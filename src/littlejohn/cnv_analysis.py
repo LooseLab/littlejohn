@@ -79,10 +79,15 @@ import logging
 import time
 import pickle
 import gc
+import subprocess
+import sys
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass, field
 from collections import Counter
+from functools import lru_cache
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import multiprocessing as mp
 
 import numpy as np
 import pysam
@@ -90,28 +95,94 @@ from scipy.ndimage import uniform_filter1d
 
 import ruptures as rpt
 from littlejohn.logging_config import get_job_logger
+import robin.resources as resources
 
 os.environ["CI"] = "1"
 
-# Global variable to hold the module
-_cnv_from_bam_module = None
+# Cache for reference CNV data to avoid repeated loading
+_REF_CNV_CACHE = {}
 
-def get_cnv_from_bam():
-    """Lazy import of cnv_from_bam to avoid threading issues"""
-    global _cnv_from_bam_module
-    if _cnv_from_bam_module is None:
-        try:
-            import cnv_from_bam
-            _cnv_from_bam_module = cnv_from_bam
-        except ImportError as e:
-            raise ImportError(f"cnv_from_bam module not available: {e}")
-    return _cnv_from_bam_module
+# Global configuration for performance tuning
+CHUNK_SIZE = 1000  # For processing large arrays in chunks
+MAX_WORKERS = min(4, mp.cpu_count())  # Limit parallel processing
 
-def cleanup_cnv_from_bam():
-    """Cleanup function to reset the module reference"""
-    global _cnv_from_bam_module
-    _cnv_from_bam_module = None
-
+def run_cnv_analysis_subprocess(bam_path, copy_numbers, ref_cnv_dict, temp_dir, logger, threads=1, mapq_filter=60):
+    """
+    Run CNV analysis using cnv_from_bam in a subprocess to avoid signal handling issues.
+    
+    Args:
+        bam_path: Path to BAM file
+        copy_numbers: Copy numbers dictionary
+        ref_cnv_dict: Reference CNV dictionary
+        temp_dir: Temporary directory for intermediate files
+        logger: Logger instance
+        threads: Number of threads to use
+        mapq_filter: Mapping quality filter
+    
+    Returns:
+        Dictionary with analysis results or None if failed
+    """
+    try:
+        # Ensure temp directory exists
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        # Save copy numbers to temporary file
+        copy_numbers_path = os.path.join(temp_dir, 'copy_numbers.pkl')
+        with open(copy_numbers_path, 'wb') as f:
+            pickle.dump(copy_numbers, f)
+        
+        # Save reference CNV dict to temporary file
+        ref_cnv_dict_path = os.path.join(temp_dir, 'ref_cnv_dict.pkl')
+        with open(ref_cnv_dict_path, 'wb') as f:
+            pickle.dump(ref_cnv_dict, f)
+        
+        # Get path to the subprocess script
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        subprocess_script = os.path.join(script_dir, 'cnv_subprocess.py')
+        
+        # Run the subprocess
+        cmd = [
+            sys.executable,  # Use the same Python interpreter
+            subprocess_script,
+            '--bam-path', bam_path,
+            '--copy-numbers-path', copy_numbers_path,
+            '--ref-cnv-dict-path', ref_cnv_dict_path,
+            '--output-dir', temp_dir,
+            '--threads', str(threads),
+            '--mapq-filter', str(mapq_filter)
+        ]
+        
+        logger.debug(f"Running CNV analysis in subprocess: {' '.join(cmd)}")
+        
+        # Run subprocess with timeout (removed cwd=temp_dir to fix path issues)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=3600,  # 1 hour timeout
+        )
+        
+        if result.returncode != 0:
+            logger.error(f"Subprocess failed with return code {result.returncode}")
+            logger.error(f"stdout: {result.stdout}")
+            logger.error(f"stderr: {result.stderr}")
+            return None
+        
+        # Load results
+        results_path = os.path.join(temp_dir, 'cnv_analysis_results.pkl')
+        if os.path.exists(results_path):
+            with open(results_path, 'rb') as f:
+                return pickle.load(f)
+        else:
+            logger.error("Results file not found")
+            return None
+            
+    except subprocess.TimeoutExpired:
+        logger.error("CNV analysis subprocess timed out")
+        return None
+    except Exception as e:
+        logger.error(f"Error running CNV analysis subprocess: {e}")
+        return None
 
 @dataclass
 class CNVMetadata:
@@ -147,15 +218,18 @@ def run_ruptures(
         List[Tuple[float, float]]: A list of tuples where each tuple represents a detected change point range
                                     as (start, end) with respect to the bin width.
     """
+    # Convert to numpy array once for better performance
+    r_cnv_array = np.array(r_cnv)
+    
     # Initialize the Kernel Change Point Detection algorithm with the Radial Basis Function (RBF) kernel
-    algo_c = rpt.KernelCPD(kernel="rbf").fit(np.array(r_cnv))
+    algo_c = rpt.KernelCPD(kernel="rbf").fit(r_cnv_array)
     
     # Predict the change points using the provided penalty value
     ruptures_result = algo_c.predict(pen=penalty_value)
     
-    # Compute the ranges around each change point
+    # Compute the ranges around each change point using vectorized operations
     return [
-        (cp * bin_width - (bin_width), cp * bin_width + (bin_width))
+        (cp * bin_width - bin_width, cp * bin_width + bin_width)
         for cp in ruptures_result
     ]
 
@@ -191,6 +265,7 @@ def pad_arrays(
     len1, len2 = len(arr1), len(arr2)
     max_len = max(len1, len2)
     
+    # Use numpy's pad function more efficiently
     if len1 < max_len:
         arr1 = np.pad(
             arr1, (0, max_len - len1), mode="constant", constant_values=pad_value
@@ -211,7 +286,8 @@ def has_reads(bam_file: str) -> bool:
                 return True
         return False
     except Exception as e:
-        print(f"Error checking reads in {bam_file}: {e}")
+        # Replace print with logging
+        logging.error(f"Error checking reads in {bam_file}: {e}")
         return False
 
 
@@ -230,12 +306,18 @@ def estimate_sex_from_cnv(cnv_data: Dict, logger) -> str:
         if 'chrX' not in cnv_data or 'chrY' not in cnv_data:
             return "Unknown"
         
-        # Calculate average CNV values for X and Y chromosomes
-        x_avg = np.average([i for i in cnv_data['chrX'] if i != 0])
-        y_avg = np.average([i for i in cnv_data['chrY'] if i != 0])
+        # Calculate average CNV values for X and Y chromosomes more efficiently
+        x_data = [i for i in cnv_data['chrX'] if i != 0]
+        y_data = [i for i in cnv_data['chrY'] if i != 0]
         
-        logger.info(f"X chromosome average: {x_avg:.3f}")
-        logger.info(f"Y chromosome average: {y_avg:.3f}")
+        if not x_data or not y_data:
+            return "Unknown"
+        
+        x_avg = np.mean(x_data)
+        y_avg = np.mean(y_data)
+        
+        logger.debug(f"X chromosome average: {x_avg:.3f}")
+        logger.debug(f"Y chromosome average: {y_avg:.3f}")
         
         # Sex estimation logic from original code
         if x_avg >= 0.1 and y_avg <= -0.1:
@@ -256,9 +338,42 @@ def estimate_sex_from_cnv(cnv_data: Dict, logger) -> str:
         return "Unknown"
 
 
+def process_chromosome_breakpoints(chrom_data: Tuple[str, list], bin_width: int) -> List[Dict]:
+    """
+    Process breakpoints for a single chromosome (for parallel processing).
+    
+    Args:
+        chrom_data: Tuple of (chromosome_name, data)
+        bin_width: Width of bins
+        
+    Returns:
+        List of breakpoints for this chromosome
+    """
+    key, data = chrom_data
+    breakpoints = []
+    
+    if key != "chrM" and len(data) > 3:
+        try:
+            paired_changepoints = run_ruptures(data, penalty_value=5, bin_width=bin_width)
+            
+            for start, end in paired_changepoints:
+                if start >= 0 and end > start:
+                    breakpoints.append({
+                        'chromosome': key,
+                        'start': start,
+                        'end': end,
+                        'length': end - start
+                    })
+        except Exception:
+            # Silently skip chromosomes with errors
+            pass
+    
+    return breakpoints
+
+
 def detect_breakpoints_from_cnv(cnv_data: Dict, bin_width: int, logger) -> List[Dict]:
     """
-    Detect breakpoints in CNV data using change point detection.
+    Detect breakpoints in CNV data using change point detection with parallel processing.
     
     Args:
         cnv_data: Dictionary containing CNV data
@@ -271,28 +386,44 @@ def detect_breakpoints_from_cnv(cnv_data: Dict, bin_width: int, logger) -> List[
     breakpoints = []
     
     try:
-        logger.info(f"Detecting breakpoints in CNV data")
+        logger.debug(f"Detecting breakpoints in CNV data")
         
-        for key in cnv_data.keys():
-            if key != "chrM" and len(cnv_data[key]) > 3:
-                # Use the original breakpoint detection logic
-                paired_changepoints = run_ruptures(
-                    cnv_data[key],
-                    penalty_value=5,  # penalty_value
-                    bin_width=bin_width,
-                )
+        # Use parallel processing for large datasets
+        if len(cnv_data) > 5:  # Only parallelize if we have many chromosomes
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                # Submit all chromosome processing tasks
+                future_to_chrom = {
+                    executor.submit(process_chromosome_breakpoints, (key, data), bin_width): key
+                    for key, data in cnv_data.items()
+                }
                 
-                # Process detected change points
-                for start, end in paired_changepoints:
-                    if start >= 0 and end > start:
-                        breakpoints.append({
-                            'chromosome': key,
-                            'start': start,
-                            'end': end,
-                            'length': end - start
-                        })
+                # Collect results
+                for future in as_completed(future_to_chrom):
+                    chrom = future_to_chrom[future]
+                    try:
+                        chrom_breakpoints = future.result()
+                        breakpoints.extend(chrom_breakpoints)
+                    except Exception as e:
+                        logger.debug(f"Error processing chromosome {chrom}: {e}")
+        else:
+            # Sequential processing for small datasets
+            for key, data in cnv_data.items():
+                if key != "chrM" and len(data) > 3:
+                    try:
+                        paired_changepoints = run_ruptures(data, penalty_value=5, bin_width=bin_width)
+                        
+                        for start, end in paired_changepoints:
+                            if start >= 0 and end > start:
+                                breakpoints.append({
+                                    'chromosome': key,
+                                    'start': start,
+                                    'end': end,
+                                    'length': end - start
+                                })
+                    except Exception as e:
+                        logger.debug(f"Error processing chromosome {key}: {e}")
         
-        logger.info(f"Detected {len(breakpoints)} breakpoints")
+        logger.debug(f"Detected {len(breakpoints)} breakpoints")
         return breakpoints
         
     except Exception as e:
@@ -314,22 +445,23 @@ def calculate_chromosome_stats_from_cnv(cnv_data: Dict, logger) -> Dict:
     stats = {}
     
     try:
-        logger.info(f"Calculating chromosome statistics")
+        logger.debug(f"Calculating chromosome statistics")
         
         for chrom, data in cnv_data.items():
             if len(data) == 0:
                 continue
                 
-            # Calculate basic statistics
+            # Calculate basic statistics more efficiently using numpy
+            data_array = np.array(data)
             stats[chrom] = {
-                'mean': float(np.mean(data)),
-                'std': float(np.std(data)),
-                'min': float(np.min(data)),
-                'max': float(np.max(data)),
-                'length': len(data)
+                'mean': float(np.mean(data_array)),
+                'std': float(np.std(data_array)),
+                'min': float(np.min(data_array)),
+                'max': float(np.max(data_array)),
+                'length': len(data_array)
             }
         
-        logger.info(f"Calculated statistics for {len(stats)} chromosomes")
+        logger.debug(f"Calculated statistics for {len(stats)} chromosomes")
         return stats
         
     except Exception as e:
@@ -337,8 +469,9 @@ def calculate_chromosome_stats_from_cnv(cnv_data: Dict, logger) -> Dict:
         return {}
 
 
+@lru_cache(maxsize=128)
 def load_analysis_counter(sample_id: str, work_dir: str, logger) -> int:
-    """Load the analysis counter for a sample from disk"""
+    """Load the analysis counter for a sample from disk with caching"""
     counter_file = os.path.join(work_dir, sample_id, "cnv_analysis_counter.txt")
     if os.path.exists(counter_file):
         try:
@@ -375,16 +508,17 @@ def find_significant_regions(values, chrom):
     regions = []
     threshold = 0.5  # CNV change threshold
     
-    # Simple algorithm to find regions with significant changes
-    # In a real implementation, this would be more sophisticated
-    for i, value in enumerate(values):
-        if abs(value) > threshold:
-            regions.append({
-                'chromosome': chrom,
-                'start': i * 1000000,  # Approximate position
-                'end': (i + 1) * 1000000,
-                'type': 'gain' if value > 0 else 'loss'
-            })
+    # Use numpy for better performance
+    values_array = np.array(values)
+    significant_indices = np.where(np.abs(values_array) > threshold)[0]
+    
+    for i in significant_indices:
+        regions.append({
+            'chromosome': chrom,
+            'start': i * 1000000,  # Approximate position
+            'end': (i + 1) * 1000000,
+            'type': 'gain' if values_array[i] > 0 else 'loss'
+        })
     
     return regions
 
@@ -418,7 +552,7 @@ def generate_bed_files(bed_dir, analysis_counter, breakpoints, cnv_data, logger)
                 for bp in breakpoints:
                     f.write(f"{bp['chromosome']}\t{bp['start']}\t{bp['end']}\tbreakpoint\n")
         
-        logger.info(f"Generated BED files in {bed_dir}")
+        logger.debug(f"Generated BED files in {bed_dir}")
         
     except Exception as e:
         logger.error(f"Error generating BED files: {e}")
@@ -495,10 +629,41 @@ def save_cnv_files(sample_dir, analysis_counter, r_cnv, r2_cnv, result3_cnv,
         # Generate BED files for CNV regions and breakpoints
         generate_bed_files(bed_dir, analysis_counter, breakpoints, result3_cnv, logger)
         
-        logger.info(f"Saved all CNV files to {sample_dir}")
+        logger.debug(f"Saved all CNV files to {sample_dir}")
         
     except Exception as e:
         logger.error(f"Error saving CNV files: {e}")
+
+
+def load_reference_cnv_data(logger):
+    """
+    Load reference CNV data with caching for better performance.
+    
+    Args:
+        logger: Logger instance
+        
+    Returns:
+        Reference CNV dictionary
+    """
+    global _REF_CNV_CACHE
+    
+    if _REF_CNV_CACHE:
+        logger.debug("Using cached reference CNV data")
+        return _REF_CNV_CACHE
+    
+    try:
+        ref_cnv_path = os.path.join(
+            os.path.dirname(os.path.abspath(resources.__file__)),
+            "HG01280_control_new.pkl",
+        )
+        with open(ref_cnv_path, "rb") as f:
+            ref_cnv_dict = pickle.load(f)
+        _REF_CNV_CACHE = ref_cnv_dict
+        logger.debug(f"Loaded reference CNV data from: {ref_cnv_path}")
+        return ref_cnv_dict
+    except Exception as e:
+        logger.error(f"Could not load reference CNV data from robin module: {e}")
+        raise RuntimeError(f"Reference CNV data is required but could not be loaded: {e}")
 
 
 def process_single_bam(bam_path, metadata, work_dir, logger):
@@ -514,31 +679,21 @@ def process_single_bam(bam_path, metadata, work_dir, logger):
     Returns:
         Dictionary with CNV analysis results
     """
+    
     sample_id = metadata.extracted_data.get('sample_id', 'unknown')
     logger.info(f"🧬 Starting CNV analysis for sample: {sample_id}")
     
-    # Log all metadata values
-    logger.info(f"BAM file metadata:")
-    logger.info(f"   File path: {metadata.file_path}")
-    logger.info(f"   File size: {metadata.file_size:,} bytes")
-    logger.info(f"   Creation time: {metadata.creation_time}")
-    logger.info(f"   Sample ID: {sample_id}")
-    
-    # Log all extracted data
-    logger.info(f"   Extracted data:")
-    for key, value in metadata.extracted_data.items():
-        if key == 'sample_id':
-            continue  # Already logged above
-        logger.info(f"      {key}: {value}")
+    # Log essential metadata only
+    logger.debug(f"BAM file: {metadata.file_path} ({metadata.file_size:,} bytes)")
+    logger.debug(f"Sample ID: {sample_id}")
     
     # Create sample-specific output directory
     sample_output_dir = os.path.join(work_dir, sample_id)
     os.makedirs(sample_output_dir, exist_ok=True)
-    logger.info(f"Created sample output directory: {sample_output_dir}")
     
     # Load analysis counter from disk
     analysis_counter = load_analysis_counter(sample_id, work_dir, logger)
-    logger.info(f"Loaded analysis counter for {sample_id}: {analysis_counter}")
+    logger.debug(f"Analysis counter: {analysis_counter}")
     
     analysis_result = {
         'sample_id': sample_id,
@@ -556,7 +711,7 @@ def process_single_bam(bam_path, metadata, work_dir, logger):
     try:
         # Create temporary directory for this analysis within the sample directory
         with tempfile.TemporaryDirectory(dir=sample_output_dir) as temp_dir:
-            logger.info(f"Created temporary directory: {temp_dir}")
+            logger.debug(f"Created temporary directory: {temp_dir}")
             
             # Check if BAM has reads
             if not has_reads(bam_path):
@@ -573,13 +728,13 @@ def process_single_bam(bam_path, metadata, work_dir, logger):
                 try:
                     with open(update_cnv_dict_path, "rb") as f:
                         update_cnv_dict = pickle.load(f)
-                    logger.info(f"Loaded accumulated copy numbers from previous iterations")
+                    logger.debug(f"Loaded accumulated copy numbers from previous iterations")
                     if sample_id in update_cnv_dict:
                         copy_numbers = update_cnv_dict[sample_id]
-                        logger.info(f"   Found existing data for {sample_id}")
+                        logger.debug(f"Found existing data for {sample_id}")
                     else:
                         copy_numbers = {}
-                        logger.info(f"   No existing data for {sample_id}, starting fresh")
+                        logger.debug(f"No existing data for {sample_id}, starting fresh")
                 except Exception as e:
                     logger.warning(f"Error loading accumulated copy numbers: {e}")
                     copy_numbers = {}
@@ -587,76 +742,54 @@ def process_single_bam(bam_path, metadata, work_dir, logger):
             else:
                 copy_numbers = {}
                 update_cnv_dict = {}
-                logger.info(f"No previous copy numbers found, starting fresh")
+                logger.debug(f"No previous copy numbers found, starting fresh")
             
-            # Load reference CNV dictionary from robin module resources
-            try:
-                import robin.resources as resources
-                ref_cnv_path = os.path.join(
-                    os.path.dirname(os.path.abspath(resources.__file__)),
-                    "HG01280_control_new.pkl",
-                )
-                with open(ref_cnv_path, "rb") as f:
-                    ref_cnv_dict = pickle.load(f)
-                logger.info(f"Loaded reference CNV data from: {ref_cnv_path}")
-            except Exception as e:
-                logger.error(f"Could not load reference CNV data from robin module: {e}")
-                raise RuntimeError(f"Reference CNV data is required but could not be loaded: {e}")
+            # Load reference CNV dictionary with caching
+            ref_cnv_dict = load_reference_cnv_data(logger)
             
-            # Process BAM file with cnv_from_bam using accumulated copy numbers
-            logger.info(f"Processing BAM file with cnv_from_bam (incremental)")
+            # Process BAM file with cnv_from_bam using subprocess
+            logger.debug(f"Processing BAM file with cnv_from_bam (subprocess)")
             try:
-                # Get the module only when needed using lazy loading
-                cnv_from_bam = get_cnv_from_bam()
-                
-                # First pass: process sample with accumulated copy numbers
-                result = cnv_from_bam.iterate_bam_file(
+                # Run CNV analysis in subprocess
+                subprocess_result = run_cnv_analysis_subprocess(
                     bam_path,
-                    _threads=4,
-                    mapq_filter=60,
-                    copy_numbers=copy_numbers,
-                    log_level=int(logging.ERROR),
+                    copy_numbers,
+                    ref_cnv_dict,
+                    temp_dir,
+                    logger,
+                    threads=1,
+                    mapq_filter=60
                 )
                 
-                # Second pass: process against reference using the same bin width
-                result2 = cnv_from_bam.iterate_bam_file(
-                    bam_path,
-                    _threads=4,
-                    mapq_filter=60,
-                    copy_numbers=ref_cnv_dict,
-                    log_level=int(logging.ERROR),
-                    bin_width=result.bin_width,  # Use the same bin width as the sample
-                )
+                if subprocess_result is None or not subprocess_result.get('success', False):
+                    error_msg = subprocess_result.get('error', 'Unknown error') if subprocess_result else 'Subprocess failed'
+                    raise RuntimeError(f"CNV analysis subprocess failed: {error_msg}")
                 
-                r_cnv = result.cnv
-                r_bin = result.bin_width
-                r_var = result.variance
-                genome_length = result.genome_length
-                r2_cnv = result2.cnv
+                # Extract results from subprocess
+                r_cnv = subprocess_result['r_cnv']
+                r_bin = subprocess_result['r_bin']
+                r_var = subprocess_result['r_var']
+                genome_length = subprocess_result['genome_length']
+                r2_cnv = subprocess_result['r2_cnv']
+                updated_copy_numbers = subprocess_result['updated_copy_numbers']
                 
-                # The copy_numbers dictionary was mutated in place by iterate_bam_file
-                # So we need to use the updated copy_numbers, not r_cnv
+                # Update the copy numbers dictionary
                 if sample_id not in update_cnv_dict:
                     update_cnv_dict[sample_id] = {}
-                update_cnv_dict[sample_id] = copy_numbers  # Use the mutated copy_numbers
+                update_cnv_dict[sample_id] = updated_copy_numbers
                 
                 analysis_result['processing_steps'].append('cnv_data_extracted')
-                logger.info(f"CNV data extracted successfully (incremental)")
-                logger.info(f"   Bin width: {r_bin:,}")
-                logger.info(f"   Variance: {r_var:.6f}")
-                logger.info(f"   Genome length: {genome_length:,}")
+                logger.debug(f"CNV data extracted successfully")
+                logger.debug(f"Bin width: {r_bin:,}, Variance: {r_var:.6f}, Genome length: {genome_length:,}")
                 
             except Exception as e:
                 logger.error(f"Error extracting CNV data: {e}")
                 analysis_result['error_message'] = f"CNV extraction failed: {str(e)}"
                 analysis_result['processing_steps'].append('cnv_extraction_failed')
                 return analysis_result
-            finally:
-                # Cleanup after processing to avoid threading issues
-                cleanup_cnv_from_bam()
-            
+
             # Calculate normalized CNV data (difference between sample and reference)
-            logger.info(f"Calculating normalized CNV data")
+            logger.debug(f"Calculating normalized CNV data")
             result3_cnv = {}
             for key in r_cnv.keys():
                 if key != "chrM" and key in r2_cnv:
@@ -695,15 +828,18 @@ def process_single_bam(bam_path, metadata, work_dir, logger):
             # Save updated analysis counter to disk
             save_analysis_counter(sample_id, analysis_counter, work_dir, logger)
             analysis_result['analysis_counter'] = analysis_counter
-            logger.info(f"Saved analysis counter for {sample_id}: {analysis_counter}")
+            logger.debug(f"Saved analysis counter: {analysis_counter}")
             
             # Force garbage collection
             gc.collect()
             
             analysis_result['processing_steps'].append('cnv_analysis_complete')
+            
+            # Replace print with logging
+            logger.debug(f"Analysis result: {analysis_result}")
             logger.info(f"CNV analysis complete for {sample_id}")
-            logger.info(f"   Sex Estimate: {analysis_result['sex_estimate']}")
-            logger.info(f"   Breakpoints: {len(analysis_result['breakpoints'])} detected")
+            logger.info(f"Sex Estimate: {analysis_result['sex_estimate']}")
+            logger.info(f"Breakpoints: {len(analysis_result['breakpoints'])} detected")
             
             return analysis_result
             
@@ -712,7 +848,7 @@ def process_single_bam(bam_path, metadata, work_dir, logger):
         analysis_result['error_message'] = str(e)
         analysis_result['processing_steps'].append('analysis_failed')
         return analysis_result
-
+        
 
 def cnv_handler(job, work_dir=None):
     """

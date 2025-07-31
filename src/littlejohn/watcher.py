@@ -8,6 +8,7 @@ from typing import List, Optional
 
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 from watchdog.observers import Observer
+from tqdm import tqdm
 
 
 class FileChangeHandler(FileSystemEventHandler):
@@ -147,6 +148,7 @@ class FileWatcher:
         ignore_patterns: Optional[List[str]] = None,
         command: Optional[str] = None,
         verbose: bool = False,
+        show_progress: bool = True,
     ) -> None:
         """Initialize the file watcher.
         
@@ -157,6 +159,7 @@ class FileWatcher:
             ignore_patterns: List of file patterns to ignore
             command: Command to run when files change
             verbose: Enable verbose output
+            show_progress: Show progress bars for file processing
         """
         self.path = path
         self.recursive = recursive
@@ -164,6 +167,7 @@ class FileWatcher:
         self.ignore_patterns = ignore_patterns or []
         self.command = command
         self.verbose = verbose
+        self.show_progress = show_progress
         
         self.observer = Observer()
         self.handler = FileChangeHandler(
@@ -226,11 +230,18 @@ class FileWatcher:
                     print(f"  - {file_path}")
                 print()
             
-            # Process each existing file
-            for file_path in existing_files:
-                if self.verbose:
-                    print(f"Processing existing file: {file_path}")
-                self.handler._run_command(str(file_path))
+            # Process each existing file with progress bar
+            with tqdm(
+                total=len(existing_files),
+                desc="Processing existing files",
+                unit="file",
+                disable=not self.show_progress
+            ) as pbar:
+                for file_path in existing_files:
+                    if self.show_progress:
+                        pbar.set_postfix_str(f"Processing: {file_path.name}")
+                    self.handler._run_command(str(file_path))
+                    pbar.update(1)
         else:
             if self.verbose:
                 print("No existing files found matching the patterns.")

@@ -22,6 +22,7 @@ import subprocess
 import tempfile
 import shutil
 import pysam
+import logging
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional
 from pathlib import Path
@@ -73,390 +74,343 @@ class MGMTMetadata:
             self.results = {}
 
 
-class MGMTAnalysis:
-    """MGMT promoter methylation analysis worker"""
+def _find_mgmt_bed(work_dir: str) -> str:
+    """Find or create the MGMT BED file"""
+    possible_paths = [
+        "mgmt_hg38.bed",
+        "bin/mgmt_hg38.bed", 
+        "data/mgmt_hg38.bed",
+        "/usr/local/share/mgmt_hg38.bed"
+    ]
     
-    def __init__(self, work_dir=None, threads=4):
-        self.work_dir = work_dir or os.getcwd()
-        self.threads = threads
-        
-        # Find required files and paths
-        self.mgmt_bed_path = self._find_mgmt_bed()
-        self.hv_path = self._find_hv_path()
-        
-        # Initialize counter for incremental file naming
-        self.file_counter = 1
-        
-        # Use logger for initialization
-        import logging
-        logger = logging.getLogger("littlejohn.mgmt")
-        logger.info(f"MGMT Analysis initialized")
-        logger.debug(f"Work directory: {self.work_dir}")
-        logger.debug(f"MGMT BED file: {self.mgmt_bed_path}")
-        logger.debug(f"HV path: {self.hv_path}")
-        logger.debug(f"Threads: {self.threads}")
-        
-    def _find_mgmt_bed(self) -> str:
-        """Find or create the MGMT BED file"""
-        possible_paths = [
-            "mgmt_hg38.bed",
-            "bin/mgmt_hg38.bed", 
-            "data/mgmt_hg38.bed",
-            "/usr/local/share/mgmt_hg38.bed"
-        ]
-        
-        for path in possible_paths:
-            if os.path.exists(path):
-                return path
-        
-        # Create default MGMT BED file
-        default_path = os.path.join(self.work_dir, "mgmt_hg38.bed")
-        with open(default_path, 'w') as f:
-            f.write("chr10\t129466536\t129467536\tMGMT_promoter\t1000\t+\n")
-        
-        return default_path
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+    
+    # Create default MGMT BED file
+    default_path = os.path.join(work_dir, "mgmt_hg38.bed")
+    with open(default_path, 'w') as f:
+        f.write("chr10\t129466536\t129467536\tMGMT_promoter\t1000\t+\n")
+    
+    return default_path
 
-    def _find_hv_path(self) -> str:
-        """Find the HV rapidCNS2 path from robin module"""
-        # Use the already defined HVPATH constant if available
-        if HVPATH and os.path.exists(HVPATH):
-            return HVPATH
-        
-        # Fallback: create a basic structure if HVPATH doesn't exist
-        hv_path = os.path.join(self.work_dir, "hv_rapidCNS2")
-        os.makedirs(hv_path, exist_ok=True)
-        os.makedirs(os.path.join(hv_path, "bin"), exist_ok=True)
-        
-        if HVPATH:
-            print(f"HVPATH not found at {HVPATH}, created basic structure at: {hv_path}")
-        else:
-            print(f"Robin module not available, created basic HV structure at: {hv_path}")
-        return hv_path
 
-    def _get_next_file_number(self) -> int:
-        """Get the next file number for incremental naming"""
-        current_number = self.file_counter
-        self.file_counter += 1
-        return current_number
+def _find_hv_path(work_dir: str) -> str:
+    """Find the HV rapidCNS2 path from robin module"""
+    # Use the already defined HVPATH constant if available
+    if HVPATH and os.path.exists(HVPATH):
+        return HVPATH
+    
+    # Fallback: create a basic structure if HVPATH doesn't exist
+    hv_path = os.path.join(work_dir, "hv_rapidCNS2")
+    os.makedirs(hv_path, exist_ok=True)
+    os.makedirs(os.path.join(hv_path, "bin"), exist_ok=True)
+    
+    logger = logging.getLogger("littlejohn.mgmt")
+    if HVPATH:
+        logger.warning(f"HVPATH not found at {HVPATH}, created basic structure at: {hv_path}")
+    else:
+        logger.warning(f"Robin module not available, created basic HV structure at: {hv_path}")
+    return hv_path
 
-    def process_bam_file(self, bam_path: str, metadata: Dict[str, Any]) -> MGMTMetadata:
-        """Process a single BAM file for MGMT analysis"""
-        import logging
-        logger = logging.getLogger("littlejohn.mgmt")
-        
-        logger.info(f"Processing BAM file: {bam_path} in MGMT analysis")
-        sample_id = metadata.get('sample_id', 'unknown')
-        start_time = time.time()
-        
-        # Get next file number for incremental naming
-        file_number = self._get_next_file_number()
-        
-        mgmt_result = MGMTMetadata(
-            sample_id=sample_id,
-            bam_path=bam_path,
-            analysis_timestamp=start_time
-        )
-        
-        logger.info(f"Starting MGMT analysis for sample: {sample_id}")
-        logger.debug(f"BAM file: {os.path.basename(bam_path)}")
-        logger.debug(f"Work directory: {self.work_dir}")
-        
-        try:
-            # Step 1: Check if BAM file exists and is readable
-            if not os.path.exists(bam_path):
-                raise FileNotFoundError(f"BAM file not found: {bam_path}")
-            
-            mgmt_result.processing_steps.append("file_validation")
-            
-            # Step 2: Check if BAM file contains MGMT spanning reads
-            has_mgmt_reads = has_reads(bam_path, "chr10", 129467242, 129467244)
-            
-            if not has_mgmt_reads:
-                mgmt_result.processing_steps.append("no_mgmt_reads")
-                mgmt_result.error_message = "No MGMT spanning reads found"
-                return mgmt_result
-            
-            mgmt_result.processing_steps.append("mgmt_reads_found")
-            
-            # Step 3: Extract MGMT region using bedtools
-            MGMT_BED: str = self.mgmt_bed_path
-            
-            # Create sample-specific directory
-            sample_dir = os.path.join(self.work_dir, sample_id)
-            os.makedirs(sample_dir, exist_ok=True)
-            
-            # Create temporary BAM file for this extraction
-            temp_bamfile = tempfile.NamedTemporaryFile(
-                suffix=".bam",
-                delete=False
-            )
-            temp_bamfile.close()
-            
-            # Extract MGMT region to temporary file
-            bedtools_cmd = [
-                "bedtools", "intersect",
-                "-a", bam_path,
-                "-b", MGMT_BED
-            ]
-            
-            try:
-                with open(temp_bamfile.name, 'wb') as f:
-                    result = subprocess.run(
-                        bedtools_cmd,
-                        stdout=f,
-                        stderr=subprocess.PIPE,
-                        timeout=300  # 5 minute timeout
-                    )
-                
-                if result.returncode != 0:
-                    # Check if the output file was created and has content
-                    if not os.path.exists(temp_bamfile.name) or os.path.getsize(temp_bamfile.name) == 0:
-                        raise RuntimeError("Bedtools failed to create valid BAM file")
-                
-                # Create index for the BAM file
-                try:
-                    pysam.index(temp_bamfile.name, f"{temp_bamfile.name}.bai")
-                except Exception as e:
-                    print(f"Failed to create BAM index: {e}")
-                    # Continue without index if it fails
-                
-                # Check if the extracted BAM has reads
-                if pysam.AlignmentFile(temp_bamfile.name, "rb").count(until_eof=True) > 0:
-                    # Accumulate reads in the sample's mgmt.bam file
-                    mgmt_bam_output = os.path.join(sample_dir, "mgmt.bam")
-                    
-                    if os.path.exists(mgmt_bam_output):
-                        # Concatenate with existing mgmt.bam
-                        temp_holder = tempfile.NamedTemporaryFile(
-                            suffix=".bam",
-                            delete=False
-                        )
-                        temp_holder.close()
-                        
-                        pysam.cat("-o", temp_holder.name, mgmt_bam_output, temp_bamfile.name)
-                        shutil.copy2(temp_holder.name, mgmt_bam_output)
-                        try:
-                            os.remove(f"{temp_holder.name}.bai")
-                            os.remove(f"{temp_bamfile.name}.bai")
-                        except FileNotFoundError:
-                            pass
+
+def _get_next_file_number(sample_dir: str) -> int:
+    """Get the next file number for incremental naming based on existing files"""
+    # Look for existing numbered files in the sample directory
+    if not os.path.exists(sample_dir):
+        return 1
+    
+    existing_numbers = set()
+    for filename in os.listdir(sample_dir):
+        # Look for files with pattern like "1_mgmt.bed", "2_mgmt.csv", etc.
+        if filename.endswith(('.bed', '.csv', '.png')):
+            parts = filename.split('_')
+            if len(parts) >= 2 and parts[0].isdigit():
+                existing_numbers.add(int(parts[0]))
+    
+    # Return the next available number
+    if existing_numbers:
+        return max(existing_numbers) + 1
+    else:
+        return 1
+
+
+def convert_to_mixed_delim(input_file: str, output_file: str) -> bool:
+    """
+    Converts standard BEDMethyl format to mixed-delim format for R script compatibility.
+
+    The R script expects column V10 to contain a space-separated string like "10 0.5"
+    instead of separate columns for coverage and fraction.
+    """
+    try:
+        with open(input_file, 'r') as infile, open(output_file, 'w') as outfile:
+            for line in infile:
+                if line.strip():
+                    fields = line.strip().split('\t')
+                    if len(fields) >= 18:
+                        # Standard BEDMethyl format has:
+                        # V10: coverage (column 10, 0-indexed)
+                        # V11: fraction modified (column 11, 0-indexed)
+
+                        # Create mixed-delim format by combining V10 and V11 into V10
+                        coverage = fields[9]  # V10 (0-indexed)
+                        fraction = fields[10]  # V11 (0-indexed)
+
+                        # Create the mixed-delim format: "coverage fraction"
+                        mixed_delim = f"{coverage} {fraction}"
+
+                        # Replace V10 with the mixed-delim string
+                        fields[9] = mixed_delim
+
+                        # Write the converted line
+                        outfile.write('\t'.join(fields) + '\n')
                     else:
-                        # Copy to create new mgmt.bam
-                        shutil.copy2(temp_bamfile.name, mgmt_bam_output)
-                        try:
-                            os.remove(f"{temp_bamfile.name}.bai")
-                        except FileNotFoundError:
-                            pass
-                    
-                    mgmt_result.processing_steps.append("mgmt_region_extraction")
-                else:
-                    mgmt_result.processing_steps.append("no_mgmt_region_reads")
-                    #mgmt_result.error_message = "No reads found in extracted MGMT region"
-                    return mgmt_result
-                
-            except subprocess.TimeoutExpired:
-                raise RuntimeError("Bedtools extraction timed out")
-            except FileNotFoundError:
-                raise RuntimeError("bedtools not found in PATH")
-            finally:
-                # Clean up temporary files
-                temp_files_to_clean = [temp_bamfile.name]
-                if 'temp_holder' in locals():
-                    temp_files_to_clean.append(temp_holder.name)
-                
-                for temp_file in temp_files_to_clean:
-                    try:
-                        if os.path.exists(temp_file):
-                            os.remove(temp_file)
-                    except FileNotFoundError:
-                        pass
+                        # If the line doesn't have enough columns, write it as-is
+                        outfile.write(line)
+        
+        logger = logging.getLogger("littlejohn.mgmt")
+        logger.info(f"Converted BEDMethyl format: {input_file} → {output_file}")
+        return True
+        
+    except Exception as e:
+        logger = logging.getLogger("littlejohn.mgmt")
+        logger.error(f"Error converting BEDMethyl format: {e}")
+        return False
+
+
+def run_matkit(temp_dir: str, mgmt_bamfile: str, hv_path: str, sample_dir: str, file_number: int) -> bool:
+    """Processes BAM file with matkit and runs R script for MGMT prediction."""
+    temp_files = []  # Track temporary files for cleanup
+    
+    logger = logging.getLogger("littlejohn.mgmt")
+    try:
+        logger.info(f"Running matkit for methylation analysis")
+        
+        # Sort and index the BAM file
+        sorted_bam = os.path.join(sample_dir, f"mgmt_sorted_{file_number}.bam")
+        temp_files.append(sorted_bam)
+        temp_files.append(f"{sorted_bam}.bai")
+        
+        pysam.sort("-o", sorted_bam, mgmt_bamfile)
+        pysam.index(sorted_bam, f"{sorted_bam}.bai")
+        
+        # Use matkit from robin package
+        try:
+            from robin.utils import run_matkit as run_matkit_util
+            temp_bed_file = os.path.join(sample_dir, f"temp_mgmt_{file_number}.bed")
+            temp_files.append(temp_bed_file)
+            run_matkit_util(sorted_bam, temp_bed_file)
             
-            # Step 4: Run matkit analysis (if available)
-            try:
-                print("Running matkit")
-                # Use the proper run_matkit function with robin package
-                if self.run_matkit(self.work_dir, mgmt_bam_output, self.hv_path, sample_dir, file_number):
-                    mgmt_result.processing_steps.append("matkit_analysis")
-                    print(f"Matkit analysis complete")
-                else:
-                    print("Matkit analysis failed or robin package not available")
-                    
-            except Exception as e:
-                print(f"Matkit analysis error: {e}")
+            # Convert to mixed delimiter format for R script
+            output_mgmt_bed = os.path.join(sample_dir, f"mgmt_mixed_{file_number}.bed")
+            temp_files.append(output_mgmt_bed)
+            convert_to_mixed_delim(temp_bed_file, output_mgmt_bed)
             
-            # Step 5: Generate visualization (if methylartist is available)
-            temp_files = []  # Track temporary files for cleanup
+            # Copy BED file to sample directory with incremental naming
+            final_bed_file = os.path.join(sample_dir, f"{file_number}_mgmt.bed")
+            shutil.copy2(output_mgmt_bed, final_bed_file)
             
-            try:
-                # Sort and index the accumulated mgmt.bam file for methylartist
-                sorted_mgmt_bam = os.path.join(sample_dir, "mgmt_sorted.bam")
-                temp_files.append(sorted_mgmt_bam)
-                temp_files.append(f"{sorted_mgmt_bam}.bai")
-                
-                try:
-                    pysam.sort("-o", sorted_mgmt_bam, mgmt_bam_output)
-                    pysam.index(sorted_mgmt_bam, f"{sorted_mgmt_bam}.bai")
-                    print(f"Sorted and indexed accumulated MGMT BAM: {sorted_mgmt_bam}")
-                    mgmt_bam_for_plot = sorted_mgmt_bam
-                except Exception as e:
-                    print(f"Failed to sort/index accumulated MGMT BAM: {e}")
-                    mgmt_bam_for_plot = mgmt_bam_output
-                
-                plot_out = os.path.join(sample_dir, f"{file_number}_mgmt.png")
-                methylartist_cmd = f"methylartist locus -i chr10:129466536-129467536 -b {mgmt_bam_for_plot} -o {plot_out} --motif CG --mods m"
-                
-                result = subprocess.run(
-                    methylartist_cmd,
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=300  # 5 minute timeout
-                )
+            # Run R script for MGMT prediction
+            r_script_path = os.path.join(hv_path, "bin", "mgmt_pred_v0.3.R")
+            if os.path.exists(r_script_path):
+                cmd = f"Rscript {r_script_path} --input={output_mgmt_bed} --out_dir={sample_dir} --probes={hv_path}/bin/mgmt_probes.Rdata --model={hv_path}/bin/mgmt_137sites_mean_model.Rdata --sample=live_analysis"
+                result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
                 
                 if result.returncode == 0:
-                    mgmt_result.processing_steps.append("visualization")
-                    print(f"Visualization complete")
+                    # Rename the output CSV file to use incremental naming
+                    default_csv = os.path.join(sample_dir, "live_analysis_mgmt_status.csv")
+                    final_csv = os.path.join(sample_dir, f"{file_number}_mgmt.csv")
+                    if os.path.exists(default_csv):
+                        shutil.move(default_csv, final_csv)
                 else:
-                    print(f"Methylartist visualization failed: {result.stderr}")
-                    
-            except (subprocess.TimeoutExpired, FileNotFoundError):
-                print("Methylartist not available, skipping visualization")
-            finally:
-                # Clean up temporary files
-                for temp_file in temp_files:
-                    try:
-                        if os.path.exists(temp_file):
-                            os.remove(temp_file)
-                    except Exception as e:
-                        print(f"Could not remove temporary file {temp_file}: {e}")
+                    logger.warning(f"R script failed: {result.stderr}")
+                    # Continue anyway as we still have the BED file
+            else:
+                logger.warning(f"R script not found at {r_script_path}")
             
-            # Step 6: Collect results and metadata
-            analysis_time = time.time() - start_time
-            mgmt_result.results = {
-                "analysis_time": analysis_time,
-                "mgmt_bam_file": mgmt_bam_output,
-                "processing_steps": mgmt_result.processing_steps.copy(),
-                "tools_available": {
-                    "bedtools": shutil.which("bedtools") is not None,
-                    "robin_package": HVPATH is not None,
-                    "matkit": HVPATH is not None,  # matkit comes from robin package
-                    "r": shutil.which("Rscript") is not None,
-                    "methylartist": shutil.which("methylartist") is not None
-                },
-                "hv_path": self.hv_path,
-                "hv_path_source": "robin_module" if HVPATH and self.hv_path == HVPATH else "fallback"
-            }
-            
-            mgmt_result.processing_steps.append("analysis_complete")
-            print(f"MGMT analysis completed for {sample_id} in {analysis_time:.2f}s")
-            
-        except Exception as e:
-            error_msg = f"MGMT analysis failed for {sample_id}: {str(e)}"
-            print(f"{error_msg}")
-            mgmt_result.error_message = error_msg
-            mgmt_result.processing_steps.append("analysis_failed")
-        
-        return mgmt_result
-    
-    def convert_to_mixed_delim(self, input_file: str, output_file: str) -> bool:
-        """
-        Converts standard BEDMethyl format to mixed-delim format for R script compatibility.
-
-        The R script expects column V10 to contain a space-separated string like "10 0.5"
-        instead of separate columns for coverage and fraction.
-        """
-        try:
-            with open(input_file, 'r') as infile, open(output_file, 'w') as outfile:
-                for line in infile:
-                    if line.strip():
-                        fields = line.strip().split('\t')
-                        if len(fields) >= 18:
-                            # Standard BEDMethyl format has:
-                            # V10: coverage (column 10, 0-indexed)
-                            # V11: fraction modified (column 11, 0-indexed)
-
-                            # Create mixed-delim format by combining V10 and V11 into V10
-                            coverage = fields[9]  # V10 (0-indexed)
-                            fraction = fields[10]  # V11 (0-indexed)
-
-                            # Create the mixed-delim format: "coverage fraction"
-                            mixed_delim = f"{coverage} {fraction}"
-
-                            # Replace V10 with the mixed-delim string
-                            fields[9] = mixed_delim
-
-                            # Write the converted line
-                            outfile.write('\t'.join(fields) + '\n')
-                        else:
-                            # If the line doesn't have enough columns, write it as-is
-                            outfile.write(line)
-            
-            print(f"Converted BEDMethyl format: {input_file} → {output_file}")
+            logger.info(f"Matkit processing completed")
             return True
             
-        except Exception as e:
-            print(f"Error converting BEDMethyl format: {e}")
+        except ImportError:
+            logger.warning("Robin package not available, skipping matkit processing")
             return False
+            
+    except Exception as e:
+        logger.error(f"Error running matkit: {e}")
+        return False
+    finally:
+        # Clean up temporary files
+        for temp_file in temp_files:
+            try:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+            except Exception as e:
+                logger.warning(f"Could not remove temporary file {temp_file}: {e}")
 
-    def run_matkit(self, temp_dir: str, mgmt_bamfile: str, hv_path: str, sample_dir: str, file_number: int) -> bool:
-        """Processes BAM file with matkit and runs R script for MGMT prediction."""
+
+def process_bam_file(bam_path: str, metadata: Dict[str, Any], work_dir: str, threads: int = 4) -> MGMTMetadata:
+    """Process a single BAM file for MGMT analysis"""
+    logger = logging.getLogger("littlejohn.mgmt")
+    
+    logger.info(f"Processing BAM file: {bam_path} in MGMT analysis")
+    sample_id = metadata.get('sample_id', 'unknown')
+    start_time = time.time()
+    
+    # Create sample-specific directory
+    sample_dir = os.path.join(work_dir, sample_id)
+    os.makedirs(sample_dir, exist_ok=True)
+    
+    # Get next file number for incremental naming based on existing files
+    file_number = _get_next_file_number(sample_dir)
+    
+    # Find required files and paths
+    mgmt_bed_path = _find_mgmt_bed(work_dir)
+    hv_path = _find_hv_path(work_dir)
+    
+    mgmt_result = MGMTMetadata(
+        sample_id=sample_id,
+        bam_path=bam_path,
+        analysis_timestamp=start_time
+    )
+    
+    logger.info(f"Starting MGMT analysis for sample: {sample_id}")
+    logger.debug(f"BAM file: {os.path.basename(bam_path)}")
+    logger.debug(f"Work directory: {work_dir}")
+    logger.debug(f"MGMT BED file: {mgmt_bed_path}")
+    logger.debug(f"HV path: {hv_path}")
+    logger.debug(f"Threads: {threads}")
+    
+    try:
+        # Step 1: Check if BAM file exists and is readable
+        if not os.path.exists(bam_path):
+            raise FileNotFoundError(f"BAM file not found: {bam_path}")
+        
+        mgmt_result.processing_steps.append("file_validation")
+        
+        # Step 2: Check if BAM file contains MGMT spanning reads
+        has_mgmt_reads = has_reads(bam_path, "chr10", 129467242, 129467244)
+        
+        if not has_mgmt_reads:
+            mgmt_result.processing_steps.append("no_mgmt_reads")
+            mgmt_result.error_message = "No MGMT spanning reads found"
+            return mgmt_result
+        
+        mgmt_result.processing_steps.append("mgmt_reads_found")
+        
+        # Step 3: Extract MGMT region using bedtools
+        MGMT_BED: str = mgmt_bed_path
+        
+        # Create temporary BAM file for this extraction
+        temp_bamfile = tempfile.NamedTemporaryFile(
+            suffix=".bam",
+            delete=False
+        )
+        temp_bamfile.close()
+        
+        # Extract MGMT region to temporary file
+        bedtools_cmd = [
+            "bedtools", "intersect",
+            "-a", bam_path,
+            "-b", MGMT_BED
+        ]
+        
+        try:
+            with open(temp_bamfile.name, 'wb') as f:
+                result = subprocess.run(
+                    bedtools_cmd,
+                    stdout=f,
+                    stderr=subprocess.PIPE,
+                    timeout=300  # 5 minute timeout
+                )
+            
+            if result.returncode != 0:
+                # Check if the output file was created and has content
+                if not os.path.exists(temp_bamfile.name) or os.path.getsize(temp_bamfile.name) == 0:
+                    raise RuntimeError("Bedtools failed to create valid BAM file")
+            
+            # Create index for the BAM file
+            try:
+                pysam.index(temp_bamfile.name, f"{temp_bamfile.name}.bai")
+            except Exception as e:
+                logger.warning(f"Failed to create BAM index: {e}")
+                # Continue without index if it fails
+            
+            # Check if the extracted BAM has reads
+            if pysam.AlignmentFile(temp_bamfile.name, "rb").count(until_eof=True) > 0:
+                # Accumulate reads in the sample's mgmt.bam file
+                mgmt_bam_output = os.path.join(sample_dir, "mgmt.bam")
+                
+                if os.path.exists(mgmt_bam_output):
+                    # Concatenate with existing mgmt.bam
+                    temp_holder = tempfile.NamedTemporaryFile(
+                        suffix=".bam",
+                        delete=False
+                    )
+                    temp_holder.close()
+                    
+                    pysam.cat("-o", temp_holder.name, mgmt_bam_output, temp_bamfile.name)
+                    shutil.copy2(temp_holder.name, mgmt_bam_output)
+                    try:
+                        os.remove(f"{temp_holder.name}.bai")
+                        os.remove(f"{temp_bamfile.name}.bai")
+                    except FileNotFoundError:
+                        pass
+                else:
+                    # Copy to create new mgmt.bam
+                    shutil.copy2(temp_bamfile.name, mgmt_bam_output)
+                    try:
+                        os.remove(f"{temp_bamfile.name}.bai")
+                    except FileNotFoundError:
+                        pass
+                
+                mgmt_result.processing_steps.append("mgmt_region_extraction")
+            else:
+                mgmt_result.processing_steps.append("no_mgmt_region_reads")
+                #mgmt_result.error_message = "No reads found in extracted MGMT region"
+                return mgmt_result
+            
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("Bedtools extraction timed out")
+        except FileNotFoundError:
+            raise RuntimeError("bedtools not found in PATH")
+        
+        # Step 4: Generate visualization (if methylartist is available)
         temp_files = []  # Track temporary files for cleanup
         
         try:
-            print(f"Running matkit for methylation analysis")
+            # Sort and index the accumulated mgmt.bam file for methylartist
+            sorted_mgmt_bam = os.path.join(sample_dir, "mgmt_sorted.bam")
+            temp_files.append(sorted_mgmt_bam)
+            temp_files.append(f"{sorted_mgmt_bam}.bai")
             
-            # Sort and index the BAM file
-            sorted_bam = os.path.join(temp_dir, "mgmt_sorted.bam")
-            temp_files.append(sorted_bam)
-            temp_files.append(f"{sorted_bam}.bai")
-            
-            pysam.sort("-o", sorted_bam, mgmt_bamfile)
-            pysam.index(sorted_bam, f"{sorted_bam}.bai")
-            
-            # Use matkit from robin package
             try:
-                from robin.utils import run_matkit as run_matkit_util
-                temp_bed_file = os.path.join(temp_dir, "temp_mgmt.bed")
-                temp_files.append(temp_bed_file)
-                run_matkit_util(sorted_bam, temp_bed_file)
+                pysam.sort("-o", sorted_mgmt_bam, mgmt_bam_output)
+                pysam.index(sorted_mgmt_bam, f"{sorted_mgmt_bam}.bai")
+                logger.info(f"Sorted and indexed accumulated MGMT BAM: {sorted_mgmt_bam}")
+                mgmt_bam_for_plot = sorted_mgmt_bam
+            except Exception as e:
+                logger.warning(f"Failed to sort/index accumulated MGMT BAM: {e}")
+                mgmt_bam_for_plot = mgmt_bam_output
+            
+            plot_out = os.path.join(sample_dir, f"{file_number}_mgmt.png")
+            methylartist_cmd = f"methylartist locus -i chr10:129466536-129467536 -b {mgmt_bam_for_plot} -o {plot_out} --motif CG --mods m"
+            
+            result = subprocess.run(
+                methylartist_cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=300  # 5 minute timeout
+            )
+            
+            if result.returncode == 0:
+                mgmt_result.processing_steps.append("visualization")
+                logger.info(f"Visualization complete")
+            else:
+                logger.error(f"Methylartist visualization failed: {result.stderr}")
                 
-                # Convert to mixed delimiter format for R script
-                output_mgmt_bed = os.path.join(temp_dir, "mgmt_mixed.bed")
-                temp_files.append(output_mgmt_bed)
-                self.convert_to_mixed_delim(temp_bed_file, output_mgmt_bed)
-                
-                # Copy BED file to sample directory with incremental naming
-                final_bed_file = os.path.join(sample_dir, f"{file_number}_mgmt.bed")
-                shutil.copy2(output_mgmt_bed, final_bed_file)
-                
-                # Run R script for MGMT prediction
-                r_script_path = os.path.join(hv_path, "bin", "mgmt_pred_v0.3.R")
-                if os.path.exists(r_script_path):
-                    cmd = f"Rscript {r_script_path} --input={output_mgmt_bed} --out_dir={sample_dir} --probes={hv_path}/bin/mgmt_probes.Rdata --model={hv_path}/bin/mgmt_137sites_mean_model.Rdata --sample=live_analysis"
-                    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-                    
-                    if result.returncode == 0:
-                        # Rename the output CSV file to use incremental naming
-                        default_csv = os.path.join(sample_dir, "live_analysis_mgmt_status.csv")
-                        final_csv = os.path.join(sample_dir, f"{file_number}_mgmt.csv")
-                        if os.path.exists(default_csv):
-                            shutil.move(default_csv, final_csv)
-                    else:
-                        print(f"R script failed: {result.stderr}")
-                        # Continue anyway as we still have the BED file
-                else:
-                    print(f"R script not found at {r_script_path}")
-                
-                print(f"Matkit processing completed")
-                return True
-                
-            except ImportError:
-                print("Robin package not available, skipping matkit processing")
-                return False
-                
-        except Exception as e:
-            print(f"Error running matkit: {e}")
-            return False
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            logger.warning("Methylartist not available, skipping visualization")
         finally:
             # Clean up temporary files
             for temp_file in temp_files:
@@ -464,7 +418,87 @@ class MGMTAnalysis:
                     if os.path.exists(temp_file):
                         os.remove(temp_file)
                 except Exception as e:
-                    print(f"Could not remove temporary file {temp_file}: {e}")
+                    logger.warning(f"Could not remove temporary file {temp_file}: {e}")
+        
+        # Step 5: Run matkit analysis on accumulated data (if available)
+        try:
+            logger.info("Running matkit")
+            # Use the proper run_matkit function with robin package
+            if run_matkit(work_dir, mgmt_bam_output, hv_path, sample_dir, file_number):
+                mgmt_result.processing_steps.append("matkit_analysis")
+                logger.info(f"Matkit analysis complete")
+            else:
+                logger.warning("Matkit analysis failed or robin package not available")
+                
+        except Exception as e:
+            logger.error(f"Matkit analysis error: {e}")
+        
+
+        
+        # Clean up temporary files after all analysis is complete
+        temp_files_to_clean = [temp_bamfile.name]
+        if 'temp_holder' in locals():
+            temp_files_to_clean.append(temp_holder.name)
+        
+        for temp_file in temp_files_to_clean:
+            try:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+            except FileNotFoundError:
+                pass
+        
+        # Step 6: Collect results and metadata
+        analysis_time = time.time() - start_time
+        mgmt_result.results = {
+            "analysis_time": analysis_time,
+            "mgmt_bam_file": mgmt_bam_output,
+            "processing_steps": mgmt_result.processing_steps.copy(),
+            "tools_available": {
+                "bedtools": shutil.which("bedtools") is not None,
+                "robin_package": HVPATH is not None,
+                "matkit": HVPATH is not None,  # matkit comes from robin package
+                "r": shutil.which("Rscript") is not None,
+                "methylartist": shutil.which("methylartist") is not None
+            },
+            "hv_path": hv_path,
+            "hv_path_source": "robin_module" if HVPATH and hv_path == HVPATH else "fallback"
+        }
+        
+        mgmt_result.processing_steps.append("analysis_complete")
+        logger.info(f"MGMT analysis completed for {sample_id} in {analysis_time:.2f}s")
+        
+    except Exception as e:
+        error_msg = f"MGMT analysis failed for {sample_id}: {str(e)}"
+        logger.error(f"{error_msg}")
+        mgmt_result.error_message = error_msg
+        mgmt_result.processing_steps.append("analysis_failed")
+    
+    return mgmt_result
+
+
+def run_final_combined_analysis(sample_id: str, work_dir: str) -> bool:
+    """Run final combined analysis on all accumulated data for a sample."""
+    sample_dir = os.path.join(work_dir, sample_id)
+    mgmt_bam_output = os.path.join(sample_dir, "mgmt.bam")
+    
+    logger = logging.getLogger("littlejohn.mgmt")
+    if not os.path.exists(mgmt_bam_output) or os.path.getsize(mgmt_bam_output) == 0:
+        logger.warning(f"No accumulated MGMT BAM file found for sample {sample_id}")
+        return False
+    
+    logger.info(f"Running final combined analysis for sample {sample_id}")
+    try:
+        # Run matkit on the accumulated data with "final" naming
+        hv_path = _find_hv_path(work_dir)
+        if run_matkit(work_dir, mgmt_bam_output, hv_path, sample_dir, "final"):
+            logger.info(f"Final combined analysis completed for sample {sample_id}")
+            return True
+        else:
+            logger.warning(f"Final combined analysis failed for sample {sample_id}")
+            return False
+    except Exception as e:
+        logger.error(f"Error in final combined analysis for sample {sample_id}: {e}")
+        return False
 
 
 def mgmt_handler(job, work_dir=None):
@@ -495,19 +529,28 @@ def mgmt_handler(job, work_dir=None):
             os.makedirs(work_dir, exist_ok=True)
             logger.debug(f"Using specified work directory: {work_dir}")
         
-        # Create MGMT analysis instance
-        mgmt_analyzer = MGMTAnalysis(work_dir=work_dir)
-        
         # Process the BAM file
-        mgmt_result = mgmt_analyzer.process_bam_file(bam_path, bam_metadata)
+        mgmt_result = process_bam_file(bam_path, bam_metadata, work_dir)
         
         # Store results in job context
         job.context.add_metadata('mgmt_analysis', mgmt_result.results)
         job.context.add_metadata('mgmt_processing_steps', mgmt_result.processing_steps)
         
         if mgmt_result.error_message:
-            job.context.add_error('mgmt_analysis', mgmt_result.error_message)
-            logger.error(f"MGMT analysis failed: {mgmt_result.error_message}")
+            # Check if this is an expected condition (no MGMT reads) vs actual error
+            if mgmt_result.error_message == "No MGMT spanning reads found":
+                # This is an expected condition, not an error
+                job.context.add_result('mgmt_analysis', {
+                    'status': 'no_mgmt_reads',
+                    'sample_id': mgmt_result.sample_id,
+                    'processing_steps': mgmt_result.processing_steps,
+                    'message': mgmt_result.error_message
+                })
+                logger.info(f"MGMT analysis completed - {mgmt_result.error_message}")
+            else:
+                # This is an actual error
+                job.context.add_error('mgmt_analysis', mgmt_result.error_message)
+                logger.error(f"MGMT analysis failed: {mgmt_result.error_message}")
         else:
             job.context.add_result('mgmt_analysis', {
                 'status': 'success',

@@ -15,6 +15,8 @@ A Python CLI tool with file watching capabilities built using Click and Watchdog
 - **Recursive Watching**: Watch directories recursively
 - **CLI Interface**: Easy-to-use command-line interface built with Click
 - **Workflow Management**: Run multi-step workflows with automatic preprocessing
+- **Progress Bars**: Visual progress indication for file processing operations
+- **Worker Progress Tracking**: Real-time progress monitoring for multi-worker workflows
 
 ## Installation
 
@@ -99,6 +101,12 @@ Enable verbose output:
 littlejohn watch /path/to/directory --verbose
 ```
 
+Disable progress bars:
+
+```bash
+littlejohn watch /path/to/directory --verbose --no-progress
+```
+
 ### File Listing
 
 List files in a directory:
@@ -153,6 +161,7 @@ Watch a directory or file for changes.
 - `--command, -c`: Command to run when files change
 - `--verbose, -v`: Enable verbose output
 - `--no-process-existing`: Skip processing existing files, only watch for new changes
+- `--no-progress`: Disable progress bars for file processing
 
 ### `list-files`
 
@@ -179,6 +188,7 @@ Run an async workflow on files in a directory.
 - `--commands, -c`: Command mappings (e.g., 'index:samtools index {file}')
 - `--verbose, -v`: Enable verbose output
 - `--no-process-existing`: Skip processing existing files, only watch for new changes
+- `--no-progress`: Disable progress bars for file processing
 - `--work-dir, -d`: Base output directory for analysis results (defaults to BAM file directory)
 
 ### `info`
@@ -251,6 +261,56 @@ littlejohn workflow ~/datasets/ \
 - File statistics
 
 This metadata is available to all downstream workflow steps through the job context.
+
+### Progress Bars
+
+LittleJohn includes progress bars to show the status of file processing operations:
+
+```bash
+# Enable progress bars (default when verbose is enabled)
+littlejohn watch ~/datasets/ --verbose --patterns "*.bam"
+
+# Disable progress bars
+littlejohn watch ~/datasets/ --verbose --no-progress --patterns "*.bam"
+
+# Progress bars also work with workflows
+littlejohn workflow ~/datasets/ \
+  --workflow "preprocessing:bed_conversion,analysis:mgmt" \
+  --verbose
+```
+
+Progress bars show:
+- Total number of files to process
+- Current file being processed
+- Processing speed and estimated time remaining
+- Overall completion percentage
+
+### Worker Progress Tracking
+
+For workflows, LittleJohn provides detailed worker progress tracking:
+
+```bash
+# Enable worker progress tracking (default when verbose is enabled)
+littlejohn workflow ~/datasets/ \
+  --workflow "preprocessing:bed_conversion,analysis:mgmt,classification:sturgeon" \
+  --verbose
+```
+
+Worker progress tracking shows:
+- **Multiple progress bars** - One for each worker type (Preprocessing, Analysis, Classification, Slow)
+- **Queue information** - Shows queue size (Q) and active jobs (A) for each worker
+- **Active job details** - Shows which specific jobs are running with their duration
+- **Overall progress** - Shows total progress across all jobs
+- **Real-time updates** - Progress bars update in real-time as jobs complete
+
+Example output:
+```
+Preprocessing (Q:4 A:1): preprocessing:test_001.bam(3s)
+Analysis (Q:0 A:0): 
+Classification (Q:0 A:0): 
+Slow (Q:0 A:0): 
+Overall Progress: 25%|██▌ | 4/16 [00:12<00:36, Active: 1 | Completed: 3 | Failed: 0]
+```
 
 ### Configurable Logging
 

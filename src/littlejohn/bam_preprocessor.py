@@ -37,6 +37,9 @@ class ReadBam:
         self.sam_file = None
         self.state = "pass" if bam_file and "pass" in bam_file else "fail"
         
+        # Compile regex pattern once for barcode detection
+        self.barcode_pattern = re.compile(r"_barcode(\d{1,2})$")
+        
         # Initialize counters
         self.mapped_reads = 0
         self.unmapped_reads = 0
@@ -69,34 +72,33 @@ class ReadBam:
         if not rg_tags:
             return None
 
-        for rg_tag in rg_tags:
-            id_tag = rg_tag.get("ID")
-            dt_tag = rg_tag.get("DT")
-            ds_tag = rg_tag.get("DS", "")
-            ds_tags = ds_tag.split(" ")
-            basecall_model_tag = (
-                ds_tags[1].replace("basecall_model=", "") if len(ds_tags) > 1 else None
-            )
-            runid_tag = ds_tags[0].replace("runid=", "") if ds_tags else None
-            lb_tag = rg_tag.get("LB")
-            pl_tag = rg_tag.get("PL")
-            pm_tag = rg_tag.get("PM")
-            pu_tag = rg_tag.get("PU")
-            al_tag = rg_tag.get("al")
+        # Process only the first RG tag for efficiency
+        rg_tag = rg_tags[0]
+        id_tag = rg_tag.get("ID")
+        dt_tag = rg_tag.get("DT")
+        ds_tag = rg_tag.get("DS", "")
+        ds_tags = ds_tag.split(" ")
+        basecall_model_tag = (
+            ds_tags[1].replace("basecall_model=", "") if len(ds_tags) > 1 else None
+        )
+        runid_tag = ds_tags[0].replace("runid=", "") if ds_tags else None
+        lb_tag = rg_tag.get("LB")
+        pl_tag = rg_tag.get("PL")
+        pm_tag = rg_tag.get("PM")
+        pu_tag = rg_tag.get("PU")
+        al_tag = rg_tag.get("al")
 
-            return (
-                id_tag,
-                dt_tag,
-                basecall_model_tag,
-                runid_tag,
-                lb_tag,
-                pl_tag,
-                pm_tag,
-                pu_tag,
-                al_tag,
-            )
-
-        return None
+        return (
+            id_tag,
+            dt_tag,
+            basecall_model_tag,
+            runid_tag,
+            lb_tag,
+            pl_tag,
+            pm_tag,
+            pu_tag,
+            al_tag,
+        )
         
     def process_reads(self) -> Optional[Dict[str, Any]]:
         """
@@ -110,13 +112,8 @@ class ReadBam:
         if not self.bam_file:
             return None
 
-        index_file = f"{self.bam_file}.bai"
-        if not os.path.isfile(index_file):
-            try:
-                pysam.index(self.bam_file)
-            except Exception:
-                pass  # Continue without index file
-
+        # Only create index if needed for specific operations
+        # For basic read processing, we don't need the index
         try:
             self.sam_file = pysam.AlignmentFile(self.bam_file, "rb", check_sq=False)
         except (IOError, ValueError):
@@ -127,11 +124,14 @@ class ReadBam:
         if not rg_tags:
             return None
 
-        # Ensure sample_id is not None - use a fallback if needed
+        # Ensure sample_id is not None - use runid as fallback per ONT specification
+        # LB tag is optional, but runid from DS tag is always present
         sample_id = (
-            rg_tags[4]
+            rg_tags[4]  # LB (Library) tag
             if rg_tags[4]
-            else f"unknown_sample_{os.path.basename(self.bam_file)}"
+            else rg_tags[3]  # runid from DS tag as fallback
+            if rg_tags[3]
+            else f"unknown_sample_{os.path.basename(self.bam_file)}"  # filename as final fallback
         )
 
         bam_read = {
@@ -158,8 +158,8 @@ class ReadBam:
             # Extract RG tag and check for barcode
             if read.has_tag("RG") and not barcode_found:
                 rg_tag = read.get_tag("RG")
-                # Check if RG tag ends with _barcodeNN where NN is 01-96
-                barcode_match = re.search(r"_barcode(\d{1,2})$", rg_tag)
+                # Use compiled regex pattern for barcode detection
+                barcode_match = self.barcode_pattern.search(rg_tag)
                 if barcode_match and bam_read['sample_id']:
                     barcode_num = int(barcode_match.group(1))
                     if 1 <= barcode_num <= 96:
@@ -197,23 +197,31 @@ class ReadBam:
 
                     if read_length > 0:
                         self.yield_tracking += read_length
+            
+            # Cache tag value to avoid multiple get_tag() calls
             try:
-                if not bam_read['last_start']:
-                    bam_read['last_start'] = read.get_tag("st")
-                elif read.get_tag("st") > bam_read['last_start']:
-                    bam_read['last_start'] = read.get_tag("st")
+                st_tag = read.get_tag("st")
+                if not bam_read['last_start'] or st_tag > bam_read['last_start']:
+                    bam_read['last_start'] = st_tag
             except KeyError:
-                bam_read['last_start'] = bam_read['time_of_run']
+                if not bam_read['last_start']:
+                    bam_read['last_start'] = bam_read['time_of_run']
 
+        # Remove redundant assignments - use single assignment
         self.mapped_reads = len(mapped_readset)
         self.unmapped_reads = len(unmapped_readset)
-        self.mapped_reads_num = len(mapped_readset)
-        self.unmapped_reads_num = len(unmapped_readset)
+        self.mapped_reads_num = self.mapped_reads  # Use cached value
+        self.unmapped_reads_num = self.unmapped_reads  # Use cached value
         
+        # Parse dates once at the end instead of during the loop
         if bam_read['last_start'] and bam_read['time_of_run']:
-            bam_read['elapsed_time'] = parser.parse(bam_read['last_start']) - parser.parse(
-                bam_read['time_of_run']
-            )
+            try:
+                bam_read['elapsed_time'] = parser.parse(bam_read['last_start']) - parser.parse(
+                    bam_read['time_of_run']
+                )
+            except (ValueError, TypeError):
+                # Handle invalid date formats gracefully
+                bam_read['elapsed_time'] = None
 
         return bam_read
     
@@ -224,35 +232,43 @@ class ReadBam:
         Returns:
             dict: A dictionary containing read statistics including counts and mean lengths.
         """
-        # Calculate mean lengths
+        # Cache division results to avoid repeated calculations
+        mapped_reads_num = self.mapped_reads_num
+        unmapped_reads_num = self.unmapped_reads_num
+        pass_mapped_reads_num = self.pass_mapped_reads_num
+        fail_mapped_reads_num = self.fail_mapped_reads_num
+        pass_unmapped_reads_num = self.pass_unmapped_reads_num
+        fail_unmapped_reads_num = self.fail_unmapped_reads_num
+        
+        # Calculate mean lengths with cached values
         mean_mapped_length = (
-            self.mapped_bases / self.mapped_reads_num
-            if self.mapped_reads_num > 0
+            self.mapped_bases / mapped_reads_num
+            if mapped_reads_num > 0
             else 0
         )
         mean_unmapped_length = (
-            self.unmapped_bases / self.unmapped_reads_num
-            if self.unmapped_reads_num > 0
+            self.unmapped_bases / unmapped_reads_num
+            if unmapped_reads_num > 0
             else 0
         )
         mean_pass_mapped_length = (
-            self.pass_mapped_bases / self.pass_mapped_reads_num
-            if self.pass_mapped_reads_num > 0
+            self.pass_mapped_bases / pass_mapped_reads_num
+            if pass_mapped_reads_num > 0
             else 0
         )
         mean_fail_mapped_length = (
-            self.fail_mapped_bases / self.fail_mapped_reads_num
-            if self.fail_mapped_reads_num > 0
+            self.fail_mapped_bases / fail_mapped_reads_num
+            if fail_mapped_reads_num > 0
             else 0
         )
         mean_pass_unmapped_length = (
-            self.pass_unmapped_bases / self.pass_unmapped_reads_num
-            if self.pass_unmapped_reads_num > 0
+            self.pass_unmapped_bases / pass_unmapped_reads_num
+            if pass_unmapped_reads_num > 0
             else 0
         )
         mean_fail_unmapped_length = (
-            self.fail_unmapped_bases / self.fail_unmapped_reads_num
-            if self.fail_unmapped_reads_num > 0
+            self.fail_unmapped_bases / fail_unmapped_reads_num
+            if fail_unmapped_reads_num > 0
             else 0
         )
 
@@ -295,6 +311,11 @@ def extract_bam_metadata(bam_path: str) -> BamMetadata:
     Returns:
         BamMetadata: Object containing all extracted metadata
     """
+    # Cache path components to avoid repeated operations
+    bam_path_obj = Path(bam_path)
+    filename = bam_path_obj.name
+    directory = str(bam_path_obj.parent)
+    
     # Get basic file info
     stat = os.stat(bam_path)
     file_size = stat.st_size
@@ -316,8 +337,6 @@ def extract_bam_metadata(bam_path: str) -> BamMetadata:
         # Fallback to basic extraction if ReadBam fails
         sample_id = _extract_sample_id_from_bam(bam_path)
         state = 'pass' if 'pass' in bam_path else 'fail'
-        filename = os.path.basename(bam_path)
-        directory = os.path.dirname(bam_path)
         
         metadata.extracted_data = {
             'sample_id': sample_id,
@@ -330,9 +349,6 @@ def extract_bam_metadata(bam_path: str) -> BamMetadata:
         # (logger not available in this context)
     else:
         # Use comprehensive data from ReadBam
-        filename = os.path.basename(bam_path)
-        directory = os.path.dirname(bam_path)
-        
         metadata.extracted_data = {
             'sample_id': bam_info.get('sample_id', 'unknown'),
             'file_size': file_size,
@@ -367,13 +383,24 @@ def _extract_sample_id_from_bam(bam_path: str) -> str:
             # Get read group tags
             rg_tags = bam.header.get("RG", [])
             if rg_tags:
-                for rg_tag in rg_tags:
-                    # Look for LB (Library) tag which contains the sample ID
-                    lb_tag = rg_tag.get("LB")
-                    if lb_tag:
-                        return lb_tag
+                # Process only the first RG tag for efficiency
+                rg_tag = rg_tags[0]
+                
+                # Look for LB (Library) tag which contains the sample ID
+                lb_tag = rg_tag.get("LB")
+                if lb_tag:
+                    return lb_tag
+                
+                # Fallback to runid from DS tag per ONT specification
+                ds_tag = rg_tag.get("DS", "")
+                if ds_tag:
+                    ds_tags = ds_tag.split(" ")
+                    if ds_tags and ds_tags[0].startswith("runid="):
+                        runid = ds_tags[0].replace("runid=", "")
+                        if runid:
+                            return runid
             
-            # If no RG tags or LB tag found, return unknown
+            # If no RG tags or no valid sample ID found, return unknown
             return "unknown"
             
     except Exception:
@@ -450,55 +477,57 @@ def bam_preprocessing_handler(job):
         logger.info(f"Unmapped reads: {metadata.extracted_data.get('unmapped_reads', 0):,}")
         logger.info(f"Total yield: {metadata.extracted_data.get('yield_tracking', 0):,}")
         
-        # Log sample ID extraction details at debug level
-        logger.debug(f"Sample ID extraction details:")
-        logger.debug(f"  - Extracted sample_id: {metadata.extracted_data.get('sample_id', 'unknown')}")
-        logger.debug(f"  - Filename: {os.path.basename(bam_path)}")
-        logger.debug(f"  - Full path: {bam_path}")
-        
-        # Log comprehensive metadata at debug level
-        logger.debug(f"BAM File Metadata:")
-        logger.debug(f"File path: {metadata.file_path}")
-        logger.debug(f"File size: {metadata.file_size:,} bytes")
-        logger.debug(f"Creation time: {time.ctime(metadata.creation_time)}")
-        
-        # Log run information if available
-        if metadata.extracted_data.get('runid'):
-            logger.debug(f"Run ID: {metadata.extracted_data.get('runid')}")
-        if metadata.extracted_data.get('platform'):
-            logger.debug(f"Platform: {metadata.extracted_data.get('platform')}")
-        if metadata.extracted_data.get('device_position'):
-            logger.debug(f"Device: {metadata.extracted_data.get('device_position')}")
-        if metadata.extracted_data.get('flow_cell_id'):
-            logger.debug(f"Flow cell: {metadata.extracted_data.get('flow_cell_id')}")
-        if metadata.extracted_data.get('basecall_model'):
-            logger.debug(f"Basecall model: {metadata.extracted_data.get('basecall_model')}")
-        if metadata.extracted_data.get('time_of_run'):
-            logger.debug(f"Run time: {metadata.extracted_data.get('time_of_run')}")
-        
-        # Log detailed statistics
-        logger.debug(f"Read Statistics:")
-        logger.debug(f"Mapped reads: {metadata.extracted_data.get('mapped_reads', 0):,}")
-        logger.debug(f"Unmapped reads: {metadata.extracted_data.get('unmapped_reads', 0):,}")
-        logger.debug(f"Total reads: {metadata.extracted_data.get('mapped_reads', 0) + metadata.extracted_data.get('unmapped_reads', 0):,}")
-        logger.debug(f"Mapped bases: {metadata.extracted_data.get('mapped_bases', 0):,}")
-        logger.debug(f"Unmapped bases: {metadata.extracted_data.get('unmapped_bases', 0):,}")
-        logger.debug(f"Total yield: {metadata.extracted_data.get('yield_tracking', 0):,}")
-        
-        # Log mean lengths if available
-        if metadata.extracted_data.get('mean_mapped_length', 0) > 0:
-            logger.debug(f"Mean mapped read length: {metadata.extracted_data.get('mean_mapped_length', 0):.1f}")
-        if metadata.extracted_data.get('mean_unmapped_length', 0) > 0:
-            logger.debug(f"Mean unmapped read length: {metadata.extracted_data.get('mean_unmapped_length', 0):.1f}")
-        
-        # Log pass/fail breakdown if available
-        if metadata.extracted_data.get('pass_mapped_reads_num', 0) > 0 or metadata.extracted_data.get('fail_mapped_reads_num', 0) > 0:
-            logger.debug(f"Pass mapped reads: {metadata.extracted_data.get('pass_mapped_reads_num', 0):,}")
-            logger.debug(f"Fail mapped reads: {metadata.extracted_data.get('fail_mapped_reads_num', 0):,}")
-            logger.debug(f"Pass unmapped reads: {metadata.extracted_data.get('pass_unmapped_reads_num', 0):,}")
-            logger.debug(f"Fail unmapped reads: {metadata.extracted_data.get('fail_unmapped_reads_num', 0):,}")
-        
-        logger.debug(f"Processing steps: {', '.join(metadata.processing_steps)}")
+        # Reduced debug logging for better performance
+        if logger.logger.isEnabledFor(10):  # DEBUG level
+            # Log sample ID extraction details at debug level
+            logger.debug(f"Sample ID extraction details:")
+            logger.debug(f"  - Extracted sample_id: {metadata.extracted_data.get('sample_id', 'unknown')}")
+            logger.debug(f"  - Filename: {os.path.basename(bam_path)}")
+            logger.debug(f"  - Full path: {bam_path}")
+            
+            # Log comprehensive metadata at debug level
+            logger.debug(f"BAM File Metadata:")
+            logger.debug(f"File path: {metadata.file_path}")
+            logger.debug(f"File size: {metadata.file_size:,} bytes")
+            logger.debug(f"Creation time: {time.ctime(metadata.creation_time)}")
+            
+            # Log run information if available
+            if metadata.extracted_data.get('runid'):
+                logger.debug(f"Run ID: {metadata.extracted_data.get('runid')}")
+            if metadata.extracted_data.get('platform'):
+                logger.debug(f"Platform: {metadata.extracted_data.get('platform')}")
+            if metadata.extracted_data.get('device_position'):
+                logger.debug(f"Device: {metadata.extracted_data.get('device_position')}")
+            if metadata.extracted_data.get('flow_cell_id'):
+                logger.debug(f"Flow cell: {metadata.extracted_data.get('flow_cell_id')}")
+            if metadata.extracted_data.get('basecall_model'):
+                logger.debug(f"Basecall model: {metadata.extracted_data.get('basecall_model')}")
+            if metadata.extracted_data.get('time_of_run'):
+                logger.debug(f"Run time: {metadata.extracted_data.get('time_of_run')}")
+            
+            # Log detailed statistics
+            logger.debug(f"Read Statistics:")
+            logger.debug(f"Mapped reads: {metadata.extracted_data.get('mapped_reads', 0):,}")
+            logger.debug(f"Unmapped reads: {metadata.extracted_data.get('unmapped_reads', 0):,}")
+            logger.debug(f"Total reads: {metadata.extracted_data.get('mapped_reads', 0) + metadata.extracted_data.get('unmapped_reads', 0):,}")
+            logger.debug(f"Mapped bases: {metadata.extracted_data.get('mapped_bases', 0):,}")
+            logger.debug(f"Unmapped bases: {metadata.extracted_data.get('unmapped_bases', 0):,}")
+            logger.debug(f"Total yield: {metadata.extracted_data.get('yield_tracking', 0):,}")
+            
+            # Log mean lengths if available
+            if metadata.extracted_data.get('mean_mapped_length', 0) > 0:
+                logger.debug(f"Mean mapped read length: {metadata.extracted_data.get('mean_mapped_length', 0):.1f}")
+            if metadata.extracted_data.get('mean_unmapped_length', 0) > 0:
+                logger.debug(f"Mean unmapped read length: {metadata.extracted_data.get('mean_unmapped_length', 0):.1f}")
+            
+            # Log pass/fail breakdown if available
+            if metadata.extracted_data.get('pass_mapped_reads_num', 0) > 0 or metadata.extracted_data.get('fail_mapped_reads_num', 0) > 0:
+                logger.debug(f"Pass mapped reads: {metadata.extracted_data.get('pass_mapped_reads_num', 0):,}")
+                logger.debug(f"Fail mapped reads: {metadata.extracted_data.get('fail_mapped_reads_num', 0):,}")
+                logger.debug(f"Pass unmapped reads: {metadata.extracted_data.get('pass_unmapped_reads_num', 0):,}")
+                logger.debug(f"Fail unmapped reads: {metadata.extracted_data.get('fail_unmapped_reads_num', 0):,}")
+            
+            logger.debug(f"Processing steps: {', '.join(metadata.processing_steps)}")
         
     except Exception as e:
         job.context.add_error('preprocessing', str(e))

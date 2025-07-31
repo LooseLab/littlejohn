@@ -80,11 +80,15 @@ def list_job_types() -> None:
 @click.option(
     "--no-process-existing", is_flag=True, help="Skip processing existing files, only watch for new changes"
 )
+@click.option(
+    "--no-progress", is_flag=True, help="Disable progress bars for file processing"
+)
 def watch(
     path: Path,
     command: Optional[str],
     verbose: bool,
     no_process_existing: bool,
+    no_progress: bool,
 ) -> None:
     """Watch a directory for BAM file changes."""
     try:
@@ -95,6 +99,7 @@ def watch(
             ignore_patterns=[],
             command=command,
             verbose=verbose,
+            show_progress=not no_progress,
         )
         
         if no_process_existing:
@@ -191,7 +196,10 @@ def info(path: Path) -> None:
     "--deduplicate-jobs", multiple=True,
     help="Job types to deduplicate by sample ID (e.g., 'sturgeon', 'mgmt'). Jobs of these types will only run once per sample, even if multiple upstream jobs complete simultaneously."
 )
-def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool, no_process_existing: bool, work_dir: Optional[Path], log_level: str, job_log_level: tuple[str, ...], deduplicate_jobs: tuple[str, ...]) -> None:
+@click.option(
+    "--no-progress", is_flag=True, help="Disable progress bars for file processing"
+)
+def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool, no_process_existing: bool, work_dir: Optional[Path], log_level: str, job_log_level: tuple[str, ...], deduplicate_jobs: tuple[str, ...], no_progress: bool) -> None:
     """Run an async workflow on BAM files in a directory. Preprocessing is automatically included as the first step."""
     try:
         
@@ -350,6 +358,10 @@ def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool
             click.echo(f"Job deduplication: {list(deduplicate_jobs)}")
         click.echo("Press Ctrl+C to stop")
         
+        
+        print("!!!!!!!!!! Running The Workflow !!!!!!!!!!")
+        
+        
         # Run the workflow
         runner.run_workflow(
             watch_dir=str(path),
@@ -358,10 +370,13 @@ def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool
             patterns=["*.bam"],
             ignore_patterns=None,
             classifier_func=classifier_func if 'classifier_func' in locals() else None,
-            process_existing=not no_process_existing
+            process_existing=not no_process_existing,
+            show_progress=not no_progress
         )
         
     except KeyboardInterrupt:
+        print("Stopping workflow...")
+        runner.manager.stop(timeout=5.0)
         click.echo("\nWorkflow stopped by user")
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
