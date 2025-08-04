@@ -91,8 +91,9 @@ class WorkflowManager:
 
     def __init__(self, verbose: bool = False):
         # Specialized queues for different task categories
-        self.preprocessing_queue = queue.Queue()  # bam_preprocessing, bed_conversion
-        self.analysis_queue = queue.Queue()       # mgmt, cnv
+        self.preprocessing_queue = queue.Queue()  # bam_preprocessing only
+        self.bed_conversion_queue = queue.Queue() # bed_conversion only
+        self.analysis_queue = queue.Queue()       # mgmt, cnv, target, fusion
         self.classification_queue = queue.Queue() # sturgeon, nanodx, pannanodx
         self.slow_queue = queue.Queue()           # slow jobs (legacy)
         
@@ -101,6 +102,7 @@ class WorkflowManager:
         
         # Specialized job handlers for each queue
         self.job_handlers_preprocessing: Dict[str, Callable[[Job], None]] = {}
+        self.job_handlers_bed_conversion: Dict[str, Callable[[Job], None]] = {}
         self.job_handlers_analysis: Dict[str, Callable[[Job], None]] = {}
         self.job_handlers_classification: Dict[str, Callable[[Job], None]] = {}
         self.job_handlers_slow: Dict[str, Callable[[Job], None]] = {}
@@ -119,6 +121,7 @@ class WorkflowManager:
         
         # Track worker threads for graceful shutdown
         self.preprocessing_workers = []
+        self.bed_conversion_workers = []
         self.analysis_workers = []
         self.classification_workers = []
         self.slow_workers = []
@@ -136,7 +139,9 @@ class WorkflowManager:
         self.job_queue_mapping = {
             # Preprocessing queue
             "preprocessing": "preprocessing",
-            "bed_conversion": "preprocessing",
+            
+            # Bed conversion queue
+            "bed_conversion": "bed_conversion",
             
             # Analysis queue  
             "mgmt": "analysis",
@@ -162,6 +167,8 @@ class WorkflowManager:
         """Register a handler for a specific job type and queue."""
         if queue_type == "preprocessing":
             self.job_handlers_preprocessing[job_type] = handler
+        elif queue_type == "bed_conversion":
+            self.job_handlers_bed_conversion[job_type] = handler
         elif queue_type == "analysis":
             self.job_handlers_analysis[job_type] = handler
         elif queue_type == "classification":
@@ -270,6 +277,8 @@ class WorkflowManager:
             
             if queue_type == "preprocessing":
                 self.preprocessing_queue.put(job)
+            elif queue_type == "bed_conversion":
+                self.bed_conversion_queue.put(job)
             elif queue_type == "analysis":
                 self.analysis_queue.put(job)
             elif queue_type == "classification":
@@ -358,7 +367,7 @@ class WorkflowManager:
 
     def run(self) -> None:
         """Start the workflow manager with specialized workers for different task categories."""
-        # Create preprocessing worker (bam_preprocessing, bed_conversion)
+        # Create preprocessing worker (bam_preprocessing only)
         preprocessing_worker = threading.Thread(
             target=self.worker, 
             args=("PreprocessingWorker", self.preprocessing_queue, self.job_handlers_preprocessing)
@@ -367,7 +376,16 @@ class WorkflowManager:
         self.preprocessing_workers.append(preprocessing_worker)
         preprocessing_worker.start()
         
-        # Create analysis worker (mgmt, cnv)
+        # Create bed conversion worker (bed_conversion only)
+        bed_conversion_worker = threading.Thread(
+            target=self.worker, 
+            args=("BedConversionWorker", self.bed_conversion_queue, self.job_handlers_bed_conversion)
+        )
+        bed_conversion_worker.daemon = True
+        self.bed_conversion_workers.append(bed_conversion_worker)
+        bed_conversion_worker.start()
+        
+        # Create analysis worker (mgmt, cnv, target, fusion)
         analysis_worker = threading.Thread(
             target=self.worker, 
             args=("AnalysisWorker", self.analysis_queue, self.job_handlers_analysis)
@@ -395,7 +413,7 @@ class WorkflowManager:
         slow_worker.start()
         
         # Wait for all workers to finish with periodic checks for shutdown
-        all_workers = (self.preprocessing_workers + self.analysis_workers + 
+        all_workers = (self.preprocessing_workers + self.bed_conversion_workers + self.analysis_workers + 
                       self.classification_workers + self.slow_workers)
         
         try:
@@ -433,7 +451,7 @@ class WorkflowManager:
         self.running = False
         
         # Wait for workers to finish with timeout
-        all_workers = (self.preprocessing_workers + self.analysis_workers + 
+        all_workers = (self.preprocessing_workers + self.bed_conversion_workers + self.analysis_workers + 
                       self.classification_workers + self.slow_workers)
         
         # Wait for each worker with timeout
@@ -470,6 +488,7 @@ class WorkflowManager:
         """Get statistics about the workflow execution."""
         # Get queue sizes
         preprocessing_queue_size = self.preprocessing_queue.qsize()
+        bed_conversion_queue_size = self.bed_conversion_queue.qsize()
         analysis_queue_size = self.analysis_queue.qsize()
         classification_queue_size = self.classification_queue.qsize()
         slow_queue_size = self.slow_queue.qsize()
@@ -490,7 +509,7 @@ class WorkflowManager:
         # This gives us the current total of all jobs that have been processed or are in progress
         total_expected = (len(self.completed_jobs) + len(self.failed_jobs) + 
                          len(self.active_jobs) + 
-                         preprocessing_queue_size + analysis_queue_size + 
+                         preprocessing_queue_size + bed_conversion_queue_size + analysis_queue_size + 
                          classification_queue_size + slow_queue_size)
         
         # If we have no jobs in progress but have completed jobs, use the completed count as the total
@@ -517,6 +536,7 @@ class WorkflowManager:
             "failed_by_type": self.failed_jobs_by_type.copy(),  # Make a copy to avoid threading issues
             "queue_sizes": {
                 "preprocessing": preprocessing_queue_size,
+                "bed_conversion": bed_conversion_queue_size,
                 "analysis": analysis_queue_size,
                 "classification": classification_queue_size,
                 "slow": slow_queue_size
@@ -858,22 +878,28 @@ class WorkflowRunner:
             position=0,
             leave=True
         )
+        bed_conversion_pbar = tqdm(
+            desc="Bed Conversion",
+            unit="jobs",
+            position=1,
+            leave=True
+        )
         analysis_pbar = tqdm(
             desc="Analysis", 
             unit="jobs",
-            position=1,
+            position=2,
             leave=True
         )
         classification_pbar = tqdm(
             desc="Classification",
             unit="jobs", 
-            position=2,
+            position=3,
             leave=True
         )
         slow_pbar = tqdm(
             desc="Slow",
             unit="jobs",
-            position=3,
+            position=4,
             leave=True
         )
         
@@ -881,12 +907,13 @@ class WorkflowRunner:
         overall_pbar = tqdm(
             desc="Overall Progress",
             unit="jobs",
-            position=4,
+            position=5,
             leave=True
         )
         
         progress_bars = {
             "preprocessing": preprocessing_pbar,
+            "bed_conversion": bed_conversion_pbar,
             "analysis": analysis_pbar,
             "classification": classification_pbar,
             "slow": slow_pbar
@@ -895,6 +922,7 @@ class WorkflowRunner:
         # Track job type completion counts
         job_type_completion = {
             "preprocessing": 0,
+            "bed_conversion": 0,
             "analysis": 0, 
             "classification": 0,
             "slow": 0
@@ -933,6 +961,11 @@ class WorkflowRunner:
                         for job in jobs:
                             # Check if this worker belongs to the current queue
                             if queue_name == "preprocessing" and "PreprocessingWorker" in worker_name:
+                                active_in_queue += 1
+                                filename = job['filepath'].split('/')[-1]
+                                duration = int(job['duration'])
+                                active_jobs_info.append(f"{job['job_type']}:{filename}({duration}s)")
+                            elif queue_name == "bed_conversion" and "BedConversionWorker" in worker_name:
                                 active_in_queue += 1
                                 filename = job['filepath'].split('/')[-1]
                                 duration = int(job['duration'])

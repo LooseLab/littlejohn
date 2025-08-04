@@ -40,13 +40,6 @@ cd littlejohn
 pip install -e .
 ```
 
-### Development Setup
-
-For development, install with dev dependencies:
-
-```bash
-pip install -e ".[dev]"
-```
 
 ## Available Commands
 
@@ -58,7 +51,8 @@ littlejohn list-job-types
 ```
 
 **Available Job Types:**
-- **Preprocessing Queue**: `preprocessing`, `bed_conversion`
+- **Preprocessing Queue**: `preprocessing`
+- **Bed Conversion Queue**: `bed_conversion`
 - **Analysis Queue**: `mgmt`, `cnv`, `target`, `fusion`
 - **Classification Queue**: `sturgeon`, `nanodx`, `pannanodx`
 - **Slow Queue**: `random_forest`
@@ -116,22 +110,24 @@ LittleJohn uses a sophisticated multi-queue workflow system with four specialize
 
 ### Queue Types
 
-1. **Preprocessing Queue**: Fast jobs for metadata extraction and file conversion
+1. **Preprocessing Queue**: Fast jobs for metadata extraction
    - `preprocessing`: Extract metadata from BAM files
+
+2. **Bed Conversion Queue**: File format conversion jobs
    - `bed_conversion`: Convert BAM files to BED format
 
-2. **Analysis Queue**: Bioinformatics analysis jobs
+3. **Analysis Queue**: Bioinformatics analysis jobs
    - `mgmt`: MGMT methylation analysis
    - `cnv`: Copy number variation analysis
    - `target`: Target analysis
    - `fusion`: Fusion detection analysis
 
-3. **Classification Queue**: Machine learning classification jobs
+4. **Classification Queue**: Machine learning classification jobs
    - `sturgeon`: Sturgeon classification analysis
    - `nanodx`: NanoDX analysis
    - `pannanodx`: PanNanoDX analysis
 
-4. **Slow Queue**: Resource-intensive jobs
+5. **Slow Queue**: Resource-intensive jobs
    - `random_forest`: Random Forest analysis
 
 ### Workflow Syntax

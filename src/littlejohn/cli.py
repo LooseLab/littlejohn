@@ -33,7 +33,9 @@ def list_job_types() -> None:
     """List all available job types organized by queue category."""
     job_types = {
         "preprocessing": [
-            "preprocessing - Extract metadata from BAM files",
+            "preprocessing - Extract metadata from BAM files"
+        ],
+        "bed_conversion": [
             "bed_conversion - Convert BAM files to BED format"
         ],
         "analysis": [
@@ -243,9 +245,9 @@ def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool
         if work_dir:
             def bed_conversion_handler_with_work_dir(job):
                 return bed_conversion_handler(job, work_dir=str(work_dir))
-            runner.register_handler("preprocessing", "bed_conversion", bed_conversion_handler_with_work_dir)
+            runner.register_handler("bed_conversion", "bed_conversion", bed_conversion_handler_with_work_dir)
         else:
-            runner.register_handler("preprocessing", "bed_conversion", bed_conversion_handler)
+            runner.register_handler("bed_conversion", "bed_conversion", bed_conversion_handler)
         
         # Register the MGMT analysis handler with work directory if specified
         if work_dir:
@@ -330,6 +332,9 @@ def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool
             if job_type.startswith("preprocessing:"):
                 queue_type, actual_job_type = job_type.split(":", 1)
                 runner.register_command_handler("preprocessing", actual_job_type, command)
+            elif job_type.startswith("bed_conversion:"):
+                queue_type, actual_job_type = job_type.split(":", 1)
+                runner.register_command_handler("bed_conversion", actual_job_type, command)
             elif job_type.startswith("analysis:"):
                 queue_type, actual_job_type = job_type.split(":", 1)
                 runner.register_command_handler("analysis", actual_job_type, command)
