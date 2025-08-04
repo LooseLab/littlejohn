@@ -1,73 +1,15 @@
 #!/usr/bin/env python3
 """
-Fusion Analysis Module for LittleJohn
+Simplified Fusion Analysis Module for LittleJohn
 
-This module provides automated fusion analysis following the exact architecture
-specified in the Fusion Analysis Documentation. It integrates with LittleJohn's 
-workflow system and processes files for fusion detection.
+This module provides a simplified, function-based approach to fusion analysis
+that removes unnecessary class hierarchy while preserving important functionality.
 
-Features:
-- Automated fusion detection using BAM files
-- Target panel and genome-wide fusion analysis
-- Integration with LittleJohn's workflow system
-- Sample-specific output directories
-- Comprehensive metadata extraction and logging
-- Error handling and result tracking
-- State persistence and incremental processing
-- Memory-optimized processing
-
-Classes
--------
-FusionMetadata
-    Container for fusion analysis metadata and results.
-
-FusionAnalysis
-    Main analysis class that processes files for fusion detection.
-
-Dependencies
------------
-- pandas: Data manipulation and analysis
-- numpy: Numerical computations
-- logging: Logging for debugging and monitoring
-- typing: Type hints
-- tempfile: Temporary file creation
-- pathlib: File system paths
-- os: Operating system interface
-- time: Time utilities
-- json: JSON serialization
-- pickle: Python object serialization
-- gc: Garbage collection
-- pysam: BAM file processing
-- asyncio: Asynchronous processing support
-- subprocess: External command execution
-
-Example Usage
------------
-.. code-block:: python
-
-    from littlejohn.fusion_analysis import FusionAnalysis
-
-    # Initialize analysis
-    fusion_analysis = FusionAnalysis(
-        work_dir="output/",
-        config_path="fusion_config.json"
-    )
-
-    # Process files
-    fusion_analysis.process_file("sample.bam")
-
-Notes
------
-The module follows the LittleJohn framework patterns for:
-- Integration with workflow system
-- Worker process management
-- State tracking and persistence
-- Error handling and logging
-- Output generation and file management
-
-Authors
--------
-Matt Loose
+Key improvements:
+- Removes FusionAnalysis wrapper class
+- Converts FusionProcessor to module-level functions with caching
+- Maintains gene region caching for performance
+- Simplifies the API while preserving all functionality
 """
 
 import os
@@ -78,14 +20,12 @@ import time
 import pickle
 import gc
 import json
-import asyncio
-import subprocess
-import shutil
+import random
+import networkx as nx
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple, Set
 from dataclasses import dataclass, field
 from collections import Counter, defaultdict
-from io import StringIO
 import numpy as np
 import pandas as pd
 import pysam
@@ -145,414 +85,616 @@ class FusionMetadata:
             self.fusion_data = {}
 
 
-class FusionProcessor:
-    """
-    Core processor for fusion detection from BAM files.
+# Module-level caches for gene regions (shared across all function calls)
+_gene_regions_cache: Dict[str, Dict[str, List[GeneRegion]]] = {}
+_all_gene_regions_cache: Dict[str, Dict[str, List[GeneRegion]]] = {}
+_target_panel_cache: Dict[str, str] = {}
+
+
+def _setup_file_paths(target_panel: str = "rCNS2") -> Tuple[str, str]:
+    """Setup file paths for gene data."""
+    # Try to import robin resources to get the correct path
+    try:
+        from robin import resources
+        resources_dir = os.path.dirname(resources.__file__)
+        
+        # Look for BED files in robin resources first
+        if target_panel == "rCNS2":
+            rCNS2_path = os.path.join(resources_dir, "rCNS2_panel_name_uniq.bed")
+            if os.path.exists(rCNS2_path):
+                gene_bed = rCNS2_path
+            else:
+                gene_bed = "rCNS2_panel_name_uniq.bed"
+        elif target_panel == "AML":
+            aml_path = os.path.join(resources_dir, "AML_panel_name_uniq.bed")
+            if os.path.exists(aml_path):
+                gene_bed = aml_path
+            else:
+                gene_bed = "AML_panel_name_uniq.bed"
+        else:
+            # Default to rCNS2
+            target_panel = "rCNS2"
+            rCNS2_path = os.path.join(resources_dir, "rCNS2_panel_name_uniq.bed")
+            if os.path.exists(rCNS2_path):
+                gene_bed = rCNS2_path
+            else:
+                gene_bed = "rCNS2_panel_name_uniq.bed"
+        
+        # Look for all genes BED file
+        all_genes_path = os.path.join(resources_dir, "all_genes2.bed")
+        if os.path.exists(all_genes_path):
+            all_gene_bed = all_genes_path
+        else:
+            all_gene_bed = "all_genes2.bed"
+            
+    except ImportError:
+        # Fallback to local files if robin is not available
+        if target_panel == "rCNS2":
+            gene_bed = "rCNS2_panel_name_uniq.bed"
+        elif target_panel == "AML":
+            gene_bed = "AML_panel_name_uniq.bed"
+        else:
+            # Default to rCNS2
+            target_panel = "rCNS2"
+            gene_bed = "rCNS2_panel_name_uniq.bed"
+        
+        all_gene_bed = "all_genes2.bed"
     
-    Responsibilities:
-    - Load and cache gene region data
-    - Process BAM files for fusion candidates
-    - Memory-optimized processing
+    # Log the file paths for debugging
+    logging.info(f"Fusion analysis initialized with target_panel: {target_panel}")
+    logging.info(f"Gene bed path: {gene_bed}")
+    logging.info(f"All gene bed path: {all_gene_bed}")
+    
+    return gene_bed, all_gene_bed
+
+
+def _load_bed_regions(bed_file: str) -> Dict[str, List[GeneRegion]]:
     """
-
-    def __init__(self, target_panel: str = "rCNS2"):
-        self.target_panel = target_panel
-        self.gene_regions_cache: Dict[str, List[GeneRegion]] = {}
-        self.all_gene_regions_cache: Dict[str, List[GeneRegion]] = {}
+    Load BED file regions into memory for efficient lookup.
+    
+    Args:
+        bed_file: Path to BED file
         
-        # Initialize file paths
-        self._setup_file_paths()
-        
-        # Load gene regions into memory
-        self._load_gene_regions()
-
-    def _setup_file_paths(self) -> None:
-        """Setup file paths for gene data."""
-        # Try to import robin resources to get the correct path
-        try:
-            from robin import resources
-            resources_dir = os.path.dirname(resources.__file__)
-            
-            # Look for BED files in robin resources first
-            if self.target_panel == "rCNS2":
-                rCNS2_path = os.path.join(resources_dir, "rCNS2_panel_name_uniq.bed")
-                if os.path.exists(rCNS2_path):
-                    self.gene_bed = rCNS2_path
-                else:
-                    self.gene_bed = "rCNS2_panel_name_uniq.bed"
-            elif self.target_panel == "AML":
-                aml_path = os.path.join(resources_dir, "AML_panel_name_uniq.bed")
-                if os.path.exists(aml_path):
-                    self.gene_bed = aml_path
-                else:
-                    self.gene_bed = "AML_panel_name_uniq.bed"
-            else:
-                # Default to rCNS2
-                self.target_panel = "rCNS2"
-                rCNS2_path = os.path.join(resources_dir, "rCNS2_panel_name_uniq.bed")
-                if os.path.exists(rCNS2_path):
-                    self.gene_bed = rCNS2_path
-                else:
-                    self.gene_bed = "rCNS2_panel_name_uniq.bed"
-            
-            # Look for all genes BED file
-            all_genes_path = os.path.join(resources_dir, "all_genes2.bed")
-            if os.path.exists(all_genes_path):
-                self.all_gene_bed = all_genes_path
-            else:
-                self.all_gene_bed = "all_genes2.bed"
+    Returns:
+        Dictionary mapping chromosome to list of GeneRegion objects
+    """
+    regions = defaultdict(list)
+    
+    try:
+        with open(bed_file, "r") as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
                 
-        except ImportError:
-            # Fallback to local files if robin is not available
-            if self.target_panel == "rCNS2":
-                self.gene_bed = "rCNS2_panel_name_uniq.bed"
-            elif self.target_panel == "AML":
-                self.gene_bed = "AML_panel_name_uniq.bed"
-            else:
-                # Default to rCNS2
-                self.target_panel = "rCNS2"
-                self.gene_bed = "rCNS2_panel_name_uniq.bed"
-            
-            self.all_gene_bed = "all_genes2.bed"
+                parts = line.split("\t")
+                if len(parts) < 4:
+                    continue
+                
+                try:
+                    chrom = parts[0]
+                    start = int(parts[1])
+                    end = int(parts[2])
+                    gene_name = parts[3]
+                    
+                    regions[chrom].append(GeneRegion(start, end, gene_name))
+                except ValueError:
+                    continue
+                    
+    except FileNotFoundError:
+        # If file not found, return empty dict
+        pass
+    except Exception:
+        # If any other error, return empty dict
+        pass
         
-        # Log the file paths for debugging
-        logging.info(f"FusionProcessor initialized with target_panel: {self.target_panel}")
-        logging.info(f"Gene bed path: {self.gene_bed}")
-        logging.info(f"All gene bed path: {self.all_gene_bed}")
+    return dict(regions)
 
-    def _load_gene_regions(self) -> None:
-        """Load gene regions into memory for efficient lookup."""
+
+def _ensure_gene_regions_loaded(target_panel: str = "rCNS2") -> None:
+    """Ensure gene regions are loaded into cache for the given target panel."""
+    if target_panel not in _gene_regions_cache:
+        gene_bed, all_gene_bed = _setup_file_paths(target_panel)
+        
         # Load target panel gene regions
-        self.gene_regions_cache = self._load_bed_regions(self.gene_bed)
+        _gene_regions_cache[target_panel] = _load_bed_regions(gene_bed)
         
-        # Load genome-wide gene regions
-        self.all_gene_regions_cache = self._load_bed_regions(self.all_gene_bed)
+        # Load genome-wide gene regions (shared across all panels)
+        if not _all_gene_regions_cache:
+            _all_gene_regions_cache['shared'] = _load_bed_regions(all_gene_bed)
         
-        logging.info(f"Gene regions loaded - target cache: {len(self.gene_regions_cache)} regions")
-        logging.info(f"Gene regions loaded - genome-wide cache: {len(self.all_gene_regions_cache)} regions")
-
-    def _load_bed_regions(self, bed_file: str) -> Dict[str, List[GeneRegion]]:
-        """
-        Load BED file regions into memory for efficient lookup.
-        
-        Args:
-            bed_file: Path to BED file
-            
-        Returns:
-            Dictionary mapping chromosome to list of GeneRegion objects
-        """
-        regions = defaultdict(list)
-        
-        try:
-            with open(bed_file, "r") as f:
-                for line_num, line in enumerate(f, 1):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    
-                    parts = line.split("\t")
-                    if len(parts) < 4:
-                        continue
-                    
-                    try:
-                        chrom = parts[0]
-                        start = int(parts[1])
-                        end = int(parts[2])
-                        gene_name = parts[3]
-                        
-                        regions[chrom].append(GeneRegion(start, end, gene_name))
-                    except ValueError:
-                        continue
-                        
-        except FileNotFoundError:
-            # If file not found, return empty dict
-            pass
-        except Exception:
-            # If any other error, return empty dict
-            pass
-            
-        return dict(regions)
-
-    def has_supplementary_alignments(self, bamfile: str) -> bool:
-        """
-        Quickly check if a BAM file has supplementary alignments.
-        
-        Args:
-            bamfile: Path to the BAM file
-            
-        Returns:
-            True if supplementary alignment is found, else False
-        """
-        try:
-            with pysam.AlignmentFile(bamfile, "rb") as bam:
-                read_count = 0
-                for read in bam:
-                    read_count += 1
-                    if read.has_tag('SA'):
-                        return True
-                    if read.is_supplementary:
-                        return True
-                    # Limit the number of reads to check for performance
-                    if read_count > 10000:
-                        break
-            return False
-        except Exception as e:
-            logging.error(f"Error checking supplementary alignments in {bamfile}: {str(e)}")
-            return False
-
-    def find_reads_with_supplementary(self, bamfile: str) -> Set[str]:
-        """
-        Find all reads that have supplementary alignments.
-        
-        Args:
-            bamfile: Path to the BAM file
-            
-        Returns:
-            Set of read names with supplementary alignments
-        """
-        reads_with_supp = set()
-        
-        try:
-            with pysam.AlignmentFile(bamfile, "rb") as bam:
-                for read in bam:
-                    if read.has_tag('SA') or read.is_supplementary:
-                        reads_with_supp.add(read.query_name)
-        except Exception:
-            pass
-            
-        return reads_with_supp
-
-    def process_bam_for_fusions(self, bamfile: str) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
-        """
-        Process BAM file to find fusion candidates.
-        
-        Args:
-            bamfile: Path to BAM file
-            
-        Returns:
-            Tuple of (target_panel_candidates, genome_wide_candidates) DataFrames
-        """
-        try:
-            # Find reads with supplementary alignments
-            reads_with_supp = self.find_reads_with_supplementary(bamfile)
-            
-            if not reads_with_supp:
-                return None, None
-            
-            # Process reads for target panel fusions
-            target_candidates = self._process_reads_for_fusions(
-                bamfile, reads_with_supp, self.gene_regions_cache
-            )
-            
-            # Process reads for genome-wide fusions
-            genome_wide_candidates = self._process_reads_for_fusions(
-                bamfile, reads_with_supp, self.all_gene_regions_cache
-            )
-            
-            return target_candidates, genome_wide_candidates
-            
-        except Exception as e:
-            import traceback
-            logging.error(f"Error processing BAM file for fusions: {str(e)}")
-            logging.error(f"Traceback: {traceback.format_exc()}")
-            return None, None
-
-    def _process_reads_for_fusions(
-        self,
-        bamfile: str,
-        reads_with_supp: Set[str],
-        gene_regions: Dict[str, List[GeneRegion]],
-    ) -> Optional[pd.DataFrame]:
-        """
-        Process reads to find gene intersections and create fusion candidates.
-        
-        Args:
-            bamfile: Path to BAM file
-            reads_with_supp: Set of read names with supplementary alignments
-            gene_regions: Dictionary of gene regions by chromosome
-            
-        Returns:
-            DataFrame with fusion candidates or None if no candidates found
-        """
-        rows = []
-        
-        try:
-            with pysam.AlignmentFile(bamfile, "rb") as bam:
-                for read in bam:
-                    # Skip if not in our target reads
-                    if read.query_name not in reads_with_supp:
-                        continue
-                    
-                    # Skip secondary alignments and unmapped reads
-                    if read.is_secondary or read.is_unmapped:
-                        continue
-                    
-                    # Get reference information
-                    ref_name = bam.get_reference_name(read.reference_id) if read.reference_id >= 0 else None
-                    if not ref_name or ref_name == "chrM":
-                        continue
-                    
-                    ref_start = read.reference_start
-                    ref_end = read.reference_end
-                    
-                    # Check if this read intersects with any gene regions
-                    if ref_name in gene_regions:
-                        read_rows = self._find_gene_intersections(
-                            read, ref_name, ref_start, ref_end, gene_regions[ref_name]
-                        )
-                        rows.extend(read_rows)
-                        
-        except Exception as e:
-            logging.error(f"Error processing reads for fusions: {str(e)}")
-            return None
-            
-        if not rows:
-            return None
-            
-        # Create DataFrame
-        df = pd.DataFrame(rows)
-        return self._optimize_fusion_dataframe(df)
-
-    def _find_gene_intersections(
-        self,
-        read: pysam.AlignedSegment,
-        ref_name: str,
-        ref_start: int,
-        ref_end: int,
-        gene_regions: List[GeneRegion],
-    ) -> List[Dict]:
-        """
-        Find gene intersections for a read.
-        
-        Args:
-            read: Pysam AlignedSegment object
-            ref_name: Reference chromosome name
-            ref_start: Reference start position
-            ref_end: Reference end position
-            gene_regions: List of gene regions for this chromosome
-            
-        Returns:
-            List of dictionaries with fusion candidate data
-        """
-        intersections = []
-        
-        for gene_region in gene_regions:
-            if gene_region.overlaps_with(ref_start, ref_end):
-                intersection = {
-                    'read_id': read.query_name,
-                    'gene_name': gene_region.name,
-                    'chromosome': ref_name,
-                    'start': ref_start,
-                    'end': ref_end,
-                    'strand': '-' if read.is_reverse else '+',
-                    'mapping_quality': read.mapping_quality,
-                    'read_start': read.query_alignment_start,
-                    'read_end': read.query_alignment_end,
-                    'mapping_span': ref_end - ref_start,
-                }
-                intersections.append(intersection)
-                
-        return intersections
-
-    def _optimize_fusion_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Optimize DataFrame memory usage.
-        
-        Args:
-            df: Input DataFrame
-            
-        Returns:
-            Optimized DataFrame
-        """
-        if df.empty:
-            return df
-            
-        # Optimize dtypes
-        for col in df.columns:
-            if df[col].dtype == 'object':
-                if col in ['read_id', 'gene_name', 'chromosome', 'strand']:
-                    df[col] = df[col].astype('category')
-                    
-        return df
+        logging.info(f"Gene regions loaded for {target_panel} - target cache: {len(_gene_regions_cache[target_panel])} regions")
+        logging.info(f"Gene regions loaded - genome-wide cache: {len(_all_gene_regions_cache['shared'])} regions")
 
 
-class FusionAnalysis:
+def has_supplementary_alignments(bamfile: str) -> bool:
     """
-    Main fusion analysis class that processes files for fusion detection.
+    Quickly check if a BAM file has supplementary alignments.
     
-    This class follows the LittleJohn framework patterns for:
-    - Integration with workflow system
-    - Worker process management
-    - State tracking and persistence
-    - Error handling and logging
-    - Output generation and file management
+    Args:
+        bamfile: Path to the BAM file
+        
+    Returns:
+        True if supplementary alignment is found, else False
     """
+    try:
+        with pysam.AlignmentFile(bamfile, "rb") as bam:
+            for read in bam:
+                if read.has_tag('SA'):
+                    return True
+                if read.is_supplementary:
+                    return True
+        return False
+    except Exception as e:
+        logging.error(f"Error checking supplementary alignments in {bamfile}: {str(e)}")
+        return False
 
-    def __init__(self, work_dir=None, config_path=None, threads=4):
-        """
-        Initialize the fusion analysis.
-        
-        Args:
-            work_dir: Working directory for output files
-            config_path: Path to configuration file
-            threads: Number of threads to use
-        """
-        self.work_dir = work_dir or "fusion_output"
-        self.config_path = config_path
-        self.threads = threads
-        self.logger = logging.getLogger("littlejohn.fusion")
-        
-        # Ensure work directory exists
-        os.makedirs(self.work_dir, exist_ok=True)
-        
-        # Load configuration
-        self.config = self._load_config()
-        
-        # Initialize processor
-        self.target_panel = self.config.get('target_panel', 'rCNS2')
-        self.processor = FusionProcessor(self.target_panel)
 
-    def _load_config(self) -> Dict[str, Any]:
-        """Load configuration from file or use defaults."""
-        if self.config_path and os.path.exists(self.config_path):
-            try:
-                with open(self.config_path, 'r') as f:
-                    return json.load(f)
-            except Exception as e:
-                self.logger.warning(f"Could not load config file: {e}")
+def find_reads_with_supplementary(bamfile: str) -> Set[str]:
+    """
+    Find all reads that have supplementary alignments.
+    
+    Args:
+        bamfile: Path to the BAM file
+        
+    Returns:
+        Set of read names with supplementary alignments
+    """
+    reads_with_supp = set()
+    
+    try:
+        with pysam.AlignmentFile(bamfile, "rb") as bam:
+            for read in bam:
+                if read.is_unmapped:
+                    continue
+                # Check for supplementary alignments or SA tag (matching ROBIN implementation)
+                if read.is_supplementary or read.has_tag("SA"):
+                    reads_with_supp.add(read.query_name)
+    except Exception:
+        pass
+        
+    return reads_with_supp
+
+
+def _find_gene_intersections(
+    read: pysam.AlignedSegment,
+    ref_name: str,
+    ref_start: int,
+    ref_end: int,
+    gene_regions: List[GeneRegion],
+) -> List[Dict]:
+    """
+    Find gene intersections for a read.
+    
+    Args:
+        read: Pysam AlignedSegment object
+        ref_name: Reference chromosome name
+        ref_start: Reference start position
+        ref_end: Reference end position
+        gene_regions: List of gene regions for this chromosome
+        
+    Returns:
+        List of dictionaries with fusion candidate data in the correct format
+    """
+    intersections = []
+    
+    for gene_region in gene_regions:
+        if gene_region.overlaps_with(ref_start, ref_end, min_overlap=100):
+            intersection = {
+                # Gene information columns (col1-col4) - following reference format
+                'col1': ref_name,                    # Chromosome
+                'col2': gene_region.start,          # Gene start position
+                'col3': gene_region.end,            # Gene end position
+                'col4': gene_region.name,           # Gene name
                 
-        # Default configuration
-        return {
-            'target_panel': 'rCNS2',
-            'min_overlap': 100,
-            'min_mapping_quality': 10,
-        }
+                # Reference alignment information
+                'reference_id': ref_name,
+                'reference_start': ref_start,
+                'reference_end': ref_end,
+                
+                # Read information
+                'read_id': read.query_name,
+                'mapping_quality': read.mapping_quality,
+                'strand': '-' if read.is_reverse else '+',
+                'read_start': read.query_alignment_start,
+                'read_end': read.query_alignment_end,
+                
+                # Alignment flags
+                'is_secondary': read.is_secondary,
+                'is_supplementary': read.is_supplementary,
+                
+                # Calculated values
+                'mapping_span': ref_end - ref_start,
+            }
+            intersections.append(intersection)
+            
+    return intersections
 
-    def _get_next_file_number(self) -> int:
-        """Get the next file number for output files."""
-        return int(time.time() * 1000)
 
-    def _check_and_create_folder(self, base_dir: str, sample_id: str) -> str:
-        """Check and create folder for sample output."""
-        sample_dir = os.path.join(base_dir, sample_id)
-        os.makedirs(sample_dir, exist_ok=True)
-        return sample_dir
-
-    def process_file(self, file_path: str, metadata: Dict[str, Any], timestamp: Optional[float] = None) -> FusionMetadata:
-        """
-        Process a single file for fusion analysis.
+def _process_reads_for_fusions(
+    bamfile: str,
+    reads_with_supp: Set[str],
+    gene_regions: Dict[str, List[GeneRegion]],
+) -> Optional[pd.DataFrame]:
+    """
+    Process reads to find gene intersections and create fusion candidates.
+    
+    Args:
+        bamfile: Path to BAM file
+        reads_with_supp: Set of read names with supplementary alignments
+        gene_regions: Dictionary of gene regions by chromosome
         
-        Args:
-            file_path: Path to the file to process
-            metadata: Metadata about the file
-            timestamp: Optional timestamp for the analysis
-            
-        Returns:
-            FusionMetadata object with results
-        """
-        if timestamp is None:
-            timestamp = time.time()
-            
+    Returns:
+        DataFrame with fusion candidates or None if no candidates found
+    """
+    rows = []
+    
+    try:
+        with pysam.AlignmentFile(bamfile, "rb") as bam:
+            for read in bam:
+                # Skip if not in our target reads
+                if read.query_name not in reads_with_supp:
+                    continue
+                
+                # Skip secondary alignments and unmapped reads
+                if read.is_secondary or read.is_unmapped:
+                    continue
+                
+                # Get reference information
+                ref_name = bam.get_reference_name(read.reference_id) if read.reference_id >= 0 else None
+                if not ref_name or ref_name == "chrM":
+                    continue
+                
+                ref_start = read.reference_start
+                ref_end = read.reference_end
+                
+                # Check if this read intersects with any gene regions
+                if ref_name in gene_regions:
+                    read_rows = _find_gene_intersections(
+                        read, ref_name, ref_start, ref_end, gene_regions[ref_name]
+                    )
+                    rows.extend(read_rows)
+                    
+    except Exception as e:
+        logging.error(f"Error processing reads for fusions: {str(e)}")
+        return None
+        
+    if not rows:
+        return None
+        
+    # Create DataFrame
+    df = pd.DataFrame(rows)
+    
+    # Apply quality filters (matching ROBIN implementation)
+    df = df[(df["mapping_quality"] > 40) & (df["mapping_span"] > 100)].reset_index(drop=True)
+    
+    if df.empty:
+        return None
+    
+    # Apply fusion candidate filtering (matching ROBIN implementation)
+    # Filter for duplicated reads (reads mapping to multiple locations)
+    duplicated_mask = df["read_id"].duplicated(keep=False)
+    if not duplicated_mask.any():
+        return None
+    
+    doubles = df[duplicated_mask]
+    
+    # Count unique genes per read
+    gene_counts = doubles.groupby("read_id")["col4"].transform("nunique")
+    
+    # Keep reads mapping to multiple genes
+    result = doubles[gene_counts > 1]
+    
+    return result if not result.empty else None
+
+
+def _optimize_fusion_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Optimize DataFrame memory usage.
+    
+    Args:
+        df: Input DataFrame
+        
+    Returns:
+        Optimized DataFrame
+    """
+    if df.empty:
+        return df
+        
+    # Optimize dtypes
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            if col in ['read_id', 'gene_name', 'chromosome', 'strand']:
+                df[col] = df[col].astype('category')
+                
+    return df
+
+
+def process_bam_for_fusions(bamfile: str, target_panel: str = "rCNS2") -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
+    """
+    Process BAM file to find fusion candidates.
+    
+    Args:
+        bamfile: Path to BAM file
+        target_panel: Target panel to use for analysis
+        
+    Returns:
+        Tuple of (target_panel_candidates, genome_wide_candidates) DataFrames
+    """
+    # Ensure gene regions are loaded
+    _ensure_gene_regions_loaded(target_panel)
+    
+    try:
+        # Find reads with supplementary alignments
+        reads_with_supp = find_reads_with_supplementary(bamfile)
+        
+        if not reads_with_supp:
+            return None, None
+        
+        # Process reads for target panel fusions
+        target_candidates = _process_reads_for_fusions(
+            bamfile, reads_with_supp, _gene_regions_cache[target_panel]
+        )
+        
+        # Process reads for genome-wide fusions
+        genome_wide_candidates = _process_reads_for_fusions(
+            bamfile, reads_with_supp, _all_gene_regions_cache['shared']
+        )
+        
+        return target_candidates, genome_wide_candidates
+        
+    except Exception as e:
+        import traceback
+        logging.error(f"Error processing BAM file for fusions: {str(e)}")
+        logging.error(f"Traceback: {traceback.format_exc()}")
+        return None, None
+
+
+def _check_and_create_folder(base_dir: str, sample_id: str) -> str:
+    """Check and create folder for sample output."""
+    sample_dir = os.path.join(base_dir, sample_id)
+    os.makedirs(sample_dir, exist_ok=True)
+    return sample_dir
+
+
+def _generate_output_files(
+    sample_id: str, 
+    analysis_results: Dict[str, Any], 
+    fusion_metadata: FusionMetadata,
+    work_dir: str
+) -> Dict[str, str]:
+    """
+    Generate output files for the analysis, merging with existing results if present.
+    
+    Args:
+        sample_id: Sample ID
+        analysis_results: Analysis results
+        fusion_metadata: Fusion metadata object
+        work_dir: Working directory
+        
+    Returns:
+        Dictionary mapping file type to file path
+    """
+    # Ensure work directory exists
+    os.makedirs(work_dir, exist_ok=True)
+    
+    # Create sample-specific directory
+    sample_dir = _check_and_create_folder(work_dir, sample_id)
+    
+    # Load existing results if they exist
+    existing_target, existing_genome_wide, existing_metadata = _load_existing_fusion_results(sample_dir, sample_id)
+    
+    # Merge new results with existing results
+    merged_target = _merge_fusion_candidates(analysis_results.get('target_candidates'), existing_target)
+    merged_genome_wide = _merge_fusion_candidates(analysis_results.get('genome_wide_candidates'), existing_genome_wide)
+    
+    # Merge metadata
+    merged_metadata = _merge_fusion_metadata(fusion_metadata, existing_metadata)
+    
+    output_files = {}
+    
+    # Save merged target panel fusion candidates (master) to sample directory
+    if merged_target is not None:
+        target_path = os.path.join(sample_dir, "fusion_candidates_master.csv")
+        merged_target.to_csv(target_path, index=False)
+        output_files['target_fusion'] = target_path
+        merged_metadata.target_fusion_path = target_path
+        
+    # Save merged genome-wide fusion candidates (all) to sample directory
+    if merged_genome_wide is not None:
+        genome_path = os.path.join(sample_dir, "fusion_candidates_all.csv")
+        merged_genome_wide.to_csv(genome_path, index=False)
+        output_files['genome_wide_fusion'] = genome_path
+        merged_metadata.genome_wide_fusion_path = genome_path
+        
+    # Save merged metadata to sample-specific directory
+    metadata_path = os.path.join(sample_dir, f"{sample_id}_fusion_metadata.json")
+    with open(metadata_path, 'w') as f:
+        json.dump(merged_metadata.__dict__, f, default=json_serializable, indent=2)
+        
+    # Update the original fusion_metadata object with merged data
+    fusion_metadata.__dict__.update(merged_metadata.__dict__)
+    
+    return output_files
+
+
+def _load_existing_fusion_results(sample_dir: str, sample_id: str) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame], Optional[Dict]]:
+    """
+    Load existing fusion results if they exist.
+    
+    Args:
+        sample_dir: Sample-specific directory
+        sample_id: Sample ID
+        
+    Returns:
+        Tuple of (existing_target_candidates, existing_genome_wide_candidates, existing_metadata)
+    """
+    existing_target = None
+    existing_genome_wide = None
+    existing_metadata = None
+    
+    # Check for existing target fusion candidates
+    target_path = os.path.join(sample_dir, "fusion_candidates_master.csv")
+    if os.path.exists(target_path):
+        try:
+            existing_target = pd.read_csv(target_path)
+            logging.info(f"Loaded existing target fusion candidates: {len(existing_target)} entries")
+        except Exception as e:
+            logging.warning(f"Error loading existing target fusion candidates: {e}")
+    
+    # Check for existing genome-wide fusion candidates
+    genome_path = os.path.join(sample_dir, "fusion_candidates_all.csv")
+    if os.path.exists(genome_path):
+        try:
+            existing_genome_wide = pd.read_csv(genome_path)
+            logging.info(f"Loaded existing genome-wide fusion candidates: {len(existing_genome_wide)} entries")
+        except Exception as e:
+            logging.warning(f"Error loading existing genome-wide fusion candidates: {e}")
+    
+    # Check for existing metadata
+    metadata_path = os.path.join(sample_dir, f"{sample_id}_fusion_metadata.json")
+    if os.path.exists(metadata_path):
+        try:
+            with open(metadata_path, 'r') as f:
+                existing_metadata = json.load(f)
+            logging.info(f"Loaded existing fusion metadata")
+        except Exception as e:
+            logging.warning(f"Error loading existing fusion metadata: {e}")
+    
+    return existing_target, existing_genome_wide, existing_metadata
+
+
+def _merge_fusion_candidates(new_candidates: Optional[pd.DataFrame], existing_candidates: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+    """
+    Merge new fusion candidates with existing ones.
+    
+    Args:
+        new_candidates: New fusion candidates DataFrame
+        existing_candidates: Existing fusion candidates DataFrame
+        
+    Returns:
+        Merged DataFrame or None if no candidates
+    """
+    if new_candidates is None and existing_candidates is None:
+        return None
+    elif new_candidates is None:
+        return existing_candidates
+    elif existing_candidates is None:
+        return new_candidates
+    
+    # Combine the DataFrames
+    combined = pd.concat([existing_candidates, new_candidates], ignore_index=True)
+    
+    # Remove duplicates based on key columns (read_id, col1, reference_id, reference_start, reference_end)
+    # Keep the first occurrence (existing data takes precedence)
+    key_columns = ['read_id', 'col1', 'reference_id', 'reference_start', 'reference_end']
+    if all(col in combined.columns for col in key_columns):
+        combined = combined.drop_duplicates(subset=key_columns, keep='first')
+        logging.info(f"Merged fusion candidates: {len(existing_candidates)} existing + {len(new_candidates)} new -> {len(combined)} total (after deduplication)")
+    else:
+        logging.warning(f"Could not deduplicate fusion candidates - missing key columns: {key_columns}")
+        logging.info(f"Merged fusion candidates: {len(existing_candidates)} existing + {len(new_candidates)} new -> {len(combined)} total")
+    
+    return combined
+
+
+def _merge_fusion_metadata(new_metadata: FusionMetadata, existing_metadata: Optional[Dict]) -> FusionMetadata:
+    """
+    Merge new fusion metadata with existing metadata.
+    
+    Args:
+        new_metadata: New fusion metadata object
+        existing_metadata: Existing metadata dictionary
+        
+    Returns:
+        Merged FusionMetadata object
+    """
+    if existing_metadata is None:
+        return new_metadata
+    
+    # Merge processing steps
+    existing_steps = existing_metadata.get('processing_steps', [])
+    new_steps = new_metadata.processing_steps
+    merged_steps = list(set(existing_steps + new_steps))  # Remove duplicates
+    
+    # Merge fusion data
+    existing_fusion_data = existing_metadata.get('fusion_data', {})
+    new_fusion_data = new_metadata.fusion_data or {}
+    
+    # Combine target candidates
+    existing_target = existing_fusion_data.get('target_candidates', [])
+    new_target = new_fusion_data.get('target_candidates', [])
+    merged_target = existing_target + new_target
+    
+    # Combine genome-wide candidates
+    existing_genome = existing_fusion_data.get('genome_wide_candidates', [])
+    new_genome = new_fusion_data.get('genome_wide_candidates', [])
+    merged_genome = existing_genome + new_genome
+    
+    # Update the new metadata object
+    new_metadata.processing_steps = merged_steps
+    new_metadata.fusion_data = {
+        'target_candidates': merged_target,
+        'genome_wide_candidates': merged_genome,
+    }
+    
+    # Update analysis results counts
+    if new_metadata.analysis_results:
+        new_metadata.analysis_results['target_candidates_count'] = len(merged_target)
+        new_metadata.analysis_results['genome_wide_candidates_count'] = len(merged_genome)
+    
+    logging.info(f"Merged fusion metadata: {len(existing_steps)} existing steps + {len(new_steps)} new steps")
+    
+    return new_metadata
+
+
+def _perform_fusion_analysis(
+    file_path: str, 
+    temp_dir: str, 
+    metadata: Dict[str, Any], 
+    fusion_metadata: FusionMetadata,
+    target_panel: str = "rCNS2"
+) -> Dict[str, Any]:
+    """
+    Perform the actual fusion analysis.
+    
+    Args:
+        file_path: Path to the file to process
+        temp_dir: Temporary directory for intermediate files
+        metadata: File metadata
+        fusion_metadata: Fusion metadata object
+        target_panel: Target panel to use
+        
+    Returns:
+        Dictionary with analysis results
+    """
+    from littlejohn.fusion_work import process_bam_file
+    
+    fusion_metadata.processing_steps.append("analysis_started")
+    results = process_bam_file(file_path, temp_dir, metadata, fusion_metadata, target_panel)
+    return results
+
+
+def process_single_file(file_path: str, metadata: Dict[str, Any], work_dir: str, logger=None, target_panel: str = "rCNS2") -> Dict[str, Any]:
+    """
+    Process a single file for fusion analysis (simplified function-based approach).
+    
+    Args:
+        file_path: Path to the file to process
+        metadata: Metadata about the file
+        work_dir: Working directory for output
+        logger: Logger instance
+        target_panel: Target panel to use for analysis
+        
+    Returns:
+        Dictionary with processing results
+    """
+    try:
+        if logger:
+            logger.info(f"Starting fusion analysis for {file_path}")
+            logger.info(f"Using work directory: {work_dir}")
+            logger.info(f"Target panel: {target_panel}")
+        
         # Extract sample ID from metadata
         sample_id = metadata.get('sample_id', 'unknown')
         
@@ -560,216 +702,89 @@ class FusionAnalysis:
         fusion_metadata = FusionMetadata(
             sample_id=sample_id,
             file_path=file_path,
-            analysis_timestamp=timestamp,
-            target_panel=self.target_panel
+            analysis_timestamp=time.time(),
+            target_panel=target_panel
         )
         
+        fusion_metadata.processing_steps.append("started")
+        
+        # Check if file exists
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+            
+        # Check if file is readable
+        if not os.access(file_path, os.R_OK):
+            raise PermissionError(f"File not readable: {file_path}")
+            
+        # Check if file is a BAM file
+        if not file_path.lower().endswith('.bam'):
+            if logger:
+                logger.warning(f"File does not have .bam extension: {file_path}")
+                
+        # Try to open BAM file to check if it's valid
         try:
-            self.logger.info(f"Starting fusion analysis for {file_path}")
-            fusion_metadata.processing_steps.append("started")
+            with pysam.AlignmentFile(file_path, "rb") as bam:
+                # Just check if we can read the header
+                header = bam.header
+                if logger:
+                    logger.info(f"BAM file header read successfully, {len(header.get('SQ', []))} sequences")
+        except Exception as bam_error:
+            raise ValueError(f"Invalid or corrupted BAM file {file_path}: {str(bam_error)}")
             
-            # Check if file exists
-            if not os.path.exists(file_path):
-                raise FileNotFoundError(f"File not found: {file_path}")
-                
-            # Check if file is readable
-            if not os.access(file_path, os.R_OK):
-                raise PermissionError(f"File not readable: {file_path}")
-                
-            # Check if file is a BAM file
-            if not file_path.lower().endswith('.bam'):
-                self.logger.warning(f"File does not have .bam extension: {file_path}")
-                
-            # Try to open BAM file to check if it's valid
-            try:
-                with pysam.AlignmentFile(file_path, "rb") as bam:
-                    # Just check if we can read the header
-                    header = bam.header
-                    self.logger.info(f"BAM file header read successfully, {len(header.get('SQ', []))} sequences")
-            except Exception as bam_error:
-                raise ValueError(f"Invalid or corrupted BAM file {file_path}: {str(bam_error)}")
-                
-            # Create temporary directory
-            with tempfile.TemporaryDirectory() as temp_dir:
-                fusion_metadata.processing_steps.append("temp_dir_created")
-                
-                # Perform fusion analysis
-                analysis_results = self._perform_fusion_analysis(
-                    file_path, temp_dir, metadata, fusion_metadata
-                )
-                
-                # Generate output files
-                output_files = self._generate_output_files(
-                    sample_id, analysis_results, fusion_metadata
-                )
-                
-                # Update metadata with results
-                fusion_metadata.analysis_results = analysis_results
-                fusion_metadata.target_fusion_path = output_files.get('target_fusion')
-                fusion_metadata.genome_wide_fusion_path = output_files.get('genome_wide_fusion')
-                fusion_metadata.processing_steps.append("completed")
-                
-                self.logger.info(f"Fusion analysis completed for {file_path}")
-                
-        except Exception as e:
-            import traceback
-            error_msg = f"Error in fusion analysis: {str(e)}"
-            self.logger.error(error_msg)
-            self.logger.error(f"Traceback: {traceback.format_exc()}")
-            fusion_metadata.error_message = error_msg
-            fusion_metadata.processing_steps.append("failed")
+        # Create temporary directory
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fusion_metadata.processing_steps.append("temp_dir_created")
             
-        return fusion_metadata
-
-    def _perform_fusion_analysis(
-        self, file_path: str, temp_dir: str, metadata: Dict[str, Any], fusion_metadata: FusionMetadata
-    ) -> Dict[str, Any]:
-        """
-        Perform the actual fusion analysis.
-        
-        Args:
-            file_path: Path to the file to process
-            temp_dir: Temporary directory for intermediate files
-            metadata: File metadata
-            fusion_metadata: Fusion metadata object
+            # Perform fusion analysis
+            analysis_results = _perform_fusion_analysis(
+                file_path, temp_dir, metadata, fusion_metadata, target_panel
+            )
             
-        Returns:
-            Dictionary with analysis results
-        """
-        fusion_metadata.processing_steps.append("analysis_started")
-        
-        # Check for supplementary alignments
-        has_supp = self.processor.has_supplementary_alignments(file_path)
-        
-        if not has_supp:
-            self.logger.info("No supplementary alignments found, skipping fusion analysis")
-            return {
-                'has_supplementary': False,
-                'target_candidates_count': 0,
-                'genome_wide_candidates_count': 0,
-                'target_candidates': None,
-                'genome_wide_candidates': None,
+            # Generate output files
+            from littlejohn.fusion_work import _generate_output_files
+            output_files = _generate_output_files(
+                sample_id, analysis_results, fusion_metadata, work_dir
+            )
+            
+            # Update metadata with results (now includes merged data)
+            fusion_metadata.analysis_results = analysis_results
+            fusion_metadata.target_fusion_path = output_files.get('target_fusion')
+            fusion_metadata.genome_wide_fusion_path = output_files.get('genome_wide_fusion')
+            
+            # Update analysis results with final merged counts
+            if fusion_metadata.fusion_data:
+                fusion_metadata.analysis_results['target_candidates_count'] = len(fusion_metadata.fusion_data.get('target_candidates', []))
+                fusion_metadata.analysis_results['genome_wide_candidates_count'] = len(fusion_metadata.fusion_data.get('genome_wide_candidates', []))
+            
+            fusion_metadata.processing_steps.append("completed")
+            
+            if logger:
+                logger.info(f"Fusion analysis completed for {file_path}")
+            
+            # Convert to dictionary
+            result = {
+                'success': fusion_metadata.error_message is None,
+                'sample_id': fusion_metadata.sample_id,
+                'file_path': fusion_metadata.file_path,
+                'analysis_timestamp': fusion_metadata.analysis_timestamp,
+                'target_fusion_path': fusion_metadata.target_fusion_path,
+                'genome_wide_fusion_path': fusion_metadata.genome_wide_fusion_path,
+                'processing_steps': fusion_metadata.processing_steps,
+                'error_message': fusion_metadata.error_message,
+                'analysis_results': fusion_metadata.analysis_results,
             }
-        
-        fusion_metadata.processing_steps.append("supplementary_found")
-        
-        # Process for fusions
-        target_candidates, genome_wide_candidates = self.processor.process_bam_for_fusions(file_path)
-        
-        fusion_metadata.processing_steps.append("fusion_processing_complete")
-        
-        # Prepare results
-        results = {
-            'has_supplementary': True,
-            'target_candidates_count': len(target_candidates) if target_candidates is not None else 0,
-            'genome_wide_candidates_count': len(genome_wide_candidates) if genome_wide_candidates is not None else 0,
-            'target_candidates': target_candidates,
-            'genome_wide_candidates': genome_wide_candidates,
-        }
-        
-        # Store fusion data in metadata
-        fusion_metadata.fusion_data = {
-            'target_candidates': target_candidates.to_dict('records') if target_candidates is not None else [],
-            'genome_wide_candidates': genome_wide_candidates.to_dict('records') if genome_wide_candidates is not None else [],
-        }
-        
-        return results
-
-    def _generate_output_files(
-        self, sample_id: str, analysis_results: Dict[str, Any], fusion_metadata: FusionMetadata
-    ) -> Dict[str, str]:
-        """
-        Generate output files for the analysis.
-        
-        Args:
-            sample_id: Sample ID
-            analysis_results: Analysis results
-            fusion_metadata: Fusion metadata object
             
-        Returns:
-            Dictionary mapping file type to file path
-        """
-        # Ensure work directory exists
-        os.makedirs(self.work_dir, exist_ok=True)
-        
-        # Create sample-specific directory
-        sample_dir = self._check_and_create_folder(self.work_dir, sample_id)
-        
-        output_files = {}
-        
-        # Save target panel fusion candidates (master) to sample directory
-        if analysis_results.get('target_candidates') is not None:
-            target_path = os.path.join(sample_dir, "fusion_candidates_master.csv")
-            analysis_results['target_candidates'].to_csv(target_path, index=False)
-            output_files['target_fusion'] = target_path
-            fusion_metadata.target_fusion_path = target_path
+            if fusion_metadata.error_message:
+                if logger:
+                    logger.error(f"Fusion analysis failed: {fusion_metadata.error_message}")
+                    logger.error(f"Processing steps completed: {fusion_metadata.processing_steps}")
+            else:
+                if logger:
+                    logger.info(f"Fusion analysis completed successfully for {file_path}")
+                    logger.info(f"Processing steps: {fusion_metadata.processing_steps}")
+                
+            return result
             
-        # Save genome-wide fusion candidates (all) to sample directory
-        if analysis_results.get('genome_wide_candidates') is not None:
-            genome_path = os.path.join(sample_dir, "fusion_candidates_all.csv")
-            analysis_results['genome_wide_candidates'].to_csv(genome_path, index=False)
-            output_files['genome_wide_fusion'] = genome_path
-            fusion_metadata.genome_wide_fusion_path = genome_path
-            
-        # Save metadata to sample-specific directory
-        metadata_path = os.path.join(sample_dir, f"{sample_id}_fusion_metadata.json")
-        with open(metadata_path, 'w') as f:
-            json.dump(fusion_metadata.__dict__, f, default=json_serializable, indent=2)
-            
-        return output_files
-
-
-def process_single_file(file_path: str, metadata: Dict[str, Any], work_dir: str, logger=None) -> Dict[str, Any]:
-    """
-    Process a single file for fusion analysis (standalone function).
-    
-    Args:
-        file_path: Path to the file to process
-        metadata: Metadata about the file
-        work_dir: Working directory for output
-        logger: Logger instance
-        
-    Returns:
-        Dictionary with processing results
-    """
-    try:
-        if logger:
-            logger.info(f"Initializing FusionAnalysis with work_dir: {work_dir}")
-        
-        # Initialize analysis
-        fusion_analysis = FusionAnalysis(work_dir=work_dir)
-        
-        if logger:
-            logger.info(f"Processing file: {file_path}")
-            logger.info(f"File metadata: {metadata}")
-        
-        # Process file
-        fusion_metadata = fusion_analysis.process_file(file_path, metadata)
-        
-        # Convert to dictionary
-        result = {
-            'success': fusion_metadata.error_message is None,
-            'sample_id': fusion_metadata.sample_id,
-            'file_path': fusion_metadata.file_path,
-            'analysis_timestamp': fusion_metadata.analysis_timestamp,
-            'target_fusion_path': fusion_metadata.target_fusion_path,
-            'genome_wide_fusion_path': fusion_metadata.genome_wide_fusion_path,
-            'processing_steps': fusion_metadata.processing_steps,
-            'error_message': fusion_metadata.error_message,
-            'analysis_results': fusion_metadata.analysis_results,
-        }
-        
-        if fusion_metadata.error_message:
-            if logger:
-                logger.error(f"Fusion analysis failed: {fusion_metadata.error_message}")
-                logger.error(f"Processing steps completed: {fusion_metadata.processing_steps}")
-        else:
-            if logger:
-                logger.info(f"Fusion analysis completed successfully for {file_path}")
-                logger.info(f"Processing steps: {fusion_metadata.processing_steps}")
-            
-        return result
-        
     except Exception as e:
         import traceback
         error_msg = f"Error in fusion analysis: {str(e)}"
@@ -808,8 +823,11 @@ def fusion_handler(job, work_dir=None):
             
         logger.info(f"Using work directory: {work_dir}")
         
+        # Get target panel from metadata or use default
+        target_panel = metadata.get('target_panel', 'rCNS2')
+        
         # Process the file
-        result = process_single_file(file_path, metadata, work_dir, logger)
+        result = process_single_file(file_path, metadata, work_dir, logger, target_panel)
         
         # Add result to job context
         job.context.add_result("fusion_analysis", result)
