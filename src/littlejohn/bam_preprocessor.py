@@ -29,8 +29,313 @@ class BamMetadata:
             self.processing_steps = []
 
 
+# Compile regex pattern once for barcode detection (module-level constant)
+_BARCODE_PATTERN = re.compile(r"_barcode(\d{1,2})$")
+
+
+def get_rg_tags_from_bam(sam_file) -> Optional[Tuple[Optional[str], ...]]:
+    """
+    Extracts RG (Read Group) tags from the BAM file header.
+
+    Args:
+        sam_file: pysam AlignmentFile object
+
+    Returns:
+        Optional[Tuple[Optional[str], ...]]: A tuple containing RG tag information
+                                             or None if no RG tags are found.
+    """
+    if not sam_file:
+        return None
+
+    rg_tags = sam_file.header.get("RG", [])
+    if not rg_tags:
+        return None
+
+    # Process only the first RG tag for efficiency
+    rg_tag = rg_tags[0]
+    id_tag = rg_tag.get("ID")
+    dt_tag = rg_tag.get("DT")
+    ds_tag = rg_tag.get("DS", "")
+    ds_tags = ds_tag.split(" ")
+    basecall_model_tag = (
+        ds_tags[1].replace("basecall_model=", "") if len(ds_tags) > 1 else None
+    )
+    runid_tag = ds_tags[0].replace("runid=", "") if ds_tags else None
+    lb_tag = rg_tag.get("LB")
+    pl_tag = rg_tag.get("PL")
+    pm_tag = rg_tag.get("PM")
+    pu_tag = rg_tag.get("PU")
+    al_tag = rg_tag.get("al")
+
+    return (
+        id_tag,
+        dt_tag,
+        basecall_model_tag,
+        runid_tag,
+        lb_tag,
+        pl_tag,
+        pm_tag,
+        pu_tag,
+        al_tag,
+    )
+
+
+def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
+    """
+    Processes the reads in the BAM file and aggregates information.
+    Uses streaming processing to minimize memory usage.
+
+    Args:
+        bam_file: Path to the BAM file
+
+    Returns:
+        Optional[Dict[str, Any]]: A dictionary containing aggregated read information,
+                                  or None if processing fails.
+    """
+    if not bam_file:
+        return None
+
+    # Determine state from filename
+    state = "pass" if bam_file and "pass" in bam_file else "fail"
+
+    # Use context manager to ensure proper file cleanup
+    try:
+        with pysam.AlignmentFile(bam_file, "rb", check_sq=False) as sam_file:
+            rg_tags = get_rg_tags_from_bam(sam_file)
+            
+            if not rg_tags:
+                return None
+
+            # Ensure sample_id is not None - use runid as fallback per ONT specification
+            # LB tag is optional, but runid from DS tag is always present
+            sample_id = (
+                rg_tags[4]  # LB (Library) tag
+                if rg_tags[4]
+                else rg_tags[3]  # runid from DS tag as fallback
+                if rg_tags[3]
+                else f"unknown_sample_{os.path.basename(bam_file)}"  # filename as final fallback
+            )
+
+            bam_read = {
+                'ID': rg_tags[0],
+                'time_of_run': rg_tags[1],
+                'sample_id': sample_id,
+                'basecall_model': rg_tags[2],
+                'runid': rg_tags[3],
+                'platform': rg_tags[5],
+                'flow_cell_id': rg_tags[7],
+                'device_position': rg_tags[6],
+                'al': rg_tags[8],
+                'state': state,
+                'last_start': None,
+                'elapsed_time': None,
+            }
+
+            # Initialize counters
+            mapped_reads = 0
+            unmapped_reads = 0
+            yield_tracking = 0
+            mapped_reads_num = 0
+            unmapped_reads_num = 0
+            pass_mapped_reads_num = 0
+            fail_mapped_reads_num = 0
+            pass_unmapped_reads_num = 0
+            fail_unmapped_reads_num = 0
+            mapped_bases = 0
+            unmapped_bases = 0
+            pass_mapped_bases = 0
+            fail_mapped_bases = 0
+            pass_unmapped_bases = 0
+            fail_unmapped_bases = 0
+
+            # Use sets only for deduplication, not for counting
+            # This reduces memory usage significantly for large files
+            seen_reads = set()
+            barcode_found = False
+
+            # Process reads in streaming fashion
+            for read in sam_file.fetch(until_eof=True):
+                # Extract RG tag and check for barcode
+                if read.has_tag("RG") and not barcode_found:
+                    rg_tag = read.get_tag("RG")
+                    # Use compiled regex pattern for barcode detection
+                    barcode_match = _BARCODE_PATTERN.search(rg_tag)
+                    if barcode_match and bam_read['sample_id']:
+                        barcode_num = int(barcode_match.group(1))
+                        if 1 <= barcode_num <= 96:
+                            barcode_str = f"_barcode{barcode_num:02d}"
+                            if not bam_read['sample_id'].endswith(barcode_str):
+                                bam_read['sample_id'] = (
+                                    f"{bam_read['sample_id']}{barcode_str}"
+                                )
+                                barcode_found = True
+
+                read_length = read.query_length if read.query_length else 0
+
+                if not read.is_secondary:  # Only process primary alignments
+                    # Use read name for deduplication only
+                    if read.query_name not in seen_reads:
+                        seen_reads.add(read.query_name)
+
+                        if not read.is_unmapped:
+                            mapped_reads += 1
+                            mapped_bases += read_length
+                            if state == "pass":
+                                pass_mapped_bases += read_length
+                                pass_mapped_reads_num += 1
+                            else:
+                                fail_mapped_bases += read_length
+                                fail_mapped_reads_num += 1
+                        else:
+                            unmapped_reads += 1
+                            unmapped_bases += read_length
+                            if state == "pass":
+                                pass_unmapped_bases += read_length
+                                pass_unmapped_reads_num += 1
+                            else:
+                                fail_unmapped_bases += read_length
+                                fail_unmapped_reads_num += 1
+
+                        if read_length > 0:
+                            yield_tracking += read_length
+                    
+                    # Cache tag value to avoid multiple get_tag() calls
+                    try:
+                        st_tag = read.get_tag("st")
+                        if not bam_read['last_start'] or st_tag > bam_read['last_start']:
+                            bam_read['last_start'] = st_tag
+                    except KeyError:
+                        if not bam_read['last_start']:
+                            bam_read['last_start'] = bam_read['time_of_run']
+
+            # Update counters using the streaming counts
+            mapped_reads_num = mapped_reads
+            unmapped_reads_num = unmapped_reads
+            
+            # Parse dates once at the end instead of during the loop
+            if bam_read['last_start'] and bam_read['time_of_run']:
+                try:
+                    bam_read['elapsed_time'] = parser.parse(bam_read['last_start']) - parser.parse(
+                        bam_read['time_of_run']
+                    )
+                except (ValueError, TypeError):
+                    # Handle invalid date formats gracefully
+                    bam_read['elapsed_time'] = None
+
+            # Add statistics to the return dictionary
+            bam_read.update({
+                'mapped_reads': mapped_reads,
+                'unmapped_reads': unmapped_reads,
+                'yield_tracking': yield_tracking,
+                'mapped_reads_num': mapped_reads_num,
+                'unmapped_reads_num': unmapped_reads_num,
+                'pass_mapped_reads_num': pass_mapped_reads_num,
+                'fail_mapped_reads_num': fail_mapped_reads_num,
+                'pass_unmapped_reads_num': pass_unmapped_reads_num,
+                'fail_unmapped_reads_num': fail_unmapped_reads_num,
+                'mapped_bases': mapped_bases,
+                'unmapped_bases': unmapped_bases,
+                'pass_mapped_bases': pass_mapped_bases,
+                'fail_mapped_bases': fail_mapped_bases,
+                'pass_unmapped_bases': pass_unmapped_bases,
+                'fail_unmapped_bases': fail_unmapped_bases,
+            })
+
+            return bam_read
+            
+    except (IOError, ValueError):
+        return None
+
+
+def calculate_bam_summary(bam_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Calculates summary statistics from BAM processing data.
+
+    Args:
+        bam_data: Dictionary containing BAM processing results
+
+    Returns:
+        dict: A dictionary containing read statistics including counts and mean lengths.
+    """
+    # Extract values from bam_data
+    mapped_reads_num = bam_data.get('mapped_reads_num', 0)
+    unmapped_reads_num = bam_data.get('unmapped_reads_num', 0)
+    pass_mapped_reads_num = bam_data.get('pass_mapped_reads_num', 0)
+    fail_mapped_reads_num = bam_data.get('fail_mapped_reads_num', 0)
+    pass_unmapped_reads_num = bam_data.get('pass_unmapped_reads_num', 0)
+    fail_unmapped_reads_num = bam_data.get('fail_unmapped_reads_num', 0)
+    
+    mapped_bases = bam_data.get('mapped_bases', 0)
+    unmapped_bases = bam_data.get('unmapped_bases', 0)
+    pass_mapped_bases = bam_data.get('pass_mapped_bases', 0)
+    fail_mapped_bases = bam_data.get('fail_mapped_bases', 0)
+    pass_unmapped_bases = bam_data.get('pass_unmapped_bases', 0)
+    fail_unmapped_bases = bam_data.get('fail_unmapped_bases', 0)
+    
+    # Calculate mean lengths with cached values
+    mean_mapped_length = (
+        mapped_bases / mapped_reads_num
+        if mapped_reads_num > 0
+        else 0
+    )
+    mean_unmapped_length = (
+        unmapped_bases / unmapped_reads_num
+        if unmapped_reads_num > 0
+        else 0
+    )
+    mean_pass_mapped_length = (
+        pass_mapped_bases / pass_mapped_reads_num
+        if pass_mapped_reads_num > 0
+        else 0
+    )
+    mean_fail_mapped_length = (
+        fail_mapped_bases / fail_mapped_reads_num
+        if fail_mapped_reads_num > 0
+        else 0
+    )
+    mean_pass_unmapped_length = (
+        pass_unmapped_bases / pass_unmapped_reads_num
+        if pass_unmapped_reads_num > 0
+        else 0
+    )
+    mean_fail_unmapped_length = (
+        fail_unmapped_bases / fail_unmapped_reads_num
+        if fail_unmapped_reads_num > 0
+        else 0
+    )
+
+    return {
+        "mapped_reads": bam_data.get('mapped_reads', 0),
+        "unmapped_reads": bam_data.get('unmapped_reads', 0),
+        "yield_tracking": bam_data.get('yield_tracking', 0),
+        "state": bam_data.get('state', 'unknown'),
+        # Add read numbers
+        "mapped_reads_num": mapped_reads_num,
+        "unmapped_reads_num": unmapped_reads_num,
+        "pass_mapped_reads_num": pass_mapped_reads_num,
+        "fail_mapped_reads_num": fail_mapped_reads_num,
+        "pass_unmapped_reads_num": pass_unmapped_reads_num,
+        "fail_unmapped_reads_num": fail_unmapped_reads_num,
+        # Add bases
+        "mapped_bases": mapped_bases,
+        "unmapped_bases": unmapped_bases,
+        "pass_mapped_bases": pass_mapped_bases,
+        "fail_mapped_bases": fail_mapped_bases,
+        "pass_unmapped_bases": pass_unmapped_bases,
+        "fail_unmapped_bases": fail_unmapped_bases,
+        # Add mean lengths
+        "mean_mapped_length": mean_mapped_length,
+        "mean_unmapped_length": mean_unmapped_length,
+        "mean_pass_mapped_length": mean_pass_mapped_length,
+        "mean_fail_mapped_length": mean_fail_mapped_length,
+        "mean_pass_unmapped_length": mean_pass_unmapped_length,
+        "mean_fail_unmapped_length": mean_fail_unmapped_length,
+    }
+
+
+# Legacy ReadBam class for backward compatibility
 class ReadBam:
-    """Class for reading and analyzing BAM files to extract comprehensive statistics"""
+    """Legacy class for reading and analyzing BAM files to extract comprehensive statistics"""
     
     def __init__(self, bam_file: str):
         self.bam_file = bam_file
@@ -103,127 +408,13 @@ class ReadBam:
     def process_reads(self) -> Optional[Dict[str, Any]]:
         """
         Processes the reads in the BAM file and aggregates information.
-        Also extracts and prints RG tags for each read.
+        Uses streaming processing to minimize memory usage.
 
         Returns:
             Optional[Dict[str, Any]]: A dictionary containing aggregated read information,
                                       or None if processing fails.
         """
-        if not self.bam_file:
-            return None
-
-        # Only create index if needed for specific operations
-        # For basic read processing, we don't need the index
-        try:
-            self.sam_file = pysam.AlignmentFile(self.bam_file, "rb", check_sq=False)
-        except (IOError, ValueError):
-            return None
-
-        rg_tags = self.get_rg_tags()
-        
-        if not rg_tags:
-            return None
-
-        # Ensure sample_id is not None - use runid as fallback per ONT specification
-        # LB tag is optional, but runid from DS tag is always present
-        sample_id = (
-            rg_tags[4]  # LB (Library) tag
-            if rg_tags[4]
-            else rg_tags[3]  # runid from DS tag as fallback
-            if rg_tags[3]
-            else f"unknown_sample_{os.path.basename(self.bam_file)}"  # filename as final fallback
-        )
-
-        bam_read = {
-            'ID': rg_tags[0],
-            'time_of_run': rg_tags[1],
-            'sample_id': sample_id,
-            'basecall_model': rg_tags[2],
-            'runid': rg_tags[3],
-            'platform': rg_tags[5],
-            'flow_cell_id': rg_tags[7],
-            'device_position': rg_tags[6],
-            'al': rg_tags[8],
-            'state': self.state,
-            'last_start': None,
-            'elapsed_time': None,
-        }
-
-        readset = set()
-        mapped_readset = set()
-        unmapped_readset = set()
-        barcode_found = False
-
-        for read in self.sam_file.fetch(until_eof=True):
-            # Extract RG tag and check for barcode
-            if read.has_tag("RG") and not barcode_found:
-                rg_tag = read.get_tag("RG")
-                # Use compiled regex pattern for barcode detection
-                barcode_match = self.barcode_pattern.search(rg_tag)
-                if barcode_match and bam_read['sample_id']:
-                    barcode_num = int(barcode_match.group(1))
-                    if 1 <= barcode_num <= 96:
-                        barcode_str = f"_barcode{barcode_num:02d}"
-                        if not bam_read['sample_id'].endswith(barcode_str):
-                            bam_read['sample_id'] = (
-                                f"{bam_read['sample_id']}{barcode_str}"
-                            )
-                            barcode_found = True
-
-            read_length = read.query_length if read.query_length else 0
-
-            if not read.is_secondary:  # Only process primary alignments
-                if read.query_name not in readset:
-                    readset.add(read.query_name)
-
-                    if not read.is_unmapped:
-                        mapped_readset.add(read.query_name)
-                        self.mapped_bases += read_length
-                        if self.state == "pass":
-                            self.pass_mapped_bases += read_length
-                            self.pass_mapped_reads_num += 1
-                        else:
-                            self.fail_mapped_bases += read_length
-                            self.fail_mapped_reads_num += 1
-                    else:
-                        unmapped_readset.add(read.query_name)
-                        self.unmapped_bases += read_length
-                        if self.state == "pass":
-                            self.pass_unmapped_bases += read_length
-                            self.pass_unmapped_reads_num += 1
-                        else:
-                            self.fail_unmapped_bases += read_length
-                            self.fail_unmapped_reads_num += 1
-
-                    if read_length > 0:
-                        self.yield_tracking += read_length
-            
-            # Cache tag value to avoid multiple get_tag() calls
-            try:
-                st_tag = read.get_tag("st")
-                if not bam_read['last_start'] or st_tag > bam_read['last_start']:
-                    bam_read['last_start'] = st_tag
-            except KeyError:
-                if not bam_read['last_start']:
-                    bam_read['last_start'] = bam_read['time_of_run']
-
-        # Remove redundant assignments - use single assignment
-        self.mapped_reads = len(mapped_readset)
-        self.unmapped_reads = len(unmapped_readset)
-        self.mapped_reads_num = self.mapped_reads  # Use cached value
-        self.unmapped_reads_num = self.unmapped_reads  # Use cached value
-        
-        # Parse dates once at the end instead of during the loop
-        if bam_read['last_start'] and bam_read['time_of_run']:
-            try:
-                bam_read['elapsed_time'] = parser.parse(bam_read['last_start']) - parser.parse(
-                    bam_read['time_of_run']
-                )
-            except (ValueError, TypeError):
-                # Handle invalid date formats gracefully
-                bam_read['elapsed_time'] = None
-
-        return bam_read
+        return process_bam_reads(self.bam_file)
     
     def summary(self) -> Dict[str, Any]:
         """
@@ -232,73 +423,10 @@ class ReadBam:
         Returns:
             dict: A dictionary containing read statistics including counts and mean lengths.
         """
-        # Cache division results to avoid repeated calculations
-        mapped_reads_num = self.mapped_reads_num
-        unmapped_reads_num = self.unmapped_reads_num
-        pass_mapped_reads_num = self.pass_mapped_reads_num
-        fail_mapped_reads_num = self.fail_mapped_reads_num
-        pass_unmapped_reads_num = self.pass_unmapped_reads_num
-        fail_unmapped_reads_num = self.fail_unmapped_reads_num
-        
-        # Calculate mean lengths with cached values
-        mean_mapped_length = (
-            self.mapped_bases / mapped_reads_num
-            if mapped_reads_num > 0
-            else 0
-        )
-        mean_unmapped_length = (
-            self.unmapped_bases / unmapped_reads_num
-            if unmapped_reads_num > 0
-            else 0
-        )
-        mean_pass_mapped_length = (
-            self.pass_mapped_bases / pass_mapped_reads_num
-            if pass_mapped_reads_num > 0
-            else 0
-        )
-        mean_fail_mapped_length = (
-            self.fail_mapped_bases / fail_mapped_reads_num
-            if fail_mapped_reads_num > 0
-            else 0
-        )
-        mean_pass_unmapped_length = (
-            self.pass_unmapped_bases / pass_unmapped_reads_num
-            if pass_unmapped_reads_num > 0
-            else 0
-        )
-        mean_fail_unmapped_length = (
-            self.fail_unmapped_bases / fail_unmapped_reads_num
-            if fail_unmapped_reads_num > 0
-            else 0
-        )
-
-        return {
-            "mapped_reads": self.mapped_reads,
-            "unmapped_reads": self.unmapped_reads,
-            "yield_tracking": self.yield_tracking,
-            "state": self.state,
-            # Add read numbers
-            "mapped_reads_num": self.mapped_reads_num,
-            "unmapped_reads_num": self.unmapped_reads_num,
-            "pass_mapped_reads_num": self.pass_mapped_reads_num,
-            "fail_mapped_reads_num": self.fail_mapped_reads_num,
-            "pass_unmapped_reads_num": self.pass_unmapped_reads_num,
-            "fail_unmapped_reads_num": self.fail_unmapped_reads_num,
-            # Add bases
-            "mapped_bases": self.mapped_bases,
-            "unmapped_bases": self.unmapped_bases,
-            "pass_mapped_bases": self.pass_mapped_bases,
-            "fail_mapped_bases": self.fail_mapped_bases,
-            "pass_unmapped_bases": self.pass_unmapped_bases,
-            "fail_unmapped_bases": self.fail_unmapped_bases,
-            # Add mean lengths
-            "mean_mapped_length": mean_mapped_length,
-            "mean_unmapped_length": mean_unmapped_length,
-            "mean_pass_mapped_length": mean_pass_mapped_length,
-            "mean_fail_mapped_length": mean_fail_mapped_length,
-            "mean_pass_unmapped_length": mean_pass_unmapped_length,
-            "mean_fail_unmapped_length": mean_fail_unmapped_length,
-        }
+        bam_data = self.process_reads()
+        if bam_data is None:
+            return {}
+        return calculate_bam_summary(bam_data)
 
 
 def extract_bam_metadata(bam_path: str) -> BamMetadata:
@@ -328,13 +456,10 @@ def extract_bam_metadata(bam_path: str) -> BamMetadata:
         creation_time=creation_time
     )
     
-    # Use ReadBam class to extract comprehensive data
-    read_bam = ReadBam(bam_path)
-    
-    # Extract basic metadata
-    bam_info = read_bam.process_reads()
+    # Use functional approach to extract comprehensive data
+    bam_info = process_bam_reads(bam_path)
     if bam_info is None:
-        # Fallback to basic extraction if ReadBam fails
+        # Fallback to basic extraction if processing fails
         sample_id = _extract_sample_id_from_bam(bam_path)
         state = 'pass' if 'pass' in bam_path else 'fail'
         
@@ -348,7 +473,7 @@ def extract_bam_metadata(bam_path: str) -> BamMetadata:
         # Note: sample_id extraction result for debugging
         # (logger not available in this context)
     else:
-        # Use comprehensive data from ReadBam
+        # Use comprehensive data from processing
         metadata.extracted_data = {
             'sample_id': bam_info.get('sample_id', 'unknown'),
             'file_size': file_size,
@@ -363,11 +488,11 @@ def extract_bam_metadata(bam_path: str) -> BamMetadata:
             'time_of_run': bam_info.get('time_of_run'),
             'file_path': bam_path
         }
-        # Note: ReadBam extraction result for debugging
+        # Note: BAM processing result for debugging
         # (logger not available in this context)
     
     # Extract comprehensive statistics
-    bam_stats = read_bam.summary()
+    bam_stats = calculate_bam_summary(bam_info) if bam_info else {}
     if bam_stats:
         metadata.extracted_data.update(bam_stats)
     
