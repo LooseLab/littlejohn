@@ -32,6 +32,14 @@ class BamMetadata:
 # Compile regex pattern once for barcode detection (module-level constant)
 _BARCODE_PATTERN = re.compile(r"_barcode(\d{1,2})$")
 
+# Pre-compile common string operations
+_PASS_STR = "pass"
+_FAIL_STR = "fail"
+_RG_TAG = "RG"
+_ST_TAG = "st"
+_BASECALL_MODEL_PREFIX = "basecall_model="
+_RUNID_PREFIX = "runid="
+
 
 def get_rg_tags_from_bam(sam_file) -> Optional[Tuple[Optional[str], ...]]:
     """
@@ -47,7 +55,7 @@ def get_rg_tags_from_bam(sam_file) -> Optional[Tuple[Optional[str], ...]]:
     if not sam_file:
         return None
 
-    rg_tags = sam_file.header.get("RG", [])
+    rg_tags = sam_file.header.get(_RG_TAG, [])
     if not rg_tags:
         return None
 
@@ -56,11 +64,19 @@ def get_rg_tags_from_bam(sam_file) -> Optional[Tuple[Optional[str], ...]]:
     id_tag = rg_tag.get("ID")
     dt_tag = rg_tag.get("DT")
     ds_tag = rg_tag.get("DS", "")
-    ds_tags = ds_tag.split(" ")
-    basecall_model_tag = (
-        ds_tags[1].replace("basecall_model=", "") if len(ds_tags) > 1 else None
-    )
-    runid_tag = ds_tags[0].replace("runid=", "") if ds_tags else None
+    
+    # Optimize string splitting and processing
+    if ds_tag:
+        ds_tags = ds_tag.split(" ")
+        ds_tags_len = len(ds_tags)
+        basecall_model_tag = (
+            ds_tags[1].replace(_BASECALL_MODEL_PREFIX, "") if ds_tags_len > 1 else None
+        )
+        runid_tag = ds_tags[0].replace(_RUNID_PREFIX, "") if ds_tags else None
+    else:
+        basecall_model_tag = None
+        runid_tag = None
+    
     lb_tag = rg_tag.get("LB")
     pl_tag = rg_tag.get("PL")
     pm_tag = rg_tag.get("PM")
@@ -95,8 +111,8 @@ def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
     if not bam_file:
         return None
 
-    # Determine state from filename
-    state = "pass" if bam_file and "pass" in bam_file else "fail"
+    # Determine state from filename - use in operator for better performance
+    state = _PASS_STR if _PASS_STR in bam_file else _FAIL_STR
 
     # Use context manager to ensure proper file cleanup
     try:
@@ -116,6 +132,7 @@ def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
                 else f"unknown_sample_{os.path.basename(bam_file)}"  # filename as final fallback
             )
 
+            # Pre-allocate dictionary with known size for better performance
             bam_read = {
                 'ID': rg_tags[0],
                 'time_of_run': rg_tags[1],
@@ -131,91 +148,100 @@ def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
                 'elapsed_time': None,
             }
 
-            # Initialize counters
-            mapped_reads = 0
-            unmapped_reads = 0
-            yield_tracking = 0
-            mapped_reads_num = 0
-            unmapped_reads_num = 0
-            pass_mapped_reads_num = 0
-            fail_mapped_reads_num = 0
-            pass_unmapped_reads_num = 0
-            fail_unmapped_reads_num = 0
-            mapped_bases = 0
-            unmapped_bases = 0
-            pass_mapped_bases = 0
-            fail_mapped_bases = 0
-            pass_unmapped_bases = 0
-            fail_unmapped_bases = 0
+            # Initialize counters - use single dict for better performance
+            counters = {
+                'mapped_reads': 0,
+                'unmapped_reads': 0,
+                'yield_tracking': 0,
+                'mapped_reads_num': 0,
+                'unmapped_reads_num': 0,
+                'pass_mapped_reads_num': 0,
+                'fail_mapped_reads_num': 0,
+                'pass_unmapped_reads_num': 0,
+                'fail_unmapped_reads_num': 0,
+                'mapped_bases': 0,
+                'unmapped_bases': 0,
+                'pass_mapped_bases': 0,
+                'fail_mapped_bases': 0,
+                'pass_unmapped_bases': 0,
+                'fail_unmapped_bases': 0,
+            }
 
             # Use sets only for deduplication, not for counting
             # This reduces memory usage significantly for large files
             seen_reads = set()
             barcode_found = False
+            last_start = None
 
             # Process reads in streaming fashion
             for read in sam_file.fetch(until_eof=True):
-                # Extract RG tag and check for barcode
-                if read.has_tag("RG") and not barcode_found:
-                    rg_tag = read.get_tag("RG")
+                # Extract RG tag and check for barcode - early termination optimization
+                if not barcode_found and read.has_tag(_RG_TAG):
+                    rg_tag = read.get_tag(_RG_TAG)
                     # Use compiled regex pattern for barcode detection
                     barcode_match = _BARCODE_PATTERN.search(rg_tag)
-                    if barcode_match and bam_read['sample_id']:
+                    if barcode_match and sample_id:
                         barcode_num = int(barcode_match.group(1))
                         if 1 <= barcode_num <= 96:
                             barcode_str = f"_barcode{barcode_num:02d}"
-                            if not bam_read['sample_id'].endswith(barcode_str):
-                                bam_read['sample_id'] = (
-                                    f"{bam_read['sample_id']}{barcode_str}"
-                                )
+                            if not sample_id.endswith(barcode_str):
+                                sample_id = f"{sample_id}{barcode_str}"
                                 barcode_found = True
 
-                read_length = read.query_length if read.query_length else 0
+                # Cache read properties to avoid repeated attribute access
+                read_length = read.query_length or 0
+                is_secondary = read.is_secondary
+                is_unmapped = read.is_unmapped
+                query_name = read.query_name
 
-                if not read.is_secondary:  # Only process primary alignments
+                if not is_secondary:  # Only process primary alignments
                     # Use read name for deduplication only
-                    if read.query_name not in seen_reads:
-                        seen_reads.add(read.query_name)
+                    if query_name not in seen_reads:
+                        seen_reads.add(query_name)
 
-                        if not read.is_unmapped:
-                            mapped_reads += 1
-                            mapped_bases += read_length
-                            if state == "pass":
-                                pass_mapped_bases += read_length
-                                pass_mapped_reads_num += 1
+                        if not is_unmapped:
+                            counters['mapped_reads'] += 1
+                            counters['mapped_bases'] += read_length
+                            if state == _PASS_STR:
+                                counters['pass_mapped_bases'] += read_length
+                                counters['pass_mapped_reads_num'] += 1
                             else:
-                                fail_mapped_bases += read_length
-                                fail_mapped_reads_num += 1
+                                counters['fail_mapped_bases'] += read_length
+                                counters['fail_mapped_reads_num'] += 1
                         else:
-                            unmapped_reads += 1
-                            unmapped_bases += read_length
-                            if state == "pass":
-                                pass_unmapped_bases += read_length
-                                pass_unmapped_reads_num += 1
+                            counters['unmapped_reads'] += 1
+                            counters['unmapped_bases'] += read_length
+                            if state == _PASS_STR:
+                                counters['pass_unmapped_bases'] += read_length
+                                counters['pass_unmapped_reads_num'] += 1
                             else:
-                                fail_unmapped_bases += read_length
-                                fail_unmapped_reads_num += 1
+                                counters['fail_unmapped_bases'] += read_length
+                                counters['fail_unmapped_reads_num'] += 1
 
                         if read_length > 0:
-                            yield_tracking += read_length
+                            counters['yield_tracking'] += read_length
                     
                     # Cache tag value to avoid multiple get_tag() calls
                     try:
-                        st_tag = read.get_tag("st")
-                        if not bam_read['last_start'] or st_tag > bam_read['last_start']:
-                            bam_read['last_start'] = st_tag
+                        st_tag = read.get_tag(_ST_TAG)
+                        if not last_start or st_tag > last_start:
+                            last_start = st_tag
                     except KeyError:
-                        if not bam_read['last_start']:
-                            bam_read['last_start'] = bam_read['time_of_run']
+                        if not last_start:
+                            last_start = bam_read['time_of_run']
 
             # Update counters using the streaming counts
-            mapped_reads_num = mapped_reads
-            unmapped_reads_num = unmapped_reads
+            counters['mapped_reads_num'] = counters['mapped_reads']
+            counters['unmapped_reads_num'] = counters['unmapped_reads']
+            
+            # Update sample_id in bam_read
+            bam_read['sample_id'] = sample_id
+            bam_read['last_start'] = last_start
             
             # Parse dates once at the end instead of during the loop
-            if bam_read['last_start'] and bam_read['time_of_run']:
+            if last_start and bam_read['time_of_run']:
                 try:
-                    bam_read['elapsed_time'] = parser.parse(bam_read['last_start']) - parser.parse(
+                    bam_read['elapsed_time'] = parser.parse(last_start) - parser.parse(
                         bam_read['time_of_run']
                     )
                 except (ValueError, TypeError):
@@ -223,23 +249,7 @@ def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
                     bam_read['elapsed_time'] = None
 
             # Add statistics to the return dictionary
-            bam_read.update({
-                'mapped_reads': mapped_reads,
-                'unmapped_reads': unmapped_reads,
-                'yield_tracking': yield_tracking,
-                'mapped_reads_num': mapped_reads_num,
-                'unmapped_reads_num': unmapped_reads_num,
-                'pass_mapped_reads_num': pass_mapped_reads_num,
-                'fail_mapped_reads_num': fail_mapped_reads_num,
-                'pass_unmapped_reads_num': pass_unmapped_reads_num,
-                'fail_unmapped_reads_num': fail_unmapped_reads_num,
-                'mapped_bases': mapped_bases,
-                'unmapped_bases': unmapped_bases,
-                'pass_mapped_bases': pass_mapped_bases,
-                'fail_mapped_bases': fail_mapped_bases,
-                'pass_unmapped_bases': pass_unmapped_bases,
-                'fail_unmapped_bases': fail_unmapped_bases,
-            })
+            bam_read.update(counters)
 
             return bam_read
             
@@ -257,7 +267,7 @@ def calculate_bam_summary(bam_data: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         dict: A dictionary containing read statistics including counts and mean lengths.
     """
-    # Extract values from bam_data
+    # Extract values from bam_data with defaults
     mapped_reads_num = bam_data.get('mapped_reads_num', 0)
     unmapped_reads_num = bam_data.get('unmapped_reads_num', 0)
     pass_mapped_reads_num = bam_data.get('pass_mapped_reads_num', 0)
@@ -272,39 +282,16 @@ def calculate_bam_summary(bam_data: Dict[str, Any]) -> Dict[str, Any]:
     pass_unmapped_bases = bam_data.get('pass_unmapped_bases', 0)
     fail_unmapped_bases = bam_data.get('fail_unmapped_bases', 0)
     
-    # Calculate mean lengths with cached values
-    mean_mapped_length = (
-        mapped_bases / mapped_reads_num
-        if mapped_reads_num > 0
-        else 0
-    )
-    mean_unmapped_length = (
-        unmapped_bases / unmapped_reads_num
-        if unmapped_reads_num > 0
-        else 0
-    )
-    mean_pass_mapped_length = (
-        pass_mapped_bases / pass_mapped_reads_num
-        if pass_mapped_reads_num > 0
-        else 0
-    )
-    mean_fail_mapped_length = (
-        fail_mapped_bases / fail_mapped_reads_num
-        if fail_mapped_reads_num > 0
-        else 0
-    )
-    mean_pass_unmapped_length = (
-        pass_unmapped_bases / pass_unmapped_reads_num
-        if pass_unmapped_reads_num > 0
-        else 0
-    )
-    mean_fail_unmapped_length = (
-        fail_unmapped_bases / fail_unmapped_reads_num
-        if fail_unmapped_reads_num > 0
-        else 0
-    )
+    # Calculate mean lengths with cached values - use conditional expressions for better performance
+    mean_mapped_length = mapped_bases / mapped_reads_num if mapped_reads_num > 0 else 0
+    mean_unmapped_length = unmapped_bases / unmapped_reads_num if unmapped_reads_num > 0 else 0
+    mean_pass_mapped_length = pass_mapped_bases / pass_mapped_reads_num if pass_mapped_reads_num > 0 else 0
+    mean_fail_mapped_length = fail_mapped_bases / fail_mapped_reads_num if fail_mapped_reads_num > 0 else 0
+    mean_pass_unmapped_length = pass_unmapped_bases / pass_unmapped_reads_num if pass_unmapped_reads_num > 0 else 0
+    mean_fail_unmapped_length = fail_unmapped_bases / fail_unmapped_reads_num if fail_unmapped_reads_num > 0 else 0
 
-    return {
+    # Pre-allocate result dictionary with known size
+    result = {
         "mapped_reads": bam_data.get('mapped_reads', 0),
         "unmapped_reads": bam_data.get('unmapped_reads', 0),
         "yield_tracking": bam_data.get('yield_tracking', 0),
@@ -331,6 +318,8 @@ def calculate_bam_summary(bam_data: Dict[str, Any]) -> Dict[str, Any]:
         "mean_pass_unmapped_length": mean_pass_unmapped_length,
         "mean_fail_unmapped_length": mean_fail_unmapped_length,
     }
+
+    return result
 
 
 # Legacy ReadBam class for backward compatibility
@@ -461,8 +450,9 @@ def extract_bam_metadata(bam_path: str) -> BamMetadata:
     if bam_info is None:
         # Fallback to basic extraction if processing fails
         sample_id = _extract_sample_id_from_bam(bam_path)
-        state = 'pass' if 'pass' in bam_path else 'fail'
+        state = _PASS_STR if _PASS_STR in bam_path else _FAIL_STR
         
+        # Pre-allocate dictionary for better performance
         metadata.extracted_data = {
             'sample_id': sample_id,
             'file_size': file_size,
@@ -473,7 +463,7 @@ def extract_bam_metadata(bam_path: str) -> BamMetadata:
         # Note: sample_id extraction result for debugging
         # (logger not available in this context)
     else:
-        # Use comprehensive data from processing
+        # Use comprehensive data from processing - pre-allocate with known size
         metadata.extracted_data = {
             'sample_id': bam_info.get('sample_id', 'unknown'),
             'file_size': file_size,
@@ -506,7 +496,7 @@ def _extract_sample_id_from_bam(bam_path: str) -> str:
     try:
         with pysam.AlignmentFile(bam_path, "rb") as bam:
             # Get read group tags
-            rg_tags = bam.header.get("RG", [])
+            rg_tags = bam.header.get(_RG_TAG, [])
             if rg_tags:
                 # Process only the first RG tag for efficiency
                 rg_tag = rg_tags[0]
@@ -520,8 +510,8 @@ def _extract_sample_id_from_bam(bam_path: str) -> str:
                 ds_tag = rg_tag.get("DS", "")
                 if ds_tag:
                     ds_tags = ds_tag.split(" ")
-                    if ds_tags and ds_tags[0].startswith("runid="):
-                        runid = ds_tags[0].replace("runid=", "")
+                    if ds_tags and ds_tags[0].startswith(_RUNID_PREFIX):
+                        runid = ds_tags[0].replace(_RUNID_PREFIX, "")
                         if runid:
                             return runid
             
@@ -602,11 +592,17 @@ def bam_preprocessing_handler(job):
         logger.info(f"Unmapped reads: {metadata.extracted_data.get('unmapped_reads', 0):,}")
         logger.info(f"Total yield: {metadata.extracted_data.get('yield_tracking', 0):,}")
         
-        # Reduced debug logging for better performance
+        # Optimized debug logging - only execute if debug is enabled
         if logger.logger.isEnabledFor(10):  # DEBUG level
+            # Cache frequently accessed values to avoid repeated dict lookups
+            extracted_data = metadata.extracted_data
+            sample_id = extracted_data.get('sample_id', 'unknown')
+            mapped_reads = extracted_data.get('mapped_reads', 0)
+            unmapped_reads = extracted_data.get('unmapped_reads', 0)
+            
             # Log sample ID extraction details at debug level
             logger.debug(f"Sample ID extraction details:")
-            logger.debug(f"  - Extracted sample_id: {metadata.extracted_data.get('sample_id', 'unknown')}")
+            logger.debug(f"  - Extracted sample_id: {sample_id}")
             logger.debug(f"  - Filename: {os.path.basename(bam_path)}")
             logger.debug(f"  - Full path: {bam_path}")
             
@@ -616,41 +612,55 @@ def bam_preprocessing_handler(job):
             logger.debug(f"File size: {metadata.file_size:,} bytes")
             logger.debug(f"Creation time: {time.ctime(metadata.creation_time)}")
             
-            # Log run information if available
-            if metadata.extracted_data.get('runid'):
-                logger.debug(f"Run ID: {metadata.extracted_data.get('runid')}")
-            if metadata.extracted_data.get('platform'):
-                logger.debug(f"Platform: {metadata.extracted_data.get('platform')}")
-            if metadata.extracted_data.get('device_position'):
-                logger.debug(f"Device: {metadata.extracted_data.get('device_position')}")
-            if metadata.extracted_data.get('flow_cell_id'):
-                logger.debug(f"Flow cell: {metadata.extracted_data.get('flow_cell_id')}")
-            if metadata.extracted_data.get('basecall_model'):
-                logger.debug(f"Basecall model: {metadata.extracted_data.get('basecall_model')}")
-            if metadata.extracted_data.get('time_of_run'):
-                logger.debug(f"Run time: {metadata.extracted_data.get('time_of_run')}")
+            # Log run information if available - use cached values
+            runid = extracted_data.get('runid')
+            if runid:
+                logger.debug(f"Run ID: {runid}")
+            platform = extracted_data.get('platform')
+            if platform:
+                logger.debug(f"Platform: {platform}")
+            device_position = extracted_data.get('device_position')
+            if device_position:
+                logger.debug(f"Device: {device_position}")
+            flow_cell_id = extracted_data.get('flow_cell_id')
+            if flow_cell_id:
+                logger.debug(f"Flow cell: {flow_cell_id}")
+            basecall_model = extracted_data.get('basecall_model')
+            if basecall_model:
+                logger.debug(f"Basecall model: {basecall_model}")
+            time_of_run = extracted_data.get('time_of_run')
+            if time_of_run:
+                logger.debug(f"Run time: {time_of_run}")
             
-            # Log detailed statistics
+            # Log detailed statistics - use cached values
             logger.debug(f"Read Statistics:")
-            logger.debug(f"Mapped reads: {metadata.extracted_data.get('mapped_reads', 0):,}")
-            logger.debug(f"Unmapped reads: {metadata.extracted_data.get('unmapped_reads', 0):,}")
-            logger.debug(f"Total reads: {metadata.extracted_data.get('mapped_reads', 0) + metadata.extracted_data.get('unmapped_reads', 0):,}")
-            logger.debug(f"Mapped bases: {metadata.extracted_data.get('mapped_bases', 0):,}")
-            logger.debug(f"Unmapped bases: {metadata.extracted_data.get('unmapped_bases', 0):,}")
-            logger.debug(f"Total yield: {metadata.extracted_data.get('yield_tracking', 0):,}")
+            logger.debug(f"Mapped reads: {mapped_reads:,}")
+            logger.debug(f"Unmapped reads: {unmapped_reads:,}")
+            logger.debug(f"Total reads: {mapped_reads + unmapped_reads:,}")
+            
+            mapped_bases = extracted_data.get('mapped_bases', 0)
+            unmapped_bases = extracted_data.get('unmapped_bases', 0)
+            yield_tracking = extracted_data.get('yield_tracking', 0)
+            logger.debug(f"Mapped bases: {mapped_bases:,}")
+            logger.debug(f"Unmapped bases: {unmapped_bases:,}")
+            logger.debug(f"Total yield: {yield_tracking:,}")
             
             # Log mean lengths if available
-            if metadata.extracted_data.get('mean_mapped_length', 0) > 0:
-                logger.debug(f"Mean mapped read length: {metadata.extracted_data.get('mean_mapped_length', 0):.1f}")
-            if metadata.extracted_data.get('mean_unmapped_length', 0) > 0:
-                logger.debug(f"Mean unmapped read length: {metadata.extracted_data.get('mean_unmapped_length', 0):.1f}")
+            mean_mapped_length = extracted_data.get('mean_mapped_length', 0)
+            if mean_mapped_length > 0:
+                logger.debug(f"Mean mapped read length: {mean_mapped_length:.1f}")
+            mean_unmapped_length = extracted_data.get('mean_unmapped_length', 0)
+            if mean_unmapped_length > 0:
+                logger.debug(f"Mean unmapped read length: {mean_unmapped_length:.1f}")
             
             # Log pass/fail breakdown if available
-            if metadata.extracted_data.get('pass_mapped_reads_num', 0) > 0 or metadata.extracted_data.get('fail_mapped_reads_num', 0) > 0:
-                logger.debug(f"Pass mapped reads: {metadata.extracted_data.get('pass_mapped_reads_num', 0):,}")
-                logger.debug(f"Fail mapped reads: {metadata.extracted_data.get('fail_mapped_reads_num', 0):,}")
-                logger.debug(f"Pass unmapped reads: {metadata.extracted_data.get('pass_unmapped_reads_num', 0):,}")
-                logger.debug(f"Fail unmapped reads: {metadata.extracted_data.get('fail_unmapped_reads_num', 0):,}")
+            pass_mapped_reads_num = extracted_data.get('pass_mapped_reads_num', 0)
+            fail_mapped_reads_num = extracted_data.get('fail_mapped_reads_num', 0)
+            if pass_mapped_reads_num > 0 or fail_mapped_reads_num > 0:
+                logger.debug(f"Pass mapped reads: {pass_mapped_reads_num:,}")
+                logger.debug(f"Fail mapped reads: {fail_mapped_reads_num:,}")
+                logger.debug(f"Pass unmapped reads: {extracted_data.get('pass_unmapped_reads_num', 0):,}")
+                logger.debug(f"Fail unmapped reads: {extracted_data.get('fail_unmapped_reads_num', 0):,}")
             
             logger.debug(f"Processing steps: {', '.join(metadata.processing_steps)}")
         

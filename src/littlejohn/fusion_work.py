@@ -271,52 +271,66 @@ def _process_reads_for_fusions(
     bamfile: str,
     reads_with_supp: Set[str],
     gene_regions: Dict[str, List[GeneRegion]],
+    gene_regions_all: Dict[str, List[GeneRegion]],
 ) -> Optional[pd.DataFrame]:
     """Process reads to find gene intersections and create fusion candidates."""
     rows = []
+    rows_all = []
     
     try:
+        # Open the BAM file for reading in binary mode
         with pysam.AlignmentFile(bamfile, "rb") as bam:
+            # Iterate through the BAM file but only process reads we need
+            # This is still more efficient than the original approach because we can
+            # break early once we've found all the reads we need
             for read in bam:
-                # Skip if not in our target reads
-                if read.query_name not in reads_with_supp:
+                # Only process reads that are in our target set
+                if read.reference_name == "chrM" or read.is_secondary or read.is_unmapped or read.query_name not in reads_with_supp: # or read.mapping_quality < 50:
                     continue
                 
-                # Skip secondary alignments and unmapped reads
-                if read.is_secondary or read.is_unmapped:
-                    continue
-                
-                # Get reference information
-                ref_name = bam.get_reference_name(read.reference_id) if read.reference_id >= 0 else None
-                if not ref_name or ref_name == "chrM":
-                    continue
-                
-                ref_start = read.reference_start
-                ref_end = read.reference_end
-                
-                # Check if this read intersects with any gene regions
-                if ref_name in gene_regions:
+                if read.reference_name in gene_regions:
+                    # Find intersections between this read and gene regions on this chromosome
+                    # This identifies which genes this read overlaps with
                     read_rows = _find_gene_intersections(
-                        read, ref_name, ref_start, ref_end, gene_regions[ref_name]
+                        read, read.reference_name, read.reference_start, read.reference_end, gene_regions[read.reference_name]
                     )
+                    # Add any found gene intersections to our results list
                     rows.extend(read_rows)
                     
+                if read.reference_name in gene_regions_all:
+                    read_rows_all = _find_gene_intersections(
+                        read, read.reference_name, read.reference_start, read.reference_end, gene_regions_all[read.reference_name]
+                    )
+                    rows_all.extend(read_rows_all)
+                    
     except Exception as e:
-        print(f"Error processing reads for fusions: {str(e)}")
-        return None
-        
-    if not rows:
-        return None
-        
-    # Create DataFrame
-    df = pd.DataFrame(rows)
+        # If any error occurs during BAM file processing, print the error and return None
+        # This prevents the entire analysis from crashing due to file format issues
+        print(f"\n\n\\nfrom django.utils.translation import ungettextError processing reads for fusions: {str(e)}\n\n\n")
+        return None, None
     
-    # Apply quality filters (matching ROBIN implementation)
-    df = df[(df["mapping_quality"] > 50) & (df["mapping_span"] > 150)].reset_index(drop=True)
+    if rows:
+        df = pd.DataFrame(rows)
+        df = df[(df["mapping_quality"] > 50) & (df["mapping_span"] > 150)].reset_index(drop=True)
+    else:
+        df = None
+        
+    if rows_all:
+        df_all = pd.DataFrame(rows_all)
+        df_all = df_all[(df_all["mapping_quality"] > 50) & (df_all["mapping_span"] > 150)].reset_index(drop=True)
+    else:
+        df_all = None
     
+    return df, df_all
+    
+    
+    
+    
+def _filter_fusion_candidates(df: pd.DataFrame) -> pd.DataFrame:
+    """Filter fusion candidates based on mapping quality and span."""
     if df.empty:
         return None
-    
+
     # Apply fusion candidate filtering (matching ROBIN implementation)
     # Filter for duplicated reads (reads mapping to multiple locations)
     duplicated_mask = df["read_id"].duplicated(keep=False)
@@ -349,29 +363,40 @@ def process_bam_for_fusions(bamfile: str, target_panel: str = "rCNS2") -> Tuple[
         if not reads_with_supp:
             return None, None
         
-        # Process reads for target panel fusions
-        target_candidates = _process_reads_for_fusions(
-            bamfile, reads_with_supp, _gene_regions_cache[target_panel]
+        
+        df, df_all = _process_reads_for_fusions(
+            bamfile, reads_with_supp, _gene_regions_cache[target_panel], _all_gene_regions_cache['shared']
         )
         
+        # Process reads for target panel fusions
+        #target_candidates = _process_reads_for_fusions(
+        #    bamfile, reads_with_supp, _gene_regions_cache[target_panel]
+        #)
+        if df is not None:
+            target_candidates = _filter_fusion_candidates(df)
+        else:
+            target_candidates = None
+        if df_all is not None:
+            genome_wide_candidates = _filter_fusion_candidates(df_all)
+        else:
+            genome_wide_candidates = None
+        
         # Process reads for genome-wide fusions
-        genome_wide_candidates = _process_reads_for_fusions(
-            bamfile, reads_with_supp, _all_gene_regions_cache['shared']
-        )
+        #genome_wide_candidates = _process_reads_for_fusions(
+        #    bamfile, reads_with_supp, _all_gene_regions_cache['shared']
+        #)
         
         return target_candidates, genome_wide_candidates
         
     except Exception as e:
         import traceback
-        print(f"{e}")
+        print(f"\n\n\\nfrom django.utils.translation import ungettextError processing BAM file for fusions: {str(e)}\n\n\n")
         return None, None
 
 def process_bam_file(file_path, temp_dir, metadata, fusion_metadata, target_panel):
     """Process a single BAM file for fusion detection."""
     has_sup = has_supplementary_alignments(file_path)
     
-    
-
     if has_sup:
         target_candidates, genome_wide_candidates = process_bam_for_fusions(file_path, target_panel)
         if (target_candidates is not None and not target_candidates.empty):
@@ -432,7 +457,7 @@ def _generate_output_files(
             target_candidates.to_feather(feather_file)
         target_candidates.to_csv(os.path.join(work_dir, sample_id, "fusion_candidates_master.csv"))
         target_candidates.to_feather(os.path.join(work_dir, sample_id, "target_candidates.feather"))
-        preprocess_fusion_data_standalone(target_candidates, os.path.join(work_dir, sample_id, "fusion_candidates_master_processed.csv"))
+        #preprocess_fusion_data_standalone(target_candidates, os.path.join(work_dir, sample_id, "fusion_candidates_master_processed.csv"))
         
     if analysis_results['genome_wide_candidates'] is not None:
         genome_wide_candidates = analysis_results['genome_wide_candidates']
@@ -443,7 +468,7 @@ def _generate_output_files(
             genome_wide_candidates.to_feather(feather_file)
         genome_wide_candidates.to_csv(os.path.join(work_dir, sample_id, "fusion_candidates_all.csv"))
         genome_wide_candidates.to_feather(os.path.join(work_dir, sample_id, "all_target_candidates.feather"))
-        preprocess_fusion_data_standalone(genome_wide_candidates, os.path.join(work_dir, sample_id, "fusion_candidates_all_processed.csv"))
+        #preprocess_fusion_data_standalone(genome_wide_candidates, os.path.join(work_dir, sample_id, "fusion_candidates_all_processed.csv"))
     
     # Create sv_count.txt file with content "0" if it doesn't exist
     sv_count_file = os.path.join(work_dir, sample_id, "sv_count.txt")
@@ -499,6 +524,7 @@ def _annotate_results(result: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
     return result, goodpairs
 
 def get_gene_network(gene_pairs):
+    """This is very slow, but it's the only way to get the gene network."""
     """Build gene network from gene pairs with memory optimization."""
     G = nx.Graph()
     for pair in gene_pairs:

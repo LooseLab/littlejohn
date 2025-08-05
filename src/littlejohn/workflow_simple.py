@@ -89,21 +89,63 @@ class Job:
 class WorkflowManager:
     """Manages job queues and execution using threading with specialized workers."""
 
-    def __init__(self, verbose: bool = False):
+    def __init__(self, verbose: bool = False, analysis_workers: int = 1, use_separate_analysis_queues: bool = True):
         # Specialized queues for different task categories
         self.preprocessing_queue = queue.Queue()  # bam_preprocessing only
         self.bed_conversion_queue = queue.Queue() # bed_conversion only
-        self.analysis_queue = queue.Queue()       # mgmt, cnv, target, fusion
+        
+        # Analysis queue mode
+        self.use_separate_analysis_queues = use_separate_analysis_queues
+        
+        if use_separate_analysis_queues:
+            # Separate queues for each analysis job type (ensures only one of each type runs at a time)
+            self.mgmt_queue = queue.Queue()           # MGMT analysis only
+            self.cnv_queue = queue.Queue()            # CNV analysis only
+            self.target_queue = queue.Queue()         # Target analysis only
+            self.fusion_queue = queue.Queue()         # Fusion analysis only
+            self.analysis_queue = None  # Not used in separate mode
+        else:
+            # Legacy single analysis queue (all analysis types share one queue)
+            self.analysis_queue = queue.Queue()       # mgmt, cnv, target, fusion
+            self.mgmt_queue = None
+            self.cnv_queue = None
+            self.target_queue = None
+            self.fusion_queue = None
+        
         self.classification_queue = queue.Queue() # sturgeon, nanodx, pannanodx
         self.slow_queue = queue.Queue()           # slow jobs (legacy)
         
         self.completed_jobs = []
         self.failed_jobs = []
         
+        # Analysis workers per queue (each analysis type gets its own worker)
+        self.analysis_workers_count = analysis_workers
+        # All other queues are fixed at 1 worker
+        self.preprocessing_workers_count = 1
+        self.bed_conversion_workers_count = 1
+        self.classification_workers_count = 1
+        self.slow_workers_count = 1
+        
         # Specialized job handlers for each queue
         self.job_handlers_preprocessing: Dict[str, Callable[[Job], None]] = {}
         self.job_handlers_bed_conversion: Dict[str, Callable[[Job], None]] = {}
-        self.job_handlers_analysis: Dict[str, Callable[[Job], None]] = {}
+        
+        # Analysis job handlers (mode-dependent)
+        if use_separate_analysis_queues:
+            # Separate handlers for each analysis job type
+            self.job_handlers_mgmt: Dict[str, Callable[[Job], None]] = {}
+            self.job_handlers_cnv: Dict[str, Callable[[Job], None]] = {}
+            self.job_handlers_target: Dict[str, Callable[[Job], None]] = {}
+            self.job_handlers_fusion: Dict[str, Callable[[Job], None]] = {}
+            self.job_handlers_analysis = None  # Not used in separate mode
+        else:
+            # Legacy single analysis handler
+            self.job_handlers_analysis: Dict[str, Callable[[Job], None]] = {}
+            self.job_handlers_mgmt = None
+            self.job_handlers_cnv = None
+            self.job_handlers_target = None
+            self.job_handlers_fusion = None
+        
         self.job_handlers_classification: Dict[str, Callable[[Job], None]] = {}
         self.job_handlers_slow: Dict[str, Callable[[Job], None]] = {}
         
@@ -117,12 +159,31 @@ class WorkflowManager:
         # Allow max 2 jobs per sample: 1 running + 1 pending
         self.running_jobs_by_sample: Dict[str, Dict[str, int]] = {}  # sample_id -> {job_type: count}
         self.pending_jobs_by_sample: Dict[str, Dict[str, int]] = {}  # sample_id -> {job_type: count}
+        
+
+        
         self.job_tracking_lock = threading.Lock()
         
         # Track worker threads for graceful shutdown
         self.preprocessing_workers = []
         self.bed_conversion_workers = []
-        self.analysis_workers = []
+        
+        # Analysis workers (mode-dependent)
+        if use_separate_analysis_queues:
+            # Separate workers for each analysis job type
+            self.mgmt_workers = []
+            self.cnv_workers = []
+            self.target_workers = []
+            self.fusion_workers = []
+            self.analysis_workers = []  # Not used in separate mode
+        else:
+            # Legacy single analysis workers
+            self.analysis_workers = []
+            self.mgmt_workers = []
+            self.cnv_workers = []
+            self.target_workers = []
+            self.fusion_workers = []
+        
         self.classification_workers = []
         self.slow_workers = []
         
@@ -136,32 +197,60 @@ class WorkflowManager:
         self.progress_lock = threading.Lock()  # Lock for progress tracking
         
         # Define job type mappings to queues
-        self.job_queue_mapping = {
-            # Preprocessing queue
-            "preprocessing": "preprocessing",
-            
-            # Bed conversion queue
-            "bed_conversion": "bed_conversion",
-            
-            # Analysis queue  
-            "mgmt": "analysis",
-            "cnv": "analysis",
-            "target": "analysis",
-            "fusion": "analysis",
-            "test": "analysis",  # For testing purposes
-            "long": "analysis",   # For testing purposes
-            "quick": "analysis",  # For testing purposes
-            
-            # Classification queue
-            "sturgeon": "classification", 
-            "nanodx": "classification",
-            "pannanodx": "classification",
-            
-            # Slow queue
-            "random_forest": "slow",
-            "sleep": "slow",
-            "echo": "slow"
-        }
+        if use_separate_analysis_queues:
+            self.job_queue_mapping = {
+                # Preprocessing queue
+                "preprocessing": "preprocessing",
+                
+                # Bed conversion queue
+                "bed_conversion": "bed_conversion",
+                
+                # Separate analysis queues (ensures only one of each type runs at a time)
+                "mgmt": "mgmt",
+                "cnv": "cnv",
+                "target": "target",
+                "fusion": "fusion",
+                "test": "mgmt",  # For testing purposes - map to mgmt queue
+                "long": "cnv",   # For testing purposes - map to cnv queue
+                "quick": "target",  # For testing purposes - map to target queue
+                
+                # Classification queue
+                "sturgeon": "classification", 
+                "nanodx": "classification",
+                "pannanodx": "classification",
+                
+                # Slow queue
+                "random_forest": "slow",
+                "sleep": "slow",
+                "echo": "slow"
+            }
+        else:
+            self.job_queue_mapping = {
+                # Preprocessing queue
+                "preprocessing": "preprocessing",
+                
+                # Bed conversion queue
+                "bed_conversion": "bed_conversion",
+                
+                # Legacy single analysis queue
+                "mgmt": "analysis",
+                "cnv": "analysis",
+                "target": "analysis",
+                "fusion": "analysis",
+                "test": "analysis",  # For testing purposes
+                "long": "analysis",   # For testing purposes
+                "quick": "analysis",  # For testing purposes
+                
+                # Classification queue
+                "sturgeon": "classification", 
+                "nanodx": "classification",
+                "pannanodx": "classification",
+                
+                # Slow queue
+                "random_forest": "slow",
+                "sleep": "slow",
+                "echo": "slow"
+            }
 
     def register_handler(self, queue_type: str, job_type: str, handler: Callable[[Job], None]) -> None:
         """Register a handler for a specific job type and queue."""
@@ -170,7 +259,30 @@ class WorkflowManager:
         elif queue_type == "bed_conversion":
             self.job_handlers_bed_conversion[job_type] = handler
         elif queue_type == "analysis":
-            self.job_handlers_analysis[job_type] = handler
+            if not self.use_separate_analysis_queues:
+                self.job_handlers_analysis[job_type] = handler
+            else:
+                raise ValueError(f"Cannot register 'analysis' queue handler in separate analysis queues mode")
+        elif queue_type == "mgmt":
+            if self.use_separate_analysis_queues:
+                self.job_handlers_mgmt[job_type] = handler
+            else:
+                raise ValueError(f"Cannot register 'mgmt' queue handler in legacy analysis queue mode")
+        elif queue_type == "cnv":
+            if self.use_separate_analysis_queues:
+                self.job_handlers_cnv[job_type] = handler
+            else:
+                raise ValueError(f"Cannot register 'cnv' queue handler in legacy analysis queue mode")
+        elif queue_type == "target":
+            if self.use_separate_analysis_queues:
+                self.job_handlers_target[job_type] = handler
+            else:
+                raise ValueError(f"Cannot register 'target' queue handler in legacy analysis queue mode")
+        elif queue_type == "fusion":
+            if self.use_separate_analysis_queues:
+                self.job_handlers_fusion[job_type] = handler
+            else:
+                raise ValueError(f"Cannot register 'fusion' queue handler in legacy analysis queue mode")
         elif queue_type == "classification":
             self.job_handlers_classification[job_type] = handler
         elif queue_type == "slow":
@@ -185,6 +297,8 @@ class WorkflowManager:
     def remove_deduplication_job_type(self, job_type: str) -> None:
         """Remove a job type from the deduplication list."""
         self.deduplicate_job_types.discard(job_type)
+
+
 
     def _can_enqueue_job_for_sample(self, job_type: str, sample_id: str) -> bool:
         """Check if a job can be enqueued for the sample (max 2: 1 running + 1 pending)."""
@@ -280,7 +394,30 @@ class WorkflowManager:
             elif queue_type == "bed_conversion":
                 self.bed_conversion_queue.put(job)
             elif queue_type == "analysis":
-                self.analysis_queue.put(job)
+                if not self.use_separate_analysis_queues:
+                    self.analysis_queue.put(job)
+                else:
+                    raise ValueError(f"Cannot enqueue to 'analysis' queue in separate analysis queues mode")
+            elif queue_type == "mgmt":
+                if self.use_separate_analysis_queues:
+                    self.mgmt_queue.put(job)
+                else:
+                    raise ValueError(f"Cannot enqueue to 'mgmt' queue in legacy analysis queue mode")
+            elif queue_type == "cnv":
+                if self.use_separate_analysis_queues:
+                    self.cnv_queue.put(job)
+                else:
+                    raise ValueError(f"Cannot enqueue to 'cnv' queue in legacy analysis queue mode")
+            elif queue_type == "target":
+                if self.use_separate_analysis_queues:
+                    self.target_queue.put(job)
+                else:
+                    raise ValueError(f"Cannot enqueue to 'target' queue in legacy analysis queue mode")
+            elif queue_type == "fusion":
+                if self.use_separate_analysis_queues:
+                    self.fusion_queue.put(job)
+                else:
+                    raise ValueError(f"Cannot enqueue to 'fusion' queue in legacy analysis queue mode")
             elif queue_type == "classification":
                 self.classification_queue.put(job)
             elif queue_type == "slow":
@@ -367,53 +504,99 @@ class WorkflowManager:
 
     def run(self) -> None:
         """Start the workflow manager with specialized workers for different task categories."""
-        # Create preprocessing worker (bam_preprocessing only)
-        preprocessing_worker = threading.Thread(
-            target=self.worker, 
-            args=("PreprocessingWorker", self.preprocessing_queue, self.job_handlers_preprocessing)
-        )
-        preprocessing_worker.daemon = True
-        self.preprocessing_workers.append(preprocessing_worker)
-        preprocessing_worker.start()
+        # Create preprocessing workers (bam_preprocessing only)
+        for i in range(self.preprocessing_workers_count):
+            preprocessing_worker = threading.Thread(
+                target=self.worker, 
+                args=(f"PreprocessingWorker-{i+1}", self.preprocessing_queue, self.job_handlers_preprocessing)
+            )
+            preprocessing_worker.daemon = True
+            self.preprocessing_workers.append(preprocessing_worker)
+            preprocessing_worker.start()
         
-        # Create bed conversion worker (bed_conversion only)
-        bed_conversion_worker = threading.Thread(
-            target=self.worker, 
-            args=("BedConversionWorker", self.bed_conversion_queue, self.job_handlers_bed_conversion)
-        )
-        bed_conversion_worker.daemon = True
-        self.bed_conversion_workers.append(bed_conversion_worker)
-        bed_conversion_worker.start()
+        # Create bed conversion workers (bed_conversion only)
+        for i in range(self.bed_conversion_workers_count):
+            bed_conversion_worker = threading.Thread(
+                target=self.worker, 
+                args=(f"BedConversionWorker-{i+1}", self.bed_conversion_queue, self.job_handlers_bed_conversion)
+            )
+            bed_conversion_worker.daemon = True
+            self.bed_conversion_workers.append(bed_conversion_worker)
+            bed_conversion_worker.start()
         
-        # Create analysis worker (mgmt, cnv, target, fusion)
-        analysis_worker = threading.Thread(
-            target=self.worker, 
-            args=("AnalysisWorker", self.analysis_queue, self.job_handlers_analysis)
-        )
-        analysis_worker.daemon = True
-        self.analysis_workers.append(analysis_worker)
-        analysis_worker.start()
+        # Create analysis workers based on mode
+        if self.use_separate_analysis_queues:
+            # Create separate workers for each analysis job type (ensures only one of each type runs at a time)
+            for i in range(self.analysis_workers_count):
+                # MGMT worker
+                mgmt_worker = threading.Thread(
+                    target=self.worker, 
+                    args=(f"MGMTWorker-{i+1}", self.mgmt_queue, self.job_handlers_mgmt)
+                )
+                mgmt_worker.daemon = True
+                self.mgmt_workers.append(mgmt_worker)
+                mgmt_worker.start()
+                
+                # CNV worker
+                cnv_worker = threading.Thread(
+                    target=self.worker, 
+                    args=(f"CNVWorker-{i+1}", self.cnv_queue, self.job_handlers_cnv)
+                )
+                cnv_worker.daemon = True
+                self.cnv_workers.append(cnv_worker)
+                cnv_worker.start()
+                
+                # Target worker
+                target_worker = threading.Thread(
+                    target=self.worker, 
+                    args=(f"TargetWorker-{i+1}", self.target_queue, self.job_handlers_target)
+                )
+                target_worker.daemon = True
+                self.target_workers.append(target_worker)
+                target_worker.start()
+                
+                # Fusion worker
+                fusion_worker = threading.Thread(
+                    target=self.worker, 
+                    args=(f"FusionWorker-{i+1}", self.fusion_queue, self.job_handlers_fusion)
+                )
+                fusion_worker.daemon = True
+                self.fusion_workers.append(fusion_worker)
+                fusion_worker.start()
+        else:
+            # Create legacy single analysis workers
+            for i in range(self.analysis_workers_count):
+                analysis_worker = threading.Thread(
+                    target=self.worker, 
+                    args=(f"AnalysisWorker-{i+1}", self.analysis_queue, self.job_handlers_analysis)
+                )
+                analysis_worker.daemon = True
+                self.analysis_workers.append(analysis_worker)
+                analysis_worker.start()
         
-        # Create classification worker (sturgeon, nanodx, pannanodx)
-        classification_worker = threading.Thread(
-            target=self.worker, 
-            args=("ClassificationWorker", self.classification_queue, self.job_handlers_classification)
-        )
-        classification_worker.daemon = True
-        self.classification_workers.append(classification_worker)
-        classification_worker.start()
+        # Create classification workers (sturgeon, nanodx, pannanodx)
+        for i in range(self.classification_workers_count):
+            classification_worker = threading.Thread(
+                target=self.worker, 
+                args=(f"ClassificationWorker-{i+1}", self.classification_queue, self.job_handlers_classification)
+            )
+            classification_worker.daemon = True
+            self.classification_workers.append(classification_worker)
+            classification_worker.start()
         
-        # Create slow worker (legacy)
-        slow_worker = threading.Thread(
-            target=self.worker, 
-            args=("SlowWorker", self.slow_queue, self.job_handlers_slow)
-        )
-        slow_worker.daemon = True
-        self.slow_workers.append(slow_worker)
-        slow_worker.start()
+        # Create slow workers (legacy)
+        for i in range(self.slow_workers_count):
+            slow_worker = threading.Thread(
+                target=self.worker, 
+                args=(f"SlowWorker-{i+1}", self.slow_queue, self.job_handlers_slow)
+            )
+            slow_worker.daemon = True
+            self.slow_workers.append(slow_worker)
+            slow_worker.start()
         
         # Wait for all workers to finish with periodic checks for shutdown
-        all_workers = (self.preprocessing_workers + self.bed_conversion_workers + self.analysis_workers + 
+        all_workers = (self.preprocessing_workers + self.bed_conversion_workers + 
+                      self.mgmt_workers + self.cnv_workers + self.target_workers + self.fusion_workers +
                       self.classification_workers + self.slow_workers)
         
         try:
@@ -451,8 +634,13 @@ class WorkflowManager:
         self.running = False
         
         # Wait for workers to finish with timeout
-        all_workers = (self.preprocessing_workers + self.bed_conversion_workers + self.analysis_workers + 
-                      self.classification_workers + self.slow_workers)
+        if self.use_separate_analysis_queues:
+            all_workers = (self.preprocessing_workers + self.bed_conversion_workers + 
+                          self.mgmt_workers + self.cnv_workers + self.target_workers + self.fusion_workers +
+                          self.classification_workers + self.slow_workers)
+        else:
+            all_workers = (self.preprocessing_workers + self.bed_conversion_workers + 
+                          self.analysis_workers + self.classification_workers + self.slow_workers)
         
         # Wait for each worker with timeout
         for worker in all_workers:
@@ -489,7 +677,20 @@ class WorkflowManager:
         # Get queue sizes
         preprocessing_queue_size = self.preprocessing_queue.qsize()
         bed_conversion_queue_size = self.bed_conversion_queue.qsize()
-        analysis_queue_size = self.analysis_queue.qsize()
+        
+        if self.use_separate_analysis_queues:
+            mgmt_queue_size = self.mgmt_queue.qsize()
+            cnv_queue_size = self.cnv_queue.qsize()
+            target_queue_size = self.target_queue.qsize()
+            fusion_queue_size = self.fusion_queue.qsize()
+            analysis_queue_size = 0  # Not used in separate mode
+        else:
+            analysis_queue_size = self.analysis_queue.qsize()
+            mgmt_queue_size = 0
+            cnv_queue_size = 0
+            target_queue_size = 0
+            fusion_queue_size = 0
+            
         classification_queue_size = self.classification_queue.qsize()
         slow_queue_size = self.slow_queue.qsize()
         
@@ -507,10 +708,17 @@ class WorkflowManager:
         
         # Calculate total expected jobs based on completed + failed + active + queued
         # This gives us the current total of all jobs that have been processed or are in progress
-        total_expected = (len(self.completed_jobs) + len(self.failed_jobs) + 
-                         len(self.active_jobs) + 
-                         preprocessing_queue_size + bed_conversion_queue_size + analysis_queue_size + 
-                         classification_queue_size + slow_queue_size)
+        if self.use_separate_analysis_queues:
+            total_expected = (len(self.completed_jobs) + len(self.failed_jobs) + 
+                             len(self.active_jobs) + 
+                             preprocessing_queue_size + bed_conversion_queue_size + 
+                             mgmt_queue_size + cnv_queue_size + target_queue_size + fusion_queue_size +
+                             classification_queue_size + slow_queue_size)
+        else:
+            total_expected = (len(self.completed_jobs) + len(self.failed_jobs) + 
+                             len(self.active_jobs) + 
+                             preprocessing_queue_size + bed_conversion_queue_size + 
+                             analysis_queue_size + classification_queue_size + slow_queue_size)
         
         # If we have no jobs in progress but have completed jobs, use the completed count as the total
         if total_expected == 0 and len(self.completed_jobs) > 0:
@@ -537,6 +745,10 @@ class WorkflowManager:
             "queue_sizes": {
                 "preprocessing": preprocessing_queue_size,
                 "bed_conversion": bed_conversion_queue_size,
+                "mgmt": mgmt_queue_size,
+                "cnv": cnv_queue_size,
+                "target": target_queue_size,
+                "fusion": fusion_queue_size,
                 "analysis": analysis_queue_size,
                 "classification": classification_queue_size,
                 "slow": slow_queue_size
@@ -791,8 +1003,12 @@ def command_handler(job: Job, command_template: str) -> None:
 class WorkflowRunner:
     """High-level interface for running workflows."""
     
-    def __init__(self, verbose: bool = False):
-        self.manager = WorkflowManager(verbose=verbose)
+    def __init__(self, verbose: bool = False, analysis_workers: int = 1, use_separate_analysis_queues: bool = True):
+        self.manager = WorkflowManager(
+            verbose=verbose,
+            analysis_workers=analysis_workers,
+            use_separate_analysis_queues=use_separate_analysis_queues
+        )
         self.verbose = verbose
         
         # Register default handlers
@@ -884,22 +1100,40 @@ class WorkflowRunner:
             position=1,
             leave=True
         )
-        analysis_pbar = tqdm(
-            desc="Analysis", 
+        mgmt_pbar = tqdm(
+            desc="MGMT", 
             unit="jobs",
             position=2,
+            leave=True
+        )
+        cnv_pbar = tqdm(
+            desc="CNV",
+            unit="jobs", 
+            position=3,
+            leave=True
+        )
+        target_pbar = tqdm(
+            desc="Target",
+            unit="jobs", 
+            position=4,
+            leave=True
+        )
+        fusion_pbar = tqdm(
+            desc="Fusion",
+            unit="jobs", 
+            position=5,
             leave=True
         )
         classification_pbar = tqdm(
             desc="Classification",
             unit="jobs", 
-            position=3,
+            position=6,
             leave=True
         )
         slow_pbar = tqdm(
             desc="Slow",
             unit="jobs",
-            position=4,
+            position=7,
             leave=True
         )
         
@@ -907,14 +1141,17 @@ class WorkflowRunner:
         overall_pbar = tqdm(
             desc="Overall Progress",
             unit="jobs",
-            position=5,
+            position=8,
             leave=True
         )
         
         progress_bars = {
             "preprocessing": preprocessing_pbar,
             "bed_conversion": bed_conversion_pbar,
-            "analysis": analysis_pbar,
+            "mgmt": mgmt_pbar,
+            "cnv": cnv_pbar,
+            "target": target_pbar,
+            "fusion": fusion_pbar,
             "classification": classification_pbar,
             "slow": slow_pbar
         }
@@ -923,7 +1160,10 @@ class WorkflowRunner:
         job_type_completion = {
             "preprocessing": 0,
             "bed_conversion": 0,
-            "analysis": 0, 
+            "mgmt": 0,
+            "cnv": 0,
+            "target": 0,
+            "fusion": 0,
             "classification": 0,
             "slow": 0
         }
@@ -960,27 +1200,42 @@ class WorkflowRunner:
                     for worker_name, jobs in stats["active_by_worker"].items():
                         for job in jobs:
                             # Check if this worker belongs to the current queue
-                            if queue_name == "preprocessing" and "PreprocessingWorker" in worker_name:
+                            if queue_name == "preprocessing" and worker_name.startswith("PreprocessingWorker"):
                                 active_in_queue += 1
                                 filename = job['filepath'].split('/')[-1]
                                 duration = int(job['duration'])
                                 active_jobs_info.append(f"{job['job_type']}:{filename}({duration}s)")
-                            elif queue_name == "bed_conversion" and "BedConversionWorker" in worker_name:
+                            elif queue_name == "bed_conversion" and worker_name.startswith("BedConversionWorker"):
                                 active_in_queue += 1
                                 filename = job['filepath'].split('/')[-1]
                                 duration = int(job['duration'])
                                 active_jobs_info.append(f"{job['job_type']}:{filename}({duration}s)")
-                            elif queue_name == "analysis" and "AnalysisWorker" in worker_name:
+                            elif queue_name == "mgmt" and worker_name.startswith("MGMTWorker"):
                                 active_in_queue += 1
                                 filename = job['filepath'].split('/')[-1]
                                 duration = int(job['duration'])
                                 active_jobs_info.append(f"{job['job_type']}:{filename}({duration}s)")
-                            elif queue_name == "classification" and "ClassificationWorker" in worker_name:
+                            elif queue_name == "cnv" and worker_name.startswith("CNVWorker"):
                                 active_in_queue += 1
                                 filename = job['filepath'].split('/')[-1]
                                 duration = int(job['duration'])
                                 active_jobs_info.append(f"{job['job_type']}:{filename}({duration}s)")
-                            elif queue_name == "slow" and "SlowWorker" in worker_name:
+                            elif queue_name == "target" and worker_name.startswith("TargetWorker"):
+                                active_in_queue += 1
+                                filename = job['filepath'].split('/')[-1]
+                                duration = int(job['duration'])
+                                active_jobs_info.append(f"{job['job_type']}:{filename}({duration}s)")
+                            elif queue_name == "fusion" and worker_name.startswith("FusionWorker"):
+                                active_in_queue += 1
+                                filename = job['filepath'].split('/')[-1]
+                                duration = int(job['duration'])
+                                active_jobs_info.append(f"{job['job_type']}:{filename}({duration}s)")
+                            elif queue_name == "classification" and worker_name.startswith("ClassificationWorker"):
+                                active_in_queue += 1
+                                filename = job['filepath'].split('/')[-1]
+                                duration = int(job['duration'])
+                                active_jobs_info.append(f"{job['job_type']}:{filename}({duration}s)")
+                            elif queue_name == "slow" and worker_name.startswith("SlowWorker"):
                                 active_in_queue += 1
                                 filename = job['filepath'].split('/')[-1]
                                 duration = int(job['duration'])

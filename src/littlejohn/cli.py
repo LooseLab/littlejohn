@@ -38,10 +38,16 @@ def list_job_types() -> None:
         "bed_conversion": [
             "bed_conversion - Convert BAM files to BED format"
         ],
-        "analysis": [
-            "mgmt - MGMT methylation analysis",
-            "cnv - Copy number variation analysis", 
-            "target - Target analysis",
+        "mgmt": [
+            "mgmt - MGMT methylation analysis"
+        ],
+        "cnv": [
+            "cnv - Copy number variation analysis"
+        ],
+        "target": [
+            "target - Target analysis"
+        ],
+        "fusion": [
             "fusion - Fusion detection analysis"
         ],
         "classification": [
@@ -63,10 +69,11 @@ def list_job_types() -> None:
         click.echo()
     
     click.echo("Usage examples:")
-    click.echo("  • Workflow with preprocessing and analysis: 'preprocessing:preprocessing,analysis:mgmt'")
-    click.echo("  • Full pipeline: 'preprocessing:preprocessing,analysis:mgmt,classification:sturgeon'")
-    click.echo("  • Multiple analyses: 'preprocessing:preprocessing,analysis:mgmt,analysis:cnv'")
+    click.echo("  • Workflow with preprocessing and analysis: 'preprocessing:preprocessing,mgmt:mgmt'")
+    click.echo("  • Full pipeline: 'preprocessing:preprocessing,mgmt:mgmt,classification:sturgeon'")
+    click.echo("  • Multiple analyses: 'preprocessing:preprocessing,mgmt:mgmt,cnv:cnv'")
     click.echo("\nNote: 'preprocessing:preprocessing' is automatically added as the first step if not specified.")
+    click.echo("Note: Each analysis type (mgmt, cnv, target, fusion) has its own queue for parallel processing.")
 
 
 @main.command()
@@ -201,7 +208,13 @@ def info(path: Path) -> None:
 @click.option(
     "--no-progress", is_flag=True, help="Disable progress bars for file processing"
 )
-def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool, no_process_existing: bool, work_dir: Optional[Path], log_level: str, job_log_level: tuple[str, ...], deduplicate_jobs: tuple[str, ...], no_progress: bool) -> None:
+@click.option(
+    "--analysis-workers", type=int, default=1, help="Number of analysis worker threads (default: 1, only queue that supports multiple workers)"
+)
+@click.option(
+    "--legacy-analysis-queue", is_flag=True, help="Use legacy single analysis queue instead of separate queues per analysis type"
+)
+def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool, no_process_existing: bool, work_dir: Optional[Path], log_level: str, job_log_level: tuple[str, ...], deduplicate_jobs: tuple[str, ...], no_progress: bool, analysis_workers: int, legacy_analysis_queue: bool) -> None:
     """Run an async workflow on BAM files in a directory. Preprocessing is automatically included as the first step."""
     try:
         
@@ -229,8 +242,12 @@ def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool
                 job_type, command = cmd_mapping.split(":", 1)
                 command_map[job_type.strip()] = command.strip()
         
-        # Create workflow runner
-        runner = WorkflowRunner(verbose=verbose)
+        # Create workflow runner with analysis worker configuration
+        runner = WorkflowRunner(
+            verbose=verbose,
+            analysis_workers=analysis_workers,
+            use_separate_analysis_queues=not legacy_analysis_queue
+        )
         
         # Configure job deduplication
         if deduplicate_jobs:
@@ -253,17 +270,29 @@ def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool
         if work_dir:
             def mgmt_handler_with_work_dir(job):
                 return mgmt_handler(job, work_dir=str(work_dir))
-            runner.register_handler("analysis", "mgmt", mgmt_handler_with_work_dir)
+            if legacy_analysis_queue:
+                runner.register_handler("analysis", "mgmt", mgmt_handler_with_work_dir)
+            else:
+                runner.register_handler("mgmt", "mgmt", mgmt_handler_with_work_dir)
         else:
-            runner.register_handler("analysis", "mgmt", mgmt_handler)
+            if legacy_analysis_queue:
+                runner.register_handler("analysis", "mgmt", mgmt_handler)
+            else:
+                runner.register_handler("mgmt", "mgmt", mgmt_handler)
         
         # Register the CNV analysis handler with work directory if specified
         if work_dir:
             def cnv_handler_with_work_dir(job):
                 return cnv_handler(job, work_dir=str(work_dir))
-            runner.register_handler("analysis", "cnv", cnv_handler_with_work_dir)
+            if legacy_analysis_queue:
+                runner.register_handler("analysis", "cnv", cnv_handler_with_work_dir)
+            else:
+                runner.register_handler("cnv", "cnv", cnv_handler_with_work_dir)
         else:
-            runner.register_handler("analysis", "cnv", cnv_handler)
+            if legacy_analysis_queue:
+                runner.register_handler("analysis", "cnv", cnv_handler)
+            else:
+                runner.register_handler("cnv", "cnv", cnv_handler)
         
         # Register the Sturgeon analysis handler with work directory if specified
         if work_dir:
@@ -301,17 +330,29 @@ def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool
         if work_dir:
             def target_handler_with_work_dir(job):
                 return target_handler(job, work_dir=str(work_dir))
-            runner.register_handler("analysis", "target", target_handler_with_work_dir)
+            if legacy_analysis_queue:
+                runner.register_handler("analysis", "target", target_handler_with_work_dir)
+            else:
+                runner.register_handler("target", "target", target_handler_with_work_dir)
         else:
-            runner.register_handler("analysis", "target", target_handler)
+            if legacy_analysis_queue:
+                runner.register_handler("analysis", "target", target_handler)
+            else:
+                runner.register_handler("target", "target", target_handler)
         
         # Register the Fusion analysis handler with work directory if specified
         if work_dir:
             def fusion_handler_with_work_dir(job):
                 return fusion_handler(job, work_dir=str(work_dir))
-            runner.register_handler("analysis", "fusion", fusion_handler_with_work_dir)
+            if legacy_analysis_queue:
+                runner.register_handler("analysis", "fusion", fusion_handler_with_work_dir)
+            else:
+                runner.register_handler("fusion", "fusion", fusion_handler_with_work_dir)
         else:
-            runner.register_handler("analysis", "fusion", fusion_handler)
+            if legacy_analysis_queue:
+                runner.register_handler("analysis", "fusion", fusion_handler)
+            else:
+                runner.register_handler("fusion", "fusion", fusion_handler)
         
         # Store work directory in job context for preprocessing
         if work_dir:
@@ -335,9 +376,30 @@ def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool
             elif job_type.startswith("bed_conversion:"):
                 queue_type, actual_job_type = job_type.split(":", 1)
                 runner.register_command_handler("bed_conversion", actual_job_type, command)
-            elif job_type.startswith("analysis:"):
+            elif job_type.startswith("mgmt:"):
                 queue_type, actual_job_type = job_type.split(":", 1)
-                runner.register_command_handler("analysis", actual_job_type, command)
+                if legacy_analysis_queue:
+                    runner.register_command_handler("analysis", actual_job_type, command)
+                else:
+                    runner.register_command_handler("mgmt", actual_job_type, command)
+            elif job_type.startswith("cnv:"):
+                queue_type, actual_job_type = job_type.split(":", 1)
+                if legacy_analysis_queue:
+                    runner.register_command_handler("analysis", actual_job_type, command)
+                else:
+                    runner.register_command_handler("cnv", actual_job_type, command)
+            elif job_type.startswith("target:"):
+                queue_type, actual_job_type = job_type.split(":", 1)
+                if legacy_analysis_queue:
+                    runner.register_command_handler("analysis", actual_job_type, command)
+                else:
+                    runner.register_command_handler("target", actual_job_type, command)
+            elif job_type.startswith("fusion:"):
+                queue_type, actual_job_type = job_type.split(":", 1)
+                if legacy_analysis_queue:
+                    runner.register_command_handler("analysis", actual_job_type, command)
+                else:
+                    runner.register_command_handler("fusion", actual_job_type, command)
             elif job_type.startswith("classification:"):
                 queue_type, actual_job_type = job_type.split(":", 1)
                 runner.register_command_handler("classification", actual_job_type, command)
@@ -361,6 +423,14 @@ def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool
             click.echo(f"Job log levels: {job_levels}")
         if deduplicate_jobs:
             click.echo(f"Job deduplication: {list(deduplicate_jobs)}")
+        click.echo(f"Worker configuration:")
+        if legacy_analysis_queue:
+            click.echo(f"  - Analysis queue mode: Legacy (single queue for all analysis types)")
+            click.echo(f"  - Analysis workers: {analysis_workers}")
+        else:
+            click.echo(f"  - Analysis queue mode: Separate queues per analysis type")
+            click.echo(f"  - Analysis workers per type: {analysis_workers} (MGMT, CNV, Target, Fusion each get {analysis_workers} workers)")
+        click.echo(f"  - Other queues: 1 worker each (fixed)")
         click.echo("Press Ctrl+C to stop")
         
         
