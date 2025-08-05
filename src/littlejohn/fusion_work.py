@@ -457,7 +457,7 @@ def _generate_output_files(
             target_candidates.to_feather(feather_file)
         target_candidates.to_csv(os.path.join(work_dir, sample_id, "fusion_candidates_master.csv"))
         target_candidates.to_feather(os.path.join(work_dir, sample_id, "target_candidates.feather"))
-        #preprocess_fusion_data_standalone(target_candidates, os.path.join(work_dir, sample_id, "fusion_candidates_master_processed.csv"))
+        preprocess_fusion_data_standalone(target_candidates, os.path.join(work_dir, sample_id, "fusion_candidates_master_processed.csv"))
         
     if analysis_results['genome_wide_candidates'] is not None:
         genome_wide_candidates = analysis_results['genome_wide_candidates']
@@ -468,7 +468,7 @@ def _generate_output_files(
             genome_wide_candidates.to_feather(feather_file)
         genome_wide_candidates.to_csv(os.path.join(work_dir, sample_id, "fusion_candidates_all.csv"))
         genome_wide_candidates.to_feather(os.path.join(work_dir, sample_id, "all_target_candidates.feather"))
-        #preprocess_fusion_data_standalone(genome_wide_candidates, os.path.join(work_dir, sample_id, "fusion_candidates_all_processed.csv"))
+        preprocess_fusion_data_standalone(genome_wide_candidates, os.path.join(work_dir, sample_id, "fusion_candidates_all_processed.csv"))
     
     # Create sv_count.txt file with content "0" if it doesn't exist
     sv_count_file = os.path.join(work_dir, sample_id, "sv_count.txt")
