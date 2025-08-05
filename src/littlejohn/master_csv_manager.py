@@ -100,8 +100,7 @@ class MasterCSVManager:
             'run_info_model': '',
             'run_info_flow_cell': '',
             'bam_tracking_counter': 0,
-            'bam_tracking_total_files': 0,
-            'bam_files': ''
+            'bam_tracking_total_files': 0
         }
     
     def _update_pass_counters(self, data: Dict[str, Any], bam_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -184,13 +183,6 @@ class MasterCSVManager:
         """Update BAM tracking information"""
         data['bam_tracking_counter'] += 1
         data['bam_tracking_total_files'] += 1
-        
-        # Update bam_files list
-        bam_files = data['bam_files'].split(',') if data['bam_files'] else []
-        filename = os.path.basename(bam_info.get('file_path', ''))
-        if filename and filename not in bam_files:
-            bam_files.append(filename)
-        data['bam_files'] = ','.join(bam_files)
         
         return data
     

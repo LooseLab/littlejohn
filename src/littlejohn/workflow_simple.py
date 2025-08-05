@@ -71,7 +71,15 @@ class Job:
     def next_job(self) -> Optional['Job']:
         """Create the next job in the workflow if available."""
         if self.step + 1 < len(self.workflow):
-            queue_type, next_type = self.workflow[self.step + 1].split(":", 1)
+            next_step = self.workflow[self.step + 1]
+            # Ensure we have a string to work with
+            if not isinstance(next_step, str):
+                raise ValueError(f"Expected string in workflow step, got {type(next_step)}: {next_step}")
+            
+            if ':' not in next_step:
+                raise ValueError(f"Invalid workflow step format (missing ':'): {next_step}")
+                
+            queue_type, next_type = next_step.split(":", 1)
             return Job(
                 job_id=self.job_id,
                 job_type=next_type,
@@ -112,7 +120,7 @@ class Job:
             # Extract job types from the workflow plan
             workflow_job_types = []
             for step in original_workflow:
-                if ':' in step:
+                if isinstance(step, str) and ':' in step:
                     queue_type, job_type = step.split(':', 1)
                     workflow_job_types.append(job_type)
             original_workflow = workflow_job_types
@@ -120,7 +128,7 @@ class Job:
             # Fallback: extract from current workflow
             original_workflow = []
             for step in self.workflow:
-                if ':' in step:
+                if isinstance(step, str) and ':' in step:
                     queue_type, job_type = step.split(':', 1)
                     original_workflow.append(job_type)
         
@@ -1066,7 +1074,14 @@ def default_file_classifier(filepath: str, workflow_plan: List[str]) -> List[Job
     
     # Create first job in plan (skip preprocessing if not present)
     if len(workflow_plan) > 0:
-        queue_type, job_type = workflow_plan[0].split(":", 1)
+        first_step = workflow_plan[0]
+        if not isinstance(first_step, str):
+            raise ValueError(f"Expected string in workflow step, got {type(first_step)}: {first_step}")
+        
+        if ':' not in first_step:
+            raise ValueError(f"Invalid workflow step format (missing ':'): {first_step}")
+            
+        queue_type, job_type = first_step.split(":", 1)
         dependencies = job_dependencies.get(job_type, set())
         triggers = set()
         for trigger_job, trigger_deps in job_dependencies.items():
@@ -1395,6 +1410,14 @@ class WorkflowRunner:
                         queue_type = self.manager.job_queue_mapping.get(job_type, "slow")
                         if queue_type == queue_name:
                             completed_in_queue += count
+                    
+                    # Calculate total jobs for this queue (completed + active + queued)
+                    total_for_queue = completed_in_queue + active_in_queue + queue_size
+                    
+                    # Update the progress bar with total and current values
+                    if total_for_queue > 0:
+                        pbar.total = total_for_queue
+                        pbar.n = completed_in_queue
                     
                     # Update the progress bar description with queue info
                     pbar.set_description(f"{queue_name.title()} (Q:{queue_size} A:{active_in_queue} C:{completed_in_queue})")
