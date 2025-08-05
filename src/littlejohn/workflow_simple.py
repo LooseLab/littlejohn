@@ -65,6 +65,8 @@ class Job:
     origin: str  # "fast" or "slow"
     workflow: List[str]
     step: int = 0
+    dependencies: Set[str] = field(default_factory=set)  # Job types this job depends on
+    triggers: Set[str] = field(default_factory=set)  # Job types this job can trigger
 
     def next_job(self) -> Optional['Job']:
         """Create the next job in the workflow if available."""
@@ -83,6 +85,89 @@ class Job:
     def get_sample_id(self) -> str:
         """Get the sample ID for this job."""
         return self.context.get_sample_id()
+
+    def can_trigger_jobs(self) -> List['Job']:
+        """Create all jobs that can be triggered by this job's completion."""
+        triggered_jobs = []
+        
+        # Define job dependencies and triggers
+        job_dependencies = {
+            # Jobs that depend on preprocessing
+            "bed_conversion": {"preprocessing"},
+            "mgmt": {"preprocessing"},
+            "cnv": {"preprocessing"},
+            "target": {"preprocessing"},
+            "fusion": {"preprocessing"},
+            
+            # Jobs that depend on bed_conversion
+            "sturgeon": {"bed_conversion"},
+            "nanodx": {"bed_conversion"},
+            "pannanodx": {"bed_conversion"},
+            "random_forest": {"bed_conversion"},
+        }
+        
+        # Get the original workflow plan to check what jobs are actually requested
+        original_workflow = self.context.metadata.get("original_workflow", [])
+        if original_workflow:
+            # Extract job types from the workflow plan
+            workflow_job_types = []
+            for step in original_workflow:
+                if ':' in step:
+                    queue_type, job_type = step.split(':', 1)
+                    workflow_job_types.append(job_type)
+            original_workflow = workflow_job_types
+        else:
+            # Fallback: extract from current workflow
+            original_workflow = []
+            for step in self.workflow:
+                if ':' in step:
+                    queue_type, job_type = step.split(':', 1)
+                    original_workflow.append(job_type)
+        
+        # Check if this job can trigger other jobs
+        for job_type, dependencies in job_dependencies.items():
+            if self.job_type in dependencies:
+                # This job completion can trigger the dependent job
+                # Check if all dependencies are met
+                all_deps_met = True
+                for dep in dependencies:
+                    if dep not in self.context.history and dep != self.job_type:
+                        all_deps_met = False
+                        break
+                
+                # Only trigger if the job is in the original workflow plan
+                if all_deps_met and job_type in original_workflow:
+                    # Create the triggered job
+                    queue_type = self._get_queue_type_for_job(job_type)
+                    triggered_job = Job(
+                        job_id=next(_job_id_counter),
+                        job_type=job_type,
+                        context=self.context,
+                        origin=queue_type,
+                        workflow=[f"{queue_type}:{job_type}"],  # Single step workflow
+                        step=0,
+                        dependencies=dependencies,
+                        triggers=set()  # No further triggers for now
+                    )
+                    triggered_jobs.append(triggered_job)
+        
+        return triggered_jobs
+
+    def _get_queue_type_for_job(self, job_type: str) -> str:
+        """Get the queue type for a given job type."""
+        queue_mapping = {
+            "preprocessing": "preprocessing",
+            "bed_conversion": "bed_conversion",
+            "mgmt": "mgmt",
+            "cnv": "cnv",
+            "target": "target",
+            "fusion": "fusion",
+            "sturgeon": "classification",
+            "nanodx": "classification",
+            "pannanodx": "classification",
+            "random_forest": "slow",
+        }
+        return queue_mapping.get(job_type, "slow")
 
 
 # === Workflow Manager ===
@@ -463,14 +548,20 @@ class WorkflowManager:
                             self.completed_jobs_by_type[job.job_type] = 0
                         self.completed_jobs_by_type[job.job_type] += 1
                     
-                    # Check if there's a next job in the workflow
-                    next_job = job.next_job()
-                    if next_job:
-                        logger.info(f"Creating next job: {next_job.job_type}")
-                        self.enqueue_jobs([next_job])
+                    # Check if this job can trigger other jobs (parallel execution)
+                    triggered_jobs = job.can_trigger_jobs()
+                    if triggered_jobs:
+                        logger.info(f"Job {job.job_type} completed, triggering {len(triggered_jobs)} parallel jobs: {[j.job_type for j in triggered_jobs]}")
+                        self.enqueue_jobs(triggered_jobs)
                     else:
-                        logger.info(f"No more jobs in workflow for {job.context.filepath}")
-                        logger.debug(f"Final results: {job.context.results}")
+                        # Fallback to linear workflow if no parallel triggers
+                        next_job = job.next_job()
+                        if next_job:
+                            logger.info(f"Creating next job: {next_job.job_type}")
+                            self.enqueue_jobs([next_job])
+                        else:
+                            logger.info(f"No more jobs in workflow for {job.context.filepath}")
+                            logger.debug(f"Final results: {job.context.results}")
                         
                 except Exception as e:
                     error_msg = f"Job {job.job_type} failed: {str(e)}"
@@ -938,14 +1029,63 @@ def default_file_classifier(filepath: str, workflow_plan: List[str]) -> List[Job
     except (OSError, FileNotFoundError):
         ctx.add_metadata("file_size", 0)
 
+    # Define job dependencies and triggers for parallel execution
+    job_dependencies = {
+        "bed_conversion": {"preprocessing"},
+        "mgmt": {"preprocessing"},
+        "cnv": {"preprocessing"},
+        "target": {"preprocessing"},
+        "fusion": {"preprocessing"},
+        "sturgeon": {"bed_conversion"},
+        "nanodx": {"bed_conversion"},
+        "pannanodx": {"bed_conversion"},
+        "random_forest": {"bed_conversion"},
+    }
+
     # Create preprocessing job if it's the first step
     if workflow_plan and workflow_plan[0].endswith(":preprocessing"):
-        return [Job(job_id=job_id, job_type="preprocessing", context=ctx, origin="preprocessing", workflow=workflow_plan, step=0)]
+        # Determine what jobs this preprocessing can trigger
+        triggers = set()
+        for job_type, deps in job_dependencies.items():
+            if "preprocessing" in deps:
+                triggers.add(job_type)
+        
+        # Store the original workflow plan in context for reference
+        ctx.add_metadata("original_workflow", workflow_plan)
+        
+        return [Job(
+            job_id=job_id, 
+            job_type="preprocessing", 
+            context=ctx, 
+            origin="preprocessing", 
+            workflow=workflow_plan, 
+            step=0,
+            dependencies=set(),
+            triggers=triggers
+        )]
     
     # Create first job in plan (skip preprocessing if not present)
     if len(workflow_plan) > 0:
         queue_type, job_type = workflow_plan[0].split(":", 1)
-        return [Job(job_id=job_id, job_type=job_type, context=ctx, origin=queue_type, workflow=workflow_plan, step=0)]
+        dependencies = job_dependencies.get(job_type, set())
+        triggers = set()
+        for trigger_job, trigger_deps in job_dependencies.items():
+            if job_type in trigger_deps:
+                triggers.add(trigger_job)
+        
+        # Store the original workflow plan in context for reference
+        ctx.add_metadata("original_workflow", workflow_plan)
+        
+        return [Job(
+            job_id=job_id, 
+            job_type=job_type, 
+            context=ctx, 
+            origin=queue_type, 
+            workflow=workflow_plan, 
+            step=0,
+            dependencies=dependencies,
+            triggers=triggers
+        )]
     
     return []
 
