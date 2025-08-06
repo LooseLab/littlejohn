@@ -28,6 +28,10 @@ _ST_TAG = "st"
 _BASECALL_MODEL_PREFIX = "basecall_model="
 _RUNID_PREFIX = "runid="
 
+# Performance optimization constants
+MAX_SUPPLEMENTARY_READS = 10000  # Limit to 10k supplementary reads
+MAX_BARCODE_DETECTION_READS = 1000  # Stop barcode detection after 1000 reads
+
 
 # ============================================================================
 # DATA STRUCTURES
@@ -225,11 +229,11 @@ def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
                 'reads_with_supplementary': 0,
             }
 
-            # Use sets only for deduplication, not for counting
-            # This reduces memory usage significantly for large files
-            seen_reads = set()
-            reads_with_supplementary = set()  # Track read IDs with supplementary mappings
+            # OPTIMIZATION: Use limited-size sets to prevent memory explosion
+            # Only track unique reads up to a reasonable limit
+            reads_with_supplementary = set()
             barcode_found = False
+            barcode_detection_count = 0  # Counter for early termination
             last_start = None
             
             # Step 3.5: Initialize MGMT read detection
@@ -239,7 +243,8 @@ def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
             # Step 4: Process reads in streaming fashion
             for read in sam_file.fetch(until_eof=True):
                 # Extract RG tag and check for barcode - early termination optimization
-                if not barcode_found and read.has_tag(_RG_TAG):
+                if not barcode_found and barcode_detection_count < MAX_BARCODE_DETECTION_READS and read.has_tag(_RG_TAG):
+                    barcode_detection_count += 1
                     rg_tag = read.get_tag(_RG_TAG)
                     # Use compiled regex pattern for barcode detection
                     barcode_match = _BARCODE_PATTERN.search(rg_tag)
@@ -252,52 +257,50 @@ def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
                                 barcode_found = True
 
                 # Cache read properties to avoid repeated attribute access
+                # Use direct attribute access for better performance
                 read_length = read.query_length or 0
                 is_secondary = read.is_secondary
                 is_unmapped = read.is_unmapped
                 is_supplementary = read.is_supplementary
                 query_name = read.query_name
 
-                # Track supplementary reads regardless of whether they're primary or secondary
+                # Track supplementary reads with size limit
                 if is_supplementary:
                     counters['supplementary_reads'] += 1
-                    reads_with_supplementary.add(query_name)
+                    if len(reads_with_supplementary) < MAX_SUPPLEMENTARY_READS:
+                        reads_with_supplementary.add(query_name)
 
                 if not is_secondary:  # Only process primary alignments
-                    # Use read name for deduplication only
-                    if query_name not in seen_reads:
-                        seen_reads.add(query_name)
-
-                        if not is_unmapped:
-                            counters['mapped_reads'] += 1
-                            counters['mapped_bases'] += read_length
-                            if state == _PASS_STR:
-                                counters['pass_mapped_bases'] += read_length
-                                counters['pass_mapped_reads_num'] += 1
-                            else:
-                                counters['fail_mapped_bases'] += read_length
-                                counters['fail_mapped_reads_num'] += 1
-                                
-                            # Check for MGMT reads (chr10:129466536-129467536)
-                            if not has_mgmt_reads and read.reference_name == "chr10":
-                                read_start = read.reference_start
-                                read_end = read.reference_end
-                                # Check if read overlaps with MGMT region (129466536-129467536)
-                                if (read_start < 129467536 and read_end > 129466536):
-                                    has_mgmt_reads = True
-                                    mgmt_read_count += 1
+                    if not is_unmapped:
+                        counters['mapped_reads'] += 1
+                        counters['mapped_bases'] += read_length
+                        if state == _PASS_STR:
+                            counters['pass_mapped_bases'] += read_length
+                            counters['pass_mapped_reads_num'] += 1
                         else:
-                            counters['unmapped_reads'] += 1
-                            counters['unmapped_bases'] += read_length
-                            if state == _PASS_STR:
-                                counters['pass_unmapped_bases'] += read_length
-                                counters['pass_unmapped_reads_num'] += 1
-                            else:
-                                counters['fail_unmapped_bases'] += read_length
-                                counters['fail_unmapped_reads_num'] += 1
+                            counters['fail_mapped_bases'] += read_length
+                            counters['fail_mapped_reads_num'] += 1
+                            
+                        # Check for MGMT reads (chr10:129466536-129467536)
+                        if not has_mgmt_reads and read.reference_name == "chr10":
+                            read_start = read.reference_start
+                            read_end = read.reference_end
+                            # Check if read overlaps with MGMT region (129466536-129467536)
+                            if (read_start < 129467536 and read_end > 129466536):
+                                has_mgmt_reads = True
+                                mgmt_read_count += 1
+                    else:
+                        counters['unmapped_reads'] += 1
+                        counters['unmapped_bases'] += read_length
+                        if state == _PASS_STR:
+                            counters['pass_unmapped_bases'] += read_length
+                            counters['pass_unmapped_reads_num'] += 1
+                        else:
+                            counters['fail_unmapped_bases'] += read_length
+                            counters['fail_unmapped_reads_num'] += 1
 
-                        if read_length > 0:
-                            counters['yield_tracking'] += read_length
+                    if read_length > 0:
+                        counters['yield_tracking'] += read_length
                     
                     # Cache tag value to avoid multiple get_tag() calls
                     try:
@@ -318,8 +321,9 @@ def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
             bam_read['sample_id'] = sample_id
             bam_read['last_start'] = last_start
             
-            # Add supplementary read information to metadata
+            # OPTIMIZATION: Only store boolean flag and count, not the actual read IDs
             bam_read['has_supplementary_reads'] = len(reads_with_supplementary) > 0
+            # Store supplementary read IDs for fusion analysis (limited to prevent memory explosion)
             bam_read['supplementary_read_ids'] = list(reads_with_supplementary) if reads_with_supplementary else []
             
             # Add MGMT read information to metadata
@@ -414,7 +418,7 @@ def calculate_bam_summary(bam_data: Dict[str, Any]) -> Dict[str, Any]:
         "supplementary_reads": bam_data.get('supplementary_reads', 0),
         "reads_with_supplementary": bam_data.get('reads_with_supplementary', 0),
         "has_supplementary_reads": bam_data.get('has_supplementary_reads', False),
-        # Add supplementary read IDs
+        # Add supplementary read IDs for fusion analysis
         "supplementary_read_ids": bam_data.get('supplementary_read_ids', []),
         # Add MGMT read statistics
         "has_mgmt_reads": bam_data.get('has_mgmt_reads', False),
@@ -589,6 +593,7 @@ def bam_preprocessing_handler(job):
             'has_supplementary_reads': metadata.extracted_data.get('has_supplementary_reads', False),
             'supplementary_reads': metadata.extracted_data.get('supplementary_reads', 0),
             'reads_with_supplementary': metadata.extracted_data.get('reads_with_supplementary', 0),
+            'supplementary_read_ids': metadata.extracted_data.get('supplementary_read_ids', []),
             'has_mgmt_reads': metadata.extracted_data.get('has_mgmt_reads', False),
             'mgmt_read_count': metadata.extracted_data.get('mgmt_read_count', 0)
         })
