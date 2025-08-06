@@ -653,7 +653,9 @@ def _perform_fusion_analysis(
     temp_dir: str, 
     metadata: Dict[str, Any], 
     fusion_metadata: FusionMetadata,
-    target_panel: str = "rCNS2"
+    target_panel: str = "rCNS2",
+    has_supplementary: bool = False,
+    supplementary_read_ids: List[str] = []
 ) -> Dict[str, Any]:
     """
     Perform the actual fusion analysis.
@@ -671,11 +673,11 @@ def _perform_fusion_analysis(
     from littlejohn.fusion_work import process_bam_file
     
     fusion_metadata.processing_steps.append("analysis_started")
-    results = process_bam_file(file_path, temp_dir, metadata, fusion_metadata, target_panel)
+    results = process_bam_file(file_path, temp_dir, metadata, fusion_metadata, target_panel,has_supplementary,supplementary_read_ids)
     return results
 
 
-def process_single_file(file_path: str, metadata: Dict[str, Any], work_dir: str, logger=None, target_panel: str = "rCNS2") -> Dict[str, Any]:
+def process_single_file(file_path: str, metadata: Dict[str, Any], work_dir: str, logger=None, target_panel: str = "rCNS2",has_supplementary: bool = False, supplementary_read_ids: List[str] = []) -> Dict[str, Any]:
     """
     Process a single file for fusion analysis (simplified function-based approach).
     
@@ -722,14 +724,14 @@ def process_single_file(file_path: str, metadata: Dict[str, Any], work_dir: str,
                 logger.warning(f"File does not have .bam extension: {file_path}")
                 
         # Try to open BAM file to check if it's valid
-        try:
-            with pysam.AlignmentFile(file_path, "rb") as bam:
-                # Just check if we can read the header
-                header = bam.header
-                if logger:
-                    logger.info(f"BAM file header read successfully, {len(header.get('SQ', []))} sequences")
-        except Exception as bam_error:
-            raise ValueError(f"Invalid or corrupted BAM file {file_path}: {str(bam_error)}")
+        #try:
+        #    with pysam.AlignmentFile(file_path, "rb") as bam:
+        #        # Just check if we can read the header
+        #        header = bam.header
+        #        if logger:
+        #            logger.info(f"BAM file header read successfully, {len(header.get('SQ', []))} sequences")
+        #except Exception as bam_error:
+        #    raise ValueError(f"Invalid or corrupted BAM file {file_path}: {str(bam_error)}")
             
         # Create temporary directory
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -737,7 +739,7 @@ def process_single_file(file_path: str, metadata: Dict[str, Any], work_dir: str,
             
             # Perform fusion analysis
             analysis_results = _perform_fusion_analysis(
-                file_path, temp_dir, metadata, fusion_metadata, target_panel
+                file_path, temp_dir, metadata, fusion_metadata, target_panel,has_supplementary,supplementary_read_ids
             )
             
             # Generate output files
@@ -814,32 +816,50 @@ def fusion_handler(job, work_dir=None):
         file_path = job.context.filepath
         metadata = job.context.metadata.get('bam_metadata', {})
         
-        logger.info(f"Starting fusion analysis for {file_path}")
-        logger.info(f"Metadata: {metadata}")
-        
-        # Set default work directory if not provided
-        if work_dir is None:
-            work_dir = "fusion_output"
+        # Access supplementary read information
+        has_supplementary = metadata.get('has_supplementary_reads', False)
+        if has_supplementary:
+            logger.info(f"Starting fusion analysis for {file_path}")
+            logger.info(f"Metadata: {metadata}")
             
-        logger.info(f"Using work directory: {work_dir}")
-        
-        # Get target panel from metadata or use default
-        target_panel = metadata.get('target_panel', 'rCNS2')
-        
-        # Process the file
-        result = process_single_file(file_path, metadata, work_dir, logger, target_panel)
-        
-        # Add result to job context
-        job.context.add_result("fusion_analysis", result)
-        
-        if result['success']:
-            logger.info(f"Fusion analysis completed successfully for {file_path}")
-            logger.info(f"Results: {result}")
+            supplementary_read_ids = metadata.get('supplementary_read_ids', [])
+            
+            # Set default work directory if not provided
+            if work_dir is None:
+                work_dir = "fusion_output"
+                
+            logger.info(f"Using work directory: {work_dir}")
+            
+            # Get target panel from metadata or use default
+            target_panel = metadata.get('target_panel', 'rCNS2')
+            
+            # Process the file
+            result = process_single_file(
+                file_path, metadata, work_dir, logger, target_panel,
+                has_supplementary=has_supplementary,
+                supplementary_read_ids=supplementary_read_ids
+            )
+            
+            # Add result to job context
+            job.context.add_result("fusion_analysis", result)
+            
+            if result['success']:
+                logger.info(f"Fusion analysis completed successfully for {file_path}")
+                logger.info(f"Results: {result}")
+            else:
+                error_msg = result.get('error_message', 'Unknown error')
+                logger.error(f"Fusion analysis failed for {file_path}: {error_msg}")
+                logger.error(f"Full result: {result}")
+                job.context.add_error("fusion_analysis", error_msg)
         else:
-            error_msg = result.get('error_message', 'Unknown error')
-            logger.error(f"Fusion analysis failed for {file_path}: {error_msg}")
-            logger.error(f"Full result: {result}")
-            job.context.add_error("fusion_analysis", error_msg)
+            logger.info(f"No supplementary reads found for {file_path}")
+            # This is not an error - just a normal skip condition
+            job.context.add_result("fusion_analysis", {
+                'success': True,
+                'skipped': True,
+                'reason': 'No supplementary reads found',
+                'file_path': file_path
+            })
             
     except Exception as e:
         import traceback

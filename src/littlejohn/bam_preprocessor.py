@@ -13,6 +13,26 @@ from littlejohn.master_csv_manager import MasterCSVManager
 from littlejohn.logging_config import get_job_logger
 
 
+# ============================================================================
+# CONSTANTS AND CONFIGURATION
+# ============================================================================
+
+# Compile regex pattern once for barcode detection (module-level constant)
+_BARCODE_PATTERN = re.compile(r"_barcode(\d{1,2})$")
+
+# Pre-compile common string operations
+_PASS_STR = "pass"
+_FAIL_STR = "fail"
+_RG_TAG = "RG"
+_ST_TAG = "st"
+_BASECALL_MODEL_PREFIX = "basecall_model="
+_RUNID_PREFIX = "runid="
+
+
+# ============================================================================
+# DATA STRUCTURES
+# ============================================================================
+
 @dataclass
 class BamMetadata:
     """Container for BAM file metadata and extracted data"""
@@ -29,21 +49,14 @@ class BamMetadata:
             self.processing_steps = []
 
 
-# Compile regex pattern once for barcode detection (module-level constant)
-_BARCODE_PATTERN = re.compile(r"_barcode(\d{1,2})$")
-
-# Pre-compile common string operations
-_PASS_STR = "pass"
-_FAIL_STR = "fail"
-_RG_TAG = "RG"
-_ST_TAG = "st"
-_BASECALL_MODEL_PREFIX = "basecall_model="
-_RUNID_PREFIX = "runid="
-
+# ============================================================================
+# CORE EXTRACTION FUNCTIONS
+# ============================================================================
 
 def get_rg_tags_from_bam(sam_file) -> Optional[Tuple[Optional[str], ...]]:
     """
     Extracts RG (Read Group) tags from the BAM file header.
+    This is the first step in metadata extraction.
 
     Args:
         sam_file: pysam AlignmentFile object
@@ -96,9 +109,49 @@ def get_rg_tags_from_bam(sam_file) -> Optional[Tuple[Optional[str], ...]]:
     )
 
 
+def _extract_sample_id_from_bam(bam_path: str) -> str:
+    """
+    Extract sample ID from BAM file read group tags.
+    This is a fallback function when comprehensive processing fails.
+    """
+    try:
+        with pysam.AlignmentFile(bam_path, "rb") as bam:
+            # Get read group tags
+            rg_tags = bam.header.get(_RG_TAG, [])
+            if rg_tags:
+                # Process only the first RG tag for efficiency
+                rg_tag = rg_tags[0]
+                
+                # Look for LB (Library) tag which contains the sample ID
+                lb_tag = rg_tag.get("LB")
+                if lb_tag:
+                    return lb_tag
+                
+                # Fallback to runid from DS tag per ONT specification
+                ds_tag = rg_tag.get("DS", "")
+                if ds_tag:
+                    ds_tags = ds_tag.split(" ")
+                    if ds_tags and ds_tags[0].startswith(_RUNID_PREFIX):
+                        runid = ds_tags[0].replace(_RUNID_PREFIX, "")
+                        if runid:
+                            return runid
+            
+            # If no RG tags or no valid sample ID found, return unknown
+            return "unknown"
+            
+    except Exception:
+        # If pysam fails, return unknown
+        return "unknown"
+
+
+# ============================================================================
+# READ PROCESSING FUNCTIONS
+# ============================================================================
+
 def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
     """
     Processes the reads in the BAM file and aggregates information.
+    This is the main processing step that analyzes all reads in the file.
     Uses streaming processing to minimize memory usage.
 
     Args:
@@ -117,11 +170,13 @@ def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
     # Use context manager to ensure proper file cleanup
     try:
         with pysam.AlignmentFile(bam_file, "rb", check_sq=False) as sam_file:
+            # Step 1: Extract RG tags from header
             rg_tags = get_rg_tags_from_bam(sam_file)
             
             if not rg_tags:
                 return None
 
+            # Step 2: Determine sample ID
             # Ensure sample_id is not None - use runid as fallback per ONT specification
             # LB tag is optional, but runid from DS tag is always present
             sample_id = (
@@ -132,6 +187,7 @@ def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
                 else f"unknown_sample_{os.path.basename(bam_file)}"  # filename as final fallback
             )
 
+            # Step 3: Initialize data structures
             # Pre-allocate dictionary with known size for better performance
             bam_read = {
                 'ID': rg_tags[0],
@@ -165,15 +221,22 @@ def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
                 'fail_mapped_bases': 0,
                 'pass_unmapped_bases': 0,
                 'fail_unmapped_bases': 0,
+                'supplementary_reads': 0,
+                'reads_with_supplementary': 0,
             }
 
             # Use sets only for deduplication, not for counting
             # This reduces memory usage significantly for large files
             seen_reads = set()
+            reads_with_supplementary = set()  # Track read IDs with supplementary mappings
             barcode_found = False
             last_start = None
+            
+            # Step 3.5: Initialize MGMT read detection
+            has_mgmt_reads = False
+            mgmt_read_count = 0
 
-            # Process reads in streaming fashion
+            # Step 4: Process reads in streaming fashion
             for read in sam_file.fetch(until_eof=True):
                 # Extract RG tag and check for barcode - early termination optimization
                 if not barcode_found and read.has_tag(_RG_TAG):
@@ -192,7 +255,13 @@ def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
                 read_length = read.query_length or 0
                 is_secondary = read.is_secondary
                 is_unmapped = read.is_unmapped
+                is_supplementary = read.is_supplementary
                 query_name = read.query_name
+
+                # Track supplementary reads regardless of whether they're primary or secondary
+                if is_supplementary:
+                    counters['supplementary_reads'] += 1
+                    reads_with_supplementary.add(query_name)
 
                 if not is_secondary:  # Only process primary alignments
                     # Use read name for deduplication only
@@ -208,6 +277,15 @@ def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
                             else:
                                 counters['fail_mapped_bases'] += read_length
                                 counters['fail_mapped_reads_num'] += 1
+                                
+                            # Check for MGMT reads (chr10:129466536-129467536)
+                            if not has_mgmt_reads and read.reference_name == "chr10":
+                                read_start = read.reference_start
+                                read_end = read.reference_end
+                                # Check if read overlaps with MGMT region (129466536-129467536)
+                                if (read_start < 129467536 and read_end > 129466536):
+                                    has_mgmt_reads = True
+                                    mgmt_read_count += 1
                         else:
                             counters['unmapped_reads'] += 1
                             counters['unmapped_bases'] += read_length
@@ -230,13 +308,23 @@ def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
                         if not last_start:
                             last_start = bam_read['time_of_run']
 
+            # Step 5: Finalize data
             # Update counters using the streaming counts
             counters['mapped_reads_num'] = counters['mapped_reads']
             counters['unmapped_reads_num'] = counters['unmapped_reads']
+            counters['reads_with_supplementary'] = len(reads_with_supplementary)
             
             # Update sample_id in bam_read
             bam_read['sample_id'] = sample_id
             bam_read['last_start'] = last_start
+            
+            # Add supplementary read information to metadata
+            bam_read['has_supplementary_reads'] = len(reads_with_supplementary) > 0
+            bam_read['supplementary_read_ids'] = list(reads_with_supplementary) if reads_with_supplementary else []
+            
+            # Add MGMT read information to metadata
+            bam_read['has_mgmt_reads'] = has_mgmt_reads
+            bam_read['mgmt_read_count'] = mgmt_read_count
             
             # Parse dates once at the end instead of during the loop
             if last_start and bam_read['time_of_run']:
@@ -257,9 +345,14 @@ def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+# ============================================================================
+# STATISTICS AND SUMMARY FUNCTIONS
+# ============================================================================
+
 def calculate_bam_summary(bam_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Calculates summary statistics from BAM processing data.
+    This step processes the raw data to generate meaningful statistics.
 
     Args:
         bam_data: Dictionary containing BAM processing results
@@ -317,14 +410,34 @@ def calculate_bam_summary(bam_data: Dict[str, Any]) -> Dict[str, Any]:
         "mean_fail_mapped_length": mean_fail_mapped_length,
         "mean_pass_unmapped_length": mean_pass_unmapped_length,
         "mean_fail_unmapped_length": mean_fail_unmapped_length,
+        # Add supplementary read statistics
+        "supplementary_reads": bam_data.get('supplementary_reads', 0),
+        "reads_with_supplementary": bam_data.get('reads_with_supplementary', 0),
+        "has_supplementary_reads": bam_data.get('has_supplementary_reads', False),
+        # Add supplementary read IDs
+        "supplementary_read_ids": bam_data.get('supplementary_read_ids', []),
+        # Add MGMT read statistics
+        "has_mgmt_reads": bam_data.get('has_mgmt_reads', False),
+        "mgmt_read_count": bam_data.get('mgmt_read_count', 0),
     }
 
     return result
 
 
+# ============================================================================
+# MAIN EXTRACTION FUNCTION
+# ============================================================================
+
 def extract_bam_metadata(bam_path: str) -> BamMetadata:
     """
     Extract comprehensive metadata from a BAM file.
+    This is the main orchestration function that coordinates all processing steps.
+    
+    Processing order:
+    1. Extract basic file information (size, creation time)
+    2. Process BAM reads and extract metadata
+    3. Calculate summary statistics
+    4. Compile final metadata object
     
     Args:
         bam_path: Path to the BAM file
@@ -332,6 +445,7 @@ def extract_bam_metadata(bam_path: str) -> BamMetadata:
     Returns:
         BamMetadata: Object containing all extracted metadata
     """
+    # Step 1: Extract basic file information
     # Cache path components to avoid repeated operations
     bam_path_obj = Path(bam_path)
     filename = bam_path_obj.name
@@ -349,7 +463,7 @@ def extract_bam_metadata(bam_path: str) -> BamMetadata:
         creation_time=creation_time
     )
     
-    # Use functional approach to extract comprehensive data
+    # Step 2: Process BAM reads and extract comprehensive data
     bam_info = process_bam_reads(bam_path)
     if bam_info is None:
         # Fallback to basic extraction if processing fails
@@ -363,9 +477,9 @@ def extract_bam_metadata(bam_path: str) -> BamMetadata:
             'state': state,
             'filename': filename,
             'directory': directory,
+            'has_mgmt_reads': False,
+            'mgmt_read_count': 0,
         }
-        # Note: sample_id extraction result for debugging
-        # (logger not available in this context)
     else:
         # Use comprehensive data from processing - pre-allocate with known size
         metadata.extracted_data = {
@@ -380,77 +494,60 @@ def extract_bam_metadata(bam_path: str) -> BamMetadata:
             'basecall_model': bam_info.get('basecall_model'),
             'flow_cell_id': bam_info.get('flow_cell_id'),
             'time_of_run': bam_info.get('time_of_run'),
-            'file_path': bam_path
+            'file_path': bam_path,
+            'has_mgmt_reads': bam_info.get('has_mgmt_reads', False),
+            'mgmt_read_count': bam_info.get('mgmt_read_count', 0),
         }
-        # Note: BAM processing result for debugging
-        # (logger not available in this context)
     
-    # Extract comprehensive statistics
+    # Step 3: Calculate summary statistics
     bam_stats = calculate_bam_summary(bam_info) if bam_info else {}
     if bam_stats:
         metadata.extracted_data.update(bam_stats)
     
+    # Step 4: Mark processing as complete
     metadata.processing_steps.append('bam_preprocessing_complete')
     
     return metadata
 
 
-def _extract_sample_id_from_bam(bam_path: str) -> str:
-    """Extract sample ID from BAM file read group tags"""
-    try:
-        with pysam.AlignmentFile(bam_path, "rb") as bam:
-            # Get read group tags
-            rg_tags = bam.header.get(_RG_TAG, [])
-            if rg_tags:
-                # Process only the first RG tag for efficiency
-                rg_tag = rg_tags[0]
-                
-                # Look for LB (Library) tag which contains the sample ID
-                lb_tag = rg_tag.get("LB")
-                if lb_tag:
-                    return lb_tag
-                
-                # Fallback to runid from DS tag per ONT specification
-                ds_tag = rg_tag.get("DS", "")
-                if ds_tag:
-                    ds_tags = ds_tag.split(" ")
-                    if ds_tags and ds_tags[0].startswith(_RUNID_PREFIX):
-                        runid = ds_tags[0].replace(_RUNID_PREFIX, "")
-                        if runid:
-                            return runid
-            
-            # If no RG tags or no valid sample ID found, return unknown
-            return "unknown"
-            
-    except Exception:
-        # If pysam fails, return unknown
-        return "unknown"
-
+# ============================================================================
+# JOB HANDLER FUNCTION
+# ============================================================================
 
 def bam_preprocessing_handler(job):
     """
     Handler function for BAM preprocessing jobs.
+    This is the main entry point that orchestrates the entire preprocessing workflow.
+    
+    Processing order:
+    1. Initialize logging
+    2. Extract metadata from BAM file
+    3. Store metadata in job context
+    4. Update master.csv with extracted data
+    5. Add results to job context
+    6. Log completion and debug information
+    
     This function extracts metadata from BAM files and stores it in the job context.
     """
     try:
         bam_path = job.context.filepath
         
-        # Get job-specific logger
+        # Step 1: Initialize logging
         logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
         logger.info(f"Starting preprocessing for: {os.path.basename(bam_path)}")
         
-        # Extract metadata from BAM file
+        # Step 2: Extract metadata from BAM file
         logger.debug(f"Extracting metadata from: {bam_path}")
         metadata = extract_bam_metadata(bam_path)
         logger.debug(f"Extracted metadata: {metadata.extracted_data}")
         
-        # Store metadata in job context
+        # Step 3: Store metadata in job context
         job.context.add_metadata('bam_metadata', metadata.extracted_data)
         job.context.add_metadata('file_size', metadata.file_size)
         job.context.add_metadata('creation_time', metadata.creation_time)
         job.context.add_metadata('processing_steps', metadata.processing_steps)
         
-        # Update master.csv if we have comprehensive data
+        # Step 4: Update master.csv if we have comprehensive data
         if metadata.extracted_data and 'sample_id' in metadata.extracted_data:
             sample_id = metadata.extracted_data['sample_id']
             
@@ -469,7 +566,9 @@ def bam_preprocessing_handler(job):
                            'pass_unmapped_reads_num', 'fail_unmapped_reads_num',
                            'mapped_bases', 'unmapped_bases',
                            'pass_mapped_bases', 'fail_mapped_bases',
-                           'pass_unmapped_bases', 'fail_unmapped_bases']:
+                           'pass_unmapped_bases', 'fail_unmapped_bases',
+                           'supplementary_reads', 'reads_with_supplementary',
+                           'has_mgmt_reads', 'mgmt_read_count']:
                     bam_stats[key] = metadata.extracted_data.get(key, 0)
                 
                 # Update master.csv
@@ -478,7 +577,7 @@ def bam_preprocessing_handler(job):
             except Exception as e:
                 logger.warning(f"Could not update master.csv for {sample_id}: {e}")
         
-        # Add result to context
+        # Step 5: Add result to context
         job.context.add_result('preprocessing', {
             'status': 'success',
             'sample_id': metadata.extracted_data.get('sample_id', 'unknown'),
@@ -486,9 +585,15 @@ def bam_preprocessing_handler(job):
             'mapped_reads': metadata.extracted_data.get('mapped_reads', 0),
             'unmapped_reads': metadata.extracted_data.get('unmapped_reads', 0),
             'total_yield': metadata.extracted_data.get('yield_tracking', 0),
-            'file_size': metadata.file_size
+            'file_size': metadata.file_size,
+            'has_supplementary_reads': metadata.extracted_data.get('has_supplementary_reads', False),
+            'supplementary_reads': metadata.extracted_data.get('supplementary_reads', 0),
+            'reads_with_supplementary': metadata.extracted_data.get('reads_with_supplementary', 0),
+            'has_mgmt_reads': metadata.extracted_data.get('has_mgmt_reads', False),
+            'mgmt_read_count': metadata.extracted_data.get('mgmt_read_count', 0)
         })
         
+        # Step 6: Log completion and summary
         logger.info(f"Preprocessing complete for {os.path.basename(bam_path)}")
         logger.info(f"Sample ID: {metadata.extracted_data.get('sample_id', 'unknown')}")
         logger.info(f"State: {metadata.extracted_data.get('state', 'unknown')}")
@@ -496,7 +601,26 @@ def bam_preprocessing_handler(job):
         logger.info(f"Unmapped reads: {metadata.extracted_data.get('unmapped_reads', 0):,}")
         logger.info(f"Total yield: {metadata.extracted_data.get('yield_tracking', 0):,}")
         
-        # Optimized debug logging - only execute if debug is enabled
+        # Log supplementary read information
+        has_supplementary = metadata.extracted_data.get('has_supplementary_reads', False)
+        supplementary_count = metadata.extracted_data.get('supplementary_reads', 0)
+        reads_with_supplementary = metadata.extracted_data.get('reads_with_supplementary', 0)
+        
+        if has_supplementary:
+            logger.info(f"Supplementary reads found: {supplementary_count:,} supplementary alignments from {reads_with_supplementary:,} unique reads")
+        else:
+            logger.info("No supplementary reads found")
+        
+        # Log MGMT read information
+        has_mgmt_reads = metadata.extracted_data.get('has_mgmt_reads', False)
+        mgmt_read_count = metadata.extracted_data.get('mgmt_read_count', 0)
+        
+        if has_mgmt_reads:
+            logger.info(f"MGMT reads found: {mgmt_read_count:,} reads spanning MGMT promoter region (chr10:129466536-129467536)")
+        else:
+            logger.info("No MGMT reads found")
+        
+        # Step 7: Detailed debug logging (only if debug is enabled)
         if logger.logger.isEnabledFor(10):  # DEBUG level
             # Cache frequently accessed values to avoid repeated dict lookups
             extracted_data = metadata.extracted_data
@@ -565,6 +689,30 @@ def bam_preprocessing_handler(job):
                 logger.debug(f"Fail mapped reads: {fail_mapped_reads_num:,}")
                 logger.debug(f"Pass unmapped reads: {extracted_data.get('pass_unmapped_reads_num', 0):,}")
                 logger.debug(f"Fail unmapped reads: {extracted_data.get('fail_unmapped_reads_num', 0):,}")
+            
+            # Log supplementary read information if available
+            has_supplementary = extracted_data.get('has_supplementary_reads', False)
+            if has_supplementary:
+                supplementary_count = extracted_data.get('supplementary_reads', 0)
+                reads_with_supplementary = extracted_data.get('reads_with_supplementary', 0)
+                supplementary_read_ids = extracted_data.get('supplementary_read_ids', [])
+                logger.debug(f"Supplementary reads: {supplementary_count:,} supplementary alignments")
+                logger.debug(f"Reads with supplementary mappings: {reads_with_supplementary:,}")
+                if supplementary_read_ids:
+                    logger.debug(f"First 10 supplementary read IDs: {supplementary_read_ids[:10]}")
+                    if len(supplementary_read_ids) > 10:
+                        logger.debug(f"... and {len(supplementary_read_ids) - 10} more")
+            else:
+                logger.debug("No supplementary reads found")
+            
+            # Log MGMT read information if available
+            has_mgmt_reads = extracted_data.get('has_mgmt_reads', False)
+            if has_mgmt_reads:
+                mgmt_read_count = extracted_data.get('mgmt_read_count', 0)
+                logger.debug(f"MGMT reads: {mgmt_read_count:,} reads spanning MGMT promoter region")
+                logger.debug(f"MGMT region: chr10:129466536-129467536")
+            else:
+                logger.debug("No MGMT reads found")
             
             logger.debug(f"Processing steps: {', '.join(metadata.processing_steps)}")
         

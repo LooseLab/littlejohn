@@ -351,15 +351,15 @@ def _filter_fusion_candidates(df: pd.DataFrame) -> pd.DataFrame:
 # MAIN PROCESSING FUNCTIONS
 # =============================================================================
 
-def process_bam_for_fusions(bamfile: str, target_panel: str = "rCNS2") -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
+def process_bam_for_fusions(bamfile: str, target_panel: str = "rCNS2",supplementary_read_ids: List[str] = []) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
     """Process BAM file to find fusion candidates."""
     # Ensure gene regions are loaded
     _ensure_gene_regions_loaded(target_panel)
     
     try:
         # Find reads with supplementary alignments
-        reads_with_supp = find_reads_with_supplementary(bamfile)
-        
+        #reads_with_supp = find_reads_with_supplementary(bamfile)
+        reads_with_supp = supplementary_read_ids
         if not reads_with_supp:
             return None, None
         
@@ -393,12 +393,12 @@ def process_bam_for_fusions(bamfile: str, target_panel: str = "rCNS2") -> Tuple[
         print(f"\n\n\\nfrom django.utils.translation import ungettextError processing BAM file for fusions: {str(e)}\n\n\n")
         return None, None
 
-def process_bam_file(file_path, temp_dir, metadata, fusion_metadata, target_panel):
+def process_bam_file(file_path, temp_dir, metadata, fusion_metadata, target_panel,has_supplementary,supplementary_read_ids):
     """Process a single BAM file for fusion detection."""
-    has_sup = has_supplementary_alignments(file_path)
+    has_sup = has_supplementary
     
     if has_sup:
-        target_candidates, genome_wide_candidates = process_bam_for_fusions(file_path, target_panel)
+        target_candidates, genome_wide_candidates = process_bam_for_fusions(file_path, target_panel,supplementary_read_ids)
         if (target_candidates is not None and not target_candidates.empty):
             candidates = _optimize_dataframe_memory(target_candidates)
         
@@ -773,46 +773,3 @@ def preprocess_structural_variants_standalone(output_dir: str) -> None:
         logger.error(f"Error pre-processing structural variants: {str(e)}")
         logger.error("Exception details:", exc_info=True)
 
-# =============================================================================
-# EXAMPLE USAGE (commented out for production)
-# =============================================================================
-
-# # Example usage
-# file_path = "all_target_candidates.feather"
-# 
-# if os.path.exists(file_path):
-#     os.remove(file_path)
-# 
-# file_path = "target_candidates.feather"
-# 
-# if os.path.exists(file_path):
-#     os.remove(file_path)
-# 
-# 
-# root_directory = "/Users/mattloose/datasets/Demo_Run"  # Replace with your actual directory
-# find_and_process_bam_files(root_directory)
-# 
-# if os.path.exists("target_candidates.feather"):
-#     candidates = pd.read_feather("target_candidates.feather")
-# 
-# candidates
-# 
-# if os.path.exists("all_target_candidates.feather"):
-#     all_candidates = pd.read_feather("all_target_candidates.feather")
-# 
-# all_candidates
-# 
-# all_candidates[all_candidates["read_id"].eq("27372af8-0237-4f7d-85c6-5bfbfb9118fe")]
-# 
-# all_candidates[all_candidates["col4"]!="JPH1"]
-# 
-# all_candidates.columns
-# 
-# 
-# all_candidates.to_csv("fusion_candidates_all.csv")
-# 
-# candidates.to_csv("fusion_candidates_master.csv")
-# 
-# preprocess_fusion_data_standalone(candidates, "fusion_candidates_master_processed.csv")
-# 
-# preprocess_fusion_data_standalone(all_candidates, "fusion_candidates_all_processed.csv")

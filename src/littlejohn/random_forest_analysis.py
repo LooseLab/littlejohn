@@ -281,148 +281,158 @@ class RandomForestAnalysis:
             rcns2folder = tempfile.mkdtemp(dir=sample_dir)
             logger.info(f"Created temporary directory for R output: {rcns2folder}")
             
-            # Step 7: Write the BED file
-            randomforest_bed_output = os.path.join(sample_dir, "RandomForestBed.bed")
-            logger.info(f"Writing BED file to: {randomforest_bed_output}")
-            
-            # Create BED file format expected by the R script
-            # The R script expects columns 1:3, 6, 10:11 to be:
-            # Column 1: chr, Column 2: start, Column 3: end, Column 6: strand, Column 10: cov, Column 11: methylation_percent
-            bed_df = merged_modkit_df.copy()
-            
-            # Create a BED file with the correct number of columns
-            bed_df = bed_df.rename(columns={
-                'chrom': 'chr',
-                'start_pos': 'start', 
-                'end_pos': 'end',
-                'Nvalid': 'cov',
-                'score': 'methylation_percent'  # The reconstructed data has 'score' not 'fraction'
-            })
-            
-            # Create a BED file with at least 11 columns
-            # The R script reads: columns 1:3 (chr, start, end), column 6 (strand), columns 10:11 (cov, methylation_percent)
-            final_bed_df = pd.DataFrame()
-            final_bed_df['chr'] = bed_df['chr']  # Column 1
-            final_bed_df['start'] = bed_df['start']  # Column 2  
-            final_bed_df['end'] = bed_df['end']  # Column 3
-            final_bed_df['dummy1'] = '.'  # Column 4 (dummy)
-            final_bed_df['dummy2'] = 0  # Column 5 (dummy)
-            final_bed_df['strand'] = bed_df['strand']  # Column 6
-            final_bed_df['dummy3'] = '.'  # Column 7 (dummy)
-            final_bed_df['dummy4'] = 0  # Column 8 (dummy)
-            final_bed_df['dummy5'] = '.'  # Column 9 (dummy)
-            final_bed_df['cov'] = bed_df['cov']  # Column 10
-            final_bed_df['methylation_percent'] = bed_df['methylation_percent']  # Column 11
-            
-            # Write with header as expected by the R script
-            final_bed_df.to_csv(
-                randomforest_bed_output, sep="\t", index=False, header=True
-            )
-            
-            # Validate BED file format
-            logger.info(f"BED file created with shape: {final_bed_df.shape}")
-            logger.info(f"BED file columns: {final_bed_df.columns.tolist()}")
-            
-            # Check if we have the required columns for R script
-            required_columns = ['chr', 'start', 'end', 'strand', 'cov', 'methylation_percent']
-            missing_required = [col for col in required_columns if col not in final_bed_df.columns]
-            if missing_required:
-                raise ValueError(f"Missing required columns for R script: {missing_required}")
-
-            # Check if BED file is not empty
-            if final_bed_df.empty:
-                raise ValueError("BED file is empty - no methylation data to process")
-            
-            # Verify the file was written correctly
-            if os.path.exists(randomforest_bed_output):
-                file_size = os.path.getsize(randomforest_bed_output)
-                logger.info(f"BED file written successfully, size: {file_size} bytes")
-            else:
-                raise FileNotFoundError("BED file was not created")
-            
-            random_forest_result.bed_file_path = randomforest_bed_output
-            random_forest_result.processing_steps.append("bed_file_created")
-            
-            # Step 8: Run the R script
-            logger.info("Attempting to run R script...")
             try:
-                run_rcns2(rcns2folder, self.bambatch[sample_id], randomforest_bed_output, self.threads, self.showerrors)
-                logger.info("R script completed successfully")
-                random_forest_result.processing_steps.append("r_script_completed")
-            except Exception as e:
-                logger.error(f"Error running R script: {str(e)}", exc_info=True)
-                raise
-            
-            # Step 9: Process results
-            votes_file = f"{rcns2folder}/live_{self.bambatch[sample_id]}_votes.tsv"
-            if os.path.isfile(votes_file):
-                logger.info(f"Found votes file: {votes_file}")
-                scores = pd.read_table(votes_file, sep=r"\s+")
-                logger.debug(f"Original scores shape: {scores.shape}")
-                logger.debug(f"Original scores columns: {list(scores.columns)}")
-                logger.debug(f"Original scores head:\n{scores.head()}")
+                # Step 7: Write the BED file
+                randomforest_bed_output = os.path.join(sample_dir, "RandomForestBed.bed")
+                logger.info(f"Writing BED file to: {randomforest_bed_output}")
                 
-                # Process scores correctly - drop Freq column and transpose
-                scores_to_save = scores.drop(columns=["Freq"]).T
-                logger.debug(f"After transpose shape: {scores_to_save.shape}")
-                logger.debug(f"After transpose columns: {list(scores_to_save.columns)}")
-                logger.debug(f"After transpose index: {list(scores_to_save.index)}")
+                # Create BED file format expected by the R script
+                # The R script expects columns 1:3, 6, 10:11 to be:
+                # Column 1: chr, Column 2: start, Column 3: end, Column 6: strand, Column 10: cov, Column 11: methylation_percent
+                bed_df = merged_modkit_df.copy()
                 
-                # Add timestamp column
-                scores_to_save["timestamp"] = start_time * 1000  # Convert to milliseconds
+                # Create a BED file with the correct number of columns
+                bed_df = bed_df.rename(columns={
+                    'chrom': 'chr',
+                    'start_pos': 'start', 
+                    'end_pos': 'end',
+                    'Nvalid': 'cov',
+                    'score': 'methylation_percent'  # The reconstructed data has 'score' not 'fraction'
+                })
                 
-                # Reorder columns to put timestamp first
-                cols = scores_to_save.columns.tolist()
-                cols.insert(0, cols.pop(cols.index("timestamp")))
-                scores_to_save = scores_to_save[cols]
+                # Create a BED file with at least 11 columns
+                # The R script reads: columns 1:3 (chr, start, end), column 6 (strand), columns 10:11 (cov, methylation_percent)
+                final_bed_df = pd.DataFrame()
+                final_bed_df['chr'] = bed_df['chr']  # Column 1
+                final_bed_df['start'] = bed_df['start']  # Column 2  
+                final_bed_df['end'] = bed_df['end']  # Column 3
+                final_bed_df['dummy1'] = '.'  # Column 4 (dummy)
+                final_bed_df['dummy2'] = 0  # Column 5 (dummy)
+                final_bed_df['strand'] = bed_df['strand']  # Column 6
+                final_bed_df['dummy3'] = '.'  # Column 7 (dummy)
+                final_bed_df['dummy4'] = 0  # Column 8 (dummy)
+                final_bed_df['dummy5'] = '.'  # Column 9 (dummy)
+                final_bed_df['cov'] = bed_df['cov']  # Column 10
+                final_bed_df['methylation_percent'] = bed_df['methylation_percent']  # Column 11
                 
-                # Load existing results if available and accumulate
-                output_file = os.path.join(sample_dir, "random_forest_scores.csv")
-                if os.path.exists(output_file):
-                    try:
-                        logger.info(f"Loading existing results from: {output_file}")
-                        existing_scores = pd.read_csv(output_file)
-                        logger.info(f"Found {len(existing_scores)} existing results")
-                        
-                        # Append new results to existing data
-                        combined_scores = pd.concat([existing_scores, scores_to_save], ignore_index=True)
-                        logger.info(f"Combined results: {len(combined_scores)} total entries")
-                        
-                        # Save accumulated results
-                        combined_scores.to_csv(output_file, index=False)
-                        logger.info(f"Saved accumulated results to: {output_file}")
-                        
-                    except Exception as e:
-                        logger.warning(f"Error loading existing results, saving new results only: {e}")
-                        scores_to_save.to_csv(output_file, index=False)
-                        logger.info(f"Saved new results to: {output_file}")
+                # Write with header as expected by the R script
+                final_bed_df.to_csv(
+                    randomforest_bed_output, sep="\t", index=False, header=True
+                )
+                
+                # Validate BED file format
+                logger.info(f"BED file created with shape: {final_bed_df.shape}")
+                logger.info(f"BED file columns: {final_bed_df.columns.tolist()}")
+                
+                # Check if we have the required columns for R script
+                required_columns = ['chr', 'start', 'end', 'strand', 'cov', 'methylation_percent']
+                missing_required = [col for col in required_columns if col not in final_bed_df.columns]
+                if missing_required:
+                    raise ValueError(f"Missing required columns for R script: {missing_required}")
+
+                # Check if BED file is not empty
+                if final_bed_df.empty:
+                    raise ValueError("BED file is empty - no methylation data to process")
+                
+                # Verify the file was written correctly
+                if os.path.exists(randomforest_bed_output):
+                    file_size = os.path.getsize(randomforest_bed_output)
+                    logger.info(f"BED file written successfully, size: {file_size} bytes")
                 else:
-                    # First run - save new results
-                    scores_to_save.to_csv(output_file, index=False)
-                    logger.info(f"Saved initial results to: {output_file}")
+                    raise FileNotFoundError("BED file was not created")
                 
-                random_forest_result.votes_file_path = votes_file
-                random_forest_result.scores_file_path = output_file
-                random_forest_result.processing_steps.append("results_saved")
+                random_forest_result.bed_file_path = randomforest_bed_output
+                random_forest_result.processing_steps.append("bed_file_created")
                 
-                # Store results in metadata
-                random_forest_result.results = {
-                    "analysis_time": time.time() - start_time,
-                    "batch_number": self.bambatch[sample_id],
-                    "votes_file": votes_file,
-                    "scores_file": output_file,
-                    "bed_file": randomforest_bed_output,
-                    "scores_shape": scores_to_save.shape,
-                    "processing_steps": random_forest_result.processing_steps.copy()
-                }
+                # Step 8: Run the R script
+                logger.info("Attempting to run R script...")
+                try:
+                    run_rcns2(rcns2folder, self.bambatch[sample_id], randomforest_bed_output, self.threads, self.showerrors)
+                    logger.info("R script completed successfully")
+                    random_forest_result.processing_steps.append("r_script_completed")
+                except Exception as e:
+                    logger.error(f"Error running R script: {str(e)}", exc_info=True)
+                    raise
                 
-                # Increment batch number for next run
-                self.bambatch[sample_id] += 1
-                
-                logger.info(f"Random Forest analysis completed for {sample_id} in {time.time() - start_time:.2f}s")
-                
-            else:
-                raise FileNotFoundError(f"Votes file not found: {votes_file}")
+                # Step 9: Process results
+                votes_file = f"{rcns2folder}/live_{self.bambatch[sample_id]}_votes.tsv"
+                if os.path.isfile(votes_file):
+                    logger.info(f"Found votes file: {votes_file}")
+                    scores = pd.read_table(votes_file, sep=r"\s+")
+                    logger.debug(f"Original scores shape: {scores.shape}")
+                    logger.debug(f"Original scores columns: {list(scores.columns)}")
+                    logger.debug(f"Original scores head:\n{scores.head()}")
+                    
+                    # Process scores correctly - drop Freq column and transpose
+                    scores_to_save = scores.drop(columns=["Freq"]).T
+                    logger.debug(f"After transpose shape: {scores_to_save.shape}")
+                    logger.debug(f"After transpose columns: {list(scores_to_save.columns)}")
+                    logger.debug(f"After transpose index: {list(scores_to_save.index)}")
+                    
+                    # Add timestamp column
+                    scores_to_save["timestamp"] = start_time * 1000  # Convert to milliseconds
+                    
+                    # Reorder columns to put timestamp first
+                    cols = scores_to_save.columns.tolist()
+                    cols.insert(0, cols.pop(cols.index("timestamp")))
+                    scores_to_save = scores_to_save[cols]
+                    
+                    # Load existing results if available and accumulate
+                    output_file = os.path.join(sample_dir, "random_forest_scores.csv")
+                    if os.path.exists(output_file):
+                        try:
+                            logger.info(f"Loading existing results from: {output_file}")
+                            existing_scores = pd.read_csv(output_file)
+                            logger.info(f"Found {len(existing_scores)} existing results")
+                            
+                            # Append new results to existing data
+                            combined_scores = pd.concat([existing_scores, scores_to_save], ignore_index=True)
+                            logger.info(f"Combined results: {len(combined_scores)} total entries")
+                            
+                            # Save accumulated results
+                            combined_scores.to_csv(output_file, index=False)
+                            logger.info(f"Saved accumulated results to: {output_file}")
+                            
+                        except Exception as e:
+                            logger.warning(f"Error loading existing results, saving new results only: {e}")
+                            scores_to_save.to_csv(output_file, index=False)
+                            logger.info(f"Saved new results to: {output_file}")
+                    else:
+                        # First run - save new results
+                        scores_to_save.to_csv(output_file, index=False)
+                        logger.info(f"Saved initial results to: {output_file}")
+                    
+                    random_forest_result.votes_file_path = votes_file
+                    random_forest_result.scores_file_path = output_file
+                    random_forest_result.processing_steps.append("results_saved")
+                    
+                    # Store results in metadata
+                    random_forest_result.results = {
+                        "analysis_time": time.time() - start_time,
+                        "batch_number": self.bambatch[sample_id],
+                        "votes_file": votes_file,
+                        "scores_file": output_file,
+                        "bed_file": randomforest_bed_output,
+                        "scores_shape": scores_to_save.shape,
+                        "processing_steps": random_forest_result.processing_steps.copy()
+                    }
+                    
+                    # Increment batch number for next run
+                    self.bambatch[sample_id] += 1
+                    
+                    logger.info(f"Random Forest analysis completed for {sample_id} in {time.time() - start_time:.2f}s")
+                    
+                else:
+                    raise FileNotFoundError(f"Votes file not found: {votes_file}")
+                    
+            finally:
+                # Clean up temporary directory
+                try:
+                    if os.path.exists(rcns2folder):
+                        shutil.rmtree(rcns2folder, ignore_errors=True)
+                        logger.debug(f"Cleaned up temporary directory: {rcns2folder}")
+                except Exception as e:
+                    logger.warning(f"Failed to clean up temporary directory {rcns2folder}: {e}")
             
         except Exception as e:
             error_msg = f"Random Forest analysis failed for {sample_id}: {str(e)}"

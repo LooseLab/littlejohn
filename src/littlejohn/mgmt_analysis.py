@@ -287,8 +287,19 @@ def process_bam_file(bam_path: str, metadata: Dict[str, Any], work_dir: str, thr
         
         mgmt_result.processing_steps.append("file_validation")
         
-        # Step 2: Check if BAM file contains MGMT spanning reads
-        has_mgmt_reads = has_reads(bam_path, "chr10", 129467242, 129467244)
+        # Step 2: Check if BAM file contains MGMT spanning reads using preprocessing data
+        # This saves time by using the MGMT read detection that was already performed during BAM preprocessing
+        has_mgmt_reads = metadata.get('has_mgmt_reads', False)
+        mgmt_read_count = metadata.get('mgmt_read_count', 0)
+        
+        # Log the MGMT read information from preprocessing
+        logger.info(f"MGMT read information from preprocessing: has_mgmt_reads={has_mgmt_reads}, count={mgmt_read_count}")
+        
+        # Fallback: if preprocessing data is not available, run our own check
+        if 'has_mgmt_reads' not in metadata:
+            logger.warning("MGMT read information not found in preprocessing metadata, running own check")
+            has_mgmt_reads = has_reads(bam_path, "chr10", 129467242, 129467244)
+            mgmt_read_count = 0  # We don't have the count from the fallback check
         
         if not has_mgmt_reads:
             mgmt_result.processing_steps.append("no_mgmt_reads")
@@ -461,7 +472,8 @@ def process_bam_file(bam_path: str, metadata: Dict[str, Any], work_dir: str, thr
                 "methylartist": shutil.which("methylartist") is not None
             },
             "hv_path": hv_path,
-            "hv_path_source": "robin_module" if HVPATH and hv_path == HVPATH else "fallback"
+            "hv_path_source": "robin_module" if HVPATH and hv_path == HVPATH else "fallback",
+            "mgmt_read_count_from_preprocessing": mgmt_read_count
         }
         
         mgmt_result.processing_steps.append("analysis_complete")
@@ -544,7 +556,8 @@ def mgmt_handler(job, work_dir=None):
                     'status': 'no_mgmt_reads',
                     'sample_id': mgmt_result.sample_id,
                     'processing_steps': mgmt_result.processing_steps,
-                    'message': mgmt_result.error_message
+                    'message': mgmt_result.error_message,
+                    'mgmt_read_count_from_preprocessing': mgmt_result.results.get('mgmt_read_count_from_preprocessing', 0)
                 })
                 logger.info(f"MGMT analysis completed - {mgmt_result.error_message}")
             else:
@@ -558,7 +571,8 @@ def mgmt_handler(job, work_dir=None):
                 'analysis_time': mgmt_result.results.get('analysis_time', 0),
                 'mgmt_bam_file': mgmt_result.results.get('mgmt_bam_file', ''),
                 'processing_steps': mgmt_result.processing_steps,
-                'tools_available': mgmt_result.results.get('tools_available', {})
+                'tools_available': mgmt_result.results.get('tools_available', {}),
+                'mgmt_read_count_from_preprocessing': mgmt_result.results.get('mgmt_read_count_from_preprocessing', 0)
             })
             logger.info(f"MGMT analysis complete for {os.path.basename(bam_path)}")
             logger.info(f"Sample ID: {mgmt_result.sample_id}")
