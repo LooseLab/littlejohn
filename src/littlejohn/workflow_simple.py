@@ -524,13 +524,14 @@ class WorkflowManager:
             try:
                 job = job_queue.get(timeout=1.0)
                 
-                # Track job start time and active status
+                # Track job start time and active status (this includes queue waiting time)
                 self.job_start_times[job.job_id] = time.time()
                 self.active_jobs[job.job_id] = {
                     'job_type': job.job_type,
                     'filepath': job.context.filepath,
                     'worker': name,
-                    'start_time': time.time()
+                    'start_time': time.time(),
+                    'processing_start_time': None  # Will be set when actual processing starts
                 }
                 
                 # Get job-specific logger
@@ -544,6 +545,9 @@ class WorkflowManager:
                     logger.debug(f"Marked {job.job_type} job as running for sample {sample_id}")
                 
                 try:
+                    # Set processing start time right before calling the handler (excludes queue waiting time)
+                    self.active_jobs[job.job_id]['processing_start_time'] = time.time()
+                    
                     handlers[job.job_type](job)
                     
                     # Track this job as completed regardless of whether it has a next job
@@ -799,10 +803,17 @@ class WorkflowManager:
             worker = job_info['worker']
             if worker not in active_by_worker:
                 active_by_worker[worker] = []
+            
+            # Use processing_start_time if available (excludes queue waiting time), otherwise fall back to start_time
+            if job_info.get('processing_start_time') is not None:
+                duration = time.time() - job_info['processing_start_time']
+            else:
+                duration = time.time() - job_info['start_time']
+            
             active_by_worker[worker].append({
                 'job_type': job_info['job_type'],
                 'filepath': job_info['filepath'],
-                'duration': time.time() - job_info['start_time']
+                'duration': duration
             })
         
         # Calculate total expected jobs based on completed + failed + active + queued

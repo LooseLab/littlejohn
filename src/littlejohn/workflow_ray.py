@@ -1,0 +1,1291 @@
+"""Ray-based workflow management system for LittleJohn using distributed computing."""
+
+import os
+import time
+import threading
+import queue
+import itertools
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Any, Set, Union
+import pickle
+
+import ray
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
+from tqdm import tqdm
+
+from littlejohn.logging_config import get_job_logger
+
+
+# === Shared Context for Each File ===
+@dataclass
+class WorkflowContext:
+    """Context object that tracks metadata and results for each file being processed."""
+    filepath: str
+    metadata: dict = field(default_factory=dict)
+    results: dict = field(default_factory=dict)
+    history: list = field(default_factory=list)
+    errors: list = field(default_factory=list)
+
+    def add_metadata(self, key: str, value: Any) -> None:
+        """Add metadata to the context."""
+        self.metadata[key] = value
+
+    def add_result(self, job_type: str, result: Any) -> None:
+        """Add a result from a job to the context."""
+        self.results[job_type] = result
+        self.history.append(job_type)
+
+    def add_error(self, job_type: str, error: str) -> None:
+        """Add an error to the context."""
+        self.errors.append({"job_type": job_type, "error": error, "timestamp": time.time()})
+
+    def get_summary(self) -> dict:
+        """Get a summary of the workflow execution."""
+        return {
+            "filepath": self.filepath,
+            "metadata": self.metadata,
+            "results": self.results,
+            "history": self.history,
+            "errors": self.errors,
+            "success": len(self.errors) == 0
+        }
+
+    def get_sample_id(self) -> str:
+        """Get the sample ID from metadata."""
+        bam_metadata = self.metadata.get('bam_metadata', {})
+        return bam_metadata.get('sample_id', 'unknown')
+
+
+# === Job Object ===
+@dataclass
+class Job:
+    """Represents a single job in the workflow."""
+    job_id: int
+    job_type: str
+    context: WorkflowContext
+    origin: str  # queue type
+    workflow: List[str]
+    step: int = 0
+    dependencies: Set[str] = field(default_factory=set)  # Job types this job depends on
+    triggers: Set[str] = field(default_factory=set)  # Job types this job can trigger
+
+    def next_job(self) -> Optional['Job']:
+        """Create the next job in the workflow if available."""
+        if self.step + 1 < len(self.workflow):
+            next_step = self.workflow[self.step + 1]
+            if not isinstance(next_step, str):
+                raise ValueError(f"Expected string in workflow step, got {type(next_step)}: {next_step}")
+            
+            if ':' not in next_step:
+                raise ValueError(f"Invalid workflow step format (missing ':'): {next_step}")
+                
+            queue_type, next_type = next_step.split(":", 1)
+            return Job(
+                job_id=self.job_id,
+                job_type=next_type,
+                context=self.context,
+                origin=queue_type,
+                workflow=self.workflow,
+                step=self.step + 1
+            )
+        return None
+
+    def get_sample_id(self) -> str:
+        """Get the sample ID for this job."""
+        return self.context.get_sample_id()
+
+    def can_trigger_jobs(self) -> List['Job']:
+        """Create all jobs that can be triggered by this job's completion."""
+        triggered_jobs = []
+        
+        # Define job dependencies and triggers
+        job_dependencies = {
+            # Jobs that depend on preprocessing
+            "bed_conversion": {"preprocessing"},
+            "mgmt": {"preprocessing"},
+            "cnv": {"preprocessing"},
+            "target": {"preprocessing"},
+            "fusion": {"preprocessing"},
+            
+            # Jobs that depend on bed_conversion
+            "sturgeon": {"bed_conversion"},
+            "nanodx": {"bed_conversion"},
+            "pannanodx": {"bed_conversion"},
+            "random_forest": {"bed_conversion"},
+        }
+        
+        # Get the original workflow plan to check what jobs are actually requested
+        original_workflow = self.context.metadata.get("original_workflow", [])
+        if original_workflow:
+            workflow_job_types = []
+            for step in original_workflow:
+                if isinstance(step, str) and ':' in step:
+                    queue_type, job_type = step.split(':', 1)
+                    workflow_job_types.append(job_type)
+            original_workflow = workflow_job_types
+        else:
+            original_workflow = []
+            for step in self.workflow:
+                if isinstance(step, str) and ':' in step:
+                    queue_type, job_type = step.split(':', 1)
+                    original_workflow.append(job_type)
+        
+        # Check if this job can trigger other jobs
+        for job_type, dependencies in job_dependencies.items():
+            if self.job_type in dependencies:
+                # Check if all dependencies are met
+                all_deps_met = True
+                for dep in dependencies:
+                    if dep not in self.context.history and dep != self.job_type:
+                        all_deps_met = False
+                        break
+                
+                # Only trigger if the job is in the original workflow plan
+                if all_deps_met and job_type in original_workflow:
+                    queue_type = self._get_queue_type_for_job(job_type)
+                    triggered_job = Job(
+                        job_id=next(_job_id_counter),
+                        job_type=job_type,
+                        context=self.context,
+                        origin=queue_type,
+                        workflow=[f"{queue_type}:{job_type}"],
+                        step=0,
+                        dependencies=dependencies,
+                        triggers=set()
+                    )
+                    triggered_jobs.append(triggered_job)
+        
+        return triggered_jobs
+
+    def _get_queue_type_for_job(self, job_type: str) -> str:
+        """Get the queue type for a given job type."""
+        queue_mapping = {
+            "preprocessing": "preprocessing",
+            "bed_conversion": "bed_conversion",
+            "mgmt": "mgmt",
+            "cnv": "cnv",
+            "target": "target",
+            "fusion": "fusion",
+            "sturgeon": "classification",
+            "nanodx": "classification",
+            "pannanodx": "classification",
+            "random_forest": "slow",
+        }
+        return queue_mapping.get(job_type, "slow")
+
+
+# Global job ID counter
+_job_id_counter = itertools.count(1)
+
+
+# === Ray Actors for Job Processing ===
+@ray.remote
+class JobProcessor:
+    """Ray actor for processing jobs in parallel."""
+    
+    def __init__(self, queue_type: str, handlers: Dict[str, Callable], log_level: str, verbose: bool):
+        self.queue_type = queue_type
+        self.handlers = handlers
+        self.processed_jobs = 0
+        self.failed_jobs = 0
+        self.log_level = log_level
+        self.verbose = verbose
+        
+        # Configure logging for this actor
+        self._configure_logging()
+        
+    def _configure_logging(self):
+        """Configure logging for this Ray actor."""
+        try:
+            from littlejohn.logging_config import configure_logging
+            configure_logging(global_level=self.log_level)
+            # Only print initialization message if verbose mode is enabled
+            # This prevents interference with progress bars
+            if self.verbose:
+                print(f"JobProcessor for {self.queue_type} initialized with log level: {self.log_level}")
+        except Exception as e:
+            # Only print warnings if verbose mode is enabled
+            if self.verbose:
+                print(f"Warning: Could not configure logging for {self.queue_type} actor: {e}")
+        
+    def process_job(self, job_data: bytes) -> Dict[str, Any]:
+        """Process a job and return the result."""
+        try:
+            # Deserialize the job
+            job = pickle.loads(job_data)
+            
+            # Get job-specific logger
+            logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
+            
+            # Set log level for this job if needed
+            if hasattr(logger, 'setLevel'):
+                import logging
+                level_map = {
+                    "DEBUG": logging.DEBUG,
+                    "INFO": logging.INFO,
+                    "WARNING": logging.WARNING,
+                    "ERROR": logging.ERROR
+                }
+                logger.setLevel(level_map.get(self.log_level, logging.INFO))
+            
+            logger.info(f"Starting job {job.job_id} ({job.job_type}) for {job.context.filepath}")
+            
+            # Record the actual processing start time (excludes queue waiting time)
+            processing_start_time = time.time()
+            
+            # Process the job
+            if job.job_type in self.handlers:
+                try:
+                    self.handlers[job.job_type](job)
+                    logger.info(f"Job {job.job_id} ({job.job_type}) completed successfully")
+                    self.processed_jobs += 1
+                    
+                    # Return updated context and triggered jobs
+                    return {
+                        'status': 'success',
+                        'job_id': job.job_id,
+                        'job_type': job.job_type,
+                        'context': job.context,
+                        'triggered_jobs': job.can_trigger_jobs(),
+                        'next_job': job.next_job(),
+                        'processing_start_time': processing_start_time
+                    }
+                except Exception as handler_error:
+                    error_msg = f"Handler execution failed: {str(handler_error)}"
+                    job.context.add_error(job.job_type, error_msg)
+                    logger.error(f"Job {job.job_id} failed: {error_msg}")
+                    self.failed_jobs += 1
+                    return {
+                        'status': 'error',
+                        'job_id': job.job_id,
+                        'job_type': job.job_type,
+                        'context': job.context,
+                        'error': error_msg,
+                        'processing_start_time': processing_start_time
+                    }
+            else:
+                available_handlers = list(self.handlers.keys())
+                error_msg = f"No handler found for job type: {job.job_type}. Available handlers: {available_handlers}"
+                job.context.add_error(job.job_type, error_msg)
+                logger.error(f"Job {job.job_id} failed: {error_msg}")
+                self.failed_jobs += 1
+                return {
+                    'status': 'error',
+                    'job_id': job.job_id,
+                    'job_type': job.job_type,
+                    'context': job.context,
+                    'error': error_msg,
+                    'processing_start_time': processing_start_time
+                }
+                
+        except Exception as e:
+            error_msg = f"Job processing failed: {str(e)}"
+            if self.verbose:
+                print(f"JobProcessor {self.queue_type} error: {error_msg}")
+            self.failed_jobs += 1
+            return {
+                'status': 'error',
+                'job_id': job.job_id if 'job' in locals() else 'unknown',
+                'job_type': job.job_type if 'job' in locals() else 'unknown',
+                'error': error_msg,
+                'processing_start_time': time.time() if 'processing_start_time' not in locals() else processing_start_time
+            }
+    
+    def get_stats(self) -> Dict[str, int]:
+        """Get processing statistics."""
+        return {
+            'processed_jobs': self.processed_jobs,
+            'failed_jobs': self.failed_jobs
+        }
+
+
+# === Ray-based Workflow Manager ===
+class RayWorkflowManager:
+    """Manages job queues and execution using Ray for distributed computing."""
+
+    def __init__(self, verbose: bool = False, analysis_workers: int = 1, use_separate_analysis_queues: bool = True, log_level: str = "INFO"):
+        # Initialize Ray if not already initialized
+        if not ray.is_initialized():
+            # Suppress Ray logging to prevent interference with progress bars
+            self._suppress_ray_logging()
+            ray.init(ignore_reinit_error=True)
+        
+        self.verbose = verbose
+        self.use_separate_analysis_queues = use_separate_analysis_queues
+        self.analysis_workers_count = analysis_workers
+        self.log_level = log_level
+        
+        # Job handlers for each queue type
+        self.job_handlers_preprocessing: Dict[str, Callable] = {}
+        self.job_handlers_bed_conversion: Dict[str, Callable] = {}
+        
+        if use_separate_analysis_queues:
+            self.job_handlers_mgmt: Dict[str, Callable] = {}
+            self.job_handlers_cnv: Dict[str, Callable] = {}
+            self.job_handlers_target: Dict[str, Callable] = {}
+            self.job_handlers_fusion: Dict[str, Callable] = {}
+        else:
+            self.job_handlers_analysis: Dict[str, Callable] = {}
+        
+        self.job_handlers_classification: Dict[str, Callable] = {}
+        self.job_handlers_slow: Dict[str, Callable] = {}
+        
+        # Ray actors for job processing
+        self.processors = {}
+        self.running = True
+        
+        # Job tracking
+        self.completed_jobs = []
+        self.failed_jobs = []
+        self.active_jobs = {}
+        self.job_start_times = {}
+        self.completed_jobs_by_type = {}
+        self.failed_jobs_by_type = {}
+        self.progress_lock = threading.Lock()
+        self.total_jobs_enqueued = 0
+        self.total_jobs_skipped = 0
+        
+        # Job deduplication
+        self.deduplicate_job_types: Set[str] = {"sturgeon", "nanodx", "pannanodx", "random_forest"}
+        self.running_jobs_by_sample: Dict[str, Dict[str, int]] = {}
+        self.pending_jobs_by_sample: Dict[str, Dict[str, int]] = {}
+        self.job_tracking_lock = threading.Lock()
+        
+        # Priority system
+        self.queue_priorities = {
+            # High priority - critical path jobs
+            "preprocessing": 10,      # Highest priority - must complete first
+            "bed_conversion": 9,      # High priority - needed for downstream jobs
+            
+            # Medium priority - analysis jobs that can run in parallel
+            "mgmt": 5,
+            "cnv": 5,
+            "target": 5,
+            "fusion": 5,
+            "analysis": 5,  # Legacy mode
+            
+            # Lower priority - classification and slow jobs
+            "classification": 3,
+            "slow": 1,
+        }
+        
+        # Priority-based job queues
+        self.priority_queues = {
+            10: [],  # preprocessing
+            9: [],   # bed_conversion
+            5: [],   # analysis jobs
+            3: [],   # classification
+            1: [],   # slow jobs
+        }
+        
+        # Initialize processors
+        self._initialize_processors()
+    
+    def _suppress_ray_logging(self):
+        """Suppress Ray logging to prevent interference with progress bars."""
+        import logging
+        
+        # Suppress all Ray-related loggers
+        ray_loggers = [
+            "ray", "ray.worker", "ray.remote", "ray.actor", "ray.util",
+            "ray.raylet", "ray.gcs", "ray.core", "ray.serve"
+        ]
+        
+        for logger_name in ray_loggers:
+            logger = logging.getLogger(logger_name)
+            logger.setLevel(logging.ERROR)
+            # Also disable propagation to prevent messages from bubbling up
+            logger.propagate = False
+    
+    def _initialize_processors(self):
+        """Initialize Ray actors for job processing."""
+        # Preprocessing processor (1 worker)
+        self.processors['preprocessing'] = [
+            JobProcessor.remote("preprocessing", self.job_handlers_preprocessing, self.log_level, self.verbose)
+        ]
+        
+        # Bed conversion processor (1 worker)
+        self.processors['bed_conversion'] = [
+            JobProcessor.remote("bed_conversion", self.job_handlers_bed_conversion, self.log_level, self.verbose)
+        ]
+        
+        # Analysis processors
+        if self.use_separate_analysis_queues:
+            # Separate processors for each analysis job type
+            self.processors['mgmt'] = [
+                JobProcessor.remote("mgmt", self.job_handlers_mgmt, self.log_level, self.verbose)
+                for _ in range(self.analysis_workers_count)
+            ]
+            self.processors['cnv'] = [
+                JobProcessor.remote("cnv", self.job_handlers_cnv, self.log_level, self.verbose)
+                for _ in range(self.analysis_workers_count)
+            ]
+            self.processors['target'] = [
+                JobProcessor.remote("target", self.job_handlers_target, self.log_level, self.verbose)
+                for _ in range(self.analysis_workers_count)
+            ]
+            self.processors['fusion'] = [
+                JobProcessor.remote("fusion", self.job_handlers_fusion, self.log_level, self.verbose)
+                for _ in range(self.analysis_workers_count)
+            ]
+        else:
+            # Single analysis processor
+            self.processors['analysis'] = [
+                JobProcessor.remote("analysis", self.job_handlers_analysis, self.log_level, self.verbose)
+                for _ in range(self.analysis_workers_count)
+            ]
+        
+        # Classification processor (1 worker)
+        self.processors['classification'] = [
+            JobProcessor.remote("classification", self.job_handlers_classification, self.log_level, self.verbose)
+        ]
+        
+        # Slow processor (1 worker)
+        self.processors['slow'] = [
+            JobProcessor.remote("slow", self.job_handlers_slow, self.log_level, self.verbose)
+        ]
+    
+    def register_handler(self, queue_type: str, job_type: str, handler: Callable[[Job], None]) -> None:
+        """Register a handler for a specific job type and queue."""
+        if queue_type == "preprocessing":
+            self.job_handlers_preprocessing[job_type] = handler
+        elif queue_type == "bed_conversion":
+            self.job_handlers_bed_conversion[job_type] = handler
+        elif queue_type == "analysis":
+            if not self.use_separate_analysis_queues:
+                self.job_handlers_analysis[job_type] = handler
+            else:
+                raise ValueError(f"Cannot register 'analysis' queue handler in separate analysis queues mode")
+        elif queue_type == "mgmt":
+            if self.use_separate_analysis_queues:
+                self.job_handlers_mgmt[job_type] = handler
+            else:
+                raise ValueError(f"Cannot register 'mgmt' queue handler in legacy analysis queue mode")
+        elif queue_type == "cnv":
+            if self.use_separate_analysis_queues:
+                self.job_handlers_cnv[job_type] = handler
+            else:
+                raise ValueError(f"Cannot register 'cnv' queue handler in legacy analysis queue mode")
+        elif queue_type == "target":
+            if self.use_separate_analysis_queues:
+                self.job_handlers_target[job_type] = handler
+            else:
+                raise ValueError(f"Cannot register 'target' queue handler in legacy analysis queue mode")
+        elif queue_type == "fusion":
+            if self.use_separate_analysis_queues:
+                self.job_handlers_fusion[job_type] = handler
+            else:
+                raise ValueError(f"Cannot register 'fusion' queue handler in legacy analysis queue mode")
+        elif queue_type == "classification":
+            self.job_handlers_classification[job_type] = handler
+        elif queue_type == "slow":
+            self.job_handlers_slow[job_type] = handler
+        else:
+            raise ValueError(f"Invalid queue type: {queue_type}")
+        
+        # Update existing processors with new handler
+        self._update_processors_with_handlers()
+    
+    def _update_processors_with_handlers(self):
+        """Update existing Ray actors with new handlers."""
+        # This is a simplified approach - in a production system, you might want to
+        # recreate the actors or use a more sophisticated handler update mechanism
+        if self.verbose:
+            print(f"Handlers updated - processors will use new handlers for next jobs")
+    
+    def _reinitialize_processors(self):
+        """Reinitialize Ray actors with current handlers."""
+        if self.verbose:
+            print("Reinitializing Ray processors with registered handlers...")
+        
+        # Shutdown existing processors
+        for queue_type, processors in self.processors.items():
+            for processor in processors:
+                try:
+                    ray.kill(processor)
+                except:
+                    pass  # Ignore errors if processor is already dead
+        
+        # Reinitialize processors with current handlers
+        self._initialize_processors()
+        
+        if self.verbose:
+            print("Ray processors reinitialized successfully")
+    
+    def add_deduplication_job_type(self, job_type: str) -> None:
+        """Add a job type to the deduplication list."""
+        self.deduplicate_job_types.add(job_type)
+    
+    def set_queue_priority(self, queue_type: str, priority: int) -> None:
+        """Set the priority for a specific queue type."""
+        if priority < 1 or priority > 10:
+            raise ValueError("Priority must be between 1 and 10")
+        
+        self.queue_priorities[queue_type] = priority
+        
+        # Ensure the priority queue exists
+        if priority not in self.priority_queues:
+            self.priority_queues[priority] = []
+        
+        if self.verbose:
+            print(f"Set priority for queue '{queue_type}' to {priority}")
+    
+    def get_queue_priority(self, queue_type: str) -> int:
+        """Get the priority for a specific queue type."""
+        return self.queue_priorities.get(queue_type, 1)
+    
+    def get_priority_info(self) -> Dict[str, Any]:
+        """Get information about queue priorities and job counts."""
+        priority_info = {
+            'queue_priorities': self.queue_priorities.copy(),
+            'priority_queue_counts': {},
+            'active_jobs_by_priority': {}
+        }
+        
+        # Count jobs in each priority queue
+        for priority, queue in self.priority_queues.items():
+            priority_info['priority_queue_counts'][priority] = len(queue)
+        
+        # Count active jobs by priority
+        for job_id, job_info in self.active_jobs.items():
+            priority = job_info.get('priority', 1)
+            if priority not in priority_info['active_jobs_by_priority']:
+                priority_info['active_jobs_by_priority'][priority] = 0
+            priority_info['active_jobs_by_priority'][priority] += 1
+        
+        return priority_info
+    
+    def print_priority_status(self) -> None:
+        """Print the current status of priority queues."""
+        print("\n=== Priority Queue Status ===")
+        
+        # Print queue priorities
+        print("Queue Priorities:")
+        for queue_type, priority in sorted(self.queue_priorities.items(), key=lambda x: x[1], reverse=True):
+            print(f"  {queue_type}: {priority}")
+        
+        # Print job counts in each priority queue
+        print("\nJobs in Priority Queues:")
+        for priority in sorted(self.priority_queues.keys(), reverse=True):
+            count = len(self.priority_queues[priority])
+            if count > 0:
+                print(f"  Priority {priority}: {count} jobs")
+        
+        # Print active jobs by priority
+        active_by_priority = {}
+        for job_id, job_info in self.active_jobs.items():
+            priority = job_info.get('priority', 1)
+            if priority not in active_by_priority:
+                active_by_priority[priority] = 0
+            active_by_priority[priority] += 1
+        
+        if active_by_priority:
+            print("\nActive Jobs by Priority:")
+            for priority in sorted(active_by_priority.keys(), reverse=True):
+                print(f"  Priority {priority}: {active_by_priority[priority]} jobs")
+        
+        print()
+    
+    def _can_enqueue_job_for_sample(self, job_type: str, sample_id: str) -> bool:
+        """Check if a job can be enqueued for the sample (max 2: 1 running + 1 pending)."""
+        with self.job_tracking_lock:
+            running_count = self.running_jobs_by_sample.get(sample_id, {}).get(job_type, 0)
+            pending_count = self.pending_jobs_by_sample.get(sample_id, {}).get(job_type, 0)
+            return running_count + pending_count < 2
+    
+    def _mark_job_pending_for_sample(self, job_type: str, sample_id: str) -> None:
+        """Mark a job as pending for a sample."""
+        with self.job_tracking_lock:
+            if sample_id not in self.pending_jobs_by_sample:
+                self.pending_jobs_by_sample[sample_id] = {}
+            if job_type not in self.pending_jobs_by_sample[sample_id]:
+                self.pending_jobs_by_sample[sample_id][job_type] = 0
+            self.pending_jobs_by_sample[sample_id][job_type] += 1
+    
+    def _mark_job_running_for_sample(self, job_type: str, sample_id: str) -> None:
+        """Mark a job as running for a sample."""
+        with self.job_tracking_lock:
+            if sample_id not in self.running_jobs_by_sample:
+                self.running_jobs_by_sample[sample_id] = {}
+            if job_type not in self.running_jobs_by_sample[sample_id]:
+                self.running_jobs_by_sample[sample_id][job_type] = 0
+            self.running_jobs_by_sample[sample_id][job_type] += 1
+            
+            # Decrease pending count
+            if sample_id in self.pending_jobs_by_sample and job_type in self.pending_jobs_by_sample[sample_id]:
+                self.pending_jobs_by_sample[sample_id][job_type] = max(0, self.pending_jobs_by_sample[sample_id][job_type] - 1)
+    
+    def _unmark_job_for_sample(self, job_type: str, sample_id: str) -> None:
+        """Unmark a job as running for a sample."""
+        with self.job_tracking_lock:
+            if sample_id in self.running_jobs_by_sample and job_type in self.running_jobs_by_sample[sample_id]:
+                self.running_jobs_by_sample[sample_id][job_type] = max(0, self.running_jobs_by_sample[sample_id][job_type] - 1)
+    
+    def enqueue_jobs(self, jobs: List[Job]) -> None:
+        """Enqueue jobs for processing using Ray with priority-based scheduling."""
+        for job in jobs:
+            # Check deduplication
+            if job.job_type in self.deduplicate_job_types:
+                sample_id = job.get_sample_id()
+                if not self._can_enqueue_job_for_sample(job.job_type, sample_id):
+                    with self.progress_lock:
+                        self.total_jobs_skipped += 1
+                    continue
+                self._mark_job_pending_for_sample(job.job_type, sample_id)
+            
+            # Determine queue type
+            queue_type = self._get_queue_type_for_job(job.job_type)
+            
+            # Get priority for this queue
+            priority = self.queue_priorities.get(queue_type, 1)
+            
+            # Add job to priority queue
+            self.priority_queues[priority].append({
+                'job': job,
+                'queue_type': queue_type,
+                'priority': priority,
+                'timestamp': time.time()
+            })
+            
+            # Track the job
+            with self.progress_lock:
+                self.total_jobs_enqueued += 1
+            
+            if self.verbose:
+                print(f"Enqueued job {job.job_id} ({job.job_type}) with priority {priority}")
+    
+    def _process_priority_queues(self) -> None:
+        """Process jobs from priority queues in order of priority."""
+        # Process queues in priority order (highest to lowest)
+        for priority in sorted(self.priority_queues.keys(), reverse=True):
+            queue = self.priority_queues[priority]
+            
+            # Process jobs in this priority queue
+            while queue:
+                job_info = queue[0]  # Get the first job in the queue
+                job = job_info['job']
+                queue_type = job_info['queue_type']
+                
+                # Check if we can process this job
+                if self._can_process_job(job, queue_type):
+                    # Remove from priority queue
+                    queue.pop(0)
+                    
+                    # Submit job to Ray
+                    self._submit_job_to_ray(job, queue_type)
+                else:
+                    # Can't process this job yet, move to next priority level
+                    break
+    
+    def _can_process_job(self, job: Job, queue_type: str) -> bool:
+        """Check if a job can be processed based on available processors."""
+        if queue_type in self.processors:
+            processors = self.processors[queue_type]
+            if processors:
+                # Check if any processor is available (not too busy)
+                # For now, we'll use a simple check - in a more sophisticated system,
+                # we could track processor load
+                return True
+        return False
+    
+    def _submit_job_to_ray(self, job: Job, queue_type: str) -> None:
+        """Submit a job to Ray for processing."""
+        processors = self.processors[queue_type]
+        if processors:
+            # Round-robin selection for load balancing
+            processor = processors[len(self.completed_jobs) % len(processors)]
+            
+            # Serialize job for Ray
+            job_data = pickle.dumps(job)
+            
+            # Submit job to Ray
+            future = processor.process_job.remote(job_data)
+            
+            # Track the job
+            with self.progress_lock:
+                self.active_jobs[job.job_id] = {
+                    'job_type': job.job_type,
+                    'filepath': job.context.filepath,
+                    'queue_type': queue_type,
+                    'priority': self.queue_priorities.get(queue_type, 1),
+                    'start_time': time.time(),
+                    'processing_start_time': None,  # Will be set when actual processing starts
+                    'future': future
+                }
+                self.job_start_times[job.job_id] = time.time()
+            
+            if self.verbose:
+                print(f"Submitted job {job.job_id} ({job.job_type}) to Ray with priority {self.queue_priorities.get(queue_type, 1)}")
+        else:
+            if self.verbose:
+                print(f"Warning: No processors available for queue type: {queue_type}")
+    
+    def _get_queue_type_for_job(self, job_type: str) -> str:
+        """Get the queue type for a given job type."""
+        if self.use_separate_analysis_queues:
+            queue_mapping = {
+                "preprocessing": "preprocessing",
+                "bed_conversion": "bed_conversion",
+                "mgmt": "mgmt",
+                "cnv": "cnv",
+                "target": "target",
+                "fusion": "fusion",
+                "sturgeon": "classification",
+                "nanodx": "classification",
+                "pannanodx": "classification",
+                "random_forest": "slow",
+            }
+        else:
+            queue_mapping = {
+                "preprocessing": "preprocessing",
+                "bed_conversion": "bed_conversion",
+                "mgmt": "analysis",
+                "cnv": "analysis",
+                "target": "analysis",
+                "fusion": "analysis",
+                "sturgeon": "classification",
+                "nanodx": "classification",
+                "pannanodx": "classification",
+                "random_forest": "slow",
+            }
+        return queue_mapping.get(job_type, "slow")
+    
+    def process_completed_jobs(self) -> None:
+        """Process completed jobs and handle their results."""
+        completed_futures = []
+        
+        # Check for completed jobs
+        for job_id, job_info in list(self.active_jobs.items()):
+            future = job_info['future']
+            try:
+                # Check if the future is ready using the correct Ray API
+                # Use ray.wait() with timeout=0 to check if future is ready
+                ready_futures, _ = ray.wait([future], timeout=0)
+                if ready_futures:
+                    # Future is ready, get the result
+                    result = ray.get(future)
+                    completed_futures.append((job_id, result))
+                else:
+                    # Future is not ready yet, skip for now
+                    continue
+                    
+            except Exception as e:
+                if self.verbose:
+                    print(f"Error checking future for job {job_id}: {e}")
+                completed_futures.append((job_id, {
+                    'status': 'error',
+                    'job_id': job_id,
+                    'job_type': job_info['job_type'],
+                    'error': str(e)
+                }))
+            finally:
+                # Remove from active jobs if completed
+                if job_id in [j[0] for j in completed_futures]:
+                    del self.active_jobs[job_id]
+                    if job_id in self.job_start_times:
+                        del self.job_start_times[job_id]
+        
+        # Process completed jobs
+        for job_id, result in completed_futures:
+            # Update processing_start_time if available in the result
+            if job_id in self.active_jobs and 'processing_start_time' in result:
+                self.active_jobs[job_id]['processing_start_time'] = result['processing_start_time']
+            
+            if result['status'] == 'success':
+                self.completed_jobs.append(job_id)
+                
+                # Update context if available
+                if 'context' in result:
+                    # In a real implementation, you'd want to merge the context
+                    # For now, we'll just track the completion
+                    pass
+                
+                # Handle triggered jobs
+                if 'triggered_jobs' in result and result['triggered_jobs']:
+                    self.enqueue_jobs(result['triggered_jobs'])
+                
+                # Handle next job
+                if 'next_job' in result and result['next_job']:
+                    self.enqueue_jobs([result['next_job']])
+                
+                # Track completion by job type
+                with self.progress_lock:
+                    job_type = result['job_type']
+                    if job_type not in self.completed_jobs_by_type:
+                        self.completed_jobs_by_type[job_type] = 0
+                    self.completed_jobs_by_type[job_type] += 1
+                
+                # Unmark job for deduplication
+                if job_type in self.deduplicate_job_types and 'context' in result:
+                    sample_id = result['context'].get_sample_id()
+                    self._unmark_job_for_sample(job_type, sample_id)
+            
+            else:
+                self.failed_jobs.append(job_id)
+                with self.progress_lock:
+                    job_type = result.get('job_type', 'unknown')
+                    if job_type not in self.failed_jobs_by_type:
+                        self.failed_jobs_by_type[job_type] = 0
+                    self.failed_jobs_by_type[job_type] += 1
+    
+    def _worker_loop(self) -> None:
+        """Main worker loop for processing jobs."""
+        while self.running:
+            # Process priority queues
+            for priority in sorted(self.queue_priorities.values(), reverse=True):
+                queue_type = next((q for q, p in self.queue_priorities.items() if p == priority), None)
+                if queue_type and hasattr(self, f'priority_queue_{queue_type}'):
+                    queue = getattr(self, f'priority_queue_{queue_type}')
+                    while not queue.empty():
+                        job = queue.get()
+                        if self._can_process_job(job, queue_type):
+                            self._submit_job_to_ray(job, queue_type)
+                            if self.verbose:
+                                print(f"Enqueued job {job.job_id} ({job.job_type}) with priority {priority}")
+                        else:
+                            # Put job back in queue if it can't be processed yet
+                            queue.put(job)
+                            break
+            
+            # Process completed jobs
+            self.process_completed_jobs()
+            
+            time.sleep(0.1)  # Small delay to prevent busy waiting
+    
+    def run(self) -> None:
+        """Run the workflow manager."""
+        if self.verbose:
+            print("Starting Ray-based workflow manager with priority scheduling...")
+        
+        self.running = True
+        
+        # Start worker threads
+        self.worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
+        self.worker_thread.start()
+        
+        # Wait for worker thread to complete
+        self.worker_thread.join()
+    
+    def stop(self, timeout: float = 30.0) -> bool:
+        """Stop the workflow manager."""
+        if self.verbose:
+            print("Stopping Ray-based workflow manager...")
+        
+        self.running = False
+        
+        # Wait for worker thread to finish
+        if hasattr(self, 'worker_thread') and self.worker_thread.is_alive():
+            self.worker_thread.join(timeout=timeout)
+            return not self.worker_thread.is_alive()
+        
+        return True
+    
+    def get_stats(self) -> dict:
+        """Get workflow statistics."""
+        with self.progress_lock:
+            # Get active jobs by worker type (for Ray, we'll group by queue type)
+            active_by_worker = {}
+            for job_id, job_info in self.active_jobs.items():
+                queue_type = job_info['queue_type']
+                if queue_type not in active_by_worker:
+                    active_by_worker[queue_type] = []
+                
+                # Use processing_start_time if available (excludes queue waiting time), otherwise fall back to start_time
+                if job_info.get('processing_start_time') is not None:
+                    duration = time.time() - job_info['processing_start_time']
+                else:
+                    duration = time.time() - job_info['start_time']
+                
+                # Get sample ID from filepath
+                sample_id = os.path.basename(job_info['filepath']).replace('.bam', '') if job_info['filepath'] else 'unknown'
+                
+                active_by_worker[queue_type].append({
+                    'job_type': job_info['job_type'],
+                    'filepath': job_info['filepath'],
+                    'sample_id': sample_id,
+                    'duration': duration
+                })
+            
+            # Calculate queue sizes
+            queue_sizes = {}
+            for queue_type in ['preprocessing', 'bed_conversion', 'mgmt', 'cnv', 'target', 'fusion', 'analysis', 'classification', 'slow']:
+                queue_sizes[queue_type] = 0
+            
+            # Count jobs in each queue (this would need to be implemented based on your queue structure)
+            # For now, we'll use a placeholder
+            
+            return {
+                'total_jobs_enqueued': self.total_jobs_enqueued,
+                'total_jobs_skipped': getattr(self, 'total_jobs_skipped', 0),
+                'total_processed': len(self.completed_jobs),
+                'total_actual_jobs': self.total_jobs_enqueued,  # This should exclude skipped jobs
+                'active_jobs': len(self.active_jobs),
+                'completed_jobs': len(self.completed_jobs),
+                'failed_jobs': len(self.failed_jobs),
+                'completed_by_type': self.completed_jobs_by_type.copy(),
+                'failed_by_type': self.failed_jobs_by_type.copy(),
+                'active_by_worker': active_by_worker,
+                'queue_sizes': queue_sizes
+            }
+
+    def is_running(self) -> bool:
+        """Check if the workflow manager is running."""
+        return self.running
+
+
+# === Ray-based File Watcher ===
+class RayFileWatcher(FileSystemEventHandler):
+    """File watcher that uses Ray for job processing."""
+    
+    def __init__(
+        self,
+        watch_dir: str,
+        preprocessor_func: Callable[[str], List[Job]],
+        manager: RayWorkflowManager,
+        recursive: bool = True,
+        patterns: Optional[List[str]] = None,
+        ignore_patterns: Optional[List[str]] = None,
+        verbose: bool = False,
+        show_progress: bool = True
+    ):
+        self.watch_dir = watch_dir
+        self.preprocessor_func = preprocessor_func
+        self.manager = manager
+        self.recursive = recursive
+        self.patterns = patterns or ["*.bam"]
+        self.ignore_patterns = ignore_patterns or []
+        self.verbose = verbose
+        self.show_progress = show_progress
+        self.observer = Observer()
+        self.processed_files = set()
+    
+    def _should_process_file(self, filepath: str) -> bool:
+        """Check if a file should be processed."""
+        if filepath in self.processed_files:
+            return False
+        
+        # Check patterns
+        if not any(filepath.endswith(pattern.replace("*", "")) for pattern in self.patterns):
+            return False
+        
+        # Check ignore patterns
+        if any(pattern in filepath for pattern in self.ignore_patterns):
+            return False
+        
+        return True
+    
+    def handle_file(self, filepath: str) -> None:
+        """Handle a file by creating and enqueuing jobs."""
+        if self._should_process_file(filepath):
+            try:
+                jobs = self.preprocessor_func(filepath)
+                if jobs:
+                    self.manager.enqueue_jobs(jobs)
+                    self.processed_files.add(filepath)
+                    if self.verbose:
+                        print(f"Enqueued {len(jobs)} jobs for {filepath}")
+            except Exception as e:
+                if self.verbose:
+                    print(f"Error processing file {filepath}: {e}")
+    
+    def on_created(self, event) -> None:
+        """Handle file creation events."""
+        if not event.is_directory:
+            self.handle_file(event.src_path)
+    
+    def on_modified(self, event) -> None:
+        """Handle file modification events."""
+        if not event.is_directory:
+            self.handle_file(event.src_path)
+    
+    def start(self, process_existing: bool = True) -> None:
+        """Start watching the directory."""
+        if process_existing:
+            self._process_existing_files()
+        
+        self.observer.schedule(self, self.watch_dir, recursive=self.recursive)
+        self.observer.start()
+    
+    def _process_existing_files(self) -> None:
+        """Process existing files in the watch directory."""
+        if self.verbose:
+            print(f"Processing existing files in {self.watch_dir}...")
+        
+        for root, dirs, files in os.walk(self.watch_dir):
+            for file in files:
+                if self._should_process_file(os.path.join(root, file)):
+                    self.handle_file(os.path.join(root, file))
+    
+    def stop(self, timeout: float = 30.0) -> bool:
+        """Stop watching the directory."""
+        self.observer.stop()
+        return self.observer.join(timeout=timeout)
+
+
+# === Ray-based Workflow Runner ===
+class RayWorkflowRunner:
+    """Main workflow runner that uses Ray for distributed computing."""
+    
+    def __init__(self, verbose: bool = False, analysis_workers: int = 1, use_separate_analysis_queues: bool = True, log_level: str = "INFO"):
+        self.verbose = verbose
+        self.log_level = log_level
+        self.manager = RayWorkflowManager(
+            verbose=verbose,
+            analysis_workers=analysis_workers,
+            use_separate_analysis_queues=use_separate_analysis_queues,
+            log_level=log_level
+        )
+    
+    def register_handler(self, queue_type: str, job_type: str, handler: Callable[[Job], None]) -> None:
+        """Register a handler for a specific job type and queue."""
+        self.manager.register_handler(queue_type, job_type, handler)
+    
+    def register_command_handler(self, queue_type: str, job_type: str, command_template: str) -> None:
+        """Register a command handler."""
+        def handler(job: Job) -> None:
+            # Implementation for command handling
+            pass
+        self.manager.register_handler(queue_type, job_type, handler)
+    
+    def run_workflow(
+        self,
+        watch_dir: str,
+        workflow_plan: List[str],
+        recursive: bool = True,
+        patterns: Optional[List[str]] = None,
+        ignore_patterns: Optional[List[str]] = None,
+        classifier_func: Optional[Callable] = None,
+        process_existing: bool = True,
+        show_progress: bool = True
+    ) -> None:
+        """Run the workflow using Ray for distributed computing."""
+        # Use the provided classifier or default
+        if classifier_func is None:
+            classifier_func = lambda filepath: default_file_classifier(filepath, workflow_plan)
+        
+        # Create file watcher
+        watcher = RayFileWatcher(
+            watch_dir=watch_dir,
+            preprocessor_func=classifier_func,
+            manager=self.manager,
+            recursive=recursive,
+            patterns=patterns,
+            ignore_patterns=ignore_patterns,
+            verbose=self.verbose,
+            show_progress=show_progress
+        )
+        
+        # Start the workflow
+        try:
+            watcher.start(process_existing=process_existing)
+            
+            # Start progress monitoring in a separate thread if show_progress is enabled
+            if show_progress:
+                progress_thread = threading.Thread(target=self._monitor_progress, args=(watcher,), daemon=True)
+                progress_thread.start()
+            
+            self.manager.run()
+        except KeyboardInterrupt:
+            if self.verbose:
+                print("Stopping workflow...")
+            self.manager.stop(timeout=5.0)
+            watcher.stop(timeout=5.0)
+            if self.verbose:
+                print("Workflow stopped by user")
+        except Exception as e:
+            if self.verbose:
+                print(f"Error: {e}")
+            self.manager.stop(timeout=5.0)
+            watcher.stop(timeout=5.0)
+            raise
+
+    def _monitor_progress(self, watcher) -> None:
+        """Monitor and display worker progress in real-time."""
+        import time
+        
+        # Suppress Ray logging to prevent interference with tqdm
+        import logging
+        ray_logger = logging.getLogger("ray")
+        ray_logger.setLevel(logging.ERROR)
+        
+        # Also suppress other potentially noisy loggers
+        logging.getLogger("ray.worker").setLevel(logging.ERROR)
+        logging.getLogger("ray.remote").setLevel(logging.ERROR)
+        logging.getLogger("ray.actor").setLevel(logging.ERROR)
+        
+        # Create progress bars for each worker type
+        preprocessing_pbar = tqdm(
+            desc="Preprocessing",
+            unit="jobs",
+            position=0,
+            leave=True
+        )
+        bed_conversion_pbar = tqdm(
+            desc="Bed Conversion",
+            unit="jobs",
+            position=1,
+            leave=True
+        )
+        mgmt_pbar = tqdm(
+            desc="MGMT",
+            unit="jobs",
+            position=2,
+            leave=True
+        )
+        cnv_pbar = tqdm(
+            desc="CNV",
+            unit="jobs",
+            position=3,
+            leave=True
+        )
+        target_pbar = tqdm(
+            desc="Target",
+            unit="jobs",
+            position=4,
+            leave=True
+        )
+        fusion_pbar = tqdm(
+            desc="Fusion",
+            unit="jobs",
+            position=5,
+            leave=True
+        )
+        classification_pbar = tqdm(
+            desc="Classification",
+            unit="jobs",
+            position=6,
+            leave=True
+        )
+        slow_pbar = tqdm(
+            desc="Slow",
+            unit="jobs",
+            position=7,
+            leave=True
+        )
+        
+        # Create overall progress bar
+        overall_pbar = tqdm(
+            desc="Overall Progress",
+            unit="jobs",
+            position=8,
+            leave=True
+        )
+        
+        progress_bars = {
+            "preprocessing": preprocessing_pbar,
+            "bed_conversion": bed_conversion_pbar,
+            "mgmt": mgmt_pbar,
+            "cnv": cnv_pbar,
+            "target": target_pbar,
+            "fusion": fusion_pbar,
+            "classification": classification_pbar,
+            "slow": slow_pbar
+        }
+        
+        # Track job type completion counts
+        job_type_completion = {
+            "preprocessing": 0,
+            "bed_conversion": 0,
+            "mgmt": 0,
+            "cnv": 0,
+            "target": 0,
+            "fusion": 0,
+            "classification": 0,
+            "slow": 0
+        }
+        
+        last_stats = None
+        
+        try:
+            while self.manager.is_running():
+                stats = self.manager.get_stats()
+                
+                # Update overall progress using total actual jobs (excluding skipped)
+                total_processed = stats.get("total_processed", 0)
+                total_actual_jobs = stats.get("total_actual_jobs", 0)
+                
+                # Ensure we have valid numbers
+                if total_processed is None:
+                    total_processed = 0
+                if total_actual_jobs is None:
+                    total_actual_jobs = 0
+                
+                if total_actual_jobs > 0:
+                    overall_pbar.total = total_actual_jobs
+                    overall_pbar.n = total_processed
+                    overall_pbar.set_postfix_str(
+                        f"Active: {stats.get('active_jobs', 0)} | "
+                        f"Completed: {total_processed}/{total_actual_jobs}"
+                    )
+                
+                # Update individual progress bars
+                for queue_type, pbar in progress_bars.items():
+                    if queue_type in stats.get("completed_by_type", {}):
+                        completed = stats["completed_by_type"][queue_type]
+                        if completed is not None and completed > job_type_completion[queue_type]:
+                            pbar.n = completed
+                            pbar.total = max(completed, pbar.total)
+                            
+                            # Show active job info if available
+                            active_info = ""
+                            if queue_type in stats.get("active_by_worker", {}):
+                                active_jobs = stats["active_by_worker"][queue_type]
+                                if active_jobs:
+                                    # Get the first active job for display
+                                    first_job = active_jobs[0]
+                                    sample_id = first_job.get("sample_id", "unknown")
+                                    duration = first_job.get("duration", 0)
+                                    if duration is not None:
+                                        active_info = f"{sample_id}({duration:.0f}s)"
+                                    else:
+                                        active_info = f"{sample_id}(?)"
+                            
+                            pbar.set_postfix_str(active_info)
+                            job_type_completion[queue_type] = completed
+                
+                # Update queue sizes display
+                if stats.get("queue_sizes"):
+                    queue_info = []
+                    for queue_type, size in stats["queue_sizes"].items():
+                        if size and size > 0:
+                            queue_info.append(f"{queue_type}:{size}")
+                    
+                    if queue_info:
+                        overall_pbar.set_postfix_str(
+                            f"Active: {stats.get('active_jobs', 0)} | "
+                            f"Completed: {total_processed}/{total_actual_jobs} | "
+                            f"Queues: {', '.join(queue_info)}"
+                        )
+                
+                time.sleep(0.5)  # Update every 500ms
+                
+        except Exception as e:
+            print(f"Progress monitoring error: {e}")
+        finally:
+            # Close all progress bars
+            for pbar in progress_bars.values():
+                pbar.close()
+            overall_pbar.close()
+
+
+def default_file_classifier(filepath: str, workflow_plan: List[str]) -> List[Job]:
+    """Default file classifier that creates jobs based on the workflow plan."""
+    jobs = []
+    context = WorkflowContext(filepath=filepath)
+    
+    for step in workflow_plan:
+        if ':' in step:
+            queue_type, job_type = step.split(':', 1)
+            job = Job(
+                job_id=next(_job_id_counter),
+                job_type=job_type,
+                context=context,
+                origin=queue_type,
+                workflow=workflow_plan,
+                step=workflow_plan.index(step)
+            )
+            jobs.append(job)
+    
+    return jobs
