@@ -541,12 +541,16 @@ def _display_workflow_config(path: Path, work_dir: Optional[Path], workflow_step
     "--show-priorities", is_flag=True, 
     help="Show current queue priorities and exit. Only used when --use-ray is specified."
 )
+@click.option(
+    "--with-gui", is_flag=True, 
+    help="Launch a NiceGUI interface with vertical tabs and splitter for workflow monitoring."
+)
 def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool, 
             no_process_existing: bool, work_dir: Optional[Path], log_level: str, 
             job_log_level: tuple[str, ...], deduplicate_jobs: tuple[str, ...], 
             no_progress: bool, analysis_workers: int, legacy_analysis_queue: bool, 
             use_ray: bool, ray_num_cpus: Optional[int], queue_priority: tuple[str, ...], 
-            show_priorities: bool) -> None:
+            show_priorities: bool, with_gui: bool) -> None:
     """Run various operations on BAM files in a directory. Preprocessing is automatically included as the first step."""
     try:
         # Validate input parameters
@@ -634,6 +638,45 @@ def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool
                                job_levels, deduplicate_jobs, legacy_analysis_queue, analysis_workers, 
                                no_process_existing, uses_simplified_format, workflow, use_ray, ray_num_cpus,
                                queue_priority)
+        
+        # Launch GUI if requested
+        gui_launcher = None
+        if with_gui:
+            try:
+                click.echo("🚀 Launching NiceGUI workflow monitor with vertical tabs...")
+                
+                # Import the new GUI launcher
+                try:
+                    from littlejohn.gui_launcher import launch_gui
+                    
+                    # Install workflow state hooks for real-time monitoring
+                    try:
+                        from littlejohn.workflow_hooks import install_workflow_hooks
+                        install_workflow_hooks(runner, workflow_steps, str(path))
+                        click.echo("✅ Workflow state hooks installed for real-time monitoring")
+                    except Exception as e:
+                        click.echo(f"⚠️  Failed to install workflow hooks: {e}. GUI will show static information only.")
+                    
+                    # Launch GUI using the new launcher
+                    gui_launcher = launch_gui(
+                        host="localhost",
+                        port=8081,
+                        show=False,
+                        workflow_runner=runner,
+                        workflow_steps=workflow_steps,
+                        monitored_directory=str(path)
+                    )
+                    
+                    click.echo("✅ GUI launched successfully on http://localhost:8081")
+                    click.echo("   Open your browser to monitor the workflow with vertical tabs and splitter")
+                    click.echo("   The GUI will run in the background while the workflow executes")
+                    
+                except ImportError as e:
+                    click.echo(f"❌ Failed to import GUI launcher: {e}")
+                    click.echo("   Please ensure the gui_launcher module is available")
+                    
+            except Exception as e:
+                click.echo(f"⚠️  Failed to launch GUI: {e}. Continuing with workflow only.", err=True)
         
         # Run the workflow
         runner.run_workflow(
