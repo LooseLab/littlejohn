@@ -187,14 +187,25 @@ class WorkflowStateHooks:
             # Store original handlers, handling None cases
             original_handlers = {}
             
-            if hasattr(manager, 'job_handlers_preprocessing') and manager.job_handlers_preprocessing:
-                original_handlers.update(manager.job_handlers_preprocessing)
-            if hasattr(manager, 'job_handlers_analysis') and manager.job_handlers_analysis:
-                original_handlers.update(manager.job_handlers_analysis)
-            if hasattr(manager, 'job_handlers_classification') and manager.job_handlers_classification:
-                original_handlers.update(manager.job_handlers_classification)
-            if hasattr(manager, 'job_handlers_slow') and manager.job_handlers_slow:
-                original_handlers.update(manager.job_handlers_slow)
+            # Check all possible handler locations
+            handler_locations = [
+                ('preprocessing', 'job_handlers_preprocessing'),
+                ('bed_conversion', 'job_handlers_bed_conversion'),
+                ('mgmt', 'job_handlers_mgmt'),
+                ('cnv', 'job_handlers_cnv'),
+                ('target', 'job_handlers_target'),
+                ('fusion', 'job_handlers_fusion'),
+                ('analysis', 'job_handlers_analysis'),
+                ('classification', 'job_handlers_classification'),
+                ('slow', 'job_handlers_slow'),
+            ]
+            
+            for queue_type, attr_name in handler_locations:
+                if hasattr(manager, attr_name) and getattr(manager, attr_name):
+                    handlers = getattr(manager, attr_name)
+                    if handlers:
+                        original_handlers.update(handlers)
+                        logging.debug(f"Found {len(handlers)} handlers in {attr_name}")
             
             if not original_handlers:
                 logging.warning("No handlers found to enhance - skipping enhanced worker hooks")
@@ -204,14 +215,24 @@ class WorkflowStateHooks:
             def create_tracked_handler(original_handler, job_type):
                 def tracked_handler(job):
                     try:
-                        # Track job start
-                        workflow_state.add_job(
-                            job_id=job.job_id,
-                            job_type=job.job_type,
-                            filepath=job.context.filepath,
-                            sample_id=Path(job.context.filepath).stem,
-                            queue_name=self._get_queue_name_for_job_type(job.job_type)
-                        )
+                        # Check if job already exists in workflow state
+                        existing_job = None
+                        try:
+                            existing_job = workflow_state.jobs.get(job.job_id)
+                        except:
+                            pass
+                        
+                        if not existing_job:
+                            # Only add job if it doesn't already exist
+                            workflow_state.add_job(
+                                job_id=job.job_id,
+                                job_type=job.job_type,
+                                filepath=job.context.filepath,
+                                sample_id=Path(job.context.filepath).stem,
+                                queue_name=self._get_queue_name_for_job_type(job.job_type)
+                            )
+                        
+                        # Start the job
                         workflow_state.start_job(job.job_id, f"Worker-{job_type}")
                         
                         # Add log message
@@ -224,6 +245,13 @@ class WorkflowStateHooks:
                         
                         # Call original handler
                         result = original_handler(job)
+                        
+                        # Capture and store the actual job metadata and results
+                        if hasattr(job.context, 'metadata') and job.context.metadata:
+                            workflow_state.store_job_metadata(job.job_id, job.context.metadata)
+                        
+                        if hasattr(job.context, 'results') and job.context.results:
+                            workflow_state.store_job_results(job.job_id, job.context.results)
                         
                         # Track successful completion
                         workflow_state.complete_job(job.job_id)
@@ -253,15 +281,13 @@ class WorkflowStateHooks:
             for job_type, handler in original_handlers.items():
                 tracked_handler = create_tracked_handler(handler, job_type)
                 
-                # Update in all handler dictionaries
-                if hasattr(manager, 'job_handlers_preprocessing') and manager.job_handlers_preprocessing and job_type in manager.job_handlers_preprocessing:
-                    manager.job_handlers_preprocessing[job_type] = tracked_handler
-                if hasattr(manager, 'job_handlers_analysis') and manager.job_handlers_analysis and job_type in manager.job_handlers_analysis:
-                    manager.job_handlers_analysis[job_type] = tracked_handler
-                if hasattr(manager, 'job_handlers_classification') and manager.job_handlers_classification and job_type in manager.job_handlers_classification:
-                    manager.job_handlers_classification[job_type] = tracked_handler
-                if hasattr(manager, 'job_handlers_slow') and manager.job_handlers_slow and job_type in manager.job_handlers_slow:
-                    manager.job_handlers_slow[job_type] = tracked_handler
+                # Update in all handler dictionaries where this job type exists
+                for queue_type, attr_name in handler_locations:
+                    if hasattr(manager, attr_name) and getattr(manager, attr_name):
+                        handlers = getattr(manager, attr_name)
+                        if job_type in handlers:
+                            handlers[job_type] = tracked_handler
+                            logging.debug(f"Updated {job_type} handler in {attr_name}")
             
             logging.info(f"Enhanced worker hooks installed for {len(original_handlers)} handlers (handler-based)")
             

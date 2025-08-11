@@ -664,7 +664,7 @@ def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool
                         show=False,
                         workflow_runner=runner,
                         workflow_steps=workflow_steps,
-                        monitored_directory=str(path)
+                        monitored_directory=str(work_dir) if work_dir else str(path)
                     )
                     
                     click.echo("✅ GUI launched successfully on http://localhost:8081")

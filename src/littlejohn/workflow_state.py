@@ -52,7 +52,7 @@ class WorkflowEvent:
 
 @dataclass
 class JobInfo:
-    """Information about a specific job."""
+    """Information about a job in the workflow."""
     job_id: int
     job_type: str
     filepath: str
@@ -63,7 +63,10 @@ class JobInfo:
     duration: Optional[float] = None
     worker_name: Optional[str] = None
     error_message: Optional[str] = None
-    progress: float = 0.0  # 0.0 to 1.0
+    progress: float = 0.0
+    # Add fields for storing actual job results and metadata
+    job_metadata: Dict[str, Any] = field(default_factory=dict)
+    job_results: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -238,7 +241,9 @@ class WorkflowState:
                 duration=None,
                 worker_name=None,
                 error_message=None,
-                progress=0.0
+                progress=0.0,
+                job_metadata={},
+                job_results={}
             )
             
             self.jobs[job_id] = job_info
@@ -318,6 +323,32 @@ class WorkflowState:
                     sample_id=job.sample_id,
                     data={"duration": job.duration}
                 ))
+    
+    def store_job_metadata(self, job_id: int, metadata: Dict[str, Any]):
+        """Store metadata for a specific job."""
+        with self._lock:
+            if job_id in self.jobs:
+                self.jobs[job_id].job_metadata.update(metadata)
+    
+    def store_job_results(self, job_id: int, results: Dict[str, Any]):
+        """Store results for a specific job."""
+        with self._lock:
+            if job_id in self.jobs:
+                self.jobs[job_id].job_results.update(results)
+    
+    def get_job_metadata(self, job_id: int) -> Optional[Dict[str, Any]]:
+        """Get metadata for a specific job."""
+        with self._lock:
+            if job_id in self.jobs:
+                return self.jobs[job_id].job_metadata
+            return None
+    
+    def get_job_results(self, job_id: int) -> Optional[Dict[str, Any]]:
+        """Get results for a specific job."""
+        with self._lock:
+            if job_id in self.jobs:
+                return self.jobs[job_id].job_results
+            return None
     
     def fail_job(self, job_id: int, error_message: str):
         """Mark a job as failed."""
@@ -463,9 +494,23 @@ class WorkflowState:
                 } for name, qs in self.queue_status.items()}
             }
     
-    def get_jobs_by_status(self, status: JobStatus) -> List[JobInfo]:
-        """Get all jobs with a specific status."""
+    def get_jobs_by_status(self, status) -> List[JobInfo]:
+        """Get all jobs with a specific status.
+        
+        Args:
+            status: Can be either a JobStatus enum value or a string representation
+                   (e.g., "completed", "running", "failed", "pending")
+        """
         with self._lock:
+            # Handle both string and enum inputs
+            if isinstance(status, str):
+                # Convert string to JobStatus enum
+                try:
+                    status = JobStatus(status.lower())
+                except ValueError:
+                    # If invalid status string, return empty list
+                    return []
+            
             return [job for job in self.jobs.values() if job.status == status]
     
     def get_jobs_by_type(self, job_type: str) -> List[JobInfo]:
