@@ -1260,7 +1260,7 @@ class GUILauncher:
         return f"http://{self.host}:{self.port}"
 
 
-def launch_gui(host: str = "localhost", port: int = 8081, show: bool = False, 
+def launch_gui(host = "0.0.0.0",port: int = 8081, show: bool = False, 
                workflow_runner: Any = None, workflow_steps: list = None, 
                monitored_directory: str = "") -> GUILauncher:
     """Launch the LittleJohn workflow GUI."""
