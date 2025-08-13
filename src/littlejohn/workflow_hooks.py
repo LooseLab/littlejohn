@@ -127,7 +127,18 @@ def _start_polling_updates(manager: Any, interval_seconds: float = 1.5) -> None:
         last_log_sent = 0.0
         while True:
             try:
-                stats = manager.get_stats()
+                start_poll = time.time()
+                stats = None
+                try:
+                    stats = manager.get_stats()
+                except Exception as inner_exc:
+                    logging.warning(f"[GUI] Poll get_stats() failed: {inner_exc}")
+                    # continue to next iteration after sleep
+                    raise
+                finally:
+                    elapsed = time.time() - start_poll
+                    if elapsed > 5.0:
+                        logging.warning(f"[GUI] Poll slow get_stats: {elapsed:.2f}s")
                 now = time.time()
                 logging.info(
                     f"[GUI] Poll: active={stats.get('active_jobs', 0)}, completed={stats.get('completed', 0)}, "
@@ -272,7 +283,7 @@ def _start_polling_updates(manager: Any, interval_seconds: float = 1.5) -> None:
                     pass
 
             except Exception as exc:
-                logging.debug(f"Polling error: {exc}")
+                logging.error(f"[GUI] Polling error: {exc}")
             finally:
                 time.sleep(interval_seconds)
 
