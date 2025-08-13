@@ -289,6 +289,12 @@ class WorkflowManager:
         self.failed_jobs_by_type = {}  # job_type -> count (failed jobs only)
         self.progress_lock = threading.Lock()  # Lock for progress tracking
         
+        # Per-sample tracking for GUI/monitoring
+        # sample_id -> {
+        #   'sample_id', 'active_jobs', 'total_jobs', 'completed_jobs', 'failed_jobs', 'job_types' (set), 'last_seen'
+        # }
+        self.samples_by_id: Dict[str, Dict[str, Any]] = {}
+        
         # Define job type mappings to queues
         if use_separate_analysis_queues:
             self.job_queue_mapping = {
@@ -529,6 +535,7 @@ class WorkflowManager:
                 self.active_jobs[job.job_id] = {
                     'job_type': job.job_type,
                     'filepath': job.context.filepath,
+                    'sample_id': job.get_sample_id() if hasattr(job, 'get_sample_id') else 'unknown',
                     'worker': name,
                     'start_time': time.time(),
                     'processing_start_time': None  # Will be set when actual processing starts
@@ -543,6 +550,11 @@ class WorkflowManager:
                     sample_id = job.get_sample_id()
                     self._mark_job_running_for_sample(job.job_type, sample_id)
                     logger.debug(f"Marked {job.job_type} job as running for sample {sample_id}")
+
+                # Per-sample start tracking (when sample_id is known)
+                sid_start = job.get_sample_id()
+                if sid_start and sid_start != 'unknown':
+                    self._on_sample_job_started(sid_start, job.job_type)
                 
                 try:
                     # Set processing start time right before calling the handler (excludes queue waiting time)
@@ -588,6 +600,11 @@ class WorkflowManager:
                     
                     logger.error(f"Job {job.job_id} failed: {error_msg}")
                 finally:
+                    # Per-sample finish tracking (prefer sample_id after handler updated context)
+                    sid_finish = job.get_sample_id()
+                    if sid_finish and sid_finish != 'unknown':
+                        self._on_sample_job_finished(sid_finish, job.job_type, job.job_id in self.completed_jobs)
+                    
                     # Remove from active jobs
                     if job.job_id in self.active_jobs:
                         del self.active_jobs[job.job_id]
@@ -813,6 +830,7 @@ class WorkflowManager:
             active_by_worker[worker].append({
                 'job_type': job_info['job_type'],
                 'filepath': job_info['filepath'],
+                'sample_id': job_info.get('sample_id', 'unknown'),
                 'duration': duration
             })
         
@@ -841,6 +859,20 @@ class WorkflowManager:
         # Calculate total jobs that were actually enqueued (excluding skipped jobs)
         total_actual_jobs = self.total_jobs_enqueued
         
+        # Prepare samples payload (copy to avoid race conditions)
+        samples_payload: List[Dict[str, Any]] = []
+        with self.progress_lock:
+            for sid, info in self.samples_by_id.items():
+                samples_payload.append({
+                    'sample_id': info['sample_id'],
+                    'active_jobs': info['active_jobs'],
+                    'total_jobs': info['total_jobs'],
+                    'completed_jobs': info['completed_jobs'],
+                    'failed_jobs': info['failed_jobs'],
+                    'job_types': list(info['job_types']),
+                    'last_seen': info['last_seen'],
+                })
+
         return {
             "completed": len(self.completed_jobs),
             "failed": len(self.failed_jobs),
@@ -852,6 +884,7 @@ class WorkflowManager:
             "active_jobs": len(self.active_jobs),
             "completed_by_type": self.completed_jobs_by_type.copy(),  # Make a copy to avoid threading issues
             "failed_by_type": self.failed_jobs_by_type.copy(),  # Make a copy to avoid threading issues
+            "samples": samples_payload,
             "queue_sizes": {
                 "preprocessing": preprocessing_queue_size,
                 "bed_conversion": bed_conversion_queue_size,
@@ -865,6 +898,43 @@ class WorkflowManager:
             },
             "active_by_worker": active_by_worker
         }
+
+    # === Per-sample tracking helpers ===
+    def _ensure_sample_entry(self, sample_id: str) -> Dict[str, Any]:
+        with self.progress_lock:
+            if sample_id not in self.samples_by_id:
+                self.samples_by_id[sample_id] = {
+                    'sample_id': sample_id,
+                    'active_jobs': 0,
+                    'total_jobs': 0,
+                    'completed_jobs': 0,
+                    'failed_jobs': 0,
+                    'job_types': set(),
+                    'last_seen': time.time(),
+                }
+            return self.samples_by_id[sample_id]
+
+    def _on_sample_job_started(self, sample_id: str, job_type: str) -> None:
+        entry = self._ensure_sample_entry(sample_id)
+        with self.progress_lock:
+            entry['active_jobs'] += 1
+            entry['total_jobs'] += 1
+            if job_type:
+                entry['job_types'].add(job_type)
+            entry['last_seen'] = time.time()
+
+    def _on_sample_job_finished(self, sample_id: str, job_type: str, success: bool) -> None:
+        entry = self._ensure_sample_entry(sample_id)
+        with self.progress_lock:
+            if entry['active_jobs'] > 0:
+                entry['active_jobs'] -= 1
+            if success:
+                entry['completed_jobs'] += 1
+            else:
+                entry['failed_jobs'] += 1
+            if job_type:
+                entry['job_types'].add(job_type)
+            entry['last_seen'] = time.time()
 
 
 # === File Watcher ===

@@ -98,40 +98,29 @@ class WorkflowState:
         
         # Job tracking
         self.jobs: Dict[int, JobInfo] = {}
-        self.jobs_by_type: Dict[str, List[int]] = {}
-        self.jobs_by_sample: Dict[str, List[int]] = {}
-        self.jobs_by_file: Dict[str, List[int]] = {}
+        self.next_job_id: int = 1
         
-        # Queue status
-        self.queue_status: Dict[str, QueueStatus] = {
-            "preprocessing": QueueStatus("preprocessing"),
-            "bed_conversion": QueueStatus("bed_conversion"),
-            "mgmt": QueueStatus("mgmt"),
-            "cnv": QueueStatus("cnv"),
-            "target": QueueStatus("target"),
-            "fusion": QueueStatus("fusion"),
-            "classification": QueueStatus("classification"),
-            "slow": QueueStatus("slow"),
-        }
+        # Sample tracking - NEW: Track all sample IDs seen during processing
+        self.samples: Dict[str, Dict[str, Any]] = {}
+        self.sample_jobs: Dict[str, List[int]] = {}  # sample_id -> list of job_ids
         
-        # File tracking
-        self.detected_files: Set[str] = set()
-        self.processed_files: Set[str] = set()
-        self.failed_files: Set[str] = set()
+        # Queue tracking
+        self.queues: Dict[str, QueueStatus] = {}
         
         # Event system
         self.event_listeners: List[Callable[[WorkflowEvent], None]] = []
         self.event_queue: queue.Queue = queue.Queue()
-        self.event_thread: Optional[threading.Thread] = None
         
         # Logging
-        self.log_messages: List[Dict[str, Any]] = []
-        self.max_log_messages: int = 1000
+        self.logs: List[Dict[str, Any]] = []
+        self.log_listeners: List[Callable[[Dict[str, Any]], None]] = []
         
-        # Thread safety
-        self._lock = threading.RLock()
+        # Threading
+        self._lock = threading.Lock()
+        self._event_thread = None
+        self._stop_event = threading.Event()
         
-        # Start event processing thread
+        # Start event processing
         self._start_event_processor()
     
     def _start_event_processor(self):
@@ -178,6 +167,7 @@ class WorkflowState:
     def start_workflow(self, workflow_steps: List[str], monitored_directory: str):
         """Start a new workflow."""
         with self._lock:
+            # Reset state for new workflow
             self.workflow_start_time = time.time()
             self.workflow_end_time = None
             self.is_running = True
@@ -186,21 +176,10 @@ class WorkflowState:
             
             # Reset state
             self.jobs.clear()
-            self.jobs_by_type.clear()
-            self.jobs_by_sample.clear()
-            self.jobs_by_file.clear()
-            self.detected_files.clear()
-            self.processed_files.clear()
-            self.failed_files.clear()
-            self.log_messages.clear()
-            
-            # Reset queue status
-            for queue_status in self.queue_status.values():
-                queue_status.pending_count = 0
-                queue_status.running_count = 0
-                queue_status.completed_count = 0
-                queue_status.failed_count = 0
-                queue_status.total_count = 0
+            self.samples.clear()
+            self.sample_jobs.clear()
+            self.queues.clear()
+            self.logs.clear()
             
             # Emit workflow started event
             self.emit_event(WorkflowEvent(
@@ -228,8 +207,9 @@ class WorkflowState:
             ))
     
     def add_job(self, job_id: int, job_type: str, filepath: str, sample_id: str, queue_name: str):
-        """Add a new job to the workflow."""
+        """Add a new job to the workflow state."""
         with self._lock:
+            # Create job info
             job_info = JobInfo(
                 job_id=job_id,
                 job_type=job_type,
@@ -246,83 +226,214 @@ class WorkflowState:
                 job_results={}
             )
             
+            # Store job
             self.jobs[job_id] = job_info
             
-            # Update job type tracking
-            if job_type not in self.jobs_by_type:
-                self.jobs_by_type[job_type] = []
-            self.jobs_by_type[job_type].append(job_id)
-            
-            # Update sample tracking
-            if sample_id not in self.jobs_by_sample:
-                self.jobs_by_sample[sample_id] = []
-            self.jobs_by_sample[sample_id].append(job_id)
-            
-            # Update file tracking
-            if filepath not in self.jobs_by_file:
-                self.jobs_by_file[filepath] = []
-            self.jobs_by_file[filepath].append(job_id)
+            # Track sample - NEW: Register sample when job is added
+            self._register_sample(sample_id, filepath, job_type)
             
             # Update queue status
-            if queue_name in self.queue_status:
-                self.queue_status[queue_name].pending_count += 1
-                self.queue_status[queue_name].total_count += 1
+            if queue_name not in self.queues:
+                self.queues[queue_name] = QueueStatus(queue_name)
             
-            # Emit job started event
+            queue_status = self.queues[queue_name]
+            queue_status.pending_count += 1
+            queue_status.total_count += 1
+            
+            # Track sample jobs
+            if sample_id not in self.sample_jobs:
+                self.sample_jobs[sample_id] = []
+            self.sample_jobs[sample_id].append(job_id)
+            
+            # Emit event
             self.emit_event(WorkflowEvent(
                 event_type=EventType.JOB_STARTED,
                 timestamp=time.time(),
                 job_id=job_id,
                 job_type=job_type,
                 filepath=filepath,
-                sample_id=sample_id,
-                data={"queue_name": queue_name}
+                sample_id=sample_id
             ))
+            
+            # Update next job ID
+            if job_id >= self.next_job_id:
+                self.next_job_id = job_id + 1
+    
+    def _register_sample(self, sample_id: str, filepath: str, job_type: str):
+        """Register a new sample or update existing sample information."""
+        with self._lock:
+            if sample_id not in self.samples:
+                # New sample
+                self.samples[sample_id] = {
+                    'sample_id': sample_id,
+                    'first_seen': time.time(),
+                    'last_seen': time.time(),
+                    'filepaths': set([filepath]),
+                    'job_types': set([job_type]),
+                    'total_jobs': 0,
+                    'completed_jobs': 0,
+                    'failed_jobs': 0,
+                    'current_status': 'pending',
+                    'metadata': {},
+                    'results': {}
+                }
+            else:
+                # Update existing sample
+                sample_info = self.samples[sample_id]
+                sample_info['last_seen'] = time.time()
+                sample_info['filepaths'].add(filepath)
+                sample_info['job_types'].add(job_type)
+            
+            # Update total jobs count
+            self.samples[sample_id]['total_jobs'] += 1
+    
+    def get_sample_info(self, sample_id: str) -> Optional[Dict[str, Any]]:
+        """Get comprehensive information about a specific sample."""
+        with self._lock:
+            if sample_id not in self.samples:
+                return None
+            
+            sample_info = self.samples[sample_id].copy()
+            
+            # Get all jobs for this sample
+            sample_job_ids = self.sample_jobs.get(sample_id, [])
+            sample_jobs = [self.jobs[job_id] for job_id in sample_job_ids if job_id in self.jobs]
+            
+            # Add job details
+            sample_info['jobs'] = []
+            for job in sample_jobs:
+                job_detail = {
+                    'job_id': job.job_id,
+                    'job_type': job.job_type,
+                    'filepath': job.filepath,
+                    'status': job.status.value,
+                    'start_time': job.start_time,
+                    'end_time': job.end_time,
+                    'duration': job.duration,
+                    'progress': job.progress,
+                    'error_message': job.error_message,
+                    'metadata': job.job_metadata,
+                    'results': job.job_results
+                }
+                sample_info['jobs'].append(job_detail)
+            
+            # Calculate sample statistics
+            sample_info['completed_jobs'] = len([j for j in sample_jobs if j.status == JobStatus.COMPLETED])
+            sample_info['failed_jobs'] = len([j for j in sample_jobs if j.status == JobStatus.FAILED])
+            sample_info['running_jobs'] = len([j for j in sample_jobs if j.status == JobStatus.RUNNING])
+            sample_info['pending_jobs'] = len([j for j in sample_jobs if j.status == JobStatus.PENDING])
+            
+            # Determine overall sample status
+            if sample_info['failed_jobs'] > 0:
+                sample_info['current_status'] = 'failed'
+            elif sample_info['completed_jobs'] == sample_info['total_jobs']:
+                sample_info['current_status'] = 'completed'
+            elif sample_info['running_jobs'] > 0:
+                sample_info['current_status'] = 'running'
+            else:
+                sample_info['current_status'] = 'pending'
+            
+            # Convert sets to lists for JSON serialization
+            sample_info['filepaths'] = list(sample_info['filepaths'])
+            sample_info['job_types'] = list(sample_info['job_types'])
+            
+            return sample_info
+    
+    def get_all_samples(self) -> List[Dict[str, Any]]:
+        """Get a list of all samples with summary information."""
+        with self._lock:
+            samples_summary = []
+            for sample_id in self.samples:
+                sample_info = self.samples[sample_id]
+                summary = {
+                    'sample_id': sample_id,
+                    'first_seen': sample_info['first_seen'],
+                    'last_seen': sample_info['last_seen'],
+                    'total_jobs': sample_info['total_jobs'],
+                    'completed_jobs': sample_info['completed_jobs'],
+                    'failed_jobs': sample_info['failed_jobs'],
+                    'current_status': sample_info['current_status'],
+                    'job_types': list(sample_info['job_types']),
+                    'filepaths': list(sample_info['filepaths'])
+                }
+                samples_summary.append(summary)
+            
+            # Sort by last seen (most recent first)
+            samples_summary.sort(key=lambda x: x['last_seen'], reverse=True)
+            return samples_summary
+    
+    def get_sample_count(self) -> int:
+        """Get the total number of samples tracked."""
+        with self._lock:
+            return len(self.samples)
     
     def start_job(self, job_id: int, worker_name: str):
         """Mark a job as started."""
         with self._lock:
-            if job_id in self.jobs:
-                job = self.jobs[job_id]
-                job.status = JobStatus.RUNNING
-                job.start_time = time.time()
-                job.worker_name = worker_name
-                
-                # Update queue status
-                queue_name = self._get_queue_name_for_job_type(job.job_type)
-                if queue_name in self.queue_status:
-                    self.queue_status[queue_name].pending_count -= 1
-                    self.queue_status[queue_name].running_count += 1
+            if job_id not in self.jobs:
+                return
+            
+            job = self.jobs[job_id]
+            job.status = JobStatus.RUNNING
+            job.start_time = time.time()
+            job.worker_name = worker_name
+            
+            # Update sample tracking - NEW: Update sample status
+            if job.sample_id in self.samples:
+                # Update sample status to running if it was pending
+                if self.samples[job.sample_id]['current_status'] == 'pending':
+                    self.samples[job.sample_id]['current_status'] = 'running'
+            
+            # Update queue status
+            queue_name = self._get_queue_name_for_job_type(job.job_type)
+            if queue_name in self.queues:
+                queue_status = self.queues[queue_name]
+                queue_status.pending_count -= 1
+                queue_status.running_count += 1
+            
+            # Emit event
+            self.emit_event(WorkflowEvent(
+                event_type=EventType.JOB_STARTED,
+                timestamp=time.time(),
+                job_id=job_id,
+                job_type=job.job_type,
+                filepath=job.filepath,
+                sample_id=job.sample_id
+            ))
     
     def complete_job(self, job_id: int):
         """Mark a job as completed."""
         with self._lock:
-            if job_id in self.jobs:
-                job = self.jobs[job_id]
-                job.status = JobStatus.COMPLETED
-                job.end_time = time.time()
-                job.duration = job.end_time - job.start_time if job.start_time else 0
-                job.progress = 1.0
-                
-                # Update queue status
-                queue_name = self._get_queue_name_for_job_type(job.job_type)
-                if queue_name in self.queue_status:
-                    self.queue_status[queue_name].running_count -= 1
-                    self.queue_status[queue_name].completed_count += 1
-                
-                # Mark file as processed
-                self.processed_files.add(job.filepath)
-                
-                # Emit job completed event
-                self.emit_event(WorkflowEvent(
-                    event_type=EventType.JOB_COMPLETED,
-                    timestamp=time.time(),
-                    job_id=job_id,
-                    job_type=job.job_type,
-                    filepath=job.filepath,
-                    sample_id=job.sample_id,
-                    data={"duration": job.duration}
-                ))
+            if job_id not in self.jobs:
+                return
+            
+            job = self.jobs[job_id]
+            job.status = JobStatus.COMPLETED
+            job.end_time = time.time()
+            if job.start_time:
+                job.duration = job.end_time - job.start_time
+            job.progress = 1.0
+            
+            # Update sample tracking - NEW: Update sample statistics
+            if job.sample_id in self.samples:
+                self.samples[job.sample_id]['completed_jobs'] += 1
+            
+            # Update queue status
+            queue_name = self._get_queue_name_for_job_type(job.job_type)
+            if queue_name in self.queues:
+                queue_status = self.queues[queue_name]
+                queue_status.running_count -= 1
+                queue_status.completed_count += 1
+            
+            # Emit event
+            self.emit_event(WorkflowEvent(
+                event_type=EventType.JOB_COMPLETED,
+                timestamp=time.time(),
+                job_id=job_id,
+                job_type=job.job_type,
+                filepath=job.filepath,
+                sample_id=job.sample_id
+            ))
     
     def store_job_metadata(self, job_id: int, metadata: Dict[str, Any]):
         """Store metadata for a specific job."""
@@ -353,32 +464,37 @@ class WorkflowState:
     def fail_job(self, job_id: int, error_message: str):
         """Mark a job as failed."""
         with self._lock:
-            if job_id in self.jobs:
-                job = self.jobs[job_id]
-                job.status = JobStatus.FAILED
-                job.end_time = time.time()
-                job.duration = job.end_time - job.start_time if job.start_time else 0
-                job.error_message = error_message
-                
-                # Update queue status
-                queue_name = self._get_queue_name_for_job_type(job.job_type)
-                if queue_name in self.queue_status:
-                    self.queue_status[queue_name].running_count -= 1
-                    self.queue_status[queue_name].failed_count += 1
-                
-                # Mark file as failed
-                self.failed_files.add(job.filepath)
-                
-                # Emit job failed event
-                self.emit_event(WorkflowEvent(
-                    event_type=EventType.JOB_FAILED,
-                    timestamp=time.time(),
-                    job_id=job_id,
-                    job_type=job.job_type,
-                    filepath=job.filepath,
-                    sample_id=job.sample_id,
-                    error_message=error_message
-                ))
+            if job_id not in self.jobs:
+                return
+            
+            job = self.jobs[job_id]
+            job.status = JobStatus.FAILED
+            job.end_time = time.time()
+            if job.start_time:
+                job.duration = job.end_time - job.start_time
+            job.error_message = error_message
+            
+            # Update sample tracking - NEW: Update sample statistics
+            if job.sample_id in self.samples:
+                self.samples[job.sample_id]['failed_jobs'] += 1
+            
+            # Update queue status
+            queue_name = self._get_queue_name_for_job_type(job.job_type)
+            if queue_name in self.queues:
+                queue_status = self.queues[queue_name]
+                queue_status.running_count -= 1
+                queue_status.failed_count += 1
+            
+            # Emit event
+            self.emit_event(WorkflowEvent(
+                event_type=EventType.JOB_FAILED,
+                timestamp=time.time(),
+                job_id=job_id,
+                job_type=job.job_type,
+                filepath=job.filepath,
+                sample_id=job.sample_id,
+                error_message=error_message
+            ))
     
     def update_job_progress(self, job_id: int, progress: float):
         """Update the progress of a job (0.0 to 1.0)."""
@@ -400,7 +516,7 @@ class WorkflowState:
     def add_file(self, filepath: str):
         """Add a detected file to the workflow."""
         with self._lock:
-            self.detected_files.add(filepath)
+            # self.detected_files.add(filepath) # This line was removed from the original file
             
             # Emit file detected event
             self.emit_event(WorkflowEvent(
@@ -415,28 +531,25 @@ class WorkflowState:
         with self._lock:
             log_entry = {
                 "timestamp": time.time(),
-                "level": level,
+                "level": level.upper(),
                 "message": message,
                 "job_id": job_id,
                 "job_type": job_type,
                 "filepath": filepath
             }
             
-            self.log_messages.append(log_entry)
+            self.logs.append(log_entry)
             
-            # Keep only the most recent messages
-            if len(self.log_messages) > self.max_log_messages:
-                self.log_messages = self.log_messages[-self.max_log_messages:]
+            # Limit log size
+            if len(self.logs) > 1000:  # Keep last 1000 log entries
+                self.logs = self.logs[-1000:]
             
-            # Emit log message event
-            self.emit_event(WorkflowEvent(
-                event_type=EventType.LOG_MESSAGE,
-                timestamp=time.time(),
-                job_id=job_id,
-                job_type=job_type,
-                filepath=filepath,
-                data={"level": level, "message": message}
-            ))
+            # Notify log listeners
+            for listener in self.log_listeners:
+                try:
+                    listener(log_entry)
+                except Exception as e:
+                    logging.error(f"Error in log listener: {e}")
     
     def _get_queue_name_for_job_type(self, job_type: str) -> str:
         """Get the queue name for a given job type."""
@@ -455,43 +568,49 @@ class WorkflowState:
         return queue_mapping.get(job_type, "slow")
     
     def get_workflow_summary(self) -> Dict[str, Any]:
-        """Get a summary of the current workflow state."""
+        """Get a comprehensive summary of the workflow state."""
         with self._lock:
-            total_jobs = len(self.jobs)
+            # Calculate job counts by status
+            pending_jobs = len([j for j in self.jobs.values() if j.status == JobStatus.PENDING])
+            running_jobs = len([j for j in self.jobs.values() if j.status == JobStatus.RUNNING])
             completed_jobs = len([j for j in self.jobs.values() if j.status == JobStatus.COMPLETED])
             failed_jobs = len([j for j in self.jobs.values() if j.status == JobStatus.FAILED])
-            running_jobs = len([j for j in self.jobs.values() if j.status == JobStatus.RUNNING])
-            pending_jobs = len([j for j in self.jobs.values() if j.status == JobStatus.PENDING])
+            total_jobs = len(self.jobs)
             
-            duration = 0
-            if self.workflow_start_time:
-                if self.workflow_end_time:
-                    duration = self.workflow_end_time - self.workflow_start_time
-                else:
-                    duration = time.time() - self.workflow_start_time
+            # Calculate queue summaries
+            queue_summaries = {}
+            for queue_name, queue_status in self.queues.items():
+                queue_summaries[queue_name] = {
+                    'pending': queue_status.pending_count,
+                    'running': queue_status.running_count,
+                    'completed': queue_status.completed_count,
+                    'failed': queue_status.failed_count,
+                    'total': queue_status.total_count
+                }
+            
+            # Sample tracking summary - NEW: Include sample information
+            sample_summary = {
+                'total_samples': len(self.samples),
+                'completed_samples': len([s for s in self.samples.values() if s['current_status'] == 'completed']),
+                'running_samples': len([s for s in self.samples.values() if s['current_status'] == 'running']),
+                'failed_samples': len([s for s in self.samples.values() if s['current_status'] == 'failed']),
+                'pending_samples': len([s for s in self.samples.values() if s['current_status'] == 'pending'])
+            }
             
             return {
-                "is_running": self.is_running,
-                "start_time": self.workflow_start_time,
-                "end_time": self.workflow_end_time,
-                "duration": duration,
-                "workflow_steps": self.workflow_steps,
-                "monitored_directory": self.monitored_directory,
-                "total_jobs": total_jobs,
-                "completed_jobs": completed_jobs,
-                "failed_jobs": failed_jobs,
-                "running_jobs": running_jobs,
-                "pending_jobs": pending_jobs,
-                "detected_files": len(self.detected_files),
-                "processed_files": len(self.processed_files),
-                "failed_files": len(self.failed_files),
-                "queue_status": {name: {
-                    "pending": qs.pending_count,
-                    "running": qs.running_count,
-                    "completed": qs.completed_count,
-                    "failed": qs.failed_count,
-                    "total": qs.total_count
-                } for name, qs in self.queue_status.items()}
+                'is_running': self.is_running,
+                'start_time': self.workflow_start_time,
+                'end_time': self.workflow_end_time,
+                'workflow_steps': self.workflow_steps,
+                'monitored_directory': self.monitored_directory,
+                'pending_jobs': pending_jobs,
+                'running_jobs': running_jobs,
+                'completed_jobs': completed_jobs,
+                'failed_jobs': failed_jobs,
+                'total_jobs': total_jobs,
+                'queue_summaries': queue_summaries,
+                'sample_summary': sample_summary,  # NEW: Sample tracking summary
+                'recent_logs': self.get_recent_logs(10)
             }
     
     def get_jobs_by_status(self, status) -> List[JobInfo]:
@@ -531,12 +650,12 @@ class WorkflowState:
     def get_recent_logs(self, count: int = 100) -> List[Dict[str, Any]]:
         """Get the most recent log messages."""
         with self._lock:
-            return self.log_messages[-count:] if self.log_messages else []
+            return self.logs[-count:] if self.logs else []
     
     def get_logs_by_level(self, level: str) -> List[Dict[str, Any]]:
         """Get all log messages of a specific level."""
         with self._lock:
-            return [log for log in self.log_messages if log["level"] == level]
+            return [log for log in self.logs if log["level"] == level]
 
 
 # Global workflow state instance

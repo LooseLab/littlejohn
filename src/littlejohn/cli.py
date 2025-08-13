@@ -643,21 +643,13 @@ def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool
         gui_launcher = None
         if with_gui:
             try:
-                click.echo("🚀 Launching NiceGUI workflow monitor with vertical tabs...")
+                print("🚀 Launching NiceGUI workflow monitor with vertical tabs...")
                 
                 # Import the new GUI launcher
                 try:
                     from littlejohn.gui_launcher import launch_gui
                     
-                    # Install workflow state hooks for real-time monitoring
-                    try:
-                        from littlejohn.workflow_hooks import install_workflow_hooks
-                        install_workflow_hooks(runner, workflow_steps, str(path))
-                        click.echo("✅ Workflow state hooks installed for real-time monitoring")
-                    except Exception as e:
-                        click.echo(f"⚠️  Failed to install workflow hooks: {e}. GUI will show static information only.")
-                    
-                    # Launch GUI using the new launcher
+                    # Launch GUI using the new launcher FIRST so the global sender is ready
                     gui_launcher = launch_gui(
                         host="localhost",
                         port=8081,
@@ -667,9 +659,21 @@ def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool
                         monitored_directory=str(work_dir) if work_dir else str(path)
                     )
                     
-                    click.echo("✅ GUI launched successfully on http://localhost:8081")
-                    click.echo("   Open your browser to monitor the workflow with vertical tabs and splitter")
-                    click.echo("   The GUI will run in the background while the workflow executes")
+                    # Now install workflow hooks for real-time monitoring
+                    try:
+                        from littlejohn.workflow_hooks import install_workflow_hooks
+                        install_workflow_hooks(runner, workflow_steps, str(path))
+                        click.echo("✅ Workflow state hooks installed for real-time monitoring")
+                    except Exception as e:
+                        click.echo(f"⚠️  Failed to install workflow hooks: {e}. GUI will show static information only.")
+                    
+                    print("✅ GUI launched successfully on http://localhost:8081")
+                    print("   🏠 Welcome page: http://localhost:8081/")
+                    print("   📊 Workflow monitor: http://localhost:8081/littlejohn")
+                    print("   📋 Sample tracking: http://localhost:8081/live_data")
+                    print("   🔬 Individual samples: http://localhost:8081/live_data/sampleID/")
+                    print("   Open your browser to monitor the workflow with the new navigation structure")
+                    print("   The GUI will run in the background while the workflow executes")
                     
                 except ImportError as e:
                     click.echo(f"❌ Failed to import GUI launcher: {e}")

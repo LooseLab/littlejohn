@@ -2,15 +2,20 @@
 GUI launcher for LittleJohn workflow monitoring.
 
 This module provides a clean interface for launching the workflow GUI
-that doesn't interfere with CLI output and properly integrates with
-the workflow state system.
+that runs in a separate thread but is completely isolated from
+workflow execution to avoid any blocking.
 """
 
 import threading
 import time
 import logging
-from typing import Optional, Dict, Any
+import queue
+from collections import deque
+import csv
+from typing import Optional, Dict, Any, List
 from pathlib import Path
+from dataclasses import dataclass
+from enum import Enum
 
 try:
     from nicegui import ui, app
@@ -18,18 +23,29 @@ except ImportError:
     ui = None
     app = None
 
-# Import the global workflow state instance
-try:
-    from .workflow_state import workflow_state
-except ImportError:
-    try:
-        from littlejohn.workflow_state import workflow_state
-    except ImportError:
-        workflow_state = None
+
+class UpdateType(Enum):
+    """Types of updates that can be sent to the GUI."""
+    WORKFLOW_STATUS = "workflow_status"
+    JOB_UPDATE = "job_update"
+    QUEUE_UPDATE = "queue_update"
+    LOG_MESSAGE = "log_message"
+    PROGRESS_UPDATE = "progress_update"
+    ERROR_UPDATE = "error_update"
+    SAMPLES_UPDATE = "samples_update"
+
+
+@dataclass
+class GUIUpdate:
+    """A single update message for the GUI."""
+    update_type: UpdateType
+    timestamp: float
+    data: Dict[str, Any]
+    priority: int = 0  # Higher priority updates are processed first
 
 
 class GUILauncher:
-    """Launcher for the LittleJohn workflow GUI."""
+    """Launcher for the LittleJohn workflow GUI using isolated threading with message queue."""
     
     def __init__(self, host: str = "localhost", port: int = 8081):
         self.host = host
@@ -40,9 +56,34 @@ class GUILauncher:
         self.workflow_steps = []
         self.monitored_directory = ""
         
+        # Message queue for non-blocking communication
+        self.update_queue = queue.PriorityQueue()
+        self.gui_ready = threading.Event()
+        self.shutdown_event = threading.Event()
+        
+        # GUI update thread
+        self.update_thread = None  # not used anymore; updates processed on UI thread via timer
+
+        # Debug counters
+        self.total_updates_enqueued = 0
+        self.total_updates_processed = 0
+
+        # Runtime state
+        self._start_time: Optional[float] = None
+        self._is_running: bool = False
+
+        # Log ring buffer (last 1000 entries)
+        self._log_buffer = deque(maxlen=1000)
+        
+        # Cached samples data for persistence across navigation
+        self._last_samples_rows: List[Dict[str, Any]] = []
+        self._current_sample_id: Optional[str] = None
+        self._selected_sample_id: Optional[str] = None
+        self._known_sample_ids: set[str] = set()
+    
     def launch_gui(self, workflow_runner: Any = None, workflow_steps: list = None, 
                    monitored_directory: str = "") -> bool:
-        """Launch the GUI in a background thread."""
+        """Launch the GUI in a completely isolated background thread."""
         if ui is None:
             logging.error("NiceGUI is not available")
             return False
@@ -52,570 +93,225 @@ class GUILauncher:
         self.monitored_directory = monitored_directory
         
         try:
-            # Start GUI in background thread
+            # Start GUI in completely isolated background thread
             self.gui_thread = threading.Thread(
                 target=self._run_gui_worker,
-                daemon=True
+                daemon=True,
+                name="LittleJohn-GUI-Thread"
             )
             self.gui_thread.start()
             
-            # Wait a moment for GUI to start
-            time.sleep(1)
-            self.is_running = True
+            # NOTE: Update processing now happens inside the UI thread via ui.timer for thread-safety
             
-            logging.info(f"GUI launched successfully on http://{self.host}:{self.port}")
-            return True
+            # Wait a moment for GUI to start
+            time.sleep(2)
+            
+            # Check if thread is still running
+            if self.gui_thread.is_alive():
+                self.is_running = True
+                logging.info(f"GUI launched successfully on http://{self.host}:{self.port}")
+                return True
+            else:
+                logging.error("GUI thread failed to start")
+                return False
             
         except Exception as e:
             logging.error(f"Failed to launch GUI: {e}")
             return False
     
-    def _run_gui_worker(self):
-        """Run the GUI worker in a separate thread."""
+    def send_update(self, update_type: UpdateType, data: Dict[str, Any], priority: int = 0):
+        """Send an update to the GUI without blocking the workflow."""
         try:
-            # Create the main interface
-            @ui.page('/')
-            def workflow_monitor():
-                self._create_workflow_monitor()
-            
-            # Start the NiceGUI server
-            ui.run(
-                host=self.host,
-                port=self.port,
-                show=False,  # Don't show browser automatically
-                reload=False  # Disable auto-reload for production
+            update = GUIUpdate(
+                update_type=update_type,
+                timestamp=time.time(),
+                data=data,
+                priority=priority
             )
             
+            # Use negative priority so higher priority updates come first
+            self.update_queue.put((-priority, update))
+            self.total_updates_enqueued += 1
+            logging.info(f"[GUI] Enqueued update #{self.total_updates_enqueued}: {update.update_type.value}")
+            
         except Exception as e:
-            logging.error(f"GUI worker failed: {e}")
-            self.is_running = False
+            # Don't let update failures affect the workflow
+            logging.debug(f"Failed to send GUI update: {e}")
     
-    def _create_workflow_monitor(self):
-        """Create the comprehensive workflow monitoring interface."""
-        # Main header with status indicator
-        with ui.header().classes('bg-blue-600 text-white p-4'):
-            with ui.row().classes('w-full justify-between items-center'):
-                ui.label('LittleJohn Workflow Monitor').classes('text-2xl font-bold')
-                self.status_indicator = ui.label('●').classes('text-2xl text-yellow-400')
-        
-        # Main content area with comprehensive monitoring
-        with ui.row().classes('w-full h-full'):
-            # Left column - Workflow Overview & Status
-            with ui.column().classes('w-1/3 p-4 border-r'):
-                ui.label('Workflow Overview').classes('text-xl font-bold mb-4 text-blue-700')
-                
-                # Real-time Status Card
-                with ui.card().classes('w-full mb-4 bg-gradient-to-r from-blue-50 to-indigo-50'):
-                    ui.label('🔄 Real-time Status').classes('text-lg font-semibold mb-2 text-blue-800')
-                    self.status_label = ui.label('Initializing...').classes('text-sm font-medium')
-                    
-                    # Status indicator
-                    with ui.row().classes('w-full justify-center mb-2'):
-                        self.status_indicator
-                    
-                    # Timing information
-                    self.started_time_label = ui.label('Started: --').classes('text-xs text-gray-600')
-                    self.elapsed_time_label = ui.label('Elapsed: --').classes('text-xs text-gray-600')
-                
-                # Progress Overview Card
-                with ui.card().classes('w-full mb-4'):
-                    ui.label('📊 Progress Overview').classes('text-lg font-semibold mb-2')
-                    
-                    # Overall progress
-                    ui.label('Overall Progress').classes('text-sm font-medium mt-2')
-                    self.overall_progress = ui.linear_progress().classes('w-full mb-1')
-                    self.progress_label = ui.label('0% Complete').classes('text-xs text-gray-600 text-center')
-                    
-                    # Job summary
-                    with ui.row().classes('w-full justify-between mt-3'):
-                        with ui.column().classes('text-center'):
-                            self.active_jobs_label = ui.label('0').classes('text-2xl font-bold text-blue-600')
-                            ui.label('Active').classes('text-xs text-gray-600')
-                        with ui.column().classes('text-center'):
-                            self.completed_jobs_label = ui.label('0').classes('text-2xl font-bold text-green-600')
-                            ui.label('Completed').classes('text-xs text-gray-600')
-                        with ui.column().classes('text-center'):
-                            self.failed_jobs_label = ui.label('0').classes('text-2xl font-bold text-red-600')
-                            ui.label('Failed').classes('text-xs text-gray-600')
-                
-                # Queue Performance Card
-                with ui.card().classes('w-full mb-4'):
-                    ui.label('⚡ Queue Performance').classes('text-lg font-semibold mb-2')
-                    
-                    # Queue progress bars
-                    self.preprocessing_progress = ui.label('Preprocessing: 0/0').classes('text-sm')
-                    self.analysis_progress = ui.label('Analysis: 0/0').classes('text-sm')
-                    self.classification_progress = ui.label('Classification: 0/0').classes('text-sm')
-                    
-                    # Performance metrics
-                    ui.separator()
-                    ui.label('Performance Metrics').classes('text-sm font-medium mt-2')
-                    self.jobs_per_second_label = ui.label('Jobs/sec: --').classes('text-xs text-gray-600')
-                    self.avg_job_time_label = ui.label('Avg Job Time: --').classes('text-xs text-gray-600')
-                
-                # File Monitoring Card
-                with ui.card().classes('w-full mb-4'):
-                    ui.label('📁 File Monitoring').classes('text-lg font-semibold mb-2')
-                    
-                    self.detected_files_label = ui.label('BAM Files: 0').classes('text-sm')
-                    self.processed_files_label = ui.label('Output Files: 0').classes('text-sm')
-                    self.failed_files_label = ui.label('Failed Files: 0').classes('text-sm')
-                    
-                    # File processing rate
-                    ui.separator()
-                    ui.label('Processing Rate').classes('text-sm font-medium mt-2')
-                    self.files_per_minute_label = ui.label('Files/min: --').classes('text-xs text-gray-600')
-                
-                # Configuration Card
-                with ui.card().classes('w-full mb-4'):
-                    ui.label('⚙️ Configuration').classes('text-lg font-semibold mb-2')
-                    self.workflow_config_label = ui.label('Workflow: Loading...').classes('text-xs text-gray-600')
-                    
-                    # Queue priorities
-                    ui.separator()
-                    ui.label('Queue Priorities').classes('text-sm font-medium mt-2')
-                    self.priority_info_label = ui.label('Loading...').classes('text-xs text-gray-600')
-            
-            # Right column - Detailed Monitoring & Control
-            with ui.column().classes('w-2/3 p-4'):
-                ui.label('Detailed Monitoring & Control').classes('text-2xl font-bold mb-6 text-blue-700')
-                
-                # Current Activity & Job Details
-                with ui.card().classes('w-full mb-6'):
-                    ui.label('🎯 Current Activity').classes('text-lg font-semibold mb-2')
-                    self.current_activity_label = ui.label('No active jobs').classes('text-sm text-gray-600')
-                    
-                    # Active jobs table
-                    ui.separator()
-                    ui.label('Active Jobs').classes('text-sm font-medium mt-2')
-                    self.active_jobs_table = ui.table(
-                        columns=[
-                            {'name': 'job_id', 'label': 'Job ID', 'field': 'job_id'},
-                            {'name': 'type', 'label': 'Type', 'field': 'type'},
-                            {'name': 'file', 'label': 'File', 'field': 'file'},
-                            {'name': 'queue', 'label': 'Queue', 'field': 'queue'},
-                            {'name': 'start_time', 'label': 'Started', 'field': 'start_time'},
-                            {'name': 'duration', 'label': 'Duration', 'field': 'duration'}
-                        ],
-                        rows=[],
-                        pagination=5
-                    ).classes('w-full')
-                
-                # Live Logs with Filtering
-                with ui.card().classes('w-full mb-6'):
-                    with ui.row().classes('w-full justify-between items-center mb-2'):
-                        ui.label('📝 Live Logs').classes('text-lg font-semibold')
-                        with ui.row().classes('gap-2'):
-                            self.log_level_filter = ui.select(
-                                ['ALL', 'INFO', 'WARNING', 'ERROR', 'DEBUG'],
-                                value='ALL',
-                                label='Log Level'
-                            ).classes('w-24')
-                            ui.button('Clear', on_click=lambda: self.log_area.set_value('')).classes('bg-gray-500 hover:bg-gray-600 text-white text-xs')
-                            ui.button('Export', on_click=lambda: self._export_logs()).classes('bg-blue-500 hover:bg-blue-600 text-white text-xs')
-                    
-                    self.log_area = ui.textarea('Workflow logs will appear here...').classes('w-full h-40').props('readonly')
-                
-                # Recent Events & Notifications
-                with ui.card().classes('w-full mb-6'):
-                    ui.label('🔔 Recent Events & Notifications').classes('text-lg font-semibold mb-2')
-                    
-                    # Events list
-                    self.events_list = ui.column().classes('w-full')
-                    ui.label('Workflow started').classes('text-sm text-gray-600')
-                    ui.label('Monitoring directory for BAM files').classes('text-sm text-gray-600')
-                
-                # Metadata Monitoring Section
-                with ui.card().classes('w-full mb-6'):
-                    ui.label('📋 Preprocessing & Workflow Metadata').classes('text-lg font-semibold mb-2')
-                    
-                    # Workflow context metadata display
-                    ui.label('Workflow Context Metadata').classes('text-sm font-medium mt-2')
-                    self.workflow_context_display = ui.textarea('No workflow context metadata available...').classes('w-full h-32').props('readonly')
-                    
-                    # Metadata summary
-                    ui.separator()
-                    ui.label('Preprocessing Summary').classes('text-sm font-medium mt-2')
-                    self.metadata_summary = ui.label('No preprocessing metadata available').classes('text-xs text-gray-600')
-                
-                # Error Summary & Troubleshooting
-                with ui.card().classes('w-full'):
-                    ui.label('⚠️ Error Summary & Troubleshooting').classes('text-lg font-semibold mb-2')
-                    
-                    # Error counts by type
-                    with ui.row().classes('w-full justify-between'):
-                        with ui.column().classes('text-center'):
-                            self.preprocessing_errors = ui.label('0').classes('text-xl font-bold text-red-600')
-                            ui.label('Preprocessing').classes('text-xs text-gray-600')
-                        with ui.column().classes('text-center'):
-                            self.analysis_errors = ui.label('0').classes('text-xl font-bold text-red-600')
-                            ui.label('Analysis').classes('text-xs text-gray-600')
-                        with ui.column().classes('text-center'):
-                            self.classification_errors = ui.label('0').classes('text-xl font-bold text-red-600')
-                            ui.label('Classification').classes('text-xs text-gray-600')
-                    
-                    # Common error messages
-                    ui.separator()
-                    ui.label('Recent Errors').classes('text-sm font-medium mt-2')
-                    self.error_summary_label = ui.label('No errors detected').classes('text-xs text-gray-600')
-            
-            # Footer
-            with ui.row().classes('w-full bg-gray-200 p-2 justify-center'):
-                ui.label('LittleJohn Workflow Monitor - Running').classes('text-sm text-gray-600')
-            
-            # Function to update UI with comprehensive real-time data
-            def update_ui():
-                try:
-                    # Try to get workflow state if available
-                    try:
-                        # from littlejohn.workflow_state import workflow_state # This line is removed
-                        summary = workflow_state.get_workflow_summary()
-                        
-                        # Update status indicator
-                        if summary['is_running']:
-                            self.status_indicator.classes('text-2xl text-green-400')
-                            self.status_label.set_text('Workflow Status: Running')
-                            self.status_label.classes('text-sm font-medium text-green-600')
-                        else:
-                            self.status_indicator.classes('text-2xl text-red-400')
-                            self.status_label.set_text('Workflow Status: Stopped')
-                            self.status_label.classes('text-sm font-medium text-red-600')
-                        
-                        # Update timing information
-                        if summary['start_time']:
-                            start_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(summary['start_time']))
-                            self.started_time_label.set_text(f'Started: {start_time}')
-                            
-                            # Calculate elapsed time
-                            elapsed_seconds = int(time.time() - summary['start_time'])
-                            elapsed_time = self._format_duration(elapsed_seconds)
-                            self.elapsed_time_label.set_text(f'Elapsed: {elapsed_time}')
-                        
-                        # Update job counts with enhanced styling
-                        self.active_jobs_label.set_text(str(summary['running_jobs']))
-                        self.completed_jobs_label.set_text(str(summary['completed_jobs']))
-                        self.failed_jobs_label.set_text(str(summary['failed_jobs']))
-                        
-                        # Update progress
-                        total_jobs = summary['total_jobs']
-                        if total_jobs > 0:
-                            progress = summary['completed_jobs'] / total_jobs
-                            self.overall_progress.set_value(progress)
-                            self.progress_label.set_text(f'{int(progress * 100)}% Complete')
-                        
-                        # Update queue progress with detailed counts
-                        queue_status = summary['queue_status']
-                        self.preprocessing_progress.set_text(f'Preprocessing: {queue_status["preprocessing"]["running"]}/{queue_status["preprocessing"]["total"]}')
-                        
-                        analysis_running = queue_status["mgmt"]["running"] + queue_status["cnv"]["running"] + queue_status["target"]["running"] + queue_status["fusion"]["running"]
-                        analysis_total = queue_status["mgmt"]["total"] + queue_status["cnv"]["total"] + queue_status["target"]["total"] + queue_status["fusion"]["total"]
-                        self.analysis_progress.set_text(f'Analysis: {analysis_running}/{analysis_total}')
-                        
-                        self.classification_progress.set_text(f'Classification: {queue_status["classification"]["running"]}/{queue_status["classification"]["total"]}')
-                        
-                        # Calculate and update performance metrics
-                        if summary['start_time'] and summary['completed_jobs'] > 0:
-                            elapsed = time.time() - summary['start_time']
-                            jobs_per_second = summary['completed_jobs'] / elapsed if elapsed > 0 else 0
-                            avg_job_time = elapsed / summary['completed_jobs'] if summary['completed_jobs'] > 0 else 0
-                            
-                            self.jobs_per_second_label.set_text(f'Jobs/sec: {jobs_per_second:.2f}')
-                            self.avg_job_time_label.set_text(f'Avg Job Time: {self._format_duration(int(avg_job_time))}')
-                        
-                        # Update file counts
-                        self.detected_files_label.set_text(f'BAM Files: {summary["detected_files"]}')
-                        self.processed_files_label.set_text(f'Output Files: {summary["processed_files"]}')
-                        self.failed_files_label.set_text(f'Failed Files: {summary["failed_files"]}')
-                        
-                        # Calculate file processing rate
-                        if summary['start_time'] and summary['processed_files'] > 0:
-                            elapsed_minutes = (time.time() - summary['start_time']) / 60
-                            files_per_minute = summary['processed_files'] / elapsed_minutes if elapsed_minutes > 0 else 0
-                            self.files_per_minute_label.set_text(f'Files/min: {files_per_minute:.1f}')
-                        
-                        # Update configuration
-                        if summary['workflow_steps']:
-                            self.workflow_config_label.set_text(f'Workflow: {", ".join(summary["workflow_steps"])}')
-                        
-                        # Update queue priorities if available
-                        if hasattr(workflow_state, 'queue_priorities'):
-                            priority_text = ', '.join([f'{q}:{p}' for q, p in workflow_state.queue_priorities.items()])
-                            self.priority_info_label.set_text(priority_text[:100] + '...' if len(priority_text) > 100 else priority_text)
-                        
-                        # Update active jobs table
-                        running_jobs = workflow_state.get_jobs_by_status("running")
-                        if running_jobs:
-                            table_rows = []
-                            for job in running_jobs[:10]:  # Show up to 10 active jobs
-                                job_start = getattr(job, 'start_time', time.time())
-                                duration = int(time.time() - job_start) if job_start else 0
-                                
-                                table_rows.append({
-                                    'job_id': str(job.job_id)[:8],
-                                    'type': job.job_type,
-                                    'file': Path(job.filepath).name if hasattr(job, 'filepath') else 'Unknown',
-                                    'queue': getattr(job, 'queue_name', 'Unknown'),
-                                    'start_time': time.strftime('%H:%M:%S', time.localtime(job_start)) if job_start else '--',
-                                    'duration': self._format_duration(duration)
-                                })
-                            
-                            # Clear existing rows and add new ones
-                            self.active_jobs_table.clear()
-                            if table_rows:
-                                self.active_jobs_table.add_rows(table_rows)
-                        
-                        # Update recent logs with filtering
-                        recent_logs = workflow_state.get_recent_logs(50)
-                        if recent_logs:
-                            # Apply log level filter
-                            selected_level = self.log_level_filter.value
-                            if selected_level != 'ALL':
-                                filtered_logs = [log for log in recent_logs if log.get('level', 'INFO') == selected_level]
-                            else:
-                                filtered_logs = recent_logs
-                            
-                            log_text = '\n'.join([f'[{time.strftime("%H:%M:%S", time.localtime(log["timestamp"]))}] {log["level"]}: {log["message"]}' for log in filtered_logs[-30:]])
-                            self.log_area.set_value(log_text)
-                        
-                        # Update current activity
-                        if running_jobs:
-                            activity_text = '\n'.join([f'{job.job_type}: {Path(job.filepath).name if hasattr(job, "filepath") else "Unknown"}' for job in running_jobs[:5]])
-                            self.current_activity_label.set_text(activity_text)
-                        else:
-                            self.current_activity_label.set_text('No active jobs')
-                        
-                        # Update error summary
-                        failed_jobs = workflow_state.get_jobs_by_status("failed")
-                        if failed_jobs:
-                            # Count errors by type
-                            error_counts = {'preprocessing': 0, 'analysis': 0, 'classification': 0}
-                            for job in failed_jobs:
-                                if job.job_type in ['preprocessing', 'bed_conversion']:
-                                    error_counts['preprocessing'] += 1
-                                elif job.job_type in ['mgmt', 'cnv', 'target', 'fusion']:
-                                    error_counts['analysis'] += 1
-                                elif job.job_type in ['sturgeon', 'nanodx', 'pannanodx', 'random_forest']:
-                                    error_counts['classification'] += 1
-                            
-                            self.preprocessing_errors.set_text(str(error_counts['preprocessing']))
-                            self.analysis_errors.set_text(str(error_counts['analysis']))
-                            self.classification_errors.set_text(str(error_counts['classification']))
-                            
-                            # Show recent error messages
-                            recent_errors = [job for job in failed_jobs[-5:]]  # Last 5 failed jobs
-                            error_text = '\n'.join([f'{job.job_type}: {getattr(job, "error_message", "Unknown error")}' for job in recent_errors])
-                            self.error_summary_label.set_text(error_text[:200] + '...' if len(error_text) > 200 else error_text)
-                        else:
-                            self.preprocessing_errors.set_text('0')
-                            self.analysis_errors.set_text('0')
-                            self.classification_errors.set_text('0')
-                            self.error_summary_label.set_text('No errors detected')
-                        
-                        # Update workflow context metadata
-                        # Monitor master.csv file for preprocessing metadata
-                        if self.monitored_directory:
-                            master_csv_path = Path(self.monitored_directory) / "master.csv"
-                            if master_csv_path.exists():
-                                try:
-                                    # Read and display master.csv content
-                                    import pandas as pd
-                                    df = pd.read_csv(master_csv_path)
-                                    
-                                    if not df.empty:
-                                        # Display preprocessing metadata from master.csv
-                                        metadata_text = f"Preprocessing Metadata from master.csv\n"
-                                        metadata_text += f"File: {master_csv_path.name}\n"
-                                        metadata_text += f"Total samples: {len(df)}\n"
-                                        metadata_text += f"Last updated: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(master_csv_path.stat().st_mtime))}\n\n"
-                                        
-                                        # Show column information
-                                        metadata_text += f"Available columns:\n"
-                                        for col in df.columns:
-                                            metadata_text += f"  - {col}\n"
-                                        
-                                        metadata_text += f"\nSample Data (first 5 samples):\n"
-                                        metadata_text += "-" * 50 + "\n"
-                                        
-                                        # Display first 5 samples with key preprocessing data
-                                        for idx, row in df.head().iterrows():
-                                            metadata_text += f"Sample {idx + 1}:\n"
-                                            
-                                            # Show key preprocessing fields if available
-                                            if 'sample_id' in df.columns:
-                                                metadata_text += f"  Sample ID: {row.get('sample_id', 'N/A')}\n"
-                                            if 'state' in df.columns:
-                                                metadata_text += f"  State: {row.get('state', 'N/A')}\n"
-                                            if 'mapped_reads' in df.columns:
-                                                mapped_reads = row.get('mapped_reads', 0)
-                                                if pd.notna(mapped_reads):
-                                                    metadata_text += f"  Mapped reads: {int(mapped_reads):,}\n"
-                                            if 'unmapped_reads' in df.columns:
-                                                unmapped_reads = row.get('unmapped_reads', 0)
-                                                if pd.notna(unmapped_reads):
-                                                    metadata_text += f"  Unmapped reads: {int(unmapped_reads):,}\n"
-                                            if 'yield_tracking' in df.columns:
-                                                yield_tracking = row.get('yield_tracking', 0)
-                                                if pd.notna(yield_tracking):
-                                                    metadata_text += f"  Total yield: {int(yield_tracking):,} bases\n"
-                                            if 'file_size' in df.columns:
-                                                file_size = row.get('file_size', 0)
-                                                if pd.notna(file_size):
-                                                    metadata_text += f"  File size: {int(file_size):,} bytes\n"
-                                            if 'has_supplementary_reads' in df.columns:
-                                                has_supp = row.get('has_supplementary_reads', False)
-                                                if pd.notna(has_supp):
-                                                    metadata_text += f"  Has supplementary reads: {has_supp}\n"
-                                            if 'has_mgmt_reads' in df.columns:
-                                                has_mgmt = row.get('has_mgmt_reads', False)
-                                                if pd.notna(has_mgmt):
-                                                    metadata_text += f"  Has MGMT reads: {has_mgmt}\n"
-                                            
-                                            metadata_text += "-" * 30 + "\n"
-                                        
-                                        # Show summary statistics
-                                        metadata_text += f"\nSummary Statistics:\n"
-                                        if 'mapped_reads' in df.columns:
-                                            total_mapped = df['mapped_reads'].sum()
-                                            if pd.notna(total_mapped):
-                                                metadata_text += f"Total mapped reads: {int(total_mapped):,}\n"
-                                        if 'yield_tracking' in df.columns:
-                                            total_yield = df['yield_tracking'].sum()
-                                            if pd.notna(total_yield):
-                                                metadata_text += f"Total yield: {int(total_yield):,} bases\n"
-                                        if 'state' in df.columns:
-                                            pass_count = len(df[df['state'] == 'pass'])
-                                            fail_count = len(df[df['state'] == 'fail'])
-                                            metadata_text += f"Pass samples: {pass_count}, Fail samples: {fail_count}\n"
-                                        
-                                        self.workflow_context_display.set_value(metadata_text)
-                                        self.metadata_summary.set_text(f"Preprocessing metadata loaded from master.csv - {len(df)} samples processed")
-                                        
-                                    else:
-                                        self.workflow_context_display.set_value('master.csv exists but is empty. No preprocessing data available yet.')
-                                        self.metadata_summary.set_text('master.csv empty - no preprocessing data')
-                                        
-                                except Exception as e:
-                                    error_msg = f"Error reading master.csv: {e}\n\n"
-                                    error_msg += f"File: {master_csv_path}\n"
-                                    error_msg += f"Size: {master_csv_path.stat().st_size:,} bytes\n"
-                                    error_msg += f"Last modified: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(master_csv_path.stat().st_mtime))}"
-                                    
-                                    self.workflow_context_display.set_value(error_msg)
-                                    self.metadata_summary.set_text('Error reading master.csv')
-                            else:
-                                # Fallback to workflow state if master.csv doesn't exist
-                                preprocessing_jobs = workflow_state.get_jobs_by_status("completed")
-                                preprocessing_metadata = []
-                                
-                                for job_info in preprocessing_jobs:
-                                    if job_info.job_type == "preprocessing":
-                                        # Get the actual preprocessing metadata and results
-                                        job_metadata = workflow_state.get_job_metadata(job_info.job_id) or {}
-                                        job_results = workflow_state.get_job_results(job_info.job_id) or {}
-                                        
-                                        # Extract preprocessing metadata from job context
-                                        bam_metadata = job_metadata.get('bam_metadata', {})
-                                        preprocessing_result = job_results.get('preprocessing', {})
-                                        
-                                        # Create comprehensive metadata display
-                                        job_display = {
-                                            'job_id': job_info.job_id,
-                                            'sample_id': bam_metadata.get('sample_id', job_info.sample_id),
-                                            'filepath': job_info.filepath,
-                                            'status': 'completed',
-                                            'timestamp': job_info.start_time,
-                                            'bam_metadata': bam_metadata,
-                                            'preprocessing_result': preprocessing_result
-                                        }
-                                        preprocessing_metadata.append(job_display)
-                                
-                                if preprocessing_metadata:
-                                    # Display comprehensive preprocessing metadata
-                                    metadata_text = "Preprocessing Metadata:\n\n"
-                                    for meta in preprocessing_metadata:
-                                        metadata_text += f"Job ID: {meta['job_id']}\n"
-                                        metadata_text += f"Sample ID: {meta['sample_id']}\n"
-                                        metadata_text += f"File: {Path(meta['filepath']).name}\n"
-                                        metadata_text += f"Status: {meta['status']}\n"
-                                        if meta['timestamp']:
-                                            metadata_text += f"Completed: {time.strftime('%H:%M:%S', time.localtime(meta['timestamp']))}\n"
-                                        
-                                        # Display BAM metadata if available
-                                        bam_metadata = meta.get('bam_metadata', {})
-                                        if bam_metadata:
-                                            metadata_text += f"\nBAM Metadata:\n"
-                                            metadata_text += f"  State: {bam_metadata.get('state', 'unknown')}\n"
-                                            metadata_text += f"  Mapped reads: {bam_metadata.get('mapped_reads', 0):,}\n"
-                                            metadata_text += f"  Unmapped reads: {bam_metadata.get('unmapped_reads', 0):,}\n"
-                                            metadata_text += f"  Total yield: {bam_metadata.get('yield_tracking', 0):,} bases\n"
-                                            metadata_text += f"  File size: {bam_metadata.get('file_size', 0):,} bytes\n"
-                                            
-                                            # Show supplementary read info
-                                            if bam_metadata.get('has_supplementary_reads', False):
-                                                metadata_text += f"  Supplementary reads: {bam_metadata.get('supplementary_reads', 0):,}\n"
-                                                metadata_text += f"  Reads with supplementary: {bam_metadata.get('reads_with_supplementary', 0):,}\n"
-                                            
-                                            # Show MGMT read info
-                                            if bam_metadata.get('has_mgmt_reads', False):
-                                                metadata_text += f"  MGMT reads: {bam_metadata.get('mgmt_read_count', 0):,}\n"
-                                        
-                                        # Display preprocessing results if available
-                                        preprocessing_result = meta.get('preprocessing_result', {})
-                                        if preprocessing_result:
-                                            metadata_text += f"\nPreprocessing Results:\n"
-                                            metadata_text += f"  Status: {preprocessing_result.get('status', 'unknown')}\n"
-                                            metadata_text += f"  Sample ID: {preprocessing_result.get('sample_id', 'unknown')}\n"
-                                            metadata_text += f"  State: {preprocessing_result.get('state', 'unknown')}\n"
-                                            metadata_text += f"  Mapped reads: {preprocessing_result.get('mapped_reads', 0):,}\n"
-                                            metadata_text += f"  Unmapped reads: {preprocessing_result.get('unmapped_reads', 0):,}\n"
-                                            metadata_text += f"  Total yield: {preprocessing_result.get('total_yield', 0):,} bases\n"
-                                        
-                                        metadata_text += "-" * 50 + "\n"
-                                    
-                                    self.workflow_context_display.set_value(metadata_text)
-                                    self.metadata_summary.set_text(f"Preprocessing metadata available - {len(preprocessing_metadata)} completed jobs with detailed BAM analysis")
-                                else:
-                                    self.workflow_context_display.set_value('No preprocessing metadata available yet.\n\nPreprocessing jobs will appear here as they complete with detailed BAM analysis results.')
-                                    self.metadata_summary.set_text('No preprocessing metadata available')
-                        else:
-                            self.workflow_context_display.set_value('No monitored directory specified. Cannot access preprocessing metadata.')
-                            self.metadata_summary.set_text('No monitored directory')
-                            
-                    except ImportError:
-                        # Workflow state not available, show static info
-                        self._show_limited_mode_ui()
-                        
-                except Exception as e:
-                    # If workflow state is not available, show static info
-                    self._show_limited_mode_ui()
-                    print(f"GUI update error: {e}")
-            
-            # Set up auto-refresh timer
-            ui.timer(2.0, update_ui)
-            
-            # Initial update
-            update_ui()
-    
-    def _show_limited_mode_ui(self):
-        """Show limited mode UI when workflow state is not available."""
+    def _drain_updates_on_ui(self):
+        """Drain queued updates and apply them on the UI thread (called by ui.timer)."""
+        if not self.gui_ready.is_set():
+            return
+        processed_any = False
         try:
-            # Update basic status
-            self.status_indicator.classes('text-2xl text-yellow-400')
-            self.status_label.set_text('Workflow Status: Limited Mode')
-            self.status_label.classes('text-sm font-medium text-yellow-600')
-            
-            # Show static configuration
-            self.workflow_config_label.set_text(f'Workflow: {", ".join(self.workflow_steps) if self.workflow_steps else "Unknown"}')
-            self.detected_files_label.set_text(f'Monitored Directory: {self.monitored_directory}')
-            
-            # Show limited mode message
-            self.current_activity_label.set_text('Real-time updates not available - check CLI output for progress')
-            
-            # Add basic log information
-            self.log_area.set_value('GUI is running in limited mode.\nReal-time workflow updates not available.\nCheck the CLI output for detailed progress information.\n\nThis is normal when workflow hooks are not fully integrated.')
-            
+            while True:
+                try:
+                    _, update = self.update_queue.get_nowait()
+                except queue.Empty:
+                    break
+                self._handle_update(update)
+                self.total_updates_processed += 1
+                processed_any = True
+                logging.info(f"[GUI] Processed update #{self.total_updates_processed}: {update.update_type.value}")
         except Exception as e:
-            print(f"Limited mode UI error: {e}")
+            logging.debug(f"[GUI] Error draining updates on UI: {e}")
+        finally:
+            if processed_any:
+                try:
+                    ui.update()
+                except Exception:
+                    pass
+    
+    def _handle_update(self, update: GUIUpdate):
+        """Handle a single update message."""
+        try:
+            if update.update_type == UpdateType.WORKFLOW_STATUS:
+                self._update_workflow_status(update.data)
+            elif update.update_type == UpdateType.JOB_UPDATE:
+                self._update_job_status(update.data)
+            elif update.update_type == UpdateType.QUEUE_UPDATE:
+                self._update_queue_status(update.data)
+            elif update.update_type == UpdateType.LOG_MESSAGE:
+                self._update_logs(update.data)
+            elif update.update_type == UpdateType.PROGRESS_UPDATE:
+                self._update_progress(update.data)
+            elif update.update_type == UpdateType.ERROR_UPDATE:
+                self._update_errors(update.data)
+            elif update.update_type == UpdateType.SAMPLES_UPDATE:
+                self._update_samples_table(update.data)
+                
+        except Exception as e:
+            logging.debug(f"Error handling GUI update: {e}")
+    
+    def _update_workflow_status(self, data: Dict[str, Any]):
+        """Update workflow status in the GUI."""
+        try:
+            if hasattr(self, 'status_indicator') and hasattr(self, 'status_label'):
+                if data.get('is_running', False):
+                    self.status_indicator.classes('text-2xl text-green-400')
+                    self.status_label.set_text('Workflow Status: Running')
+                    self._is_running = True
+                else:
+                    self.status_indicator.classes('text-2xl text-red-400')
+                    self.status_label.set_text('Workflow Status: Stopped')
+                    self._is_running = False
+                    
+                # Update timing
+                if data.get('start_time'):
+                    self._start_time = float(data['start_time'])
+                    if hasattr(self, 'workflow_start_time'):
+                        start_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self._start_time))
+                        self.workflow_start_time.set_text(f'Started: {start_str}')
+                    
+                if hasattr(self, 'workflow_duration') and self._start_time:
+                    elapsed_seconds = int(time.time() - self._start_time)
+                    self.workflow_duration.set_text(f'Duration: {self._format_duration(elapsed_seconds)}')
+                    
+        except Exception as e:
+            logging.debug(f"Error updating workflow status: {e}")
+    
+    def _update_job_status(self, data: Dict[str, Any]):
+        """Update job status in the GUI."""
+        try:
+            if hasattr(self, 'active_jobs_table'):
+                # Update active jobs table
+                job_rows = []
+                for job in data.get('active_jobs', []):
+                    job_rows.append({
+                        'job_id': str(job.get('job_id', ''))[:8],
+                        'job_type': job.get('job_type', ''),
+                        'filepath': Path(job.get('filepath', '')).name,
+                        'worker': job.get('worker_name', ''),
+                        'duration': self._format_duration(job.get('duration', 0)),
+                        'progress': f"{int(job.get('progress', 0) * 100)}%"
+                    })
+                
+                # Update table
+                self.active_jobs_table.clear()
+                if job_rows:
+                    self.active_jobs_table.add_rows(job_rows)
+                    
+        except Exception as e:
+            logging.debug(f"Error updating job status: {e}")
+    
+    def _update_queue_status(self, data: Dict[str, Any]):
+        """Update queue status in the GUI."""
+        try:
+            # Update queue status displays
+            if hasattr(self, 'preprocessing_status'):
+                queue_data = data.get('preprocessing', {})
+                self.preprocessing_status.set_text(f"{queue_data.get('running', 0)}/{queue_data.get('total', 0)}")
+                
+            if hasattr(self, 'analysis_status'):
+                # Combine analysis queues
+                analysis_running = sum(data.get(q, {}).get('running', 0) for q in ['mgmt', 'cnv', 'target', 'fusion'])
+                analysis_total = sum(data.get(q, {}).get('total', 0) for q in ['mgmt', 'cnv', 'target', 'fusion'])
+                self.analysis_status.set_text(f"{analysis_running}/{analysis_total}")
+                
+            if hasattr(self, 'classification_status'):
+                classification_data = data.get('classification', {})
+                self.classification_status.set_text(f"{classification_data.get('running', 0)}/{classification_data.get('total', 0)}")
+                
+            if hasattr(self, 'other_status'):
+                other_data = data.get('other', {})
+                self.other_status.set_text(f"{other_data.get('running', 0)}/{other_data.get('total', 0)}")
+                
+        except Exception as e:
+            logging.debug(f"Error updating queue status: {e}")
+    
+    def _update_logs(self, data: Dict[str, Any]):
+        """Update logs in the GUI."""
+        try:
+            if hasattr(self, 'log_area'):
+                log_message = data.get('message', '')
+                log_level = data.get('level', 'INFO')
+                timestamp = time.strftime('%H:%M:%S')
+                
+                new_line = f'[{timestamp}] {log_level}: {log_message}\n'
+                self._log_buffer.append(new_line)
+                self.log_area.set_value(''.join(self._log_buffer))
+                
+        except Exception as e:
+            logging.debug(f"Error updating logs: {e}")
+    
+    def _update_progress(self, data: Dict[str, Any]):
+        """Update progress in the GUI."""
+        try:
+            if hasattr(self, 'progress_bar') and hasattr(self, 'progress_label'):
+                progress = data.get('progress', 0.0)
+                
+                pct = max(0.0, min(100.0, round(progress * 100.0, 1)))
+                
+                self.progress_bar.set_value(pct)
+                # Drop .0 for integers like 81.0 -> 81
+                pct_str = f"{pct:.1f}" if pct % 1 else f"{int(pct)}"
+                self.progress_label.set_text(f'{pct_str}% Complete')
+                # Optional counts
+                if hasattr(self, 'completed_count') and 'completed' in data:
+                    self.completed_count.set_text(str(data['completed']))
+                if hasattr(self, 'failed_count') and 'failed' in data:
+                    self.failed_count.set_text(str(data['failed']))
+                if hasattr(self, 'total_count') and 'total' in data:
+                    self.total_count.set_text(str(data['total']))
+                
+        except Exception as e:
+            logging.debug(f"Error updating progress: {e}")
+    
+    def _update_errors(self, data: Dict[str, Any]):
+        """Update error information in the GUI."""
+        try:
+            # Update error counts if available
+            if hasattr(self, 'preprocessing_errors'):
+                self.preprocessing_errors.set_text(str(data.get('preprocessing_errors', 0)))
+                
+            if hasattr(self, 'analysis_errors'):
+                self.analysis_errors.set_text(str(data.get('analysis_errors', 0)))
+                
+            if hasattr(self, 'classification_errors'):
+                self.classification_errors.set_text(str(data.get('classification_errors', 0)))
+                
+        except Exception as e:
+            logging.debug(f"Error updating error information: {e}")
     
     def _format_duration(self, seconds):
         """Format duration in seconds to human readable format."""
@@ -629,114 +325,570 @@ class GUILauncher:
             minutes = (seconds % 3600) // 60
             return f"{hours}h {minutes}m"
     
-    def _export_logs(self):
-        """Export current logs to a file."""
+    def _run_gui_worker(self):
+        """Run the GUI in a completely isolated thread."""
         try:
-            from pathlib import Path
-            import tempfile
+            # Set thread name for identification
+            threading.current_thread().name = "LittleJohn-GUI-Thread"
             
-            # Create a temporary file
-            temp_dir = Path(tempfile.gettempdir())
-            log_file = temp_dir / f"littlejohn_workflow_logs_{int(time.time())}.txt"
+            # Create the main workflow monitor page
+            @ui.page('/')
+            def welcome_page():
+                """Welcome page at root route."""
+                self._create_welcome_page()
             
-            # Get current log content
-            log_content = self.log_area.value if hasattr(self.log_area, 'value') else 'No logs available'
+            # Create the workflow monitoring page
+            @ui.page('/littlejohn')
+            def workflow_monitor():
+                """Workflow monitoring page under /littlejohn route."""
+                self._create_workflow_monitor()
             
-            # Write to file
-            with open(log_file, 'w') as f:
-                f.write(f"LittleJohn Workflow Logs\n")
-                f.write(f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write(f"Workflow: {', '.join(self.workflow_steps) if self.workflow_steps else 'Unknown'}\n")
-                f.write(f"Monitored Directory: {self.monitored_directory}\n")
-                f.write("-" * 50 + "\n\n")
-                f.write(log_content)
+            # Create the samples overview page
+            @ui.page('/live_data')
+            def samples_overview():
+                """Samples overview page showing all tracked samples."""
+                self._create_samples_overview()
             
-            # Show success message
-            ui.notify(f'Logs exported to: {log_file}', type='positive')
+            # Create individual sample detail pages
+            @ui.page('/live_data/{sample_id}')
+            def sample_detail(sample_id: str):
+                """Individual sample detail page."""
+                self._create_sample_detail_page(sample_id)
             
+            # Enable global update processing regardless of which page is open
+            try:
+                self.gui_ready.set()
+                ui.timer(0.3, self._drain_updates_on_ui, active=True)
+            except Exception:
+                pass
+            
+            # Start the GUI
+            ui.run(
+                host=self.host,
+                port=self.port,
+                show=False,
+                reload=False
+            )
         except Exception as e:
-            ui.notify(f'Failed to export logs: {e}', type='negative')
+            print(f"❌ GUI worker error: {e}")
+            import traceback
+            traceback.print_exc()
     
-    def _update_metadata_summary(self, metadata_files):
-        """Update the preprocessing metadata summary information."""
+    def _create_welcome_page(self):
+        """Create the welcome page."""
+        # Background and main container
+        with ui.column().classes('w-full h-full items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100 p-8'):
+            # Main title and description
+            ui.label('🧬 LittleJohn').classes('text-6xl font-bold mb-4 text-blue-700')
+            ui.label('Advanced BAM File Analysis & Workflow Management').classes('text-2xl text-gray-700 mb-8 text-center max-w-3xl')
+            
+            # Description card
+            with ui.card().classes('w-full max-w-4xl mb-8 bg-white shadow-lg'):
+                with ui.column().classes('p-6'):
+                    ui.label('What is LittleJohn?').classes('text-xl font-semibold mb-4 text-blue-800')
+                    ui.label('LittleJohn is a comprehensive bioinformatics workflow system designed for processing and analyzing BAM files. It provides automated preprocessing, multiple analysis pipelines, and real-time monitoring capabilities.').classes('text-gray-700 mb-4')
+                    
+                    with ui.row().classes('w-full justify-center gap-8 mt-6'):
+                        with ui.column().classes('text-center'):
+                            ui.label('🔬').classes('text-3xl mb-2')
+                            ui.label('Preprocessing').classes('text-sm font-medium text-gray-600')
+                        with ui.column().classes('text-center'):
+                            ui.label('🧬').classes('text-3xl mb-2')
+                            ui.label('MGMT Analysis').classes('text-sm font-medium text-gray-600')
+                        with ui.column().classes('text-center'):
+                            ui.label('📊').classes('text-3xl mb-2')
+                            ui.label('CNV Detection').classes('text-sm font-medium text-gray-600')
+                        with ui.column().classes('text-center'):
+                            ui.label('🎯').classes('text-3xl mb-2')
+                            ui.label('Target Analysis').classes('text-sm font-medium text-gray-600')
+                        with ui.column().classes('text-center'):
+                            ui.label('🔗').classes('text-3xl mb-2')
+                            ui.label('Fusion Detection').classes('text-sm font-medium text-gray-600')
+            
+            # Action buttons
+            with ui.row().classes('gap-6'):
+                ui.link('📊 Open Workflow Monitor', '/littlejohn').classes('bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-8 py-4 rounded-lg shadow-lg transition-colors')
+                
+                # Placeholder buttons for future functionality
+                ui.button('🚀 Launch New Workflow', on_click=lambda: self._launch_workflow_button_clicked()).classes('bg-green-600 hover:bg-green-700 text-white text-lg font-semibold px-8 py-4 rounded-lg shadow-lg transition-colors')
+                ui.button('📋 View Documentation', on_click=lambda: self._view_docs_button_clicked()).classes('bg-purple-600 hover:bg-purple-700 text-white text-lg font-semibold px-8 py-4 rounded-lg shadow-lg transition-colors')
+            
+            # Sample Tracking Preview - SIMPLIFIED: Show basic info without workflow_state access
+            with ui.card().classes('w-full max-w-4xl mt-8 bg-white shadow-lg'):
+                with ui.column().classes('p-6'):
+                    ui.label('🧬 Live Sample Tracking').classes('text-xl font-semibold mb-4 text-blue-800')
+                    ui.label('Sample tracking will be available once the workflow is running.').classes('text-sm text-gray-600')
+                    
+                    with ui.row().classes('w-full justify-center gap-4 mt-4'):
+                        ui.link('�� View All Samples', '/live_data').classes('bg-blue-600 hover:bg-blue-700 text-white text-sm px-4 py-2 rounded-lg')
+                        ui.link('📊 Workflow Monitor', '/littlejohn').classes('bg-green-600 hover:bg-green-700 text-white text-sm px-4 py-2 rounded-lg')
+            
+            # Footer information
+            with ui.row().classes('mt-12 text-center text-gray-500'):
+                ui.label('LittleJohn Workflow Monitor - Advanced Bioinformatics Analysis Platform').classes('text-sm')
+    
+    def _create_samples_overview(self):
+        """Create the samples overview page showing all tracked samples."""
+        # Page title and navigation
+        with ui.row().classes('w-full bg-blue-600 text-white p-4 items-center justify-between'):
+            with ui.row().classes('items-center'):
+                ui.label('🧬 Sample Tracking Overview').classes('text-2xl font-bold')
+                ui.label('All samples processed by LittleJohn').classes('text-sm ml-4 opacity-80')
+            
+            # Navigation links
+            with ui.row().classes('gap-4'):
+                ui.link('🏠 Welcome', '/').classes('text-white hover:text-blue-200 text-sm')
+                ui.link('📊 Workflow Monitor', '/littlejohn').classes('text-white hover:text-blue-200 text-sm')
+                ui.label('📋 Sample Overview').classes('text-white text-sm font-semibold')
+        
+        # Main content area
+        with ui.column().classes('w-full p-4 gap-4'):
+            # Sample statistics
+            with ui.card().classes('w-full bg-gradient-to-r from-blue-50 to-indigo-50'):
+                ui.label('📊 Sample Statistics').classes('text-lg font-semibold mb-4 text-blue-800')
+                
+                # SIMPLIFIED: Show basic info without workflow_state access
+                ui.label('Sample statistics will be available once the workflow is running.').classes('text-sm text-gray-600')
+            
+            # Samples table
+            with ui.card().classes('w-full'):
+                ui.label('📋 All Tracked Samples').classes('text-lg font-semibold mb-4')
+                with ui.row().classes('items-center gap-2 mb-2'):
+                    self.view_sample_button = ui.button(
+                        'View',
+                        on_click=lambda: ui.navigate.to(f"/live_data/{self._selected_sample_id}") if self._selected_sample_id else ui.notify('Select a sample first', type='warning')
+                    ).props('color=primary')
+                    self.view_sample_button.disable()
+
+                # Create a placeholder table that will be updated later
+                self.samples_table = ui.table(
+                    columns=[
+                        {'name': 'sample_id', 'label': 'Sample ID', 'field': 'sample_id'},
+                        {'name': 'active_jobs', 'label': 'Active', 'field': 'active_jobs'},
+                        {'name': 'total_jobs', 'label': 'Total', 'field': 'total_jobs'},
+                        {'name': 'completed_jobs', 'label': 'Completed', 'field': 'completed_jobs'},
+                        {'name': 'failed_jobs', 'label': 'Failed', 'field': 'failed_jobs'},
+                        {'name': 'job_types', 'label': 'Job Types', 'field': 'job_types'},
+                        {'name': 'last_seen', 'label': 'Last Activity', 'field': 'last_seen'}
+                    ],
+                    rows=[],
+                    row_key='sample_id',
+                    selection='single',
+                    pagination=20
+                ).classes('w-full')
+
+                # Selection handler to enable the external View button
+                try:
+                    self.samples_table.on('selection', self._on_sample_selected)
+                except Exception:
+                    pass
+
+                # If we have cached rows, show them immediately for instant UX
+                if self._last_samples_rows:
+                    try:
+                        self.samples_table.rows = list(self._last_samples_rows)
+                        self.samples_table.update()
+                        # Auto-select if only one sample
+                        if len(self._last_samples_rows) == 1:
+                            self._selected_sample_id = self._last_samples_rows[0].get('sample_id')
+                            self.view_sample_button.enable()
+                    except Exception:
+                        pass
+
+    def _update_samples_table(self, data: Dict[str, Any]):
+        """Update the samples overview table with new data."""
         try:
-            if not metadata_files:
-                self.metadata_summary.set_text('No preprocessing metadata available')
+            if not hasattr(self, 'samples_table'):
                 return
-            
-            # For workflow context, show a simple summary
-            if metadata_files and metadata_files[0].get('type') == 'workflow_context':
-                self.metadata_summary.set_text('Workflow context metadata available - showing preprocessing and job results')
-                return
-            
-            # Count files by workflow step
-            step_counts = {}
-            total_size = 0
-            
-            for file_info in metadata_files:
-                file_type = file_info.get('type', 'general')
-                step_counts[file_type] = step_counts.get(file_type, 0) + 1
-                total_size += file_info['size']
-            
-            # Create preprocessing-focused summary
-            summary_parts = []
-            summary_parts.append(f"{len(metadata_files)} metadata files")
-            
-            # Show preprocessing files first
-            if 'preprocessing' in step_counts:
-                summary_parts.append(f"Preprocessing: {step_counts['preprocessing']}")
-            
-            # Show analysis files
-            analysis_files = sum(step_counts.get(step, 0) for step in ['fusion_analysis', 'cnv_analysis', 'target_analysis', 'sturgeon_analysis'])
-            if analysis_files > 0:
-                summary_parts.append(f"Analysis: {analysis_files}")
-            
-            # Show workflow files
-            if 'workflow' in step_counts or 'execution' in step_counts:
-                workflow_files = step_counts.get('workflow', 0) + step_counts.get('execution', 0)
-                summary_parts.append(f"Workflow: {workflow_files}")
-            
-            # Show total size
-            if total_size > 0:
-                size_mb = total_size / (1024 * 1024)
-                summary_parts.append(f"Total size: {size_mb:.1f} MB")
-            
-            # Add most recent preprocessing file info
-            preprocessing_files = [f for f in metadata_files if f.get('type') == 'preprocessing']
-            if preprocessing_files:
-                most_recent = preprocessing_files[0]
-                recent_time = time.strftime('%H:%M:%S', time.localtime(most_recent['modified']))
-                summary_parts.append(f"Latest preprocessing: {most_recent['name']} ({recent_time})")
-            
-            summary_text = ' | '.join(summary_parts)
-            self.metadata_summary.set_text(summary_text)
-            
+            samples = data.get('samples', [])
+            # Deduplicate by sample_id taking the newest last_seen
+            by_id: Dict[str, Dict[str, Any]] = {}
+            for s in samples:
+                sid = s.get('sample_id', '') or 'unknown'
+                last_seen = float(s.get('last_seen', time.time()))
+                existing = by_id.get(sid)
+                if not existing or last_seen >= existing.get('_last_seen_raw', 0):
+                    by_id[sid] = {
+                        'sample_id': sid,
+                        'active_jobs': s.get('active_jobs', 0),
+                        'total_jobs': s.get('total_jobs', 0),
+                        'completed_jobs': s.get('completed_jobs', 0),
+                        'failed_jobs': s.get('failed_jobs', 0),
+                        'job_types': ','.join(sorted(set(s.get('job_types', [])))) if isinstance(s.get('job_types', []), list) else str(s.get('job_types', '')),
+                        'last_seen': time.strftime('%H:%M:%S', time.localtime(last_seen)),
+                        'actions': 'View',
+                        '_last_seen_raw': last_seen,
+                    }
+
+            rows = list(by_id.values())
+            # Replace rows to avoid duplicates
+            self.samples_table.rows = rows
+            self.samples_table.update()
+            # Cache for persistence
+            self._last_samples_rows = rows
+            self._known_sample_ids = {r.get('sample_id') for r in rows if r.get('sample_id')}
+            # Track currently most active/recent sample
+            if rows:
+                rows_sorted = sorted(rows, key=lambda r: (r.get('active_jobs', 0), r.get('_last_seen_raw', 0)), reverse=True)
+                self._current_sample_id = rows_sorted[0].get('sample_id')
+            # Update external button state
+            if self._selected_sample_id and any(r.get('sample_id') == self._selected_sample_id for r in rows):
+                self.view_sample_button.enable()
+            elif rows:
+                if len(rows) == 1:
+                    self._selected_sample_id = rows[0].get('sample_id')
+                    self.view_sample_button.enable()
+                else:
+                    self.view_sample_button.disable()
+            else:
+                self._selected_sample_id = None
+                self.view_sample_button.disable()
         except Exception as e:
-            print(f"Metadata summary error: {e}")
-            self.metadata_summary.set_text('Error updating preprocessing metadata summary')
-    
-    def _on_metadata_file_change(self, event):
-        """Handle metadata file selection change."""
+            logging.debug(f"Error updating samples table: {e}")
+
+    def _on_sample_selected(self, event) -> None:
         try:
-            if event.value and event.value != 'No metadata files detected':
-                self._display_metadata_content()
-        except Exception as e:
-            print(f"Metadata file change error: {e}")
-    
-    def stop_gui(self):
-        """Stop the GUI."""
-        self.is_running = False
-        if self.gui_thread and self.gui_thread.is_alive():
-            # Note: NiceGUI doesn't have a clean shutdown method
-            # The thread will terminate when the main process ends
+            # NiceGUI passes {'rows': [selected_rows...]}
+            rows = None
+            if hasattr(event, 'args') and isinstance(event.args, dict):
+                rows = event.args.get('rows')
+            elif isinstance(event, dict):
+                rows = event.get('rows')
+            if rows and isinstance(rows, list) and len(rows) > 0 and isinstance(rows[0], dict):
+                self._selected_sample_id = rows[0].get('sample_id')
+                if self._selected_sample_id:
+                    self.view_sample_button.enable()
+                else:
+                    self.view_sample_button.disable()
+        except Exception:
             pass
     
+    def _create_sample_detail_page(self, sample_id: str):
+        """Create the individual sample detail page."""
+        # Guard: unknown sample -> show message and back button; also redirect
+        if self._known_sample_ids and sample_id not in self._known_sample_ids:
+            with ui.column().classes('w-full items-center justify-center p-8'):
+                ui.label(f'Unknown sample: {sample_id}').classes('text-xl font-semibold text-red-600')
+                ui.label('This sample ID has not been seen yet in the current session.').classes('text-sm text-gray-600')
+                ui.button('Back to Samples', on_click=lambda: ui.navigate.to('/live_data')).props('color=primary')
+            # Soft redirect after short delay
+            try:
+                ui.timer(1.5, lambda: ui.navigate.to('/live_data'), once=True)
+            except Exception:
+                pass
+            return
+
+        sample_dir = Path(self.monitored_directory) / sample_id if self.monitored_directory else None
+
+        # Page title and navigation
+        with ui.row().classes('w-full bg-blue-600 text-white p-4 items-center justify-between'):
+            with ui.row().classes('items-center'):
+                ui.label(f'🧬 Sample: {sample_id}').classes('text-2xl font-bold')
+                ui.label('Detailed sample information and job history').classes('text-sm ml-4 opacity-80')
+            with ui.row().classes('gap-4'):
+                ui.link('📋 Sample Overview', '/live_data').classes('text-white hover:text-blue-200 text-sm')
+                ui.link('📊 Workflow Monitor', '/littlejohn').classes('text-white hover:text-blue-200 text-sm')
+
+        with ui.column().classes('w-full p-4 gap-4'):
+            # Files in output directory
+            with ui.card().classes('w-full'):
+                ui.label('📁 Output Files').classes('text-lg font-semibold mb-2')
+                files_table = ui.table(
+                    columns=[
+                        {'name': 'name', 'label': 'File', 'field': 'name'},
+                        {'name': 'size', 'label': 'Size (bytes)', 'field': 'size'},
+                        {'name': 'mtime', 'label': 'Last Modified', 'field': 'mtime'},
+                    ],
+                    rows=[],
+                    pagination=20
+                ).classes('w-full')
+
+            # master.csv summary
+            with ui.card().classes('w-full'):
+                ui.label('📊 master.csv Summary').classes('text-lg font-semibold mb-2')
+                summary_table = ui.table(
+                    columns=[
+                        {'name': 'key', 'label': 'Field', 'field': 'key'},
+                        {'name': 'value', 'label': 'Value', 'field': 'value'},
+                    ],
+                    rows=[],
+                    pagination=0
+                ).classes('w-full')
+
+            # Periodic refresher
+            def _refresh_sample_detail() -> None:
+                # Refresh files list
+                try:
+                    rows = []
+                    if sample_dir and sample_dir.exists():
+                        for f in sorted(sample_dir.iterdir()):
+                            if f.is_file():
+                                try:
+                                    stat = f.stat()
+                                    rows.append({
+                                        'name': f.name,
+                                        'size': stat.st_size,
+                                        'mtime': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(stat.st_mtime)),
+                                    })
+                                except Exception:
+                                    continue
+                    files_table.rows = rows
+                    files_table.update()
+                except Exception:
+                    pass
+
+                # Refresh master.csv summary
+                try:
+                    if sample_dir:
+                        csv_path = sample_dir / 'master.csv'
+                        if csv_path.exists():
+                            # Read first row of CSV
+                            with csv_path.open('r', newline='') as fh:
+                                reader = csv.DictReader(fh)
+                                first_row = next(reader, None)
+                            if first_row:
+                                # Show a compact selection first; fall back to all
+                                preferred_keys = [
+                                    'counter_bam_passed', 'counter_bam_failed', 'counter_bases_count',
+                                    'counter_mapped_count', 'counter_unmapped_count',
+                                    'run_info_run_time', 'run_info_device', 'run_info_model', 'run_info_flow_cell',
+                                    'bam_tracking_counter', 'bam_tracking_total_files',
+                                ]
+                                rows = []
+                                for k in preferred_keys:
+                                    if k in first_row:
+                                        rows.append({'key': k, 'value': first_row.get(k, '')})
+                                # Add a few more dynamic fields if present
+                                additional = [
+                                    ('devices', 'devices'),
+                                    ('basecall_models', 'basecall_models'),
+                                    ('flowcell_ids', 'flowcell_ids'),
+                                ]
+                                for k, _ in additional:
+                                    if k in first_row:
+                                        rows.append({'key': k, 'value': first_row.get(k, '')})
+                                if not rows:
+                                    rows = [{'key': k, 'value': v} for k, v in first_row.items()]
+                                summary_table.rows = rows
+                                summary_table.update()
+                        else:
+                            summary_table.rows = [{'key': 'Status', 'value': 'master.csv not found'}]
+                            summary_table.update()
+                except Exception:
+                    # Avoid breaking the UI; skip on CSV parse errors
+                    pass
+
+            ui.timer(2.0, _refresh_sample_detail, active=True)
+
+    
+    def _create_workflow_monitor(self):
+        """Create the main workflow monitoring page."""
+        # Page title and navigation
+        with ui.row().classes('w-full bg-blue-600 text-white p-4 items-center justify-between'):
+            with ui.row().classes('items-center'):
+                ui.label('📊 LittleJohn Workflow Monitor').classes('text-2xl font-bold')
+                ui.label('Real-time workflow monitoring and control').classes('text-sm ml-4 opacity-80')
+            
+            # Navigation links
+            with ui.row().classes('gap-4'):
+                ui.link('🏠 Welcome', '/').classes('text-white hover:text-blue-200 text-sm')
+                ui.link('📋 Sample Overview', '/live_data').classes('text-white hover:text-blue-200 text-sm')
+                ui.label('📊 Workflow Monitor').classes('text-white text-sm font-semibold')
+        
+        # Main content area
+        with ui.column().classes('w-full p-4 gap-4'):
+            # Workflow Status Overview
+            with ui.card().classes('w-full bg-gradient-to-r from-blue-50 to-indigo-50'):
+                ui.label('🚀 Workflow Status Overview').classes('text-lg font-semibold mb-4 text-blue-800')
+                
+                # Status indicator
+                with ui.row().classes('w-full items-center gap-4'):
+                    self.status_indicator = ui.label('🟢').classes('text-2xl')
+                    self.status_label = ui.label('Workflow Status: Running').classes('text-sm font-medium text-green-600')
+                
+                # Timing information
+                with ui.row().classes('w-full gap-8 mt-4'):
+                    self.workflow_start_time = ui.label('Started: --').classes('text-sm text-gray-600')
+                    self.workflow_duration = ui.label('Duration: --').classes('text-sm text-gray-600')
+                
+                # Progress bar (hide internal float value text; use external formatted label below)
+                self.progress_bar = ui.linear_progress(0.0).classes('w-full mt-4').style('color: transparent')
+                self.progress_label = ui.label('0% Complete').classes('text-sm text-center text-gray-600')
+
+                # Counts summary
+                with ui.row().classes('w-full gap-6 mt-2'):
+                    with ui.row().classes('items-center gap-2'):
+                        ui.label('Completed:').classes('text-xs text-gray-600')
+                        self.completed_count = ui.label('0').classes('text-xs font-semibold')
+                    with ui.row().classes('items-center gap-2'):
+                        ui.label('Failed:').classes('text-xs text-gray-600')
+                        self.failed_count = ui.label('0').classes('text-xs font-semibold')
+                    with ui.row().classes('items-center gap-2'):
+                        ui.label('Total:').classes('text-xs text-gray-600')
+                        self.total_count = ui.label('0').classes('text-xs font-semibold')
+            
+            # Queue Status
+            with ui.card().classes('w-full'):
+                ui.label('📋 Queue Status').classes('text-lg font-semibold mb-4')
+                
+                # Queue status grid
+                with ui.grid(columns=4).classes('w-full gap-4'):
+                    # Preprocessing
+                    with ui.card().classes('bg-green-50 p-4'):
+                        ui.label('🔬 Preprocessing').classes('text-sm font-medium text-green-800')
+                        self.preprocessing_status = ui.label('0/0').classes('text-2xl font-bold text-green-600')
+                    
+                    # Analysis
+                    with ui.card().classes('bg-blue-50 p-4'):
+                        ui.label('🧬 Analysis').classes('text-sm font-medium text-blue-800')
+                        self.analysis_status = ui.label('0/0').classes('text-2xl font-bold text-blue-600')
+                    
+                    # Classification
+                    with ui.card().classes('bg-purple-50 p-4'):
+                        ui.label('🎯 Classification').classes('text-sm font-medium text-purple-800')
+                        self.classification_status = ui.label('0/0').classes('text-2xl font-bold text-purple-800')
+                    
+                    # Other
+                    with ui.card().classes('bg-gray-50 p-4'):
+                        ui.label('⚙️ Other').classes('text-sm font-medium text-gray-800')
+                        self.other_status = ui.label('0/0').classes('text-2xl font-bold text-gray-600')
+            
+            # Active Jobs
+            with ui.card().classes('w-full'):
+                ui.label('⚡ Active Jobs').classes('text-lg font-semibold mb-4')
+                
+                # Active jobs table
+                self.active_jobs_table = ui.table(
+                    columns=[
+                        {'name': 'job_id', 'label': 'Job ID', 'field': 'job_id'},
+                        {'name': 'job_type', 'label': 'Type', 'field': 'job_type'},
+                        {'name': 'filepath', 'label': 'File', 'field': 'filepath'},
+                        {'name': 'worker', 'label': 'Worker', 'field': 'worker'},
+                        {'name': 'duration', 'label': 'Duration', 'field': 'duration'},
+                        {'name': 'progress', 'label': 'Progress', 'field': 'progress'}
+                    ],
+                    rows=[],
+                    pagination=10
+                ).classes('w-full')
+                
+                # Placeholder for when no jobs are active
+                ui.label('No active jobs at the moment.').classes('text-sm text-gray-500 mt-2')
+            
+            # Live Logs
+            with ui.card().classes('w-full'):
+                ui.label('📝 Live Logs').classes('text-lg font-semibold mb-4')
+                
+                # Log controls
+                with ui.row().classes('w-full justify-between items-center mb-2'):
+                    with ui.row().classes('gap-2'):
+                        ui.button('Clear', on_click=self._clear_logs).classes('bg-gray-500 hover:bg-gray-600 text-white text-xs')
+                        ui.button('Export', on_click=lambda: self._export_logs()).classes('bg-blue-500 hover:bg-blue-600 text-white text-xs')
+                
+                # Log area
+                self.log_area = ui.textarea('Workflow logs will appear here...').classes('w-full h-40').props('readonly')
+            
+            # Configuration
+            with ui.card().classes('w-full'):
+                ui.label('⚙️ Workflow Configuration').classes('text-lg font-semibold mb-4')
+                
+                # Configuration details
+                with ui.grid(columns=2).classes('w-full gap-4'):
+                    with ui.column():
+                        ui.label('Monitored Directory:').classes('text-sm font-medium')
+                        ui.label(self.monitored_directory or 'Not specified').classes('text-sm text-gray-600')
+                        
+                        ui.label('Workflow Steps:').classes('text-sm font-medium mt-2')
+                        ui.label(', '.join(self.workflow_steps) if self.workflow_steps else 'Not specified').classes('text-sm text-gray-600')
+                    
+                    with ui.column():
+                        ui.label('Log Level:').classes('text-sm font-medium')
+                        ui.label('--').classes('text-sm text-gray-600')
+                        
+                        ui.label('Analysis Workers:').classes('text-sm font-medium mt-2')
+                        ui.label('--').classes('text-sm text-gray-600')
+            
+            # Error Summary & Troubleshooting
+            with ui.card().classes('w-full'):
+                ui.label('⚠️ Error Summary & Troubleshooting').classes('text-lg font-semibold mb-2')
+                
+                # Error counts by type
+                with ui.row().classes('w-full justify-between'):
+                    with ui.column().classes('text-center'):
+                        self.preprocessing_errors = ui.label('0').classes('text-xl font-bold text-red-600')
+                        ui.label('Preprocessing').classes('text-xs text-gray-600')
+                    with ui.column().classes('text-center'):
+                        self.analysis_errors = ui.label('0').classes('text-xl font-bold text-red-600')
+                        ui.label('Analysis').classes('text-xs text-gray-600')
+                    with ui.column().classes('text-center'):
+                        self.classification_errors = ui.label('0').classes('text-xl font-bold text-red-600')
+                        ui.label('Classification').classes('text-xs text-gray-600')
+                
+                # Common error messages
+                ui.separator()
+                ui.label('Recent Errors').classes('text-sm font-medium mt-2')
+                self.error_summary_label = ui.label('No errors detected').classes('text-xs text-gray-600')
+            
+            # Footer
+            with ui.row().classes('w-full bg-gray-200 p-2 justify-center'):
+                ui.label('LittleJohn Workflow Monitor - Running').classes('text-sm text-gray-600')
+            
+            # Signal that GUI is ready to receive updates
+            self.gui_ready.set()
+            logging.info("[GUI] UI created and ready to receive updates")
+            # Start a periodic UI-thread drain of the update queue
+            ui.timer(0.3, self._drain_updates_on_ui, active=True)
+            # Start duration refresher
+            ui.timer(1.0, lambda: self._refresh_duration(), active=True)
+
+    def _refresh_duration(self):
+        if self._is_running and self._start_time and hasattr(self, 'workflow_duration'):
+            try:
+                elapsed_seconds = int(time.time() - self._start_time)
+                self.workflow_duration.set_text(f'Duration: {self._format_duration(elapsed_seconds)}')
+            except Exception:
+                pass
+    
+    def _export_logs(self):
+        """Export logs to a file."""
+        try:
+            # Simple log export functionality
+            log_content = ''.join(self._log_buffer)
+            if log_content:
+                # Create a simple download
+                ui.download(log_content, 'workflow_logs.txt')
+            else:
+                ui.notify('No logs to export', type='warning')
+        except Exception as e:
+            ui.notify(f'Export failed: {e}', type='error')
+
+    def _clear_logs(self):
+        try:
+            self._log_buffer.clear()
+            self.log_area.set_value('')
+        except Exception:
+            pass
+    
+    def _launch_workflow_button_clicked(self):
+        """Handle launch workflow button click."""
+        ui.notify('Launch workflow functionality not implemented yet', type='info')
+    
+    def _view_docs_button_clicked(self):
+        """Handle view documentation button click."""
+        ui.notify('Documentation not available yet', type='info')
+    
+    def stop_gui(self):
+        """Stop the GUI thread."""
+        self.is_running = False
+        # Note: NiceGUI doesn't have a clean shutdown method
+        # The thread will terminate when the main process ends
+        logging.info("GUI shutdown requested")
+    
     def is_gui_running(self) -> bool:
-        """Check if the GUI is running."""
+        """Check if the GUI thread is running."""
         return self.is_running and self.gui_thread and self.gui_thread.is_alive()
     
     def get_gui_url(self) -> str:
-        """Get the URL where the GUI is accessible."""
+        """Get the URL where the GUI is running."""
         return f"http://{self.host}:{self.port}"
 
 
@@ -753,8 +905,37 @@ def launch_gui(host: str = "localhost", port: int = 8081, show: bool = False,
     if not success:
         raise RuntimeError("Failed to launch GUI")
     
+    # Store global reference for workflow updates
+    global _current_gui_launcher
+    _current_gui_launcher = launcher
+    logging.info(f"[GUI] Global launcher set (id={id(_current_gui_launcher)})")
+    
     if show:
         import webbrowser
         webbrowser.open(launcher.get_gui_url())
     
     return launcher
+
+
+def get_gui_launcher() -> Optional[GUILauncher]:
+    """Get the current GUI launcher instance for sending updates."""
+    try:
+        launcher = _current_gui_launcher
+        logging.info(f"[GUI] get_gui_launcher -> {id(launcher) if launcher else 'None'}")
+        return launcher
+    except NameError:
+        logging.info("[GUI] get_gui_launcher -> NameError (no global set)")
+        return None
+
+
+def send_gui_update(update_type: UpdateType, data: Dict[str, Any], priority: int = 0):
+    """Send an update to the GUI without blocking the workflow."""
+    launcher = get_gui_launcher()
+    if launcher:
+        launcher.send_update(update_type, data, priority)
+    else:
+        logging.info("[GUI] No GUI launcher available for update (update dropped)")
+
+
+# Global reference to current GUI launcher
+_current_gui_launcher = None
