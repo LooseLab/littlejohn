@@ -12,6 +12,8 @@ import logging
 import queue
 from collections import deque
 import csv
+import natsort
+import numpy as np
 import pandas as pd
 from typing import Optional, Dict, Any, List
 from pathlib import Path
@@ -81,8 +83,14 @@ class GUILauncher:
         self._current_sample_id: Optional[str] = None
         self._selected_sample_id: Optional[str] = None
         self._known_sample_ids: set[str] = set()
+        self._preexisting_sample_ids: set[str] = set()
+        self._preexisting_scanned: bool = False
         # MGMT per-sample cache (latest count seen)
         self._mgmt_state: Dict[str, Dict[str, Any]] = {}
+        # Coverage per-sample cache (file mtimes, computed metrics)
+        self._coverage_state: Dict[str, Dict[str, Any]] = {}
+        # CNV per-sample cache
+        self._cnv_state: Dict[str, Dict[str, Any]] = {}
     
     def launch_gui(self, workflow_runner: Any = None, workflow_steps: list = None, 
                    monitored_directory: str = "") -> bool:
@@ -362,6 +370,9 @@ class GUILauncher:
             try:
                 self.gui_ready.set()
                 ui.timer(0.3, self._drain_updates_on_ui, active=True)
+                # Seed pre-existing samples shortly after startup, then poll for new ones
+                ui.timer(0.5, lambda: self._scan_and_seed_samples(preexisting=True), once=True)
+                ui.timer(3.0, self._scan_for_new_samples, active=True)
             except Exception:
                 pass
             
@@ -467,6 +478,7 @@ class GUILauncher:
                 self.samples_table = ui.table(
                     columns=[
                         {'name': 'sample_id', 'label': 'Sample ID', 'field': 'sample_id'},
+                        {'name': 'origin', 'label': 'Origin', 'field': 'origin'},
                         {'name': 'active_jobs', 'label': 'Active', 'field': 'active_jobs'},
                         {'name': 'total_jobs', 'label': 'Total', 'field': 'total_jobs'},
                         {'name': 'completed_jobs', 'label': 'Completed', 'field': 'completed_jobs'},
@@ -513,6 +525,7 @@ class GUILauncher:
                 if not existing or last_seen >= existing.get('_last_seen_raw', 0):
                     by_id[sid] = {
                         'sample_id': sid,
+                        'origin': 'Pre-existing' if sid in self._preexisting_sample_ids else 'Live',
                         'active_jobs': s.get('active_jobs', 0),
                         'total_jobs': s.get('total_jobs', 0),
                         'completed_jobs': s.get('completed_jobs', 0),
@@ -523,7 +536,11 @@ class GUILauncher:
                         '_last_seen_raw': last_seen,
                     }
 
-            rows = list(by_id.values())
+            # Merge with preexisting scans if any
+            existing_rows_by_id = {r['sample_id']: r for r in (self._last_samples_rows or [])}
+            for sid, row in by_id.items():
+                existing_rows_by_id[sid] = row
+            rows = list(existing_rows_by_id.values())
             # Replace rows to avoid duplicates
             self.samples_table.rows = rows
             self.samples_table.update()
@@ -593,6 +610,35 @@ class GUILauncher:
                 ui.link('📊 Workflow Monitor', '/littlejohn').classes('text-white hover:text-blue-200 text-sm')
 
         with ui.column().classes('w-full p-4 gap-4'):
+            # Coverage section (refactored component)
+            try:
+                from .gui.components.coverage import add_coverage_section  # type: ignore
+                add_coverage_section(self, sample_dir)
+            except Exception:
+                pass
+
+            # Classification section (refactored component)
+            try:
+                from .gui.components.classification import add_classification_section  # type: ignore
+                add_classification_section(sample_dir)
+            except Exception as e:
+                logging.exception(f"[GUI] Classification section failed: {e}")
+
+            # MGMT section (refactored component)
+            try:
+                from .gui.components.mgmt import add_mgmt_section  # type: ignore
+                add_mgmt_section(self, sample_dir)
+            except Exception as e:
+                logging.exception(f"[GUI] MGMT section failed: {e}")
+
+            # CNV section (refactored component)
+            try:
+                from .gui.components.cnv import add_cnv_section  # type: ignore
+                # Pass launcher for shared state access (launcher._cnv_state)
+                add_cnv_section(self, sample_dir)
+            except Exception as e:
+                logging.exception(f"[GUI] CNV section failed: {e}")
+            
             # Files in output directory
             with ui.card().classes('w-full'):
                 ui.label('📁 Output Files').classes('text-lg font-semibold mb-2')
@@ -618,544 +664,7 @@ class GUILauncher:
                     pagination=0
                 ).classes('w-full')
 
-            # Classification tab: per-tool charts (only shown if files exist)
-            with ui.card().classes('w-full'):
-                ui.label('🧪 Classification').classes('text-lg font-semibold mb-2')
-                # Configure per-tool CSV and scaling mode
-                # mode: 'fraction' -> values in 0-1; 'percent' -> values in 0-100
-                tool_to_file = {
-                    'Sturgeon': {'file': 'sturgeon_scores.csv', 'mode': 'fraction'},
-                    'NanoDX': {'file': 'NanoDX_scores.csv', 'mode': 'fraction'},
-                    'PanNanoDX': {'file': 'PanNanoDX_scores.csv', 'mode': 'fraction'},
-                    'Random Forest': {'file': 'random_forest_scores.csv', 'mode': 'percent'},
-                }
-                charts: Dict[str, Dict[str, Any]] = {}
-                for tool_name, cfg in tool_to_file.items():
-                    exp = ui.expansion(tool_name, icon='analytics').classes('w-full')
-                    with exp:
-                        summary_labels = None
-                        if tool_name == 'Sturgeon':
-                            with ui.card().classes('w-full bg-gradient-to-r from-blue-50 to-indigo-50 mb-2 p-2'):
-                                with ui.row().classes('gap-6 items-center'):
-                                    st_class = ui.label('Sturgeon classification: Unknown').classes('text-sm font-semibold text-blue-800')
-                                    st_conf = ui.label('Confidence: --%').classes('text-sm text-gray-700')
-                                    st_probes = ui.label('Probes: --').classes('text-sm text-gray-700')
-                                summary_labels = {'class': st_class, 'conf': st_conf, 'probes': st_probes}
-                        elif tool_name in ('NanoDX', 'PanNanoDX'):
-                            with ui.card().classes('w-full bg-gradient-to-r from-blue-50 to-indigo-50 mb-2 p-2'):
-                                with ui.row().classes('gap-6 items-center'):
-                                    ndx_class = ui.label(f'{tool_name} classification: Unknown').classes('text-sm font-semibold text-blue-800')
-                                    ndx_conf = ui.label('Confidence: --%').classes('text-sm text-gray-700')
-                                    ndx_feats = ui.label('Probes: --').classes('text-sm text-gray-700')
-                                summary_labels = {'class': ndx_class, 'conf': ndx_conf, 'probes': ndx_feats}
-                        elif tool_name == 'Random Forest':
-                            with ui.card().classes('w-full bg-gradient-to-r from-blue-50 to-indigo-50 mb-2 p-2'):
-                                with ui.row().classes('gap-6 items-center'):
-                                    rf_class = ui.label('Forest classification: Unknown').classes('text-sm font-semibold text-blue-800')
-                                    rf_conf = ui.label('Confidence: --%').classes('text-sm text-gray-700')
-                                    rf_feats = ui.label('Features: --').classes('text-sm text-gray-700')
-                                summary_labels = {'class': rf_class, 'conf': rf_conf, 'probes': rf_feats}
-                        ui.label(f'{tool_name} current classification').classes('text-sm text-gray-700')
-                        # Bar chart with richer style
-                        bar = ui.echart({
-                            'backgroundColor': 'transparent',
-                            'title': {'text': f'{tool_name} (Top classes)', 'left': 'center', 'top': 10, 'textStyle': {'fontSize': 16, 'color': '#000'}},
-                            'tooltip': {'trigger': 'axis', 'axisPointer': {'type': 'shadow'}, 'formatter': '{b}: {c}%'},
-                            'grid': {'left': '5%', 'right': '5%', 'bottom': '5%', 'top': '25%', 'containLabel': True},
-                            'xAxis': {'type': 'value', 'min': 0, 'max': 100, 'interval': 20, 'axisLabel': {'formatter': '{value}%'}},
-                            'yAxis': {'type': 'category', 'inverse': True, 'data': []},
-                            'series': [{
-                                'type': 'bar', 'data': [], 'barMaxWidth': '60%',
-                                'itemStyle': {'color': '#007AFF', 'borderRadius': [0, 4, 4, 0]},
-                                'label': {'show': True, 'position': 'right', 'formatter': '{c}%'}
-                            }],
-                        }).classes('w-full h-60')
-                        ui.label(f'{tool_name} confidence over time').classes('text-sm text-gray-700 mt-2')
-                        ts = ui.echart({
-                            'backgroundColor': 'transparent',
-                            'title': {'text': f'{tool_name} (time series)', 'left': 'center', 'top': 5, 'textStyle': {'fontSize': 16, 'color': '#000'}},
-                            'tooltip': {'trigger': 'axis'},
-                            'legend': {'type': 'scroll', 'top': 45},
-                            'grid': {'left': '5%', 'right': '5%', 'bottom': '5%', 'top': '30%', 'containLabel': True},
-                            'xAxis': {'type': 'time'},
-                            'yAxis': {
-                                'type': 'value', 'min': 0, 'max': 100,
-                                'axisLabel': {'formatter': '{value}%'},
-                                'splitLine': {'show': True, 'lineStyle': {'type': 'dashed', 'color': '#E0E0E0'}},
-                            },
-                            'series': [],
-                        }).classes('w-full h-64')
-                        charts[tool_name] = {
-                            'bar': bar,
-                            'ts': ts,
-                            'file': cfg['file'],
-                            'mode': cfg['mode'],
-                            'summary': summary_labels,
-                            'expansion': exp,
-                            'last_mtime': None,
-                        }
-
-            # MGMT analysis (summary + plot)
-            with ui.card().classes('w-full'):
-                mgmt_exp = ui.expansion('MGMT', icon='science').classes('w-full')
-                with mgmt_exp:
-                    with ui.card().classes('w-full bg-gradient-to-r from-blue-50 to-indigo-50 mb-2 p-2'):
-                        with ui.row().classes('gap-6 items-center'):
-                            mgmt_status = ui.label('MGMT status: Unknown').classes('text-sm font-semibold text-blue-800')
-                            mgmt_avg = ui.label('Average: --%').classes('text-sm text-gray-700')
-                            mgmt_pred = ui.label('Prediction: --%').classes('text-sm text-gray-700')
-                    ui.label('MGMT methylation plot').classes('text-sm text-gray-700')
-                    mgmt_img = ui.image('')
-                    ui.separator()
-                    ui.label('MGMT results (latest)').classes('text-sm text-gray-700 mt-2')
-                    mgmt_results_table = ui.table(
-                        columns=[
-                            {'name': 'average', 'label': 'Average %', 'field': 'average'},
-                            {'name': 'pred', 'label': 'Prediction %', 'field': 'pred'},
-                            {'name': 'status', 'label': 'Status', 'field': 'status'},
-                        ],
-                        rows=[],
-                        pagination=0,
-                    ).classes('w-full')
-                    ui.separator()
-                    mgmt_sites_title = ui.label('MGMT CpG Site Methylation Data').classes('text-sm text-gray-700 mt-2')
-                    mgmt_sites_table = ui.table(
-                        columns=[
-                            {'name': 'site', 'label': 'Site', 'field': 'site'},
-                            {'name': 'chr', 'label': 'Chr', 'field': 'chr'},
-                            {'name': 'pos', 'label': 'CpG Position', 'field': 'pos'},
-                            {'name': 'cov_fwd', 'label': 'Forward Cov', 'field': 'cov_fwd'},
-                            {'name': 'cov_rev', 'label': 'Reverse Cov', 'field': 'cov_rev'},
-                            {'name': 'cov_total', 'label': 'Total Cov', 'field': 'cov_total'},
-                            {'name': 'meth', 'label': '% Methylation', 'field': 'meth'},
-                            {'name': 'meth_fwd', 'label': 'Forward %', 'field': 'meth_fwd'},
-                            {'name': 'meth_rev', 'label': 'Reverse %', 'field': 'meth_rev'},
-                            {'name': 'notes', 'label': 'Notes', 'field': 'notes'},
-                        ],
-                        rows=[],
-                        pagination=0,
-                    ).classes('w-full')
-
-            # Helper: refresh MGMT from latest *_mgmt.csv / *_mgmt.png
-            def _extract_mgmt_specific_sites(bed_path: Path) -> List[Dict[str, Any]]:
-                try:
-                    import pandas as _pd
-                    df = _pd.read_csv(bed_path, sep='\t', header=None)
-                    if df.shape[1] < 10:
-                        return []
-                    cols = [
-                        'Chromosome','Start','End','Name','Score','Strand','Start2','End2','RGB','Coverage_Info'
-                    ]
-                    df = df.iloc[:, :len(cols)]
-                    df.columns = cols
-                    # parse Coverage_Info as "<coverage> <fraction>"
-                    cov_split = df['Coverage_Info'].astype(str).str.split()
-                    df['Coverage'] = cov_split.str[0].astype(float)
-                    df['Modified_Fraction'] = cov_split.str[1].astype(float)
-                    cpg_pairs = [(129467255,129467256),(129467258,129467259),(129467262,129467263),(129467272,129467273)]
-                    rows: List[Dict[str, Any]] = []
-                    for p1,p2 in cpg_pairs:
-                        fwd = df[(df['Chromosome']=='chr10') & (df['Start']==p1-1) & (df['Strand']=='+')]
-                        rev = df[(df['Chromosome']=='chr10') & (df['Start']==p2-1) & (df['Strand']=='-')]
-                        if not fwd.empty and not rev.empty:
-                            cov_f = float(fwd['Coverage'].iloc[0])
-                            cov_r = float(rev['Coverage'].iloc[0])
-                            tot = cov_f + cov_r
-                            mf = float(fwd['Modified_Fraction'].iloc[0])
-                            mr = float(rev['Modified_Fraction'].iloc[0])
-                            weighted = ((cov_f*mf)+(cov_r*mr))/tot if tot>0 else 0.0
-                            label_map = {
-                                '129467255/129467256':'Site 1',
-                                '129467258/129467259':'Site 2',
-                                '129467262/129467263':'Site 3',
-                                '129467272/129467273':'Site 4',
-                            }
-                            pos_key = f"{p1}/{p2}"
-                            rows.append({
-                                'site': f"{label_map.get(pos_key,'Unknown')} (CpG {pos_key})",
-                                'chr': 'chr10',
-                                'pos': pos_key,
-                                'cov_fwd': int(cov_f),
-                                'cov_rev': int(cov_r),
-                                'cov_total': int(tot),
-                                'meth': round(weighted*100.0, 2),
-                                'meth_fwd': round(mf*100.0, 2),
-                                'meth_rev': round(mr*100.0, 2),
-                                'notes': 'Combined methylation from both strands of CpG pair',
-                            })
-                    return rows
-                except Exception:
-                    return []
-
-            def _refresh_mgmt() -> None:
-                try:
-                    if not sample_dir or not sample_dir.exists():
-                        return
-                    csv_files = list(sample_dir.glob('*_mgmt.csv'))
-                    if not csv_files:
-                        return
-                    # pick latest by numeric prefix
-                    def _count_from_name(p: Path) -> int:
-                        try:
-                            return int(p.name.split('_')[0])
-                        except Exception:
-                            return -1
-                    latest_csv = max(csv_files, key=_count_from_name)
-                    key = str(sample_dir)
-                    state = self._mgmt_state.get(key, {})
-                    current_count = _count_from_name(latest_csv)
-                    csv_mtime = latest_csv.stat().st_mtime
-                    # If same file and unchanged mtime, skip
-                    if state.get('csv_path') == str(latest_csv) and state.get('csv_mtime') == csv_mtime:
-                        return
-                    # load results
-                    df = pd.read_csv(latest_csv)
-                    status = str(df.get('status', pd.Series(['Unknown'])).iloc[0])
-                    average = float(df.get('average', pd.Series([0.0])).iloc[0])
-                    pred = float(df.get('pred', pd.Series([0.0])).iloc[0])
-                    # update labels
-                    mgmt_status.set_text(f'MGMT status: {status}')
-                    mgmt_avg.set_text(f'Average: {average:.2f}%')
-                    mgmt_pred.set_text(f'Prediction: {pred:.2f}%')
-                    # update results table
-                    try:
-                        mgmt_results_table.rows = [{
-                            'average': f"{average:.2f}",
-                            'pred': f"{pred:.2f}",
-                            'status': status,
-                        }]
-                        mgmt_results_table.update()
-                    except Exception:
-                        pass
-                    # update header
-                    header = f"MGMT — {status} ({pred:.2f}%)"
-                    try:
-                        mgmt_exp.props(f'label="{header}"')
-                    except Exception:
-                        pass
-                    # update image only if changed
-                    img_path = sample_dir / f"{current_count}_mgmt.png"
-                    if img_path.exists():
-                        img_mtime = img_path.stat().st_mtime
-                        if state.get('png_path') != str(img_path) or state.get('png_mtime') != img_mtime:
-                            try:
-                                mgmt_img.set_source(str(img_path))
-                            except Exception:
-                                mgmt_img.source = str(img_path)
-                    # specific sites table
-                    bed_path = sample_dir / f"{current_count}_mgmt.bed"
-                    if not bed_path.exists():
-                        alt_bed = sample_dir / f"{current_count}_mgmt_mgmt.bed"
-                        bed_path = alt_bed if alt_bed.exists() else bed_path
-                    if bed_path.exists():
-                        bed_mtime = bed_path.stat().st_mtime
-                        if state.get('bed_path') != str(bed_path) or state.get('bed_mtime') != bed_mtime:
-                            site_rows = _extract_mgmt_specific_sites(bed_path)
-                            try:
-                                mgmt_sites_table.rows = site_rows
-                                mgmt_sites_table.update()
-                            except Exception:
-                                pass
-                    # record state
-                    self._mgmt_state[key] = {
-                        'last_count': current_count,
-                        'csv_path': str(latest_csv),
-                        'csv_mtime': csv_mtime,
-                        'png_path': str(img_path) if img_path.exists() else '',
-                        'png_mtime': img_path.stat().st_mtime if img_path.exists() else 0,
-                        'bed_path': str(bed_path) if bed_path.exists() else '',
-                        'bed_mtime': bed_path.stat().st_mtime if bed_path.exists() else 0,
-                    }
-                except Exception:
-                    pass
-
-            # Periodic refresher
-            def _read_scores_csv(csv_path: Path, mode: str):
-                try:
-                    with csv_path.open('r', newline='') as fh:
-                        reader = csv.DictReader(fh)
-                        rows = list(reader)
-                        if not rows:
-                            return None
-                        # Determine which columns are numeric scores
-                        numeric_keys = []
-                        for k in reader.fieldnames or []:
-                            if k.lower() in {'timestamp', 'number_probes'}:
-                                continue
-                            try:
-                                float(rows[-1].get(k, ''))
-                                numeric_keys.append(k)
-                            except Exception:
-                                continue
-                        if not numeric_keys:
-                            return None
-                        # Last row scores
-                        last_scores = {}
-                        for k in numeric_keys:
-                            try:
-                                v = float(rows[-1].get(k, 0))
-                                # Scale based on mode
-                                if mode == 'fraction':
-                                    v *= 100.0
-                                last_scores[k] = round(v, 2)
-                            except Exception:
-                                pass
-                        # Time series (use index or timestamp if present)
-                        time_key = 'timestamp' if 'timestamp' in (reader.fieldnames or []) else None
-                        x_labels = []
-                        series_map: Dict[str, List[List[Any]]] = {k: [] for k in numeric_keys}
-                        for idx, r in enumerate(rows):
-                            if time_key:
-                                raw_x = r.get(time_key)
-                                try:
-                                    x_val = float(raw_x)
-                                except Exception:
-                                    x_val = raw_x
-                            else:
-                                x_val = idx + 1
-                            x_labels.append(x_val)
-                            for k in numeric_keys:
-                                try:
-                                    vv = float(r.get(k, 0))
-                                    if mode == 'fraction':
-                                        vv *= 100.0
-                                    series_map[k].append([x_val, round(vv, 2)])
-                                except Exception:
-                                    series_map[k].append([x_val, 0])
-                        # Ensure chronological order when timestamp column is present
-                        if time_key:
-                            def _sort_key(p):
-                                try:
-                                    return float(p[0])
-                                except Exception:
-                                    return str(p[0])
-                            for k in series_map:
-                                series_map[k] = sorted(series_map[k], key=_sort_key)
-                        return {'last': last_scores, 'x': x_labels, 'series': series_map, 'has_time': bool(time_key)}
-                except Exception:
-                    return None
-
-            def _update_charts_from_file(tool_name: str, file_name: str):
-                try:
-                    file_path = sample_dir / file_name if sample_dir else None
-                    if not file_path or not file_path.exists():
-                        return
-                    # Special handling for Random Forest CSVs to match previous implementation
-                    if tool_name == 'Random Forest':
-                        try:
-                            df = pd.read_csv(file_path, index_col=0)
-                        except Exception:
-                            return
-                        if df.empty:
-                            return
-                        # Determine number_probes and drop for plotting
-                        lastrow = df.iloc[-1]
-                        n_features = lastrow.get('number_probes', 0)
-                        if 'number_probes' in df.columns:
-                            df_plot = df.drop(columns=['number_probes'])
-                        else:
-                            df_plot = df.copy()
-                        # Filter columns where any value > 0.5 (percentage units) over time
-                        cols_keep = [c for c in df_plot.columns if (df_plot[c] > 0.5).any()]
-                        if cols_keep:
-                            df_plot = df_plot[cols_keep]
-                        # Bar: top 10 from latest row
-                        latest = df_plot.iloc[-1]
-                        top_series = latest.sort_values(ascending=False).head(10)
-                        bar = charts[tool_name]['bar']
-                        bar.options['yAxis']['data'] = list(top_series.index[::-1])
-                        bar.options['series'][0]['data'] = [round(float(v), 2) for v in list(top_series.values[::-1])]
-                        bar.update()
-                        # Time series: use top 10 diagnoses
-                        ts = charts[tool_name]['ts']
-                        top10 = latest.nlargest(10).index.tolist()
-                        filtered_df = df_plot[top10]
-                        # Build time-axis series: [timestamp_ms, value]
-                        raw_index = list(filtered_df.index.tolist())
-                        x_vals = list(raw_index)
-
-                        ts.options['series'] = []
-                        for col in filtered_df.columns:
-                            y_vals = [round(float(v), 2) for v in filtered_df[col].tolist()]
-                            series_data = [[x_vals[i], y_vals[i]] for i in range(len(y_vals))]
-                            ts.options['series'].append({
-                                'name': col, 'type': 'line', 'smooth': True, 'animation': False,
-                                'data': series_data,
-                            })
-                        # Threshold lines 65/85
-                        ts.options['series'].append({'name': 'thresholds', 'type': 'line', 'data': [], 'markLine': {
-                            'silent': True, 'lineStyle': {'type': 'dashed', 'color': '#999'}, 'data': [{'yAxis': 65}, {'yAxis': 85}],
-                        }})
-                        ts.update()
-                        # Summary
-                        if charts[tool_name].get('summary'):
-                            labels_map = charts[tool_name]['summary']
-                            if labels_map and len(top_series) > 0:
-                                best_label = top_series.index[0]
-                                best_value = float(top_series.values[0])
-                                labels_map['class'].set_text(f'Forest classification: {best_label}')
-                                labels_map['conf'].set_text(f'Confidence: {best_value:.2f}%')
-                                if n_features is not None:
-                                    try:
-                                        labels_map['probes'].set_text(f'Features: {int(float(n_features))}')
-                                    except Exception:
-                                        pass
-                            # Update expansion header inline as well
-                            try:
-                                exp = charts[tool_name].get('expansion')
-                                if exp and len(top_series) > 0:
-                                    header = f"{tool_name} — {best_label} ({round(best_value, 2)}%)"
-                                    exp.set_text(header)
-                            except Exception:
-                                pass
-                        return
-
-                    mode = charts[tool_name].get('mode', 'percent')
-                    data = _read_scores_csv(file_path, mode)
-                    if not data:
-                        return
-                    bar = charts[tool_name]['bar']
-                    ts = charts[tool_name]['ts']
-                    # Update bar chart with top 10
-                    last = data['last']
-                    top = sorted(last.items(), key=lambda kv: kv[1], reverse=True)[:10]
-                    labels = [k for k, _ in top][::-1]
-                    values = [round(v, 2) for _, v in top][::-1]
-                    bar.options['yAxis']['data'] = labels
-                    bar.options['series'][0]['data'] = values
-                    bar.update()
-                    # Update time series (limit series to top 5 for readability)
-                    ts.options['series'] = []
-                    if data.get('has_time'):
-                        ts.options['xAxis'] = {'type': 'time'}
-                        for k, _ in top[:5]:
-                            ts.options['series'].append({
-                                'name': k, 'type': 'line', 'smooth': True, 'animation': False,
-                                'data': data['series'][k],
-                            })
-                    else:
-                        ts.options['xAxis'] = {'type': 'category', 'data': data['x']}
-                        for k, _ in top[:5]:
-                            ts.options['series'].append({
-                                'name': k, 'type': 'line', 'smooth': True, 'animation': False,
-                                'data': [y for _, y in data['series'][k]],
-                            })
-                    # Add threshold lines for Sturgeon and Random Forest
-                    if tool_name == 'Sturgeon':
-                        ts.options.setdefault('series', [])
-                        ts.options['yAxis'].setdefault('axisLabel', {'formatter': '{value}%'} )
-                        ts.options.setdefault('grid', {'containLabel': True})
-                        ts.options.setdefault('visualMap', None)
-                        ts.options.setdefault('markLine', None)
-                        # Use a markLine via a fake series overlay
-                        ts.options['series'].append({
-                            'name': 'thresholds', 'type': 'line', 'data': [], 'markLine': {
-                                'silent': True,
-                                'lineStyle': {'type': 'dashed', 'color': '#999'},
-                                'data': [ {'yAxis': 60}, {'yAxis': 80} ],
-                            }
-                        })
-                    if tool_name == 'Random Forest':
-                        ts.options.setdefault('series', [])
-                        ts.options['series'].append({
-                            'name': 'thresholds', 'type': 'line', 'data': [], 'markLine': {
-                                'silent': True,
-                                'lineStyle': {'type': 'dashed', 'color': '#999'},
-                                'data': [ {'yAxis': 65}, {'yAxis': 85} ],
-                            }
-                        })
-                    ts.update()
-                    # Update summary card for Sturgeon
-                    if tool_name == 'Sturgeon' and charts[tool_name].get('summary'):
-                        labels_map = charts[tool_name]['summary']
-                        if labels_map:
-                            # Highest class and value
-                            if top:
-                                best_label, best_value = top[0]
-                                labels_map['class'].set_text(f'Sturgeon classification: {best_label}')
-                                labels_map['conf'].set_text(f'Confidence: {best_value:.2f}%')
-                            # number_probes if present
-                            try:
-                                # 'number_probes' column (raw, not multiplied)
-                                file_path = sample_dir / file_name if sample_dir else None
-                                with file_path.open('r', newline='') as fh:
-                                    reader = csv.DictReader(fh)
-                                    rows = list(reader)
-                                if rows:
-                                    npv = rows[-1].get('number_probes') or rows[-1].get('number_probes'.lower())
-                                    if npv is not None:
-                                        labels_map['probes'].set_text(f'Probes: {int(float(npv))}')
-                            except Exception:
-                                pass
-                        # Also update expansion header to show summary inline
-                        try:
-                            exp = charts[tool_name].get('expansion')
-                            if exp and top:
-                                best_label, best_value = top[0]
-                                header = f"{tool_name} — {best_label} ({round(best_value, 2)}%)"
-                                exp.props(f'label="{header}"')
-                        except Exception:
-                            pass
-
-                    # Update summary card for NanoDX / PanNanoDX
-                    if tool_name in ('NanoDX', 'PanNanoDX') and charts[tool_name].get('summary'):
-                        labels_map = charts[tool_name]['summary']
-                        if labels_map:
-                            if top:
-                                best_label, best_value = top[0]
-                                labels_map['class'].set_text(f'{tool_name} classification: {best_label}')
-                                labels_map['conf'].set_text(f'Confidence: {best_value:.2f}%')
-                            # number_probes if present
-                            try:
-                                file_path = sample_dir / file_name if sample_dir else None
-                                with file_path.open('r', newline='') as fh:
-                                    reader = csv.DictReader(fh)
-                                    rows = list(reader)
-                                if rows:
-                                    npv = rows[-1].get('number_probes') or rows[-1].get('number_probes'.lower())
-                                    if npv is not None:
-                                        labels_map['probes'].set_text(f'Probes: {int(float(npv))}')
-                            except Exception:
-                                pass
-                        # Inline header
-                        try:
-                            exp = charts[tool_name].get('expansion')
-                            if exp and top:
-                                best_label, best_value = top[0]
-                                header = f"{tool_name} — {best_label} ({round(best_value, 2)}%)"
-                                exp.props(f'label="{header}"')
-                        except Exception:
-                            pass
-                    # Update summary for Random Forest
-                    if tool_name == 'Random Forest' and charts[tool_name].get('summary'):
-                        labels_map = charts[tool_name]['summary']
-                        if labels_map:
-                            if top:
-                                best_label, best_value = top[0]
-                                labels_map['class'].set_text(f'Forest classification: {best_label}')
-                                labels_map['conf'].set_text(f'Confidence: {best_value:.2f}%')
-                            try:
-                                with file_path.open('r', newline='') as fh:
-                                    reader = csv.DictReader(fh)
-                                    rows = list(reader)
-                                if rows:
-                                    npv = rows[-1].get('number_probes') or rows[-1].get('number_probes'.lower())
-                                    if npv is not None:
-                                        labels_map['probes'].set_text(f'Features: {int(float(npv))}')
-                            except Exception:
-                                pass
-                        # Update expansion header summary for RF as well
-                        try:
-                            exp = charts[tool_name].get('expansion')
-                            if exp and top:
-                                best_label, best_value = top[0]
-                                header = f"{tool_name} — {best_label} ({round(best_value, 2)}%)"
-                                exp.props(f'label="{header}"')
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
+            # Periodic refresher for files table and master.csv summary
             def _refresh_sample_detail() -> None:
                 # Refresh files list
                 try:
@@ -1182,34 +691,23 @@ class GUILauncher:
                     if sample_dir:
                         csv_path = sample_dir / 'master.csv'
                         if csv_path.exists():
-                            # Read first row of CSV
                             with csv_path.open('r', newline='') as fh:
                                 reader = csv.DictReader(fh)
                                 first_row = next(reader, None)
                             if first_row:
-                                # Show a compact selection first; fall back to all
                                 preferred_keys = [
                                     'counter_bam_passed', 'counter_bam_failed', 'counter_bases_count',
                                     'counter_mapped_count', 'counter_unmapped_count',
                                     'run_info_run_time', 'run_info_device', 'run_info_model', 'run_info_flow_cell',
                                     'bam_tracking_counter', 'bam_tracking_total_files',
                                 ]
-                                rows = []
+                                rows2 = []
                                 for k in preferred_keys:
                                     if k in first_row:
-                                        rows.append({'key': k, 'value': first_row.get(k, '')})
-                                # Add a few more dynamic fields if present
-                                additional = [
-                                    ('devices', 'devices'),
-                                    ('basecall_models', 'basecall_models'),
-                                    ('flowcell_ids', 'flowcell_ids'),
-                                ]
-                                for k, _ in additional:
-                                    if k in first_row:
-                                        rows.append({'key': k, 'value': first_row.get(k, '')})
-                                if not rows:
-                                    rows = [{'key': k, 'value': v} for k, v in first_row.items()]
-                                summary_table.rows = rows
+                                        rows2.append({'key': k, 'value': first_row.get(k, '')})
+                                if not rows2:
+                                    rows2 = [{'key': k, 'value': v} for k, v in first_row.items()]
+                                summary_table.rows = rows2
                                 summary_table.update()
                         else:
                             summary_table.rows = [{'key': 'Status', 'value': 'master.csv not found'}]
@@ -1218,20 +716,7 @@ class GUILauncher:
                     # Avoid breaking the UI; skip on CSV parse errors
                     pass
 
-                # Refresh classification charts only when source file changed (or first load)
-                for tool_name, info in charts.items():
-                    file_path = sample_dir / info['file'] if sample_dir else None
-                    try:
-                        if file_path and file_path.exists():
-                            mtime = file_path.stat().st_mtime
-                            if info.get('last_mtime') is None or mtime > info.get('last_mtime', 0):
-                                _update_charts_from_file(tool_name, info['file'])
-                                info['last_mtime'] = mtime
-                    except Exception:
-                        pass
-
             ui.timer(2.0, _refresh_sample_detail, active=True)
-            ui.timer(3.0, _refresh_mgmt, active=True)
 
     
     def _create_workflow_monitor(self):
@@ -1420,6 +905,96 @@ class GUILauncher:
             self.log_area.set_value('')
         except Exception:
             pass
+
+    def _scan_and_seed_samples(self, preexisting: bool = False) -> None:
+        try:
+            base = Path(self.monitored_directory) if self.monitored_directory else None
+            if not base or not base.exists():
+                return
+            rows: List[Dict[str, Any]] = []
+            for sample_dir in base.iterdir():
+                if not sample_dir.is_dir():
+                    continue
+                master = sample_dir / 'master.csv'
+                if master.exists():
+                    sid = sample_dir.name
+                    if preexisting:
+                        self._preexisting_sample_ids.add(sid)
+                    # Determine last_seen from file mtime
+                    last_seen = master.stat().st_mtime
+                    rows.append({
+                        'sample_id': sid,
+                        'origin': 'Pre-existing' if sid in self._preexisting_sample_ids else 'Live',
+                        'active_jobs': 0,
+                        'total_jobs': 0,
+                        'completed_jobs': 0,
+                        'failed_jobs': 0,
+                        'job_types': '',
+                        'last_seen': time.strftime('%H:%M:%S', time.localtime(last_seen)),
+                        '_last_seen_raw': last_seen,
+                    })
+            if rows:
+                # Merge with any current rows and update table
+                existing = {r['sample_id']: r for r in (self._last_samples_rows or [])}
+                for r in rows:
+                    existing[r['sample_id']] = r
+                merged = list(existing.values())
+                if hasattr(self, 'samples_table'):
+                    try:
+                        self.samples_table.rows = merged
+                        self.samples_table.update()
+                    except Exception:
+                        pass
+                self._last_samples_rows = merged
+                self._known_sample_ids = {r['sample_id'] for r in merged}
+            if preexisting:
+                self._preexisting_scanned = True
+        except Exception:
+            pass
+
+    def _scan_for_new_samples(self) -> None:
+        try:
+            base = Path(self.monitored_directory) if self.monitored_directory else None
+            if not base or not base.exists():
+                return
+            new_rows: List[Dict[str, Any]] = []
+            for sample_dir in base.iterdir():
+                if not sample_dir.is_dir():
+                    continue
+                sid = sample_dir.name
+                if self._preexisting_scanned and sid in self._preexisting_sample_ids:
+                    continue
+                if any(r.get('sample_id') == sid for r in (self._last_samples_rows or [])):
+                    continue
+                master = sample_dir / 'master.csv'
+                if master.exists():
+                    last_seen = master.stat().st_mtime
+                    new_rows.append({
+                        'sample_id': sid,
+                        'origin': 'Live',
+                        'active_jobs': 0,
+                        'total_jobs': 0,
+                        'completed_jobs': 0,
+                        'failed_jobs': 0,
+                        'job_types': '',
+                        'last_seen': time.strftime('%H:%M:%S', time.localtime(last_seen)),
+                        '_last_seen_raw': last_seen,
+                    })
+            if new_rows:
+                existing = {r['sample_id']: r for r in (self._last_samples_rows or [])}
+                for r in new_rows:
+                    existing[r['sample_id']] = r
+                merged = list(existing.values())
+                if hasattr(self, 'samples_table'):
+                    try:
+                        self.samples_table.rows = merged
+                        self.samples_table.update()
+                    except Exception:
+                        pass
+                self._last_samples_rows = merged
+                self._known_sample_ids = {r['sample_id'] for r in merged}
+        except Exception:
+            pass
     
     def _launch_workflow_button_clicked(self):
         """Handle launch workflow button click."""
@@ -1448,47 +1023,31 @@ class GUILauncher:
 def launch_gui(host = "0.0.0.0",port: int = 8081, show: bool = False, 
                workflow_runner: Any = None, workflow_steps: list = None, 
                monitored_directory: str = "") -> GUILauncher:
-    """Launch the LittleJohn workflow GUI."""
-    if ui is None:
-        raise ImportError("NiceGUI is not available. Please install it with: pip install nicegui")
-    
-    launcher = GUILauncher(host, port)
-    success = launcher.launch_gui(workflow_runner, workflow_steps, monitored_directory)
-    
-    if not success:
-        raise RuntimeError("Failed to launch GUI")
-    
-    # Store global reference for workflow updates
-    global _current_gui_launcher
-    _current_gui_launcher = launcher
-    logging.info(f"[GUI] Global launcher set (id={id(_current_gui_launcher)})")
-    
-    if show:
-        import webbrowser
-        webbrowser.open(launcher.get_gui_url())
-    
-    return launcher
+    """Legacy launch function (kept for backward compatibility).
+
+    Internally delegates to the refactored launcher in `littlejohn.gui.app`.
+    """
+    from .gui.app import launch_gui as _launch  # type: ignore
+    return _launch(host=host, port=port, show=show, workflow_runner=workflow_runner, workflow_steps=workflow_steps, monitored_directory=monitored_directory)
 
 
 def get_gui_launcher() -> Optional[GUILauncher]:
-    """Get the current GUI launcher instance for sending updates."""
+    """Compatibility shim that delegates to littlejohn.gui.app.get_gui_launcher."""
     try:
-        launcher = _current_gui_launcher
-        logging.info(f"[GUI] get_gui_launcher -> {id(launcher) if launcher else 'None'}")
-        return launcher
-    except NameError:
-        logging.info("[GUI] get_gui_launcher -> NameError (no global set)")
+        from .gui.app import get_gui_launcher as _get  # type: ignore
+        return _get()
+    except Exception:
         return None
 
 
 def send_gui_update(update_type: UpdateType, data: Dict[str, Any], priority: int = 0):
-    """Send an update to the GUI without blocking the workflow."""
-    launcher = get_gui_launcher()
-    if launcher:
-        launcher.send_update(update_type, data, priority)
-    else:
+    """Compatibility shim that delegates to littlejohn.gui.app.send_gui_update."""
+    try:
+        from .gui.app import send_gui_update as _send  # type: ignore
+        _send(update_type, data, priority)
+    except Exception:
         logging.info("[GUI] No GUI launcher available for update (update dropped)")
 
 
-# Global reference to current GUI launcher
+# Global reference retained for backward compatibility (now managed in gui.app)
 _current_gui_launcher = None
