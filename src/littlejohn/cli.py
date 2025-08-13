@@ -545,12 +545,25 @@ def _display_workflow_config(path: Path, work_dir: Optional[Path], workflow_step
     "--with-gui", is_flag=True, 
     help="Launch a NiceGUI interface with vertical tabs and splitter for workflow monitoring."
 )
+@click.option(
+    "--gui-host",
+    default="0.0.0.0",
+    show_default=True,
+    help="Host interface for the GUI server (e.g., 0.0.0.0 to listen on all interfaces)."
+)
+@click.option(
+    "--gui-port",
+    type=int,
+    default=8081,
+    show_default=True,
+    help="Port for the GUI server."
+)
 def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool, 
             no_process_existing: bool, work_dir: Optional[Path], log_level: str, 
             job_log_level: tuple[str, ...], deduplicate_jobs: tuple[str, ...], 
             no_progress: bool, analysis_workers: int, legacy_analysis_queue: bool, 
             use_ray: bool, ray_num_cpus: Optional[int], queue_priority: tuple[str, ...], 
-            show_priorities: bool, with_gui: bool) -> None:
+            show_priorities: bool, with_gui: bool, gui_host: str, gui_port: int) -> None:
     """Run various operations on BAM files in a directory. Preprocessing is automatically included as the first step."""
     try:
         # Validate input parameters
@@ -651,8 +664,8 @@ def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool
                     
                     # Launch GUI using the new launcher FIRST so the global sender is ready
                     gui_launcher = launch_gui(
-                        host="localhost",
-                        port=8081,
+                        host=gui_host,
+                        port=gui_port,
                         show=False,
                         workflow_runner=runner,
                         workflow_steps=workflow_steps,
@@ -667,11 +680,12 @@ def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool
                     except Exception as e:
                         click.echo(f"⚠️  Failed to install workflow hooks: {e}. GUI will show static information only.")
                     
-                    print("✅ GUI launched successfully on http://localhost:8081")
-                    print("   🏠 Welcome page: http://localhost:8081/")
-                    print("   📊 Workflow monitor: http://localhost:8081/littlejohn")
-                    print("   📋 Sample tracking: http://localhost:8081/live_data")
-                    print("   🔬 Individual samples: http://localhost:8081/live_data/sampleID/")
+                    base_url = f"http://{gui_host}:{gui_port}"
+                    print(f"✅ GUI launched successfully on {base_url}")
+                    print(f"   🏠 Welcome page: {base_url}/")
+                    print(f"   📊 Workflow monitor: {base_url}/littlejohn")
+                    print(f"   📋 Sample tracking: {base_url}/live_data")
+                    print(f"   🔬 Individual samples: {base_url}/live_data/sampleID/")
                     print("   Open your browser to monitor the workflow with the new navigation structure")
                     print("   The GUI will run in the background while the workflow executes")
                     

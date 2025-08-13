@@ -48,7 +48,7 @@ class GUIUpdate:
 class GUILauncher:
     """Launcher for the LittleJohn workflow GUI using isolated threading with message queue."""
     
-    def __init__(self, host: str = "localhost", port: int = 8081):
+    def __init__(self, host: str = "0.0.0.0", port: int = 8081):
         self.host = host
         self.port = port
         self.gui_thread = None
