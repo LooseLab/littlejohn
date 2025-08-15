@@ -845,45 +845,43 @@ class RayWorkflowManager:
     
     def process_completed_jobs(self) -> None:
         """Process completed jobs and handle their results."""
-        completed_futures = []
-        
-        # Check for completed jobs
-        for job_id, job_info in list(self.active_jobs.items()):
+        completed_futures: List[Tuple[int, Dict[str, Any]]] = []
+
+        # Take a stable snapshot of active jobs under lock to avoid concurrent mutation
+        with self.progress_lock:
+            active_items = list(self.active_jobs.items())
+
+        # Check for completed jobs without mutating dicts during iteration
+        for job_id, job_info in active_items:
             future = job_info['future']
             try:
-                # Check if the future is ready using the correct Ray API
-                # Use ray.wait() with timeout=0 to check if future is ready
                 ready_futures, _ = ray.wait([future], timeout=0)
                 if ready_futures:
-                    # Future is ready, get the result
                     result = ray.get(future)
                     completed_futures.append((job_id, result))
-                else:
-                    # Future is not ready yet, skip for now
-                    continue
-                    
             except Exception as e:
                 if self.verbose:
                     print(f"Error checking future for job {job_id}: {e}")
                 completed_futures.append((job_id, {
                     'status': 'error',
                     'job_id': job_id,
-                    'job_type': job_info['job_type'],
+                    'job_type': job_info.get('job_type', 'unknown'),
                     'error': str(e)
                 }))
-            finally:
-                # Remove from active jobs if completed
-                if job_id in [j[0] for j in completed_futures]:
-                    del self.active_jobs[job_id]
-                    if job_id in self.job_start_times:
-                        del self.job_start_times[job_id]
         
         # Process completed jobs
         for job_id, result in completed_futures:
-            # Update processing_start_time if available in the result
-            if job_id in self.active_jobs and 'processing_start_time' in result:
-                self.active_jobs[job_id]['processing_start_time'] = result['processing_start_time']
-            
+            # Move fields and remove from active maps under lock
+            with self.progress_lock:
+                if job_id in self.active_jobs:
+                    if 'processing_start_time' in result:
+                        self.active_jobs[job_id]['processing_start_time'] = result['processing_start_time']
+                    # Remove now that it's completed
+                    del self.active_jobs[job_id]
+                # Remove start time if present
+                if job_id in self.job_start_times:
+                    del self.job_start_times[job_id]
+
             if result['status'] == 'success':
                 self.completed_jobs.append(job_id)
                 
