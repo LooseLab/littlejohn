@@ -278,6 +278,17 @@ class Job:
         }
         return queue_mapping.get(job_type, "slow")
 
+    def _get_display_queue_for_job(self, job_type: str) -> str:
+        """Return the display queue key for a job type.
+
+        In legacy analysis mode, surface per-type queues (mgmt/cnv/target/fusion)
+        even though they run on a unified actor.
+        """
+        q_map = self._get_queue_type_for_job(job_type)
+        if not self.use_separate_analysis_queues and job_type in {'mgmt', 'cnv', 'target', 'fusion'}:
+            return job_type
+        return q_map
+
 
 # Global job ID counter
 _job_id_counter = itertools.count(1)
@@ -367,14 +378,19 @@ class JobProcessor:
                     logger.info(f"Job {job.job_id} ({job.job_type}) completed successfully")
                     self.processed_jobs += 1
                     
+                    # Compute triggers explicitly so we can log them for diagnostics
+                    triggered_jobs = job.can_trigger_jobs()
+                    downstream = [tj.job_type for tj in triggered_jobs]
+                    # Diagnostics removed for clean CLI output
+                    
                     # Return updated context and triggered jobs
                     return {
                         'status': 'success',
                         'job_id': job.job_id,
                         'job_type': job.job_type,
                         'context': job.context,
-                        'triggered_jobs': job.can_trigger_jobs(),
-                        'next_job': job.next_job(),
+                        # Return only job types to avoid cross-process job_id collisions
+                        'triggered_job_types': downstream,
                         'processing_start_time': processing_start_time
                     }
                 except Exception as handler_error:
@@ -485,6 +501,18 @@ class RayWorkflowManager:
         self.job_start_times = {}
         self.completed_jobs_by_type = {}
         self.failed_jobs_by_type = {}
+        # Monotonic submitted counters per display queue for accurate totals
+        self.submitted_jobs_by_queue: Dict[str, int] = {
+            'preprocessing': 0,
+            'bed_conversion': 0,
+            'mgmt': 0,
+            'cnv': 0,
+            'target': 0,
+            'fusion': 0,
+            'analysis': 0,
+            'classification': 0,
+            'slow': 0,
+        }
         self.progress_lock = threading.Lock()
         self.total_jobs_enqueued = 0
         self.total_jobs_skipped = 0
@@ -906,6 +934,7 @@ class RayWorkflowManager:
                 'priority': priority,
                 'timestamp': time.time()
             })
+            # Diagnostics removed for clean CLI output
             
             # Track the job
             with self.progress_lock:
@@ -974,6 +1003,14 @@ class RayWorkflowManager:
                     'future': future
                 }
                 self.job_start_times[job.job_id] = time.time()
+                # Increment submitted counters per display queue for accurate totals
+                try:
+                    display_q = self._get_display_queue_for_job(job.job_type)
+                    if display_q not in self.submitted_jobs_by_queue:
+                        self.submitted_jobs_by_queue[display_q] = 0
+                    self.submitted_jobs_by_queue[display_q] += 1
+                except Exception:
+                    pass
             # For deduplicated jobs, move from pending -> running now that it's submitted
             if job.job_type in self.deduplicate_job_types and sample_id and sample_id != 'unknown':
                 self._mark_job_running_for_sample(job.job_type, sample_id)
@@ -983,6 +1020,7 @@ class RayWorkflowManager:
             
             if self.verbose:
                 print(f"Submitted job {job.job_id} ({job.job_type}) to Ray with priority {self.queue_priorities.get(queue_type, 1)}")
+            # Diagnostics removed for clean CLI output
         else:
             if self.verbose:
                 print(f"Warning: No processors available for queue type: {queue_type}")
@@ -1016,6 +1054,17 @@ class RayWorkflowManager:
                 "random_forest": "slow",
             }
         return queue_mapping.get(job_type, "slow")
+
+    def _get_display_queue_for_job(self, job_type: str) -> str:
+        """Return the display queue key for a job type.
+
+        When using the legacy unified analysis queue, we still want to display
+        individual progress bars for mgmt/cnv/target/fusion, so map those job
+        types back to their own display queues.
+        """
+        if (not self.use_separate_analysis_queues) and job_type in {"mgmt", "cnv", "target", "fusion"}:
+            return job_type
+        return self._get_queue_type_for_job(job_type)
     
     def process_completed_jobs(self) -> None:
         """
@@ -1101,14 +1150,36 @@ class RayWorkflowManager:
                     # For now, we'll just track the completion
                     pass
                 
-                # Handle successors: prefer parallel triggers; only fall back to linear next step when
-                # there are no parallel triggers. This avoids duplicating the immediate next job.
-                has_triggers = bool(result.get('triggered_jobs'))
-                if has_triggers:
-                    self.enqueue_jobs(result['triggered_jobs'])
+                # Handle successors. Prefer explicit triggered jobs returned by the actor.
+                # If only job types were returned, reconstruct Jobs here to ensure
+                # globally unique job IDs (avoid collisions across processes).
+                triggered_jobs_to_enqueue: List[Job] = []
+                if 'triggered_jobs' in result and result['triggered_jobs']:
+                    triggered_jobs_to_enqueue = result['triggered_jobs']
+                elif 'triggered_job_types' in result and result['triggered_job_types']:
+                    try:
+                        ctx = result['context']
+                        for jt in result['triggered_job_types']:
+                            q = self._get_queue_type_for_job(jt)
+                            triggered_jobs_to_enqueue.append(Job(
+                                job_id=next(_job_id_counter),
+                                job_type=jt,
+                                context=ctx,
+                                origin=q,
+                                workflow=[f"{q}:{jt}"],
+                                step=0
+                            ))
+                    except Exception:
+                        triggered_jobs_to_enqueue = []
+
+                if triggered_jobs_to_enqueue:
+                    self.enqueue_jobs(triggered_jobs_to_enqueue)
                 else:
                     if 'next_job' in result and result['next_job']:
-                        self.enqueue_jobs([result['next_job']])
+                        maybe_next = result['next_job']
+                        # Reconstruct next job if only a type is provided in the future
+                        if isinstance(maybe_next, Job):
+                            self.enqueue_jobs([maybe_next])
                 
                 # Track completion by job type
                 with self.progress_lock:
@@ -1339,6 +1410,8 @@ class RayWorkflowManager:
                 'failed_by_type': self.failed_jobs_by_type.copy(),
                 'completed_by_queue': completed_by_queue,
                 'failed_by_queue': failed_by_queue,
+                # Monotonic submitted totals per display queue
+                'submitted_by_queue': self.submitted_jobs_by_queue.copy(),
                 'active_by_worker': active_by_worker,
                 'active_by_queue': active_by_queue,
                 'queue_sizes': queue_sizes,
@@ -1383,18 +1456,32 @@ class RayFileWatcher(FileSystemEventHandler):
         self.processed_files = set()
     
     def _should_process_file(self, filepath: str) -> bool:
-        """Check if a file should be processed."""
+        """Check if a file should be processed based on patterns (Path.match)."""
         if filepath in self.processed_files:
             return False
-        
-        # Check patterns
-        if not any(filepath.endswith(pattern.replace("*", "")) for pattern in self.patterns):
+
+        path_obj = Path(filepath)
+
+        # Ignore patterns (use Path.match for glob semantics)
+        for pattern in self.ignore_patterns:
+            try:
+                if path_obj.match(pattern):
+                    return False
+            except Exception:
+                # If a pattern is malformed, skip it without blocking processing
+                continue
+
+        # Include patterns (match any)
+        if self.patterns:
+            for pattern in self.patterns:
+                try:
+                    if path_obj.match(pattern):
+                        return True
+                except Exception:
+                    continue
             return False
-        
-        # Check ignore patterns
-        if any(pattern in filepath for pattern in self.ignore_patterns):
-            return False
-        
+
+        # If no patterns specified, allow all
         return True
     
     def handle_file(self, filepath: str) -> None:
@@ -1403,6 +1490,7 @@ class RayFileWatcher(FileSystemEventHandler):
             try:
                 jobs = self.preprocessor_func(filepath)
                 if jobs:
+                    # Diagnostics removed for clean CLI output
                     self.manager.enqueue_jobs(jobs)
                     self.processed_files.add(filepath)
                     if self.verbose:
@@ -1676,8 +1764,12 @@ class RayWorkflowRunner:
                     qsize = stats.get("queue_sizes", {}).get(queue_type, 0) or 0
                     active_in_q = len(stats.get("active_by_queue", {}).get(queue_type, [])) if "active_by_queue" in stats else 0
 
-                    # Set exact totals (no carry-over from previous tick)
-                    total_for_queue = completed_q + active_in_q + qsize
+                    # Prefer monotonic submitted totals when available for stable progress bars
+                    submitted_totals = stats.get("submitted_by_queue", {}) if isinstance(stats.get("submitted_by_queue", {}), dict) else {}
+                    if submitted_totals:
+                        total_for_queue = submitted_totals.get(queue_type, 0) or (completed_q + active_in_q + qsize)
+                    else:
+                        total_for_queue = completed_q + active_in_q + qsize
                     pbar.total = total_for_queue
                     pbar.n = min(completed_q, total_for_queue)
 

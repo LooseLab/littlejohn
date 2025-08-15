@@ -148,14 +148,19 @@ def _start_polling_updates(manager: Any, interval_seconds: float = 1.5) -> None:
                 # Queue status
                 try:
                     queue_sizes = stats.get("queue_sizes", {})
+                    submitted_by_queue = stats.get("submitted_by_queue", {})
+                    # Build totals using monotonic submitted counters when available; fall back to snapshot queues
+                    def _total_for(q: str) -> int:
+                        return int(submitted_by_queue.get(q, 0) or 0) if submitted_by_queue else int(queue_sizes.get(q, 0) or 0)
+
                     queue_update: Dict[str, Dict[str, int]] = {
-                        "preprocessing": {"running": 0, "total": queue_sizes.get("preprocessing", 0)},
-                        "mgmt": {"running": 0, "total": queue_sizes.get("mgmt", 0)},
-                        "cnv": {"running": 0, "total": queue_sizes.get("cnv", 0)},
-                        "target": {"running": 0, "total": queue_sizes.get("target", 0)},
-                        "fusion": {"running": 0, "total": queue_sizes.get("fusion", 0)},
-                        "classification": {"running": 0, "total": queue_sizes.get("classification", 0)},
-                        "other": {"running": 0, "total": queue_sizes.get("slow", 0)},
+                        "preprocessing": {"running": 0, "total": _total_for("preprocessing")},
+                        "mgmt": {"running": 0, "total": _total_for("mgmt")},
+                        "cnv": {"running": 0, "total": _total_for("cnv")},
+                        "target": {"running": 0, "total": _total_for("target")},
+                        "fusion": {"running": 0, "total": _total_for("fusion")},
+                        "classification": {"running": 0, "total": _total_for("classification")},
+                        "other": {"running": 0, "total": _total_for("slow")},
                     }
 
                     active_by_worker: Dict[str, List[Dict[str, Any]]] = stats.get("active_by_worker", {})  # type: ignore

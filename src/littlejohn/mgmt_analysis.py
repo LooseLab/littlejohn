@@ -250,6 +250,7 @@ def run_matkit(temp_dir: str, mgmt_bamfile: str, hv_path: str, sample_dir: str, 
 
 def process_bam_file(bam_path: str, metadata: Dict[str, Any], work_dir: str, threads: int = 4) -> MGMTMetadata:
     """Process a single BAM file for MGMT analysis"""
+    #print(f"Processing MGMT for BAM file: {bam_path}\n\n")
     logger = logging.getLogger("littlejohn.mgmt")
     
     logger.info(f"Processing BAM file: {bam_path} in MGMT analysis")

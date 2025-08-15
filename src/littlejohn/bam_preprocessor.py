@@ -177,6 +177,8 @@ def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
     """
     if not bam_file:
         return None
+    
+    #print(f"Pre_Processing BAM file: {bam_file}")
 
     # Determine state from filename - use in operator for better performance
     state = _PASS_STR if _PASS_STR in bam_file else _FAIL_STR
@@ -595,6 +597,11 @@ def bam_preprocessing_handler(job):
                 # Record path and count in metadata
                 metadata.extracted_data['supplementary_read_ids_path'] = supp_path
                 metadata.extracted_data['supplementary_read_ids_count'] = len(supp_ids)
+                # Prune the potentially very large in-memory list to keep Ray results small
+                metadata.extracted_data.pop('supplementary_read_ids', None)
+            else:
+                # Ensure list isn't carried forward even if empty
+                metadata.extracted_data.pop('supplementary_read_ids', None)
         except Exception:
             # Non-fatal if we cannot persist; continue
             pass

@@ -685,7 +685,7 @@ def process_single_bam(bam_path, metadata, work_dir, logger):
     Returns:
         Dictionary with CNV analysis results
     """
-    
+    #print(f"Processing CNV for BAM file: {bam_path}")
     sample_id = metadata.extracted_data.get('sample_id', 'unknown')
     logger.info(f"🧬 Starting CNV analysis for sample: {sample_id}")
     
