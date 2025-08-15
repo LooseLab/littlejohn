@@ -662,11 +662,15 @@ class RayWorkflowManager:
         print()
     
     def _can_enqueue_job_for_sample(self, job_type: str, sample_id: str) -> bool:
-        """Check if a job can be enqueued for the sample (max 2: 1 running + 1 pending)."""
+        """Check if a job can be enqueued for the sample (max 2 total with at most 1 pending).
+
+        Mirrors the threaded manager behavior: allow at most one pending job
+        per sample/job_type and a combined cap of one running + one pending.
+        """
         with self.job_tracking_lock:
             running_count = self.running_jobs_by_sample.get(sample_id, {}).get(job_type, 0)
             pending_count = self.pending_jobs_by_sample.get(sample_id, {}).get(job_type, 0)
-            return running_count + pending_count < 2
+            return (running_count + pending_count) < 2 and pending_count < 1
     
     def _mark_job_pending_for_sample(self, job_type: str, sample_id: str) -> None:
         """Mark a job as pending for a sample."""
@@ -703,6 +707,12 @@ class RayWorkflowManager:
             if job.job_type in self.deduplicate_job_types:
                 sample_id = job.get_sample_id()
                 if not self._can_enqueue_job_for_sample(job.job_type, sample_id):
+                    # Already have max jobs (1 running + 1 pending) for this sample, skip it
+                    try:
+                        logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
+                        logger.info(f"Skipping {job.job_type} job for sample {sample_id} (max jobs reached: 1 running + 1 pending)")
+                    except Exception:
+                        pass
                     with self.progress_lock:
                         self.total_jobs_skipped += 1
                     continue
@@ -964,8 +974,11 @@ class RayWorkflowManager:
     def get_stats(self) -> dict:
         """Get workflow statistics."""
         with self.progress_lock:
-            # Get active jobs by worker type with names expected by the GUI hooks
+            # Get active jobs by worker type and also aggregate by queue for CLI progress
             active_by_worker: Dict[str, List[Dict[str, Any]]] = {}
+            active_by_queue: Dict[str, List[Dict[str, Any]]] = {
+                'preprocessing': [], 'bed_conversion': [], 'mgmt': [], 'cnv': [], 'target': [], 'fusion': [], 'analysis': [], 'classification': [], 'slow': []
+            }
             def _worker_name_for_job_type(job_type: str) -> str:
                 if job_type == 'preprocessing':
                     return 'PreprocessingWorker-1'
@@ -992,6 +1005,20 @@ class RayWorkflowManager:
                 duration = (time.time() - job_info['processing_start_time']) if job_info.get('processing_start_time') else (time.time() - job_info['start_time'])
                 sample_id = job_info.get('sample_id') or (os.path.basename(job_info['filepath']).replace('.bam', '') if job_info['filepath'] else 'unknown')
                 active_by_worker[worker_name].append({
+                    'job_type': job_type,
+                    'filepath': job_info['filepath'],
+                    'sample_id': sample_id,
+                    'duration': duration
+                })
+                # Aggregate by display queue. In legacy mode, keep mgmt/cnv/target/fusion separate
+                q_map = self._get_queue_type_for_job(job_type)
+                if not self.use_separate_analysis_queues and job_type in {'mgmt','cnv','target','fusion'}:
+                    q = job_type
+                else:
+                    q = q_map
+                if q not in active_by_queue:
+                    active_by_queue[q] = []
+                active_by_queue[q].append({
                     'job_type': job_type,
                     'filepath': job_info['filepath'],
                     'sample_id': sample_id,
@@ -1024,6 +1051,26 @@ class RayWorkflowManager:
                     else:
                         queue_sizes['slow'] += 1
             
+            # Aggregate completions by queue (for CLI progress parity with GUI)
+            completed_by_queue: Dict[str, int] = {k: 0 for k in ['preprocessing','bed_conversion','mgmt','cnv','target','fusion','analysis','classification','slow']}
+            for jt, count in self.completed_jobs_by_type.items():
+                q_map = self._get_queue_type_for_job(jt)
+                # In legacy mode, surface per-type counts for mgmt/cnv/target/fusion bars
+                if not self.use_separate_analysis_queues and jt in {'mgmt','cnv','target','fusion'}:
+                    q = jt
+                else:
+                    q = q_map
+                completed_by_queue[q] = completed_by_queue.get(q, 0) + (count or 0)
+
+            failed_by_queue: Dict[str, int] = {k: 0 for k in ['preprocessing','bed_conversion','mgmt','cnv','target','fusion','analysis','classification','slow']}
+            for jt, count in self.failed_jobs_by_type.items():
+                q_map = self._get_queue_type_for_job(jt)
+                if not self.use_separate_analysis_queues and jt in {'mgmt','cnv','target','fusion'}:
+                    q = jt
+                else:
+                    q = q_map
+                failed_by_queue[q] = failed_by_queue.get(q, 0) + (count or 0)
+
             # Prepare samples payload for GUI
             samples_payload: List[Dict[str, Any]] = []
             for sid, info in self.samples_by_id.items():
@@ -1043,6 +1090,7 @@ class RayWorkflowManager:
                 'total_processed': len(self.completed_jobs),
                 'total_actual_jobs': self.total_jobs_enqueued,  # This should exclude skipped jobs
                 'active_jobs': len(self.active_jobs),
+                'use_separate_analysis_queues': self.use_separate_analysis_queues,
                 # Provide both legacy and explicit keys used by GUI hooks
                 'completed': len(self.completed_jobs),
                 'failed': len(self.failed_jobs),
@@ -1050,7 +1098,10 @@ class RayWorkflowManager:
                 'failed_jobs': len(self.failed_jobs),
                 'completed_by_type': self.completed_jobs_by_type.copy(),
                 'failed_by_type': self.failed_jobs_by_type.copy(),
+                'completed_by_queue': completed_by_queue,
+                'failed_by_queue': failed_by_queue,
                 'active_by_worker': active_by_worker,
+                'active_by_queue': active_by_queue,
                 'queue_sizes': queue_sizes,
                 'samples': samples_payload
             }
@@ -1347,36 +1398,42 @@ class RayWorkflowRunner:
                         f"Completed: {total_processed}/{total_actual_jobs}"
                     )
                 
-                # Update individual progress bars
+                # Update individual progress bars using per-queue aggregates
                 for queue_type, pbar in progress_bars.items():
-                    if queue_type in stats.get("completed_by_type", {}):
-                        completed = stats["completed_by_type"][queue_type]
-                        if completed is not None and completed > job_type_completion[queue_type]:
-                            pbar.n = completed
-                            current_total = pbar.total if pbar.total is not None else 0
-                            pbar.total = max(completed, current_total)
-                            
-                            # Show active job info if available
-                            active_info = ""
-                            if queue_type in stats.get("active_by_worker", {}):
-                                active_jobs = stats["active_by_worker"][queue_type]
-                                if active_jobs:
-                                    # Get the first active job for display
-                                    first_job = active_jobs[0]
-                                    sample_id = first_job.get("sample_id", "unknown")
-                                    duration = first_job.get("duration", 0)
-                                    if duration is not None:
-                                        active_info = f"{sample_id}({duration:.0f}s)"
-                                    else:
-                                        active_info = f"{sample_id}(?)"
-                            
-                            pbar.set_postfix_str(active_info)
-                            job_type_completion[queue_type] = completed
+                    completed_q = 0
+                    if "completed_by_queue" in stats:
+                        completed_q += stats["completed_by_queue"].get(queue_type, 0) or 0
+                    if "failed_by_queue" in stats:
+                        completed_q += stats["failed_by_queue"].get(queue_type, 0) or 0
+
+                    # Always reflect current totals, even when completed is 0
+                    pbar.n = completed_q
+                    qsize = stats.get("queue_sizes", {}).get(queue_type, 0) or 0
+                    active_in_q = len(stats.get("active_by_queue", {}).get(queue_type, [])) if "active_by_queue" in stats else 0
+                    pbar.total = max(completed_q + active_in_q + qsize, pbar.total or 0)
+
+                    # Show first active job summary if any
+                    active_info = ""
+                    if stats.get("active_by_queue", {}).get(queue_type):
+                        first_job = stats["active_by_queue"][queue_type][0]
+                        sid = first_job.get("sample_id", "unknown")
+                        dur = first_job.get("duration", 0)
+                        active_info = f"{sid}({dur:.0f}s)"
+                    pbar.set_postfix_str(active_info)
+                    job_type_completion[queue_type] = completed_q
                 
                 # Update queue sizes display
                 if stats.get("queue_sizes"):
                     queue_info = []
-                    for queue_type, size in stats["queue_sizes"].items():
+                    # In legacy mode, expand analysis queue into per-type sizes when possible
+                    q_sizes = stats["queue_sizes"].copy()
+                    if not stats.get("use_separate_analysis_queues"):
+                        # Prefer active_by_queue counts as a proxy for per-type visibility
+                        for qname in ['mgmt','cnv','target','fusion']:
+                            size_est = len(stats.get('active_by_queue', {}).get(qname, []))
+                            if size_est:
+                                q_sizes[qname] = q_sizes.get(qname, 0) + size_est
+                    for queue_type, size in q_sizes.items():
                         if size and size > 0:
                             queue_info.append(f"{queue_type}:{size}")
                     

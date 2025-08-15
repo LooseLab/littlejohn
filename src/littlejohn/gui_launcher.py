@@ -222,11 +222,11 @@ class GUILauncher:
             logging.debug(f"Error updating workflow status: {e}")
     
     def _update_job_status(self, data: Dict[str, Any]):
-        """Update job status in the GUI."""
+        """Update job status in the GUI with search/sort/filter support."""
         try:
             if hasattr(self, 'active_jobs_table'):
-                # Update active jobs table
-                job_rows = []
+                # Build all rows
+                job_rows: List[Dict[str, Any]] = []
                 for job in data.get('active_jobs', []):
                     job_rows.append({
                         'job_id': str(job.get('job_id', ''))[:8],
@@ -236,12 +236,24 @@ class GUILauncher:
                         'duration': self._format_duration(job.get('duration', 0)),
                         'progress': f"{int(job.get('progress', 0) * 100)}%"
                     })
-                
-                # Update table
-                self.active_jobs_table.clear()
-                if job_rows:
-                    self.active_jobs_table.add_rows(job_rows)
-                    
+
+                # Cache for filtering
+                self._active_jobs_all_rows = job_rows
+
+                # Update filter options dynamically
+                try:
+                    type_options = ['All'] + sorted({r.get('job_type', '') for r in job_rows if r.get('job_type')})
+                    worker_options = ['All'] + sorted({r.get('worker', '') for r in job_rows if r.get('worker')})
+                    if hasattr(self, 'active_jobs_type_filter'):
+                        self.active_jobs_type_filter.set_options(type_options)
+                    if hasattr(self, 'active_jobs_worker_filter'):
+                        self.active_jobs_worker_filter.set_options(worker_options)
+                except Exception:
+                    pass
+
+                # Apply filters and refresh table
+                self._apply_active_jobs_filters_and_update()
+
         except Exception as e:
             logging.debug(f"Error updating job status: {e}")
     
@@ -269,6 +281,33 @@ class GUILauncher:
                 
         except Exception as e:
             logging.debug(f"Error updating queue status: {e}")
+
+    def _apply_active_jobs_filters_and_update(self) -> None:
+        """Apply dropdown filters and current search to the Active Jobs table."""
+        try:
+            all_rows = getattr(self, '_active_jobs_all_rows', [])
+            if not hasattr(self, 'active_jobs_table'):
+                return
+            selected_type = 'All'
+            selected_worker = 'All'
+            try:
+                if hasattr(self, 'active_jobs_type_filter'):
+                    selected_type = self.active_jobs_type_filter.value or 'All'
+                if hasattr(self, 'active_jobs_worker_filter'):
+                    selected_worker = self.active_jobs_worker_filter.value or 'All'
+            except Exception:
+                pass
+            def _keep(row: Dict[str, Any]) -> bool:
+                if selected_type != 'All' and row.get('job_type') != selected_type:
+                    return False
+                if selected_worker != 'All' and row.get('worker') != selected_worker:
+                    return False
+                return True
+            filtered = [r for r in all_rows if _keep(r)]
+            self.active_jobs_table.rows = filtered
+            self.active_jobs_table.update()
+        except Exception:
+            pass
     
     def _update_logs(self, data: Dict[str, Any]):
         """Update logs in the GUI."""
@@ -795,19 +834,36 @@ class GUILauncher:
             with ui.card().classes('w-full'):
                 ui.label('⚡ Active Jobs').classes('text-lg font-semibold mb-4')
                 
+                with ui.row().classes('items-center gap-3 mb-2'):
+                    self.active_jobs_search = ui.input('Search…').props('borderless dense clearable')
+                    self.active_jobs_type_filter = ui.select(options=['All'], value='All', label='Type').props('dense clearable').classes('w-40')
+                    self.active_jobs_worker_filter = ui.select(options=['All'], value='All', label='Worker').props('dense clearable').classes('w-40')
+
                 # Active jobs table
                 self.active_jobs_table = ui.table(
                     columns=[
-                        {'name': 'job_id', 'label': 'Job ID', 'field': 'job_id'},
-                        {'name': 'job_type', 'label': 'Type', 'field': 'job_type'},
-                        {'name': 'filepath', 'label': 'File', 'field': 'filepath'},
-                        {'name': 'worker', 'label': 'Worker', 'field': 'worker'},
-                        {'name': 'duration', 'label': 'Duration', 'field': 'duration'},
-                        {'name': 'progress', 'label': 'Progress', 'field': 'progress'}
+                        {'name': 'job_id', 'label': 'Job ID', 'field': 'job_id', 'sortable': True},
+                        {'name': 'job_type', 'label': 'Type', 'field': 'job_type', 'sortable': True},
+                        {'name': 'filepath', 'label': 'File', 'field': 'filepath', 'sortable': True},
+                        {'name': 'worker', 'label': 'Worker', 'field': 'worker', 'sortable': True},
+                        {'name': 'duration', 'label': 'Duration', 'field': 'duration', 'sortable': True},
+                        {'name': 'progress', 'label': 'Progress', 'field': 'progress', 'sortable': True}
                     ],
                     rows=[],
                     pagination=10
                 ).classes('w-full')
+                try:
+                    self.active_jobs_table.props('multi-sort rows-per-page-options="[10,20,50,0]"')
+                    self.active_jobs_search.bind_value(self.active_jobs_table, 'filter')
+                except Exception:
+                    pass
+                try:
+                    def _on_active_jobs_filter_change(_=None):
+                        self._apply_active_jobs_filters_and_update()
+                    self.active_jobs_type_filter.on('update:model-value', _on_active_jobs_filter_change)
+                    self.active_jobs_worker_filter.on('update:model-value', _on_active_jobs_filter_change)
+                except Exception:
+                    pass
                 
                 # Placeholder for when no jobs are active
                 ui.label('No active jobs at the moment.').classes('text-sm text-gray-500 mt-2')
