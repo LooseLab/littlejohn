@@ -415,20 +415,25 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             state = launcher._cnv_state.get(key, {})
             # Sync state from UI controls in case events are not firing in this environment
             try:
+                ui_changed = False
                 ui_sel = getattr(cnv_chrom_select, 'value', None)
                 if ui_sel and ui_sel != state.get('selected_chrom'):
                     state['selected_chrom'] = ui_sel
+                    ui_changed = True
                 ui_scale = getattr(cnv_scale, 'value', None)
                 if ui_scale and ui_scale != state.get('y_scale'):
                     state['y_scale'] = ui_scale
+                    ui_changed = True
                 ui_bp = getattr(cnv_bp, 'value', None)
                 if ui_bp is not None:
                     desired = (ui_bp == 'show')
                     if desired != state.get('show_bp', True):
                         state['show_bp'] = desired
+                        ui_changed = True
                 ui_color = getattr(cnv_color, 'value', None)
                 if ui_color and ui_color != state.get('color_mode'):
                     state['color_mode'] = ui_color
+                    ui_changed = True
             except Exception:
                 pass
             cnv_npy = sample_dir / 'CNV.npy'
@@ -500,7 +505,10 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                         state['_chrom_opts_set'] = True
                     except Exception:
                         pass
-                _render_cnv_from_state(state)
+                # Only re-render when data or UI state changed, or on first render
+                if changed or ui_changed or not state.get('_rendered_once'):
+                    _render_cnv_from_state(state)
+                    state['_rendered_once'] = True
             # Breakpoint density overlay
             if data_array_npy.exists():
                 try:
@@ -589,6 +597,6 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
     except Exception:
         pass
 
-    ui.timer(3.0, _refresh_cnv, active=True)
+    ui.timer(30.0, _refresh_cnv, active=True)
 
 

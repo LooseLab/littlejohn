@@ -54,6 +54,15 @@ class WorkflowContext:
         bam_metadata = self.metadata.get('bam_metadata', {})
         return bam_metadata.get('sample_id', 'unknown')
 
+    def clear_all(self) -> None:
+        """Clear all metadata/results/errors/history for this context.
+        Use after all jobs for this file are finished to allow GC to reclaim memory.
+        """
+        self.metadata.clear()
+        self.results.clear()
+        self.history.clear()
+        self.errors.clear()
+
 
 # === Job Object ===
 @dataclass
@@ -182,7 +191,7 @@ class Job:
 class WorkflowManager:
     """Manages job queues and execution using threading with specialized workers."""
 
-    def __init__(self, verbose: bool = False, analysis_workers: int = 1, use_separate_analysis_queues: bool = True):
+    def __init__(self, verbose: bool = False, analysis_workers: int = 1, use_separate_analysis_queues: bool = True, preprocessing_workers: int = 1, bed_conversion_workers: int = 1):
         # Specialized queues for different task categories
         self.preprocessing_queue = queue.Queue()  # bam_preprocessing only
         self.bed_conversion_queue = queue.Queue() # bed_conversion only
@@ -213,9 +222,9 @@ class WorkflowManager:
         
         # Analysis workers per queue (each analysis type gets its own worker)
         self.analysis_workers_count = analysis_workers
-        # All other queues are fixed at 1 worker
-        self.preprocessing_workers_count = 1
-        self.bed_conversion_workers_count = 1
+        # Configurable workers for preprocessing and bed conversion (defaults to 1)
+        self.preprocessing_workers_count = preprocessing_workers if isinstance(preprocessing_workers, int) and preprocessing_workers > 0 else 1
+        self.bed_conversion_workers_count = bed_conversion_workers if isinstance(bed_conversion_workers, int) and bed_conversion_workers > 0 else 1
         self.classification_workers_count = 1
         self.slow_workers_count = 1
         
@@ -586,6 +595,7 @@ class WorkflowManager:
                         else:
                             logger.info(f"No more jobs in workflow for {job.context.filepath}")
                             logger.debug(f"Final results: {job.context.results}")
+                            # Context clearing temporarily disabled to avoid interfering with downstream queues
                         
                 except Exception as e:
                     error_msg = f"Job {job.job_type} failed: {str(e)}"
@@ -713,6 +723,23 @@ class WorkflowManager:
             slow_worker.daemon = True
             self.slow_workers.append(slow_worker)
             slow_worker.start()
+
+    def _try_clear_context(self, context: 'WorkflowContext') -> None:
+        """Clear a context only when all jobs in the original workflow have produced results.
+        This prevents premature clearing that would block downstream triggers.
+        """
+        original_workflow = context.metadata.get("original_workflow", [])
+        required_job_types: Set[str] = set()
+        for step in original_workflow:
+            if isinstance(step, str) and ':' in step:
+                _, job_type = step.split(':', 1)
+                required_job_types.add(job_type)
+        if not required_job_types:
+            return
+        completed_job_types = set(context.history)
+        # Only clear when every planned job type has at least one result entry
+        if required_job_types.issubset(completed_job_types):
+            context.clear_all()
         
         # Wait for all workers to finish with periodic checks for shutdown
         all_workers = (self.preprocessing_workers + self.bed_conversion_workers + 
@@ -1239,11 +1266,13 @@ def command_handler(job: Job, command_template: str) -> None:
 class WorkflowRunner:
     """High-level interface for running workflows."""
     
-    def __init__(self, verbose: bool = False, analysis_workers: int = 1, use_separate_analysis_queues: bool = True):
+    def __init__(self, verbose: bool = False, analysis_workers: int = 1, use_separate_analysis_queues: bool = True, preprocessing_workers: int = 1, bed_workers: int = 1):
         self.manager = WorkflowManager(
             verbose=verbose,
             analysis_workers=analysis_workers,
-            use_separate_analysis_queues=use_separate_analysis_queues
+            use_separate_analysis_queues=use_separate_analysis_queues,
+            preprocessing_workers=preprocessing_workers,
+            bed_conversion_workers=bed_workers
         )
         self.verbose = verbose
         
@@ -1288,6 +1317,10 @@ class WorkflowRunner:
             show_progress=show_progress
         )
 
+        # Start worker threads first to ensure queues are consumed immediately
+        self.manager.run()
+
+        # Now start watching files (which enqueues jobs)
         watcher.start(process_existing=process_existing)
 
         # Start progress monitoring if enabled
@@ -1301,7 +1334,9 @@ class WorkflowRunner:
             progress_thread.start()
 
         try:
-            self.manager.run()
+            # Keep the main thread alive while workers and watcher run
+            while self.manager.is_running():
+                time.sleep(0.5)
         except KeyboardInterrupt:
             if self.verbose:
                 print("[WorkflowRunner] Shutdown requested.")

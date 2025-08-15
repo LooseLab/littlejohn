@@ -241,7 +241,8 @@ def _convert_simplified_workflow(job_types: List[str]) -> List[str]:
 
 
 def _create_ray_workflow_runner(verbose: bool, analysis_workers: int, 
-                               legacy_analysis_queue: bool, log_level: str) -> Any:
+                               legacy_analysis_queue: bool, log_level: str,
+                               preprocessing_workers: int = 1, bed_workers: int = 1) -> Any:
     """Create and configure Ray-based workflow runner."""
     try:
         from littlejohn.workflow_ray import RayWorkflowRunner
@@ -249,7 +250,9 @@ def _create_ray_workflow_runner(verbose: bool, analysis_workers: int,
             verbose=verbose,
             analysis_workers=analysis_workers,
             use_separate_analysis_queues=not legacy_analysis_queue,
-            log_level=log_level
+            log_level=log_level,
+            preprocessing_workers=preprocessing_workers,
+            bed_workers=bed_workers
         )
         click.echo("Using Ray-based distributed computing workflow")
         return runner
@@ -312,21 +315,26 @@ def _configure_queue_priorities(runner: Any, queue_priority: Tuple[str, ...]) ->
 
 
 def _create_workflow_runner(use_ray: bool, verbose: bool, analysis_workers: int, 
-                           legacy_analysis_queue: bool, log_level: str) -> Any:
+                           legacy_analysis_queue: bool, log_level: str,
+                           preprocessing_workers: int = 1, bed_workers: int = 1) -> Any:
     """Create the appropriate workflow runner based on configuration."""
     if analysis_workers < 1:
         click.echo(f"Warning: Invalid analysis_workers value {analysis_workers}. Using {DEFAULT_ANALYSIS_WORKERS} instead.", err=True)
         analysis_workers = DEFAULT_ANALYSIS_WORKERS
         
     if use_ray:
-        runner = _create_ray_workflow_runner(verbose, analysis_workers, legacy_analysis_queue, log_level)
+        runner = _create_ray_workflow_runner(verbose, analysis_workers, legacy_analysis_queue, log_level,
+                                             preprocessing_workers=preprocessing_workers,
+                                             bed_workers=bed_workers)
         if runner is None:
             # Fallback to threading-based workflow
             from littlejohn.workflow_simple import WorkflowRunner
             runner = WorkflowRunner(
                 verbose=verbose,
                 analysis_workers=analysis_workers,
-                use_separate_analysis_queues=not legacy_analysis_queue
+                use_separate_analysis_queues=not legacy_analysis_queue,
+                preprocessing_workers=preprocessing_workers,
+                bed_workers=bed_workers
             )
         return runner
     else:
@@ -334,7 +342,9 @@ def _create_workflow_runner(use_ray: bool, verbose: bool, analysis_workers: int,
         return WorkflowRunner(
             verbose=verbose,
             analysis_workers=analysis_workers,
-            use_separate_analysis_queues=not legacy_analysis_queue
+            use_separate_analysis_queues=not legacy_analysis_queue,
+            preprocessing_workers=preprocessing_workers,
+            bed_workers=bed_workers
         )
 
 
@@ -519,7 +529,15 @@ def _display_workflow_config(path: Path, work_dir: Optional[Path], workflow_step
 )
 @click.option(
     "--analysis-workers", type=int, default=DEFAULT_ANALYSIS_WORKERS, 
-    help=f"Number of analysis worker threads (default: {DEFAULT_ANALYSIS_WORKERS}, only queue that supports multiple workers)"
+    help=f"Number of analysis workers per analysis queue (default: {DEFAULT_ANALYSIS_WORKERS})"
+)
+@click.option(
+    "--preprocessing-workers", type=int, default=1,
+    help="Number of preprocessing workers (default: 1)"
+)
+@click.option(
+    "--bed-workers", type=int, default=1,
+    help="Number of bed_conversion workers (default: 1)"
 )
 @click.option(
     "--legacy-analysis-queue", is_flag=True, 
@@ -561,7 +579,7 @@ def _display_workflow_config(path: Path, work_dir: Optional[Path], workflow_step
 def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool, 
             no_process_existing: bool, work_dir: Optional[Path], log_level: str, 
             job_log_level: tuple[str, ...], deduplicate_jobs: tuple[str, ...], 
-            no_progress: bool, analysis_workers: int, legacy_analysis_queue: bool, 
+            no_progress: bool, analysis_workers: int, preprocessing_workers: int, bed_workers: int, legacy_analysis_queue: bool, 
             use_ray: bool, ray_num_cpus: Optional[int], queue_priority: tuple[str, ...], 
             show_priorities: bool, with_gui: bool, gui_host: str, gui_port: int) -> None:
     """Run various operations on BAM files in a directory. Preprocessing is automatically included as the first step."""
@@ -596,9 +614,16 @@ def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool
         if not workflow_steps:
             raise click.BadParameter("No valid workflow steps found after validation")
         
+        # If using Ray and CPU count specified, initialize Ray BEFORE creating runner
+        # so the runner respects the requested CPU resources
+        if use_ray and ray_num_cpus is not None:
+            _initialize_ray(ray_num_cpus)
+
         # Create workflow runner
-        runner = _create_workflow_runner(use_ray, verbose, analysis_workers, 
-                                       legacy_analysis_queue, log_level)
+        runner = _create_workflow_runner(use_ray, verbose, analysis_workers,
+                                         legacy_analysis_queue, log_level,
+                                         preprocessing_workers=preprocessing_workers,
+                                         bed_workers=bed_workers)
         
         # Handle Ray-specific configuration
         if use_ray and hasattr(runner, 'manager'):
@@ -613,9 +638,7 @@ def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool
             # Configure queue priorities
             _configure_queue_priorities(runner, queue_priority)
             
-            # Initialize Ray with specified CPU count if provided
-            if ray_num_cpus is not None:
-                _initialize_ray(ray_num_cpus)
+            # Ray already initialized above when ray_num_cpus is provided
         
         # Configure job deduplication
         if deduplicate_jobs:

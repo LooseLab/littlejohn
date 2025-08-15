@@ -822,7 +822,15 @@ def fusion_handler(job, work_dir=None):
             logger.info(f"Starting fusion analysis for {file_path}")
             logger.info(f"Metadata: {metadata}")
             
+            # Prefer disk-based supplementary read IDs if available to avoid large in-memory lists
             supplementary_read_ids = metadata.get('supplementary_read_ids', [])
+            supp_ids_path = metadata.get('supplementary_read_ids_path')
+            if (not supplementary_read_ids) and supp_ids_path and os.path.exists(supp_ids_path):
+                try:
+                    with open(supp_ids_path, 'r') as f:
+                        supplementary_read_ids = [line.strip() for line in f if line.strip()]
+                except Exception as e:
+                    logger.warning(f"Could not read supplementary_read_ids from {supp_ids_path}: {e}")
             
             # Set default work directory if not provided
             if work_dir is None:
@@ -846,6 +854,12 @@ def fusion_handler(job, work_dir=None):
             if result['success']:
                 logger.info(f"Fusion analysis completed successfully for {file_path}")
                 logger.info(f"Results: {result}")
+                # Cleanup supplementary IDs file if present
+                if supp_ids_path and os.path.exists(supp_ids_path):
+                    try:
+                        os.remove(supp_ids_path)
+                    except Exception:
+                        pass
             else:
                 error_msg = result.get('error_message', 'Unknown error')
                 logger.error(f"Fusion analysis failed for {file_path}: {error_msg}")

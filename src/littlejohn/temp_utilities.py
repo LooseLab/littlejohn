@@ -18,6 +18,8 @@ from datetime import datetime
 from pathlib import Path
 import pandas as pd
 import polars as pl
+from contextlib import contextmanager
+import tempfile
 
 # Suppress pkg_resources deprecation warnings from sorted_nearest
 warnings.filterwarnings("ignore", message="pkg_resources is deprecated", category=UserWarning)
@@ -34,6 +36,35 @@ except ImportError as e:
     logging.warning(f"Some dependencies not available: {e}")
 
 import json
+
+# Simple cross-process file lock using POSIX flock when available (no-op on unsupported platforms)
+try:
+    import fcntl  # type: ignore
+except Exception:
+    fcntl = None  # type: ignore
+
+
+@contextmanager
+def _exclusive_file_lock(lock_path: str):
+    """Provide an exclusive lock on a file path. Best-effort no-op when flock is unavailable."""
+    lock_dir = os.path.dirname(lock_path) or "."
+    os.makedirs(lock_dir, exist_ok=True)
+    lock_file = open(lock_path, "a+")
+    if fcntl is not None:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        except Exception:
+            # Continue without locking if flock fails
+            pass
+    try:
+        yield
+    finally:
+        if fcntl is not None:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
+        lock_file.close()
 
 
 def merge_modkit_files(
@@ -88,9 +119,6 @@ def merge_modkit_files(
     float_cols = ["percent_modified"]
 
     try:
-        # Enable StringCache for consistent categorical encoding
-        pl.enable_string_cache()
-
         # Track cumulative BAM file count
         cumulative_bam_file_count = 0
 
@@ -138,7 +166,7 @@ def merge_modkit_files(
             with open(cache_path, "wb") as f:
                 pickle.dump(filter_ranges, f)
 
-        # Process new files in chunks using Polars lazy evaluation
+        # Process new files in chunks using Polars/pandas
         new_frames = []
         for bed in new_files:
             try:
@@ -225,100 +253,145 @@ def merge_modkit_files(
             new_df = pd.concat(new_frames, ignore_index=True)
         else:
             new_df = new_frames[0]
+        # Critical section: read/merge/write parquet guarded by an exclusive lock
+        lock_path = f"{output_file}.lock"
+        with _exclusive_file_lock(lock_path):
+            # Use a shared StringCache during the merge to avoid costly categorical re-encodings
+            with pl.StringCache():
+                # If no existing file, just save the new data
+                if not os.path.exists(existing_file):
+                    pl_df = pl.from_pandas(new_df)
+                    # Atomic write: write to temp then replace
+                    fd, tmp_path = tempfile.mkstemp(prefix="lj_parquet_", suffix=".parquet", dir=os.path.dirname(output_file) or ".")
+                    os.close(fd)
+                    try:
+                        pl_df.write_parquet(tmp_path)
+                        os.replace(tmp_path, output_file)
+                    finally:
+                        try:
+                            if os.path.exists(tmp_path):
+                                os.remove(tmp_path)
+                        except Exception:
+                            pass
 
-        # If no existing file, just save the new data
-        if not os.path.exists(existing_file):
-            pl_df = pl.from_pandas(new_df)
-            pl_df.write_parquet(output_file)
+                    # Save metadata with cumulative BAM file count (atomic)
+                    metadata = {
+                        "bam_file_count": cumulative_bam_file_count,
+                        "last_updated": datetime.now().isoformat(),
+                        "sample_id": sample_id,
+                        "files_added_in_this_update": num_bam_files_seen,
+                        "column_format": "optimized",  # Mark as optimized format
+                    }
+                    metadata_file = output_file.replace(".parquet", "_metadata.json")
+                    fdm, tmp_meta = tempfile.mkstemp(prefix="lj_meta_", suffix=".json", dir=os.path.dirname(metadata_file) or ".")
+                    os.close(fdm)
+                    try:
+                        with open(tmp_meta, "w") as f:
+                            json.dump(metadata, f, indent=2)
+                        os.replace(tmp_meta, metadata_file)
+                    finally:
+                        try:
+                            if os.path.exists(tmp_meta):
+                                os.remove(tmp_meta)
+                        except Exception:
+                            pass
 
-            # Save metadata with cumulative BAM file count
-            metadata = {
-                "bam_file_count": cumulative_bam_file_count,
-                "last_updated": datetime.now().isoformat(),
-                "sample_id": sample_id,
-                "files_added_in_this_update": num_bam_files_seen,
-                "column_format": "optimized",  # Mark as optimized format
-            }
-            metadata_file = output_file.replace(".parquet", "_metadata.json")
-            with open(metadata_file, "w") as f:
-                json.dump(metadata, f, indent=2)
+                    logging.info(
+                        f"Created new optimized parquet file with {cumulative_bam_file_count} cumulative BAM files"
+                    )
+                    return
 
-            logging.info(
-                f"Created new optimized parquet file with {cumulative_bam_file_count} cumulative BAM files"
-            )
-            return
-        
-        # Process existing data in chunks
-        existing_df = pl.scan_parquet(existing_file)
-        # Convert new data to Polars
-        pl_new_df = pl.from_pandas(new_df)
+                # Process existing data in chunks
+                existing_df = pl.scan_parquet(existing_file)
+                # Convert new data to Polars
+                pl_new_df = pl.from_pandas(new_df)
 
-        # Convert existing data to regular DataFrame for concatenation
-        existing_df = existing_df.collect()
+                # Convert existing data to regular DataFrame for concatenation
+                existing_df = existing_df.collect()
 
-        # Check if existing file is in old format (18 columns) or new format (8 columns)
-        is_old_format = (
-            len(existing_df.columns) > 10
-        )  # More than 10 columns indicates old format
+                # Check if existing file is in old format (18 columns) or new format (8 columns)
+                is_old_format = (
+                    len(existing_df.columns) > 10
+                )  # More than 10 columns indicates old format
 
-        if is_old_format:
-            # Convert old format to new format by selecting only essential columns
-            logging.info("Converting existing file from old format to optimized format")
-            existing_df = existing_df.select(essential_cols)
-        
-        # Ensure consistent data types and column order
-        for c in categorical_cols:
-            if c in existing_df.columns and c in pl_new_df.columns:
-                existing_df = existing_df.with_columns(pl.col(c).cast(pl.Categorical))
-                pl_new_df = pl_new_df.with_columns(pl.col(c).cast(pl.Categorical))
+                if is_old_format:
+                    # Convert old format to new format by selecting only essential columns
+                    logging.info("Converting existing file from old format to optimized format")
+                    existing_df = existing_df.select(essential_cols)
+                
+                # Ensure consistent data types and column order
+                for c in categorical_cols:
+                    if c in existing_df.columns and c in pl_new_df.columns:
+                        existing_df = existing_df.with_columns(pl.col(c).cast(pl.Categorical))
+                        pl_new_df = pl_new_df.with_columns(pl.col(c).cast(pl.Categorical))
 
-        # Ensure columns are in the same order
-        pl_new_df = pl_new_df.select(existing_df.columns)
+                # Ensure columns are in the same order
+                pl_new_df = pl_new_df.select(existing_df.columns)
 
-        # Validate column names match
-        if set(existing_df.columns) != set(pl_new_df.columns):
-            missing_cols = set(existing_df.columns) - set(pl_new_df.columns)
-            extra_cols = set(pl_new_df.columns) - set(existing_df.columns)
-            raise ValueError(
-                f"Column mismatch: missing {missing_cols}, extra {extra_cols}"
-            )
+                # Validate column names match
+                if set(existing_df.columns) != set(pl_new_df.columns):
+                    missing_cols = set(existing_df.columns) - set(pl_new_df.columns)
+                    extra_cols = set(pl_new_df.columns) - set(existing_df.columns)
+                    raise ValueError(
+                        f"Column mismatch: missing {missing_cols}, extra {extra_cols}"
+                    )
 
-        # Combine existing and new data
-        combined = pl.concat([existing_df, pl_new_df])
+                # Combine existing and new data
+                combined = pl.concat([existing_df, pl_new_df])
 
-        # Define aggregation expressions for essential columns only
-        exprs = [
-            pl.first("mod_code"),
-            pl.first("strand"),
-            pl.mean("percent_modified").alias("percent_modified"),
-            *[pl.sum(c).alias(c) for c in ["valid_cov", "n_mod", "n_canonical"]],
-        ]
+                # Define aggregation expressions for essential columns only
+                exprs = [
+                    pl.first("mod_code"),
+                    pl.first("strand"),
+                    pl.mean("percent_modified").alias("percent_modified"),
+                    *[pl.sum(c).alias(c) for c in ["valid_cov", "n_mod", "n_canonical"]],
+                ]
 
-        # Perform groupby and aggregation
-        grouped = combined.group_by(["chrom", "chromStart"]).agg(exprs)
+                # Perform groupby and aggregation
+                grouped = combined.group_by(["chrom", "chromStart"]).agg(exprs)
 
-        # Save using Polars' efficient parquet writer
-        grouped.write_parquet(output_file)
+                # Atomic write: write to temp then replace
+                fd2, tmp_out = tempfile.mkstemp(prefix="lj_parquet_", suffix=".parquet", dir=os.path.dirname(output_file) or ".")
+                os.close(fd2)
+                try:
+                    grouped.write_parquet(tmp_out)
+                    os.replace(tmp_out, output_file)
+                finally:
+                    try:
+                        if os.path.exists(tmp_out):
+                            os.remove(tmp_out)
+                    except Exception:
+                        pass
 
-        # Save metadata with updated cumulative BAM file count
-        metadata = {
-            "bam_file_count": cumulative_bam_file_count,
-            "last_updated": datetime.now().isoformat(),
-            "sample_id": sample_id,
-            "files_added_in_this_update": num_bam_files_seen,
-            "column_format": "optimized",  # Mark as optimized format
-        }
-        metadata_file = output_file.replace(".parquet", "_metadata.json")
-        with open(metadata_file, "w") as f:
-            json.dump(metadata, f, indent=2)
+                # Save metadata with updated cumulative BAM file count (atomic)
+                metadata = {
+                    "bam_file_count": cumulative_bam_file_count,
+                    "last_updated": datetime.now().isoformat(),
+                    "sample_id": sample_id,
+                    "files_added_in_this_update": num_bam_files_seen,
+                    "column_format": "optimized",  # Mark as optimized format
+                }
+                metadata_file = output_file.replace(".parquet", "_metadata.json")
+                fd3, tmp_meta2 = tempfile.mkstemp(prefix="lj_meta_", suffix=".json", dir=os.path.dirname(metadata_file) or ".")
+                os.close(fd3)
+                try:
+                    with open(tmp_meta2, "w") as f:
+                        json.dump(metadata, f, indent=2)
+                    os.replace(tmp_meta2, metadata_file)
+                finally:
+                    try:
+                        if os.path.exists(tmp_meta2):
+                            os.remove(tmp_meta2)
+                    except Exception:
+                        pass
 
-        logging.info(
-            f"Updated optimized parquet file with {cumulative_bam_file_count} cumulative BAM files (added {num_bam_files_seen} in this update)"
-        )
+                logging.info(
+                    f"Updated optimized parquet file with {cumulative_bam_file_count} cumulative BAM files (added {num_bam_files_seen} in this update)"
+                )
 
-        logging.debug(
-            f"Merged with optimized Polars and cache saved to: {output_file}"
-        )
+                logging.debug(
+                    f"Merged with optimized Polars and cache saved to: {output_file}"
+                )
 
     except Exception as e:
         logging.error(f"Error in merge_modkit_files: {str(e)}")
@@ -330,6 +403,4 @@ def merge_modkit_files(
                 os.remove(cache_path)
             except Exception as e:
                 logging.error(f"Error removing cache file: {str(e)}")
-        # Disable StringCache
-        pl.disable_string_cache()
         gc.collect() 

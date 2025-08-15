@@ -17,7 +17,6 @@ Features:
 import os
 import time
 import tempfile
-import shutil
 import itertools
 import logging
 from dataclasses import dataclass, field
@@ -39,6 +38,19 @@ except ImportError:
     merge_modkit_files = None
 
 from littlejohn.logging_config import get_job_logger
+
+# Module-level logger to avoid repeated lookups
+_LOGGER = logging.getLogger("littlejohn.bed_conversion")
+
+# Cache CPGs master file path across instances
+_CPGS_MASTER_FILE_CACHE: Optional[str] = None
+
+# Fallback search paths for the CPGs master file
+_CPGS_POSSIBLE_PATHS = (
+    "sturg_nanodx_cpgs_0125.bed.gz",
+    "data/sturg_nanodx_cpgs_0125.bed.gz",
+    "/usr/local/share/sturg_nanodx_cpgs_0125.bed.gz",
+)
 
 
 @dataclass
@@ -73,14 +85,18 @@ class BedConversionAnalysis:
         self.file_counter = 1
         
         # Use logger for initialization
-        logger = logging.getLogger("littlejohn.bed_conversion")
-        logger.info(f"BAM to parquet conversion analysis initialized")
-        logger.debug(f"Work directory: {self.work_dir}")
-        logger.debug(f"CPGs master file: {self.cpgs_master_file}")
-        logger.debug(f"Threads: {self.threads}")
+        self.logger = _LOGGER
+        self.logger.info(f"BAM to parquet conversion analysis initialized")
+        self.logger.debug(f"Work directory: {self.work_dir}")
+        self.logger.debug(f"CPGs master file: {self.cpgs_master_file}")
+        self.logger.debug(f"Threads: {self.threads}")
         
     def _find_cpgs_master_file(self) -> str:
         """Find the CPGs master file from robin resources"""
+        global _CPGS_MASTER_FILE_CACHE
+        if _CPGS_MASTER_FILE_CACHE is not None:
+            return _CPGS_MASTER_FILE_CACHE
+
         if resources is not None:
             try:
                 cpgs_path = os.path.join(
@@ -88,20 +104,16 @@ class BedConversionAnalysis:
                     "sturg_nanodx_cpgs_0125.bed.gz",
                 )
                 if os.path.exists(cpgs_path):
-                    return cpgs_path
+                    _CPGS_MASTER_FILE_CACHE = cpgs_path
+                    return _CPGS_MASTER_FILE_CACHE
             except Exception:
                 pass
         
         # Fallback paths
-        possible_paths = [
-            "sturg_nanodx_cpgs_0125.bed.gz",
-            "data/sturg_nanodx_cpgs_0125.bed.gz",
-            "/usr/local/share/sturg_nanodx_cpgs_0125.bed.gz"
-        ]
-        
-        for path in possible_paths:
+        for path in _CPGS_POSSIBLE_PATHS:
             if os.path.exists(path):
-                return path
+                _CPGS_MASTER_FILE_CACHE = path
+                return _CPGS_MASTER_FILE_CACHE
         
         # If not found, create a placeholder (this will cause an error later)
         logger = logging.getLogger("littlejohn.bed_conversion")
@@ -116,7 +128,7 @@ class BedConversionAnalysis:
     
     def process_bam_file(self, bam_path: str, metadata: Dict[str, Any]) -> BedConversionMetadata:
         """Process a single BAM file for parquet conversion"""
-        logger = logging.getLogger("littlejohn.bed_conversion")
+        logger = self.logger
         
         logger.info(f"Processing BAM file: {bam_path} for parquet conversion")
         sample_id = metadata.get('sample_id', 'unknown')
@@ -182,8 +194,10 @@ class BedConversionAnalysis:
     
     def _process_bams(self, bams: List[str], work_dir: str) -> List[str]:
         """Process BAM files using matkit and return list of processed file paths"""
-        logger = logging.getLogger("littlejohn.bed_conversion")
-        processed_files = []
+        logger = self.logger
+        processed_files: List[str] = []
+        processed_files_append = processed_files.append
+        run_matkit_callable = run_matkit  # local binding
         
         for bam in bams:
             logger.debug(f"Processing BAM file: {bam}")
@@ -200,14 +214,14 @@ class BedConversionAnalysis:
             
             try:
                 # Run matkit on the BAM file - using the same function as working code
-                if run_matkit is not None:
-                    run_matkit(bam, temp_file.name)
+                if run_matkit_callable is not None:
+                    run_matkit_callable(bam, temp_file.name)
                 else:
                     # Fallback if robin is not available
                     with open(temp_file.name, 'w') as f:
                         f.write(f"# Dummy output for {bam}\n")
                 
-                processed_files.append(temp_file.name)
+                processed_files_append(temp_file.name)
                 logger.debug(f"Successfully processed: {temp_file.name}")
                 
             except Exception as e:

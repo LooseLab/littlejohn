@@ -598,13 +598,20 @@ def save_cnv_files(sample_dir, analysis_counter, r_cnv, r2_cnv, result3_cnv,
             ], dtype=[('name', 'U10'), ('start', 'i8'), ('end', 'i8')])
             np.save(os.path.join(sample_dir, "cnv_data_array.npy"), breakpoint_array)
         
-        # Save sex estimation
-        with open(os.path.join(sample_dir, "XYestimate.pkl"), 'wb') as f:
-            pickle.dump(sex_estimate, f)
+        # Helper for atomic pickle writes to avoid readers seeing partial files
+        def _atomic_pickle_dump(obj, target_path: str) -> None:
+            tmp_path = target_path + ".tmp"
+            with open(tmp_path, 'wb') as tf:
+                pickle.dump(obj, tf)
+                tf.flush()
+                os.fsync(tf.fileno())
+            os.replace(tmp_path, target_path)
+
+        # Save sex estimation (atomic)
+        _atomic_pickle_dump(sex_estimate, os.path.join(sample_dir, "XYestimate.pkl"))
         
-        # Save accumulated copy numbers for incremental processing
-        with open(os.path.join(sample_dir, "update_cnv_dict.pkl"), 'wb') as f:
-            pickle.dump(update_cnv_dict, f)
+        # Save accumulated copy numbers for incremental processing (atomic)
+        _atomic_pickle_dump(update_cnv_dict, os.path.join(sample_dir, "update_cnv_dict.pkl"))
         
         # Create state directory for CNV detector
         state_dir = os.path.join(sample_dir, "cnv_detector_state")
@@ -619,8 +626,7 @@ def save_cnv_files(sample_dir, analysis_counter, r_cnv, r2_cnv, result3_cnv,
             'breakpoints_count': len(breakpoints),
             'sex_estimate': sex_estimate
         }
-        with open(os.path.join(state_dir, "tracker_metadata.pkl"), 'wb') as f:
-            pickle.dump(state_metadata, f)
+        _atomic_pickle_dump(state_metadata, os.path.join(state_dir, "tracker_metadata.pkl"))
         
         # Create BED files directory
         bed_dir = os.path.join(sample_dir, "bed_files")
@@ -725,18 +731,26 @@ def process_single_bam(bam_path, metadata, work_dir, logger):
             # Load accumulated copy numbers from previous iterations
             update_cnv_dict_path = os.path.join(sample_output_dir, "update_cnv_dict.pkl")
             if os.path.exists(update_cnv_dict_path):
-                try:
-                    with open(update_cnv_dict_path, "rb") as f:
-                        update_cnv_dict = pickle.load(f)
-                    logger.debug(f"Loaded accumulated copy numbers from previous iterations")
-                    if sample_id in update_cnv_dict:
-                        copy_numbers = update_cnv_dict[sample_id]
-                        logger.debug(f"Found existing data for {sample_id}")
-                    else:
-                        copy_numbers = {}
-                        logger.debug(f"No existing data for {sample_id}, starting fresh")
-                except Exception as e:
-                    logger.warning(f"Error loading accumulated copy numbers: {e}")
+                # Robust load with retries to avoid reading while a writer is replacing the file
+                load_exc = None
+                for attempt in range(5):
+                    try:
+                        with open(update_cnv_dict_path, "rb") as f:
+                            update_cnv_dict = pickle.load(f)
+                        logger.debug(f"Loaded accumulated copy numbers from previous iterations")
+                        if sample_id in update_cnv_dict:
+                            copy_numbers = update_cnv_dict[sample_id]
+                            logger.debug(f"Found existing data for {sample_id}")
+                        else:
+                            copy_numbers = {}
+                            logger.debug(f"No existing data for {sample_id}, starting fresh")
+                        load_exc = None
+                        break
+                    except Exception as e:
+                        load_exc = e
+                        time.sleep(0.2 * (attempt + 1))
+                if load_exc is not None:
+                    logger.warning(f"Error loading accumulated copy numbers after retries: {load_exc}")
                     copy_numbers = {}
                     update_cnv_dict = {}
             else:

@@ -293,7 +293,7 @@ class GUILauncher:
                 
                 pct = max(0.0, min(100.0, round(progress * 100.0, 1)))
                 
-                self.progress_bar.set_value(pct)
+                self.progress_bar.set_value(round(progress, 2))
                 # Drop .0 for integers like 81.0 -> 81
                 pct_str = f"{pct:.1f}" if pct % 1 else f"{int(pct)}"
                 self.progress_label.set_text(f'{pct_str}% Complete')
