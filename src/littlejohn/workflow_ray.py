@@ -1,4 +1,62 @@
-"""Ray-based workflow management system for LittleJohn using distributed computing."""
+"""
+Ray-powered workflow engine for LittleJohn.
+
+This module provides a distributed, priority-aware job orchestration layer built on
+top of Ray. It mirrors the semantics of the threaded workflow manager used elsewhere
+in LittleJohn while adding the ability to run multiple jobs concurrently across
+dedicated queues.
+
+High-level architecture:
+
+- Jobs and context
+  - A `Job` encapsulates a unit of work (e.g., "preprocessing", "mgmt", "cnv").
+  - Each job carries a shared `WorkflowContext` that accumulates per-file metadata,
+    results, execution history, and errors as the workflow progresses.
+
+- Queues and priorities
+  - Jobs are mapped to queue types (e.g., `preprocessing`, `bed_conversion`,
+    `mgmt`, `cnv`, `target`, `fusion`, `classification`, `slow`).
+  - The `RayWorkflowManager` maintains per-priority in-memory queues and fairly
+    drains them from highest to lowest priority (submitting at most one job per
+    priority "tick" to prevent starvation and provide smooth progress across
+    queues).
+
+- Execution model (Ray)
+  - Each queue type has one or more Ray actors (`JobProcessor`) responsible for
+    executing jobs of that queue. Actors are configured with CPU and concurrency
+    limits to spread work while avoiding oversubscription.
+  - Handlers are simple callables that implement the actual domain logic for a
+    given `job_type`. The manager is transport/coordination only.
+
+- Triggering downstream work
+  - Only the first job from a user-provided `workflow_plan` is enqueued initially
+    (typically `preprocessing`).
+  - As jobs complete, `Job.can_trigger_jobs()` checks declared dependencies and the
+    original plan to spawn downstream jobs (e.g., `bed_conversion` after
+    `preprocessing`, then `sturgeon`/`nanodx`/`pannanodx`/`random_forest` after
+    `bed_conversion`). If no parallel triggers are applicable, a linear next step
+    fallback (`Job.next_job()`) keeps the workflow moving.
+
+- Operational safeguards and UX
+  - A watchdog can mark jobs as timed-out per queue type and restart actors for
+    recovery.
+  - Per-sample de-duplication limits how many concurrent classification-like jobs
+    (e.g., `sturgeon`, `nanodx`) can run for the same sample.
+  - Rich, pull-based statistics power CLI/GUI progress bars without coupling the
+    orchestration layer to any specific UI.
+
+Usage pattern:
+
+1) Instantiate `RayWorkflowRunner` (or `RayWorkflowManager` directly).
+2) Register job handlers per queue and job type using `register_handler(...)`.
+3) Provide a `workflow_plan` and input directory to `run_workflow(...)`.
+4) The file watcher discovers inputs, creates the first job per file, and the
+   manager handles the rest.
+
+This module intentionally avoids embedding domain-specific logic inside handlers;
+it focuses on scheduling, coordination, and observability. See inline docstrings
+throughout for details on data flow and the scheduling rules.
+"""
 
 import os
 import time
@@ -7,7 +65,7 @@ import queue
 import itertools
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Any, Set, Union
+from typing import Callable, Dict, List, Optional, Any, Set, Union, Tuple
 import pickle
 
 import ray
@@ -21,7 +79,24 @@ from littlejohn.logging_config import get_job_logger
 # === Shared Context for Each File ===
 @dataclass
 class WorkflowContext:
-    """Context object that tracks metadata and results for each file being processed."""
+    """
+    Shared, mutable state carried across all jobs for a single input file.
+
+    The context serves as the "glue" of the workflow:
+    - `metadata` stores arbitrary properties (e.g., `bam_metadata`,
+      `original_workflow`).
+    - `results` holds outputs keyed by `job_type` for later cross-step usage.
+    - `history` captures the sequence of job types that have recorded a result,
+      which is also used to evaluate downstream dependency satisfaction.
+    - `errors` collects structured error entries for post-mortem inspection.
+
+    Attributes:
+    - filepath: Absolute path to the input file (e.g., a BAM) this context refers to.
+    - metadata: Free-form key/value store enriched by handlers and orchestration.
+    - results: Outputs keyed by job type.
+    - history: Ordered list of job types that have produced results.
+    - errors: List of error dicts with `job_type`, `error`, and `timestamp`.
+    """
     filepath: str
     metadata: dict = field(default_factory=dict)
     results: dict = field(default_factory=dict)
@@ -61,7 +136,22 @@ class WorkflowContext:
 # === Job Object ===
 @dataclass
 class Job:
-    """Represents a single job in the workflow."""
+    """
+    A unit of work that runs on a specific queue and advances the workflow.
+
+    A job contains just enough information for the orchestration layer to route it
+    to the right executor and for handlers to perform their work.
+
+    Attributes:
+    - job_id: Monotonic identifier for tracking and logging.
+    - job_type: Logical type (e.g., "preprocessing", "mgmt").
+    - context: The shared `WorkflowContext` for this file/sample.
+    - origin: Queue type where this job was first enqueued (informational).
+    - workflow: The original user plan as `"queue:job_type"` strings.
+    - step: Index into the `workflow` (used by `next_job()` linear fallback).
+    - dependencies: Which job types must have completed before this job can run.
+    - triggers: Which job types this job can unlock upon completion.
+    """
     job_id: int
     job_type: str
     context: WorkflowContext
@@ -72,7 +162,13 @@ class Job:
     triggers: Set[str] = field(default_factory=set)  # Job types this job can trigger
 
     def next_job(self) -> Optional['Job']:
-        """Create the next job in the workflow if available."""
+        """
+        Create the linear next job defined in the `workflow` plan, if any.
+
+        This is a conservative fallback used only when there are no applicable
+        parallel triggers. It preserves a simple linear progression and guards
+        against malformed workflow steps.
+        """
         if self.step + 1 < len(self.workflow):
             next_step = self.workflow[self.step + 1]
             if not isinstance(next_step, str):
@@ -97,7 +193,14 @@ class Job:
         return self.context.get_sample_id()
 
     def can_trigger_jobs(self) -> List['Job']:
-        """Create all jobs that can be triggered by this job's completion."""
+        """
+        Compute parallel downstream jobs unlocked by this job's completion.
+
+        - Dependency graph is defined locally here to keep orchestration simple.
+        - Only jobs listed in the original workflow plan are eligible to trigger.
+        - A dependency is considered satisfied if the dep is present in
+          `context.history` (or is the current job).
+        """
         triggered_jobs = []
         
         # Define job dependencies and triggers
@@ -183,7 +286,13 @@ _job_id_counter = itertools.count(1)
 # === Ray Actors for Job Processing ===
 @ray.remote
 class JobProcessor:
-    """Ray actor for processing jobs in parallel."""
+    """
+    Ray actor responsible for executing jobs for a specific queue.
+
+    The manager submits pickled `Job` objects to these actors. Each actor
+    owns counters for processed/failed jobs and is configured for CPU and logical
+    concurrency. Handlers are injected by the manager and looked up by `job_type`.
+    """
     
     def __init__(self, queue_type: str, handlers: Dict[str, Callable], log_level: str, verbose: bool):
         self.queue_type = queue_type
@@ -197,7 +306,13 @@ class JobProcessor:
         self._configure_logging()
         
     def _configure_logging(self):
-        """Configure logging for this Ray actor."""
+        """
+        Configure per-actor logging.
+
+        Logging in Ray actors can get noisy and interfere with progress bars;
+        we gate user-facing prints behind `verbose` while still setting the
+        desired global level using the project's logging config.
+        """
         try:
             from littlejohn.logging_config import configure_logging
             configure_logging(global_level=self.log_level)
@@ -211,7 +326,17 @@ class JobProcessor:
                 print(f"Warning: Could not configure logging for {self.queue_type} actor: {e}")
         
     def process_job(self, job_data: bytes) -> Dict[str, Any]:
-        """Process a job and return the result."""
+        """
+        Execute one job and return a structured result payload.
+
+        Returns a dict with keys such as:
+        - status: 'success' or 'error'
+        - job_id, job_type
+        - context: the (possibly updated) `WorkflowContext`
+        - triggered_jobs: list of parallel `Job`s to enqueue next
+        - next_job: linear fallback `Job` if no triggers are applicable
+        - processing_start_time: when the handler began (used for accurate durations)
+        """
         try:
             # Deserialize the job
             job = pickle.loads(job_data)
@@ -303,7 +428,20 @@ class JobProcessor:
 
 # === Ray-based Workflow Manager ===
 class RayWorkflowManager:
-    """Manages job queues and execution using Ray for distributed computing."""
+    """
+    Priority-based scheduler that coordinates Ray actors and workflow state.
+
+    Responsibilities:
+    - Maintain per-priority queues and submit work fairly from highest to lowest.
+    - Track active/running jobs, durations, and completions/failures by type.
+    - Enforce per-sample de-duplication for classification-like workloads.
+    - Surface aggregated stats for CLI/GUI while remaining UI-agnostic.
+    - Optionally restart actors when a watchdog timeout is exceeded.
+
+    Configuration knobs include the number of workers per queue and whether to
+    use separate analysis queues (`mgmt`, `cnv`, `target`, `fusion`) or a unified
+    legacy `analysis` queue.
+    """
 
     def __init__(self, verbose: bool = False, analysis_workers: int = 1, use_separate_analysis_queues: bool = True, log_level: str = "INFO", preprocessing_workers: int = 1, bed_workers: int = 1):
         # Initialize Ray if not already initialized
@@ -416,7 +554,17 @@ class RayWorkflowManager:
             logger.propagate = False
     
     def _initialize_processors(self):
-        """Initialize Ray actors for job processing."""
+        """
+        Create Ray actors per queue with appropriate CPU and concurrency limits.
+
+        - `preprocessing` and `bed_conversion` dedicate a CPU per worker and run
+          one job at a time to ensure predictable throughput for critical-path
+          steps.
+        - Analysis queues can be split (one actor per queue) or unified under the
+          legacy `analysis` actor with adjustable logical concurrency.
+        - `classification` and `slow` queues each get their own actor; logical
+          concurrency is configurable but CPU is kept at 1 to avoid oversubscription.
+        """
         # Define concurrency targets
         analysis_concurrency = max(1, self.analysis_workers_count)
 
@@ -490,7 +638,13 @@ class RayWorkflowManager:
         ]
     
     def register_handler(self, queue_type: str, job_type: str, handler: Callable[[Job], None]) -> None:
-        """Register a handler for a specific job type and queue."""
+        """
+        Register a function to handle a specific `job_type` on a given queue.
+
+        Handlers are injected into the relevant actor(s). The manager itself
+        does not implement domain work; it merely routes jobs to the right
+        callable.
+        """
         if queue_type == "preprocessing":
             self.job_handlers_preprocessing[job_type] = handler
         elif queue_type == "bed_conversion":
@@ -707,7 +861,16 @@ class RayWorkflowManager:
                 self.running_jobs_by_sample[sample_id][job_type] = max(0, self.running_jobs_by_sample[sample_id][job_type] - 1)
     
     def enqueue_jobs(self, jobs: List[Job]) -> None:
-        """Enqueue jobs for processing using Ray with priority-based scheduling."""
+        """
+        Enqueue one or more jobs into the appropriate priority buckets.
+
+        Additional behaviors:
+        - Enforces per-sample de-duplication for certain job types (e.g.,
+          classification family) to avoid redundant concurrent work on the same
+          sample.
+        - Applies a small fairness boost for the classification queue to ensure it
+          makes progress even under heavy analysis load.
+        """
         for job in jobs:
             # Check deduplication
             if job.job_type in self.deduplicate_job_types:
@@ -780,7 +943,12 @@ class RayWorkflowManager:
         return False
     
     def _submit_job_to_ray(self, job: Job, queue_type: str) -> None:
-        """Submit a job to Ray for processing."""
+        """
+        Submit a serialized `Job` to one of the queue's actors and track it.
+
+        We perform lightweight round-robin across the queue's actors and capture
+        bookkeeping necessary for progress bars and watchdog logic.
+        """
         processors = self.processors[queue_type]
         if processors:
             # Round-robin selection for load balancing
@@ -850,7 +1018,17 @@ class RayWorkflowManager:
         return queue_mapping.get(job_type, "slow")
     
     def process_completed_jobs(self) -> None:
-        """Process completed jobs and handle their results."""
+        """
+        Drain completed Ray futures, propagate triggers, and maintain stats.
+
+        Steps:
+        1) Snapshot the active jobs and non-blockingly probe each future.
+        2) Apply watchdog timeouts per queue and request queue restarts as needed.
+        3) For each completed result:
+           - On success: enqueue trigger jobs (preferred) or the linear next job.
+           - On error: record failure counts and mark per-sample completion.
+        4) Clean up active tracking and update aggregate counters for the UI.
+        """
         completed_futures: List[Tuple[int, Dict[str, Any]]] = []
 
         # Take a stable snapshot of active jobs under lock to avoid concurrent mutation
@@ -923,13 +1101,14 @@ class RayWorkflowManager:
                     # For now, we'll just track the completion
                     pass
                 
-                # Handle triggered jobs
-                if 'triggered_jobs' in result and result['triggered_jobs']:
+                # Handle successors: prefer parallel triggers; only fall back to linear next step when
+                # there are no parallel triggers. This avoids duplicating the immediate next job.
+                has_triggers = bool(result.get('triggered_jobs'))
+                if has_triggers:
                     self.enqueue_jobs(result['triggered_jobs'])
-                
-                # Handle next job
-                if 'next_job' in result and result['next_job']:
-                    self.enqueue_jobs([result['next_job']])
+                else:
+                    if 'next_job' in result and result['next_job']:
+                        self.enqueue_jobs([result['next_job']])
                 
                 # Track completion by job type
                 with self.progress_lock:
@@ -1026,7 +1205,13 @@ class RayWorkflowManager:
         return True
     
     def get_stats(self) -> dict:
-        """Get workflow statistics."""
+        """
+        Aggregate live metrics for CLI/GUI consumption.
+
+        Returns a nested dict capturing queue sizes, active jobs (both by worker
+        and logical queue), and cumulative completions/failures by type and by
+        queue. Also includes per-sample summaries to drive list views in the GUI.
+        """
         with self.progress_lock:
             # Get active jobs by worker type and also aggregate by queue for CLI progress
             active_by_worker: Dict[str, List[Dict[str, Any]]] = {}
@@ -1167,7 +1352,13 @@ class RayWorkflowManager:
 
 # === Ray-based File Watcher ===
 class RayFileWatcher(FileSystemEventHandler):
-    """File watcher that uses Ray for job processing."""
+    """
+    Filesystem watcher that discovers inputs and seeds the workflow.
+
+    The watcher calls a `preprocessor_func` (typically a classifier) for each
+    relevant file to create the initial job(s). It can process existing files
+    at startup and then continue to watch for new/modified files.
+    """
     
     def __init__(
         self,
@@ -1256,7 +1447,14 @@ class RayFileWatcher(FileSystemEventHandler):
 
 # === Ray-based Workflow Runner ===
 class RayWorkflowRunner:
-    """Main workflow runner that uses Ray for distributed computing."""
+    """
+    High-level façade that ties together the watcher, manager, and progress UI.
+
+    Typical usage:
+    - Register handlers with `register_handler()`.
+    - Call `run_workflow(...)` with a directory and a `workflow_plan`.
+    - Optionally enable progress bars and provide a custom classifier function.
+    """
     
     def __init__(self, verbose: bool = False, analysis_workers: int = 1, use_separate_analysis_queues: bool = True, log_level: str = "INFO", preprocessing_workers: int = 1, bed_workers: int = 1):
         self.verbose = verbose
@@ -1269,6 +1467,7 @@ class RayWorkflowRunner:
             preprocessing_workers=preprocessing_workers,
             bed_workers=bed_workers
         )
+        self._watcher: Optional[RayFileWatcher] = None
     
     def register_handler(self, queue_type: str, job_type: str, handler: Callable[[Job], None]) -> None:
         """Register a handler for a specific job type and queue."""
@@ -1292,7 +1491,14 @@ class RayWorkflowRunner:
         process_existing: bool = True,
         show_progress: bool = True
     ) -> None:
-        """Run the workflow using Ray for distributed computing."""
+        """
+        Run the workflow end-to-end for files in `watch_dir` using Ray.
+
+        The first step for each discovered file is created by the provided
+        `classifier_func` (defaults to `default_file_classifier`). All downstream
+        progression is handled automatically by job triggers and the linear
+        fallback.
+        """
         # Use the provided classifier or default
         if classifier_func is None:
             classifier_func = lambda filepath: default_file_classifier(filepath, workflow_plan)
@@ -1308,6 +1514,7 @@ class RayWorkflowRunner:
             verbose=self.verbose,
             show_progress=show_progress
         )
+        self._watcher = watcher
         
         # Start the workflow
         try:
@@ -1323,14 +1530,20 @@ class RayWorkflowRunner:
             if self.verbose:
                 print("Stopping workflow...")
             self.manager.stop(timeout=5.0)
-            watcher.stop(timeout=5.0)
+            try:
+                watcher.stop(timeout=5.0)
+            except Exception:
+                pass
             if self.verbose:
                 print("Workflow stopped by user")
         except Exception as e:
             if self.verbose:
                 print(f"Error: {e}")
             self.manager.stop(timeout=5.0)
-            watcher.stop(timeout=5.0)
+            try:
+                watcher.stop(timeout=5.0)
+            except Exception:
+                pass
             raise
 
     def _monitor_progress(self, watcher) -> None:
@@ -1460,20 +1673,22 @@ class RayWorkflowRunner:
                     if "failed_by_queue" in stats:
                         completed_q += stats["failed_by_queue"].get(queue_type, 0) or 0
 
-                    # Always reflect current totals, even when completed is 0
-                    pbar.n = completed_q
                     qsize = stats.get("queue_sizes", {}).get(queue_type, 0) or 0
                     active_in_q = len(stats.get("active_by_queue", {}).get(queue_type, [])) if "active_by_queue" in stats else 0
-                    pbar.total = max(completed_q + active_in_q + qsize, pbar.total or 0)
 
-                    # Show first active job summary if any
-                    active_info = ""
-                    if stats.get("active_by_queue", {}).get(queue_type):
+                    # Set exact totals (no carry-over from previous tick)
+                    total_for_queue = completed_q + active_in_q + qsize
+                    pbar.total = total_for_queue
+                    pbar.n = min(completed_q, total_for_queue)
+
+                    # Show first active job summary if any, else clear
+                    if active_in_q > 0:
                         first_job = stats["active_by_queue"][queue_type][0]
                         sid = first_job.get("sample_id", "unknown")
                         dur = first_job.get("duration", 0)
-                        active_info = f"{sid}({dur:.0f}s)"
-                    pbar.set_postfix_str(active_info)
+                        pbar.set_postfix_str(f"{sid}({dur:.0f}s)")
+                    else:
+                        pbar.set_postfix_str("")
                     job_type_completion[queue_type] = completed_q
                 
                 # Update queue sizes display
@@ -1508,12 +1723,37 @@ class RayWorkflowRunner:
                 pbar.close()
             overall_pbar.close()
 
+    def stop(self, timeout: float = 5.0) -> bool:
+        """Gracefully stop the workflow (manager + watcher)."""
+        ok = True
+        try:
+            ok = self.manager.stop(timeout=timeout) and ok
+        except Exception:
+            ok = False
+        try:
+            if self._watcher is not None:
+                self._watcher.stop(timeout=timeout)
+        except Exception:
+            ok = False
+        return ok
+
 
 def default_file_classifier(filepath: str, workflow_plan: List[str]) -> List[Job]:
-    """Default classifier (Ray) that mirrors threaded behavior:
-    - Create ONLY the first job now (typically preprocessing)
-    - Store the full workflow plan in context metadata so downstream
-      jobs can be triggered in-order via Job.can_trigger_jobs()
+    """
+    Create the initial job for a file and stash the full workflow plan.
+
+    This mirrors the behavior of the threaded manager: we enqueue only the first
+    step and rely on in-band triggers to progress the workflow in-order.
+
+    Example:
+        workflow_plan = [
+            "preprocessing:preprocessing",
+            "bed_conversion:bed_conversion",
+            "mgmt:mgmt",
+            "cnv:cnv",
+        ]
+        jobs = default_file_classifier("/data/sample.bam", workflow_plan)
+        # -> returns one Job for "preprocessing" with context that embeds the plan
     """
     jobs: List[Job] = []
     context = WorkflowContext(filepath=filepath)
