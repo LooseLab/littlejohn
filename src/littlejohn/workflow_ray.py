@@ -357,6 +357,12 @@ class RayWorkflowManager:
         self.pending_jobs_by_sample: Dict[str, Dict[str, int]] = {}
         self.job_tracking_lock = threading.Lock()
         
+        # Watchdog: maximum runtime per queue before considering a job stuck (seconds)
+        # Keep conservative defaults; preprocessing can stall on malformed BAMs
+        self.max_runtime_seconds_by_queue: Dict[str, int] = {
+            'preprocessing': 600,  # 10 minutes
+        }
+        
         # Per-sample tracking for GUI/monitoring (parity with threaded manager)
         # sample_id -> {
         #   'sample_id', 'active_jobs', 'total_jobs', 'completed_jobs', 'failed_jobs', 'job_types' (set), 'last_seen'
@@ -868,6 +874,32 @@ class RayWorkflowManager:
                     'job_type': job_info.get('job_type', 'unknown'),
                     'error': str(e)
                 }))
+
+        # Watchdog: detect and fail jobs that exceed max runtime for their queue
+        ids_already_completed = {jid for jid, _ in completed_futures}
+        need_restart_queues: Set[str] = set()
+        now_ts = time.time()
+        for job_id, job_info in active_items:
+            if job_id in ids_already_completed:
+                continue
+            jt = job_info.get('job_type', 'unknown')
+            q = self._get_queue_type_for_job(jt)
+            if not self.use_separate_analysis_queues and jt in {'mgmt','cnv','target','fusion'}:
+                q = jt
+            max_s = self.max_runtime_seconds_by_queue.get(q)
+            if not max_s:
+                continue
+            start_ts = job_info.get('start_time', now_ts)
+            elapsed = now_ts - start_ts
+            if elapsed > max_s:
+                # Consider this job stuck; mark as failed and request queue restart
+                completed_futures.append((job_id, {
+                    'status': 'error',
+                    'job_id': job_id,
+                    'job_type': jt,
+                    'error': f'timeout: exceeded {int(max_s)}s without completion',
+                }))
+                need_restart_queues.add(q)
         
         # Process completed jobs
         for job_id, result in completed_futures:
@@ -929,6 +961,30 @@ class RayWorkflowManager:
                     sample_id = ctx.get_sample_id()
                     if sample_id and sample_id != 'unknown':
                         self._on_sample_job_finished(sample_id, result.get('job_type', 'unknown'), False)
+
+        # Restart any queues that likely have a wedged actor (best effort)
+        for q in need_restart_queues:
+            try:
+                self._restart_queue_processors(q)
+            except Exception as e:
+                if self.verbose:
+                    print(f"Warning: failed to restart processors for queue '{q}': {e}")
+
+    def _restart_queue_processors(self, queue_type: str) -> None:
+        """Restart Ray actors for a specific queue to recover from a stuck handler."""
+        procs = self.processors.get(queue_type, [])
+        for p in procs:
+            try:
+                ray.kill(p)
+            except Exception:
+                pass
+        # Recreate actors for this queue using current handlers
+        if queue_type == 'preprocessing':
+            self.processors['preprocessing'] = [
+                JobProcessor.options(num_cpus=1, max_concurrency=1).remote(
+                    'preprocessing', self.job_handlers_preprocessing, self.log_level, self.verbose
+                )
+            ]
     
     def _worker_loop(self) -> None:
         """Main worker loop for processing jobs."""
