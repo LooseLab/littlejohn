@@ -179,7 +179,7 @@ class Job:
                 
             queue_type, next_type = next_step.split(":", 1)
             return Job(
-                job_id=self.job_id,
+                job_id=next(_job_id_counter),
                 job_type=next_type,
                 context=self.context,
                 origin=queue_type,
@@ -464,7 +464,23 @@ class RayWorkflowManager:
         if not ray.is_initialized():
             # Suppress Ray logging to prevent interference with progress bars
             self._suppress_ray_logging()
-            ray.init(ignore_reinit_error=True)
+            # Start local Ray with dashboard enabled when possible
+            try:
+                ray.init(
+                    ignore_reinit_error=True,
+                    include_dashboard=True,
+                    dashboard_host="0.0.0.0",
+                    dashboard_port=8265,
+                )
+            except TypeError:
+                # Fallback for Ray versions without dashboard args
+                ray.init(ignore_reinit_error=True)
+            try:
+                url = getattr(ray, "get_dashboard_url", lambda: None)()
+                if url and self.verbose:
+                    print(f"Ray dashboard: {url}")
+            except Exception:
+                pass
         
         self.verbose = verbose
         self.use_separate_analysis_queues = use_separate_analysis_queues
@@ -501,6 +517,13 @@ class RayWorkflowManager:
         self.job_start_times = {}
         self.completed_jobs_by_type = {}
         self.failed_jobs_by_type = {}
+        # Track skipped jobs (e.g., deduplicated) by type
+        self.skipped_jobs_by_type: Dict[str, int] = {}
+        # Track submissions and results by job_id for reconciliation
+        self._submissions_by_job_id: Dict[int, Dict[str, Any]] = {}
+        self._results_by_job_id: Dict[int, Dict[str, Any]] = {}
+        # Track futures to ensure completion is observed even if active map is overwritten
+        self._pending_futures: Dict[Any, int] = {}
         # Monotonic submitted counters per display queue for accurate totals
         self.submitted_jobs_by_queue: Dict[str, int] = {
             'preprocessing': 0,
@@ -526,7 +549,7 @@ class RayWorkflowManager:
         # Watchdog: maximum runtime per queue before considering a job stuck (seconds)
         # Keep conservative defaults; preprocessing can stall on malformed BAMs
         self.max_runtime_seconds_by_queue: Dict[str, int] = {
-            'preprocessing': 600,  # 10 minutes
+            'preprocessing': 90,  # 90s per request
         }
         
         # Per-sample tracking for GUI/monitoring (parity with threaded manager)
@@ -598,53 +621,53 @@ class RayWorkflowManager:
 
         # Preprocessing processors (configurable workers) - dedicate 1 core each
         self.processors['preprocessing'] = [
-            JobProcessor.options(num_cpus=1, max_concurrency=1).remote(
+            JobProcessor.options(name=f"JobProcessor-preprocessing-{i+1}", num_cpus=1, max_concurrency=1).remote(
                 "preprocessing", self.job_handlers_preprocessing, self.log_level, self.verbose
             )
-            for _ in range(self.preprocessing_workers_count)
+            for i in range(self.preprocessing_workers_count)
         ]
         
         # Bed conversion processors (configurable workers) - dedicate 1 core each
         self.processors['bed_conversion'] = [
-            JobProcessor.options(num_cpus=1, max_concurrency=1).remote(
+            JobProcessor.options(name=f"JobProcessor-bed_conversion-{i+1}", num_cpus=1, max_concurrency=1).remote(
                 "bed_conversion", self.job_handlers_bed_conversion, self.log_level, self.verbose
             )
-            for _ in range(self.bed_workers_count)
+            for i in range(self.bed_workers_count)
         ]
         
         # Analysis processors
         if self.use_separate_analysis_queues:
             # Separate processors for each analysis job type
             self.processors['mgmt'] = [
-                JobProcessor.options(num_cpus=1, max_concurrency=1).remote(
+                JobProcessor.options(name=f"JobProcessor-mgmt-{i+1}", num_cpus=1, max_concurrency=1).remote(
                     "mgmt", self.job_handlers_mgmt, self.log_level, self.verbose
                 )
-                for _ in range(self.analysis_workers_count)
+                for i in range(self.analysis_workers_count)
             ]
             self.processors['cnv'] = [
-                JobProcessor.options(num_cpus=1, max_concurrency=1).remote(
+                JobProcessor.options(name=f"JobProcessor-cnv-{i+1}", num_cpus=1, max_concurrency=1).remote(
                     "cnv", self.job_handlers_cnv, self.log_level, self.verbose
                 )
-                for _ in range(self.analysis_workers_count)
+                for i in range(self.analysis_workers_count)
             ]
             self.processors['target'] = [
-                JobProcessor.options(num_cpus=1, max_concurrency=1).remote(
+                JobProcessor.options(name=f"JobProcessor-target-{i+1}", num_cpus=1, max_concurrency=1).remote(
                     "target", self.job_handlers_target, self.log_level, self.verbose
                 )
-                for _ in range(self.analysis_workers_count)
+                for i in range(self.analysis_workers_count)
             ]
             self.processors['fusion'] = [
-                JobProcessor.options(num_cpus=1, max_concurrency=1).remote(
+                JobProcessor.options(name=f"JobProcessor-fusion-{i+1}", num_cpus=1, max_concurrency=1).remote(
                     "fusion", self.job_handlers_fusion, self.log_level, self.verbose
                 )
-                for _ in range(self.analysis_workers_count)
+                for i in range(self.analysis_workers_count)
             ]
         else:
             # Single analysis processor
             # Combine mgmt/cnv/target/fusion onto ONE core with concurrent threads
             # Use analysis_workers_count to control concurrency while leaving CPU at 1
             self.processors['analysis'] = [
-                JobProcessor.options(num_cpus=1, max_concurrency=analysis_concurrency).remote(
+                JobProcessor.options(name=f"JobProcessor-analysis-1", num_cpus=1, max_concurrency=analysis_concurrency).remote(
                     "analysis", self.job_handlers_analysis, self.log_level, self.verbose
                 )
             ]
@@ -652,7 +675,7 @@ class RayWorkflowManager:
         # Classification processor (1 worker)
         # Give classification its own core but allow concurrent classification jobs
         self.processors['classification'] = [
-            JobProcessor.options(num_cpus=1, max_concurrency=analysis_concurrency).remote(
+            JobProcessor.options(name=f"JobProcessor-classification-1", num_cpus=1, max_concurrency=analysis_concurrency).remote(
                 "classification", self.job_handlers_classification, self.log_level, self.verbose
             )
         ]
@@ -660,7 +683,7 @@ class RayWorkflowManager:
         # Slow processor (1 worker)
         # Keep slow tasks isolated on their own core; allow concurrent jobs if desired
         self.processors['slow'] = [
-            JobProcessor.options(num_cpus=1, max_concurrency=analysis_concurrency).remote(
+            JobProcessor.options(name=f"JobProcessor-slow-1", num_cpus=1, max_concurrency=analysis_concurrency).remote(
                 "slow", self.job_handlers_slow, self.log_level, self.verbose
             )
         ]
@@ -912,6 +935,10 @@ class RayWorkflowManager:
                         pass
                     with self.progress_lock:
                         self.total_jobs_skipped += 1
+                        # Track skipped by type
+                        if job.job_type not in self.skipped_jobs_by_type:
+                            self.skipped_jobs_by_type[job.job_type] = 0
+                        self.skipped_jobs_by_type[job.job_type] += 1
                     continue
                 self._mark_job_pending_for_sample(job.job_type, sample_id)
             
@@ -979,51 +1006,83 @@ class RayWorkflowManager:
         bookkeeping necessary for progress bars and watchdog logic.
         """
         processors = self.processors[queue_type]
-        if processors:
-            # Round-robin selection for load balancing
-            processor = processors[len(self.completed_jobs) % len(processors)]
-            
-            # Serialize job for Ray
-            job_data = pickle.dumps(job)
-            
-            # Submit job to Ray
-            future = processor.process_job.remote(job_data)
-            
-            # Track the job
-            with self.progress_lock:
-                sample_id = job.get_sample_id() if hasattr(job, 'get_sample_id') else 'unknown'
-                self.active_jobs[job.job_id] = {
-                    'job_type': job.job_type,
-                    'filepath': job.context.filepath,
-                    'sample_id': sample_id,
-                    'queue_type': queue_type,
-                    'priority': self.queue_priorities.get(queue_type, 1),
-                    'start_time': time.time(),
-                    'processing_start_time': None,  # Will be set when actual processing starts
-                    'future': future
-                }
-                self.job_start_times[job.job_id] = time.time()
-                # Increment submitted counters per display queue for accurate totals
-                try:
-                    display_q = self._get_display_queue_for_job(job.job_type)
-                    if display_q not in self.submitted_jobs_by_queue:
-                        self.submitted_jobs_by_queue[display_q] = 0
-                    self.submitted_jobs_by_queue[display_q] += 1
-                except Exception:
-                    pass
-            # For deduplicated jobs, move from pending -> running now that it's submitted
-            if job.job_type in self.deduplicate_job_types and sample_id and sample_id != 'unknown':
-                self._mark_job_running_for_sample(job.job_type, sample_id)
-            # Per-sample start tracking
-            if sample_id and sample_id != 'unknown':
-                self._on_sample_job_started(sample_id, job.job_type)
-            
-            if self.verbose:
-                print(f"Submitted job {job.job_id} ({job.job_type}) to Ray with priority {self.queue_priorities.get(queue_type, 1)}")
-            # Diagnostics removed for clean CLI output
-        else:
+        if not processors:
             if self.verbose:
                 print(f"Warning: No processors available for queue type: {queue_type}")
+            return
+
+        # Round-robin selection for load balancing
+        processor = processors[len(self.completed_jobs) % len(processors)]
+
+        # Serialize job for Ray
+        job_data = pickle.dumps(job)
+
+        # Submit job to Ray; if this fails, requeue the job to avoid dropping it
+        try:
+            future = processor.process_job.remote(job_data)
+        except Exception as submit_exc:
+            # Requeue at the head of its priority bucket and log best-effort
+            try:
+                prio = self.queue_priorities.get(queue_type, 1)
+                self.priority_queues.setdefault(prio, []).insert(0, {
+                    'job': job,
+                    'queue_type': queue_type,
+                    'priority': prio,
+                    'timestamp': time.time()
+                })
+            except Exception:
+                pass
+            if self.verbose:
+                print(f"Rescheduled job {job.job_id} ({job.job_type}) after submit error: {submit_exc}")
+            return
+
+        # Track the job
+        with self.progress_lock:
+            sample_id = job.get_sample_id() if hasattr(job, 'get_sample_id') else 'unknown'
+            self.active_jobs[job.job_id] = {
+                'job_type': job.job_type,
+                'filepath': job.context.filepath,
+                'sample_id': sample_id,
+                'queue_type': queue_type,
+                'priority': self.queue_priorities.get(queue_type, 1),
+                'start_time': time.time(),
+                'processing_start_time': None,  # Will be set when actual processing starts
+                'future': future
+            }
+            self.job_start_times[job.job_id] = time.time()
+            # Track future globally for safety
+            try:
+                self._pending_futures[future] = job.job_id
+            except Exception:
+                pass
+            # Increment submitted counters per display queue for accurate totals
+            try:
+                display_q = self._get_display_queue_for_job(job.job_type)
+                if display_q not in self.submitted_jobs_by_queue:
+                    self.submitted_jobs_by_queue[display_q] = 0
+                self.submitted_jobs_by_queue[display_q] += 1
+            except Exception:
+                pass
+            # Track submission by job_id for reconciliation
+            try:
+                self._submissions_by_job_id[job.job_id] = {
+                    'queue_type': queue_type,
+                    'display_queue': self._get_display_queue_for_job(job.job_type),
+                    'job_type': job.job_type,
+                    'filepath': job.context.filepath,
+                    'submitted_at': time.time()
+                }
+            except Exception:
+                pass
+        # For deduplicated jobs, move from pending -> running now that it's submitted
+        if job.job_type in self.deduplicate_job_types and sample_id and sample_id != 'unknown':
+            self._mark_job_running_for_sample(job.job_type, sample_id)
+        # Per-sample start tracking
+        if sample_id and sample_id != 'unknown':
+            self._on_sample_job_started(sample_id, job.job_type)
+
+        if self.verbose:
+            print(f"Submitted job {job.job_id} ({job.job_type}) to Ray with priority {self.queue_priorities.get(queue_type, 1)}")
     
     def _get_queue_type_for_job(self, job_type: str) -> str:
         """Get the queue type for a given job type."""
@@ -1083,6 +1142,7 @@ class RayWorkflowManager:
         # Take a stable snapshot of active jobs under lock to avoid concurrent mutation
         with self.progress_lock:
             active_items = list(self.active_jobs.items())
+            tracked_futures = list(getattr(self, '_pending_futures', {}).items())
 
         # Check for completed jobs without mutating dicts during iteration
         for job_id, job_info in active_items:
@@ -1099,6 +1159,25 @@ class RayWorkflowManager:
                     'status': 'error',
                     'job_id': job_id,
                     'job_type': job_info.get('job_type', 'unknown'),
+                    'error': str(e)
+                }))
+
+        # Also check globally tracked futures that might have been overwritten in active map
+        for fut, jid in tracked_futures:
+            if any(jid == j and fut == info.get('future') for j, info in active_items):
+                continue
+            try:
+                ready_futures, _ = ray.wait([fut], timeout=0)
+                if ready_futures:
+                    result = ray.get(fut)
+                    completed_futures.append((jid, result))
+            except Exception as e:
+                if self.verbose:
+                    print(f"Error checking global future for job {jid}: {e}")
+                completed_futures.append((jid, {
+                    'status': 'error',
+                    'job_id': jid,
+                    'job_type': 'unknown',
                     'error': str(e)
                 }))
 
@@ -1140,6 +1219,22 @@ class RayWorkflowManager:
                 # Remove start time if present
                 if job_id in self.job_start_times:
                     del self.job_start_times[job_id]
+                # Remove from global future tracking
+                try:
+                    for f, jid in list(getattr(self, '_pending_futures', {}).items()):
+                        if jid == job_id:
+                            self._pending_futures.pop(f, None)
+                except Exception:
+                    pass
+                # Record a result footprint for reconciliation
+                try:
+                    self._results_by_job_id[job_id] = {
+                        'job_type': result.get('job_type', 'unknown'),
+                        'status': result.get('status', 'unknown'),
+                        'finished_at': time.time()
+                    }
+                except Exception:
+                    pass
 
             if result['status'] == 'success':
                 self.completed_jobs.append(job_id)
@@ -1177,8 +1272,10 @@ class RayWorkflowManager:
                 else:
                     if 'next_job' in result and result['next_job']:
                         maybe_next = result['next_job']
-                        # Reconstruct next job if only a type is provided in the future
+                        # Ensure any provided next job has a fresh id
                         if isinstance(maybe_next, Job):
+                            if not isinstance(getattr(maybe_next, 'job_id', None), int):
+                                maybe_next.job_id = next(_job_id_counter)
                             self.enqueue_jobs([maybe_next])
                 
                 # Track completion by job type
@@ -1381,6 +1478,29 @@ class RayWorkflowManager:
                     q = q_map
                 failed_by_queue[q] = failed_by_queue.get(q, 0) + (count or 0)
 
+            # Aggregate skipped by queue (dedup skips)
+            skipped_by_queue: Dict[str, int] = {k: 0 for k in ['preprocessing','bed_conversion','mgmt','cnv','target','fusion','analysis','classification','slow']}
+            for jt, count in self.skipped_jobs_by_type.items():
+                q_map = self._get_queue_type_for_job(jt)
+                if not self.use_separate_analysis_queues and jt in {'mgmt','cnv','target','fusion'}:
+                    q = jt
+                else:
+                    q = q_map
+                skipped_by_queue[q] = skipped_by_queue.get(q, 0) + (count or 0)
+
+            # Reconcile by queue: submitted - (completed + failed + active + pending)
+            submitted_totals = (self.submitted_jobs_by_queue.copy() if isinstance(self.submitted_jobs_by_queue, dict) else {})
+            unaccounted_by_queue: Dict[str, int] = {}
+            for qname in ['preprocessing','bed_conversion','mgmt','cnv','target','fusion','analysis','classification','slow']:
+                submitted_q = submitted_totals.get(qname, 0) or 0
+                completed_q = completed_by_queue.get(qname, 0) or 0
+                failed_q = failed_by_queue.get(qname, 0) or 0
+                active_q = len(active_by_queue.get(qname, [])) if isinstance(active_by_queue.get(qname, []), list) else 0
+                pending_q = queue_sizes.get(qname, 0) or 0
+                unaccounted = submitted_q - (completed_q + failed_q + active_q + pending_q)
+                if unaccounted:
+                    unaccounted_by_queue[qname] = unaccounted
+
             # Prepare samples payload for GUI
             samples_payload: List[Dict[str, Any]] = []
             for sid, info in self.samples_by_id.items():
@@ -1394,11 +1514,23 @@ class RayWorkflowManager:
                     'last_seen': info['last_seen'],
                 })
             
+            # Overall processed should include both completed and failed
+            overall_processed = len(self.completed_jobs) + len(self.failed_jobs)
+            # Derive total from submitted_by_queue for consistency across views
+            overall_total = 0
+            try:
+                if isinstance(self.submitted_jobs_by_queue, dict):
+                    overall_total = sum(int(v or 0) for v in self.submitted_jobs_by_queue.values())
+                else:
+                    overall_total = self.total_jobs_enqueued
+            except Exception:
+                overall_total = self.total_jobs_enqueued
+
             return {
                 'total_jobs_enqueued': self.total_jobs_enqueued,
                 'total_jobs_skipped': getattr(self, 'total_jobs_skipped', 0),
-                'total_processed': len(self.completed_jobs),
-                'total_actual_jobs': self.total_jobs_enqueued,  # This should exclude skipped jobs
+                'total_processed': overall_processed,
+                'total_actual_jobs': overall_total,  # Derived from submitted_by_queue for stability
                 'active_jobs': len(self.active_jobs),
                 'use_separate_analysis_queues': self.use_separate_analysis_queues,
                 # Provide both legacy and explicit keys used by GUI hooks
@@ -1406,10 +1538,14 @@ class RayWorkflowManager:
                 'failed': len(self.failed_jobs),
                 'completed_jobs': len(self.completed_jobs),
                 'failed_jobs': len(self.failed_jobs),
+                'skipped': getattr(self, 'total_jobs_skipped', 0),
                 'completed_by_type': self.completed_jobs_by_type.copy(),
                 'failed_by_type': self.failed_jobs_by_type.copy(),
+                'skipped_by_type': self.skipped_jobs_by_type.copy(),
                 'completed_by_queue': completed_by_queue,
                 'failed_by_queue': failed_by_queue,
+                'skipped_by_queue': skipped_by_queue,
+                'unaccounted_by_queue': unaccounted_by_queue,
                 # Monotonic submitted totals per display queue
                 'submitted_by_queue': self.submitted_jobs_by_queue.copy(),
                 'active_by_worker': active_by_worker,
@@ -1748,9 +1884,15 @@ class RayWorkflowRunner:
                 if total_actual_jobs > 0:
                     overall_pbar.total = total_actual_jobs
                     overall_pbar.n = total_processed
+                    overall_failed = stats.get('failed', 0) or 0
+                    overall_skipped = stats.get('total_jobs_skipped', 0) or 0
+                    unaccounted_map = stats.get('unaccounted_by_queue', {}) or {}
+                    unacc_total = sum(int(v or 0) for v in unaccounted_map.values())
                     overall_pbar.set_postfix_str(
                         f"Active: {stats.get('active_jobs', 0)} | "
-                        f"Completed: {total_processed}/{total_actual_jobs}"
+                        f"Done: {total_processed}/{total_actual_jobs} | "
+                        f"Failed: {overall_failed} | Skipped: {overall_skipped} | "
+                        f"Δ: {unacc_total}"
                     )
                 
                 # Update individual progress bars using per-queue aggregates
@@ -1778,9 +1920,18 @@ class RayWorkflowRunner:
                         first_job = stats["active_by_queue"][queue_type][0]
                         sid = first_job.get("sample_id", "unknown")
                         dur = first_job.get("duration", 0)
-                        pbar.set_postfix_str(f"{sid}({dur:.0f}s)")
+                        failed_q = stats.get("failed_by_queue", {}).get(queue_type, 0) or 0
+                        skipped_q = stats.get("skipped_by_queue", {}).get(queue_type, 0) or 0
+                        unacc_q = stats.get("unaccounted_by_queue", {}).get(queue_type, 0) or 0
+                        pbar.set_postfix_str(f"{sid}({dur:.0f}s) F:{failed_q} S:{skipped_q} Δ:{unacc_q}")
                     else:
-                        pbar.set_postfix_str("")
+                        failed_q = stats.get("failed_by_queue", {}).get(queue_type, 0) or 0
+                        skipped_q = stats.get("skipped_by_queue", {}).get(queue_type, 0) or 0
+                        unacc_q = stats.get("unaccounted_by_queue", {}).get(queue_type, 0) or 0
+                        if failed_q or skipped_q or unacc_q:
+                            pbar.set_postfix_str(f"F:{failed_q} S:{skipped_q} Δ:{unacc_q}")
+                        else:
+                            pbar.set_postfix_str("")
                     job_type_completion[queue_type] = completed_q
                 
                 # Update queue sizes display
