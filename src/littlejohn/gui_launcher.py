@@ -70,6 +70,8 @@ class GUILauncher:
         # Debug counters
         self.total_updates_enqueued = 0
         self.total_updates_processed = 0
+        # Monotonic tiebreaker for priority queue to avoid tuple comparison of GUIUpdate
+        self._update_seq: int = 0
 
         # Runtime state
         self._start_time: Optional[float] = None
@@ -91,6 +93,8 @@ class GUILauncher:
         self._coverage_state: Dict[str, Dict[str, Any]] = {}
         # CNV per-sample cache
         self._cnv_state: Dict[str, Dict[str, Any]] = {}
+        # Cache last seen queue status so we can populate immediately on page creation
+        self._last_queue_status: Dict[str, Any] = {}
     
     def launch_gui(self, workflow_runner: Any = None, workflow_steps: list = None, 
                    monitored_directory: str = "") -> bool:
@@ -140,8 +144,11 @@ class GUILauncher:
                 priority=priority
             )
             
-            # Use negative priority so higher priority updates come first
-            self.update_queue.put((-priority, update))
+            # Use negative priority so higher priority updates come first.
+            # Include a monotonically increasing sequence as a tiebreaker so
+            # heap comparisons never fallback to comparing GUIUpdate objects.
+            self._update_seq += 1
+            self.update_queue.put((-priority, self._update_seq, update))
             self.total_updates_enqueued += 1
             logging.info(f"[GUI] Enqueued update #{self.total_updates_enqueued}: {update.update_type.value}")
             
@@ -157,7 +164,8 @@ class GUILauncher:
         try:
             while True:
                 try:
-                    _, update = self.update_queue.get_nowait()
+                    # Entries are (-priority, seq, GUIUpdate)
+                    _, _, update = self.update_queue.get_nowait()
                 except queue.Empty:
                     break
                 self._handle_update(update)
@@ -260,6 +268,32 @@ class GUILauncher:
     def _update_queue_status(self, data: Dict[str, Any]):
         """Update queue status in the GUI."""
         try:
+            # Cache the latest payload so newly created pages can show current values
+            self._last_queue_status = data or {}
+            # Emit a concise log line to the Live Logs pane for visibility
+            try:
+                pr = data.get('preprocessing', {})
+                ar = {
+                    'mgmt': data.get('mgmt', {}),
+                    'cnv': data.get('cnv', {}),
+                    'target': data.get('target', {}),
+                    'fusion': data.get('fusion', {}),
+                }
+                an_running = sum(int(v.get('running', 0) or 0) for v in ar.values())
+                an_total = sum(int(v.get('total', 0) or 0) for v in ar.values())
+                cl = data.get('classification', {})
+                ot = data.get('other', {})
+                msg = (
+                    f"Queues | Pre:{pr.get('running',0)}/{pr.get('total',0)} "
+                    f"| An:{an_running}/{an_total} "
+                    f"| Cl:{cl.get('running',0)}/{cl.get('total',0)} "
+                    f"| Ot:{ot.get('running',0)}/{ot.get('total',0)}"
+                )
+                self._log_buffer.append(f"[queue] {msg}\n")
+                if hasattr(self, 'log_area'):
+                    self.log_area.set_value(''.join(self._log_buffer))
+            except Exception:
+                pass
             # Update queue status displays
             if hasattr(self, 'preprocessing_status'):
                 queue_data = data.get('preprocessing', {})
@@ -540,11 +574,23 @@ class GUILauncher:
                 # If we have cached rows, show them immediately for instant UX
                 if self._last_samples_rows:
                     try:
-                        self.samples_table.rows = list(self._last_samples_rows)
+                        # Filter out placeholder/unknown entries that can appear before
+                        # sample_id is known, and normalize job_types for display.
+                        rows_to_show = []
+                        for r in self._last_samples_rows:
+                            sid = r.get('sample_id')
+                            if not sid or sid == 'unknown':
+                                continue
+                            jt = r.get('job_types')
+                            if isinstance(jt, set):
+                                r = dict(r)
+                                r['job_types'] = ','.join(sorted(jt))
+                            rows_to_show.append(r)
+                        self.samples_table.rows = rows_to_show
                         self.samples_table.update()
                         # Auto-select if only one sample
-                        if len(self._last_samples_rows) == 1:
-                            self._selected_sample_id = self._last_samples_rows[0].get('sample_id')
+                        if len(rows_to_show) == 1:
+                            self._selected_sample_id = rows_to_show[0].get('sample_id')
                             self.view_sample_button.enable()
                     except Exception:
                         pass
@@ -584,18 +630,29 @@ class GUILauncher:
             self.samples_table.rows = rows
             self.samples_table.update()
             # Cache for persistence
-            self._last_samples_rows = rows
-            self._known_sample_ids = {r.get('sample_id') for r in rows if r.get('sample_id')}
+            # Hide 'unknown' placeholder entries from the overview and normalize job_types
+            filtered_rows = []
+            for r in rows:
+                sid = r.get('sample_id')
+                if not sid or sid == 'unknown':
+                    continue
+                jt = r.get('job_types')
+                if isinstance(jt, set):
+                    r = dict(r)
+                    r['job_types'] = ','.join(sorted(jt))
+                filtered_rows.append(r)
+            self._last_samples_rows = filtered_rows
+            self._known_sample_ids = {r.get('sample_id') for r in filtered_rows if r.get('sample_id')}
             # Track currently most active/recent sample
-            if rows:
-                rows_sorted = sorted(rows, key=lambda r: (r.get('active_jobs', 0), r.get('_last_seen_raw', 0)), reverse=True)
+            if filtered_rows:
+                rows_sorted = sorted(filtered_rows, key=lambda r: (r.get('active_jobs', 0), r.get('_last_seen_raw', 0)), reverse=True)
                 self._current_sample_id = rows_sorted[0].get('sample_id')
             # Update external button state
-            if self._selected_sample_id and any(r.get('sample_id') == self._selected_sample_id for r in rows):
+            if self._selected_sample_id and any(r.get('sample_id') == self._selected_sample_id for r in filtered_rows):
                 self.view_sample_button.enable()
-            elif rows:
-                if len(rows) == 1:
-                    self._selected_sample_id = rows[0].get('sample_id')
+            elif filtered_rows:
+                if len(filtered_rows) == 1:
+                    self._selected_sample_id = filtered_rows[0].get('sample_id')
                     self.view_sample_button.enable()
                 else:
                     self.view_sample_button.disable()
@@ -829,6 +886,13 @@ class GUILauncher:
                     with ui.card().classes('bg-gray-50 p-4'):
                         ui.label('⚙️ Other').classes('text-sm font-medium text-gray-800')
                         self.other_status = ui.label('0/0').classes('text-2xl font-bold text-gray-600')
+
+                # If we have a cached queue status from before the page was created, apply it now
+                try:
+                    if self._last_queue_status:
+                        self._update_queue_status(self._last_queue_status)
+                except Exception:
+                    pass
             
             # Active Jobs
             with ui.card().classes('w-full'):

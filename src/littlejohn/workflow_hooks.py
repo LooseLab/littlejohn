@@ -145,13 +145,36 @@ def _start_polling_updates(manager: Any, interval_seconds: float = 1.5) -> None:
                     f"failed={stats.get('failed', 0)}, total={stats.get('total_actual_jobs', 0)}"
                 )
 
-                # Queue status
+                # Queue status (support legacy manager and new Ray-Coordinator stats)
                 try:
-                    queue_sizes = stats.get("queue_sizes", {})
-                    submitted_by_queue = stats.get("submitted_by_queue", {})
-                    # Build totals using monotonic submitted counters when available; fall back to snapshot queues
+                    # 1) Totals
+                    submitted_by_queue = stats.get("submitted_by_queue", {}) or {}
+                    totals_by_category = stats.get("totals_by_category", {}) or {}
+                    queue_sizes = stats.get("queue_sizes", {}) or {}
+
                     def _total_for(q: str) -> int:
-                        return int(submitted_by_queue.get(q, 0) or 0) if submitted_by_queue else int(queue_sizes.get(q, 0) or 0)
+                        # Prefer legacy submitted_by_queue if present
+                        if submitted_by_queue:
+                            return int(submitted_by_queue.get(q, 0) or 0)
+                        # Map new coordinator categories to the same keys
+                        cat_map = {
+                            "preprocessing": "preprocessing",
+                            "mgmt": "mgmt",
+                            "cnv": "cnv",
+                            "target": "target",
+                            "fusion": "fusion",
+                            "classification": "classification",
+                            "other": "other",
+                            "slow": "other",
+                        }
+                        if totals_by_category:
+                            key = cat_map.get(q, q)
+                            return int(totals_by_category.get(key, 0) or 0)
+                        # Fallback: instantaneous queue sizes if nothing else available
+                        # Map 'other' to 'slow' in legacy queue_sizes
+                        if q == "other":
+                            return int(queue_sizes.get("slow", 0) or 0)
+                        return int(queue_sizes.get(q, 0) or 0)
 
                     queue_update: Dict[str, Dict[str, int]] = {
                         "preprocessing": {"running": 0, "total": _total_for("preprocessing")},
@@ -160,25 +183,36 @@ def _start_polling_updates(manager: Any, interval_seconds: float = 1.5) -> None:
                         "target": {"running": 0, "total": _total_for("target")},
                         "fusion": {"running": 0, "total": _total_for("fusion")},
                         "classification": {"running": 0, "total": _total_for("classification")},
-                        "other": {"running": 0, "total": _total_for("slow")},
+                        "other": {"running": 0, "total": _total_for("other")},
                     }
 
-                    active_by_worker: Dict[str, List[Dict[str, Any]]] = stats.get("active_by_worker", {})  # type: ignore
-                    for worker_name, jobs in active_by_worker.items():
-                        if worker_name.startswith("PreprocessingWorker"):
-                            queue_update["preprocessing"]["running"] += len(jobs)
-                        elif worker_name.startswith("MGMTWorker"):
-                            queue_update["mgmt"]["running"] += len(jobs)
-                        elif worker_name.startswith("CNVWorker"):
-                            queue_update["cnv"]["running"] += len(jobs)
-                        elif worker_name.startswith("TargetWorker"):
-                            queue_update["target"]["running"] += len(jobs)
-                        elif worker_name.startswith("FusionWorker"):
-                            queue_update["fusion"]["running"] += len(jobs)
-                        elif worker_name.startswith("ClassificationWorker"):
-                            queue_update["classification"]["running"] += len(jobs)
-                        elif worker_name.startswith("SlowWorker"):
-                            queue_update["other"]["running"] += len(jobs)
+                    # 2) Running
+                    running_by_category = stats.get("running_by_category", {}) or {}
+                    if running_by_category:
+                        # Direct consumption from new coordinator
+                        for k in ["preprocessing","mgmt","cnv","target","fusion","classification","other"]:
+                            queue_update[k]["running"] = int(running_by_category.get(k, 0) or 0)
+                    else:
+                        # Legacy path: derive from active_by_worker prefixes OR from active_by_queue lengths
+                        active_by_worker = stats.get("active_by_worker", {}) or {}
+                        if active_by_worker:
+                            for worker_name, jobs in active_by_worker.items():
+                                wn = str(worker_name)
+                                n = len(jobs) if isinstance(jobs, list) else 0
+                                if wn.startswith("PreprocessingWorker") or wn == "preprocessing":
+                                    queue_update["preprocessing"]["running"] += n
+                                elif wn.startswith("MGMTWorker") or wn == "mgmt":
+                                    queue_update["mgmt"]["running"] += n
+                                elif wn.startswith("CNVWorker") or wn == "cnv":
+                                    queue_update["cnv"]["running"] += n
+                                elif wn.startswith("TargetWorker") or wn == "target":
+                                    queue_update["target"]["running"] += n
+                                elif wn.startswith("FusionWorker") or wn == "fusion":
+                                    queue_update["fusion"]["running"] += n
+                                elif wn.startswith("ClassificationWorker") or wn == "classification":
+                                    queue_update["classification"]["running"] += n
+                                elif wn.startswith("SlowWorker") or wn in {"other","slow"}:
+                                    queue_update["other"]["running"] += n
 
                     send_gui_update(UpdateType.QUEUE_UPDATE, queue_update, priority=4)
                 except Exception:

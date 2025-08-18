@@ -462,28 +462,29 @@ class Coordinator:
                 "queue": q,
                 "start_time": time.time(),
             }
-            # update per-sample totals and active only on actual submission
+            # Update per-sample totals/active only when a real sample_id is known
             try:
                 sid = sample_id or 'unknown'
-                ent = self.samples_by_id.get(sid)
-                if ent is None:
-                    ent = {
-                        'sample_id': sid,
-                        'active_jobs': 0,
-                        'total_jobs': 0,
-                        'completed_jobs': 0,
-                        'failed_jobs': 0,
-                        'job_types': set(),
-                        'last_seen': time.time(),
-                    }
-                    self.samples_by_id[sid] = ent
-                ent['total_jobs'] += 1
-                ent['active_jobs'] += 1
-                try:
-                    ent['job_types'].add(job.job_type)
-                except Exception:
-                    pass
-                ent['last_seen'] = time.time()
+                if sid != 'unknown':
+                    ent = self.samples_by_id.get(sid)
+                    if ent is None:
+                        ent = {
+                            'sample_id': sid,
+                            'active_jobs': 0,
+                            'total_jobs': 0,
+                            'completed_jobs': 0,
+                            'failed_jobs': 0,
+                            'job_types': set(),
+                            'last_seen': time.time(),
+                        }
+                        self.samples_by_id[sid] = ent
+                    ent['total_jobs'] += 1
+                    ent['active_jobs'] += 1
+                    try:
+                        ent['job_types'].add(job.job_type)
+                    except Exception:
+                        pass
+                    ent['last_seen'] = time.time()
             except Exception:
                 pass
             ref = proc.process.remote(job)
@@ -526,7 +527,37 @@ class Coordinator:
                             ref = proc.process.remote(j)
                             self._inflight[ref] = j
                             self.classif_pending_by_type[t] = self.classif_pending_by_type.get(t, 0) + 1
+                            # Record submission for totals used by GUI
+                            try:
+                                self.submitted_by_type[j.job_type] = self.submitted_by_type.get(j.job_type, 0) + 1
+                            except Exception:
+                                pass
                             self.total_enqueued += 1
+                            # Update per-sample aggregate immediately for GUI samples view
+                            try:
+                                sid_local = ctx.get_sample_id() if hasattr(ctx, 'get_sample_id') else 'unknown'
+                                if sid_local != 'unknown':
+                                    ent_local = self.samples_by_id.get(sid_local)
+                                    if ent_local is None:
+                                        ent_local = {
+                                            'sample_id': sid_local,
+                                            'active_jobs': 0,
+                                            'total_jobs': 0,
+                                            'completed_jobs': 0,
+                                            'failed_jobs': 0,
+                                            'job_types': set(),
+                                            'last_seen': time.time(),
+                                        }
+                                        self.samples_by_id[sid_local] = ent_local
+                                    ent_local['total_jobs'] += 1
+                                    ent_local['active_jobs'] += 1
+                                    try:
+                                        ent_local['job_types'].add(j.job_type)
+                                    except Exception:
+                                        pass
+                                    ent_local['last_seen'] = time.time()
+                            except Exception:
+                                pass
                             self.active[j.job_id] = {
                                 "job_type": j.job_type,
                                 "filepath": j.context.filepath,
@@ -591,6 +622,37 @@ class Coordinator:
                 if proc2 is not None:
                     ref2 = proc2.process.remote(nxt_job)
                     self._inflight[ref2] = nxt_job
+                    # Record submission for totals used by GUI
+                    try:
+                        self.submitted_by_type[nxt_job.job_type] = self.submitted_by_type.get(nxt_job.job_type, 0) + 1
+                    except Exception:
+                        pass
+                    self.total_enqueued += 1
+                    # Update per-sample aggregate immediately for GUI samples view
+                    try:
+                        sid_local2 = nxt_job.context.get_sample_id() if hasattr(nxt_job.context, 'get_sample_id') else 'unknown'
+                        if sid_local2 != 'unknown':
+                            ent_local2 = self.samples_by_id.get(sid_local2)
+                            if ent_local2 is None:
+                                ent_local2 = {
+                                    'sample_id': sid_local2,
+                                    'active_jobs': 0,
+                                    'total_jobs': 0,
+                                    'completed_jobs': 0,
+                                    'failed_jobs': 0,
+                                    'job_types': set(),
+                                    'last_seen': time.time(),
+                                }
+                                self.samples_by_id[sid_local2] = ent_local2
+                            ent_local2['total_jobs'] += 1
+                            ent_local2['active_jobs'] += 1
+                            try:
+                                ent_local2['job_types'].add(nxt_job.job_type)
+                            except Exception:
+                                pass
+                            ent_local2['last_seen'] = time.time()
+                    except Exception:
+                        pass
                     self.active[nxt_job.job_id] = {
                         "job_type": nxt_job.job_type,
                         "filepath": nxt_job.context.filepath,
@@ -620,6 +682,31 @@ class Coordinator:
                     self.inflight_by_type[jt] = int(self.inflight_by_type.get(jt, 0)) + 1
                     self.submitted_by_type[jt] = self.submitted_by_type.get(jt, 0) + 1
                     self.total_enqueued += 1
+                    # Update per-sample aggregate for GUI samples view
+                    try:
+                        sid_local_g = nxt_job_g.context.get_sample_id() if hasattr(nxt_job_g.context, 'get_sample_id') else 'unknown'
+                        if sid_local_g != 'unknown':
+                            ent_local_g = self.samples_by_id.get(sid_local_g)
+                            if ent_local_g is None:
+                                ent_local_g = {
+                                    'sample_id': sid_local_g,
+                                    'active_jobs': 0,
+                                    'total_jobs': 0,
+                                    'completed_jobs': 0,
+                                    'failed_jobs': 0,
+                                    'job_types': set(),
+                                    'last_seen': time.time(),
+                                }
+                                self.samples_by_id[sid_local_g] = ent_local_g
+                            ent_local_g['total_jobs'] += 1
+                            ent_local_g['active_jobs'] += 1
+                            try:
+                                ent_local_g['job_types'].add(nxt_job_g.job_type)
+                            except Exception:
+                                pass
+                            ent_local_g['last_seen'] = time.time()
+                    except Exception:
+                        pass
                     self.active[nxt_job_g.job_id] = {
                         "job_type": nxt_job_g.job_type,
                         "filepath": nxt_job_g.context.filepath,
@@ -641,8 +728,38 @@ class Coordinator:
                 if proc3 is not None:
                     ref3 = proc3.process.remote(nxt)
                     self._inflight[ref3] = nxt
+                    # Record submission for totals used by GUI
+                    try:
+                        self.submitted_by_type[job.job_type] = self.submitted_by_type.get(job.job_type, 0) + 1
+                    except Exception:
+                        pass
                     self.classif_pending_by_type[job.job_type] = 1
                     self.total_enqueued += 1
+                    # Update per-sample aggregate immediately for GUI samples view
+                    try:
+                        sid_local3 = nxt.context.get_sample_id() if hasattr(nxt, 'context') and hasattr(nxt.context, 'get_sample_id') else 'unknown'
+                        if sid_local3 != 'unknown':
+                            ent_local3 = self.samples_by_id.get(sid_local3)
+                            if ent_local3 is None:
+                                ent_local3 = {
+                                    'sample_id': sid_local3,
+                                    'active_jobs': 0,
+                                    'total_jobs': 0,
+                                    'completed_jobs': 0,
+                                    'failed_jobs': 0,
+                                    'job_types': set(),
+                                    'last_seen': time.time(),
+                                }
+                                self.samples_by_id[sid_local3] = ent_local3
+                            ent_local3['total_jobs'] += 1
+                            ent_local3['active_jobs'] += 1
+                            try:
+                                ent_local3['job_types'].add(nxt.job_type)
+                            except Exception:
+                                pass
+                            ent_local3['last_seen'] = time.time()
+                    except Exception:
+                        pass
                     self.active[nxt.job_id] = {
                         "job_type": nxt.job_type,
                         "filepath": nxt.context.filepath,
@@ -1095,9 +1212,49 @@ async def run(plan: List[str], paths: List[str], analysis_workers: int = 1, proc
                         _gui_send_update(_GUIUpdateType.WORKFLOW_STATUS, {"is_running": True, "start_time": time.time()}, priority=1)
                         _gui_send_update(_GUIUpdateType.PROGRESS_UPDATE, {"progress": progress, "completed": completed, "failed": failed, "total": total}, priority=1)
 
-                        # Queue status (running/total by category)
+                        # Queue status (running/total by category). If the coordinator
+                        # doesn't provide category totals/running, derive them from the
+                        # available fields so the GUI can still display correct values.
                         ru = s.get('running_by_category', {}) or {}
                         tu = s.get('totals_by_category', {}) or {}
+
+                        # Derive running by category when missing using active_by_queue
+                        if not ru or sum(int(v or 0) for v in ru.values()) == 0:
+                            ru = {'preprocessing':0,'mgmt':0,'cnv':0,'target':0,'fusion':0,'classification':0,'other':0}
+                            abq = s.get('active_by_queue', {}) or {}
+                            for qname, jobs in abq.items():
+                                n = len(jobs) if isinstance(jobs, list) else 0
+                                if qname in {'preprocessing','mgmt','cnv','target','fusion','classification'}:
+                                    ru[qname] += n
+                                elif qname in {'bed_conversion','slow','other'}:
+                                    ru['other'] += n
+
+                        # Derive totals by category when missing using completed/failed + active
+                        if not tu or sum(int(v or 0) for v in tu.values()) == 0:
+                            tu = {'preprocessing':0,'mgmt':0,'cnv':0,'target':0,'fusion':0,'classification':0,'other':0}
+                            cbt = s.get('completed_by_type', {}) or {}
+                            fbt = s.get('failed_by_type', {}) or {}
+                            def _cat_of_local(jt: str) -> str:
+                                if jt == 'preprocessing':
+                                    return 'preprocessing'
+                                if jt in {'mgmt','cnv','target','fusion'}:
+                                    return jt
+                                if jt in CLASSIFICATION_TYPES:
+                                    return 'classification'
+                                return 'other'
+                            for jt, c in cbt.items():
+                                tu[_cat_of_local(jt)] += int(c or 0)
+                            for jt, c in fbt.items():
+                                tu[_cat_of_local(jt)] += int(c or 0)
+                            # Add currently active jobs
+                            abq2 = s.get('active_by_queue', {}) or {}
+                            for qname, jobs in abq2.items():
+                                n = len(jobs) if isinstance(jobs, list) else 0
+                                if qname in {'preprocessing','mgmt','cnv','target','fusion','classification'}:
+                                    tu[qname] += n
+                                elif qname in {'bed_conversion','slow','other'}:
+                                    tu['other'] += n
+
                         queue_payload = {
                             'preprocessing': {'running': int(ru.get('preprocessing', 0) or 0), 'total': int(tu.get('preprocessing', 0) or 0)},
                             'mgmt': {'running': int(ru.get('mgmt', 0) or 0), 'total': int(tu.get('mgmt', 0) or 0)},
@@ -1108,6 +1265,22 @@ async def run(plan: List[str], paths: List[str], analysis_workers: int = 1, proc
                             'other': {'running': int(ru.get('other', 0) or 0), 'total': int(tu.get('other', 0) or 0)},
                         }
                         _gui_send_update(_GUIUpdateType.QUEUE_UPDATE, queue_payload, priority=2)
+                        # Also emit a human-readable log line so users see queue summaries in Live Logs
+                        try:
+                            pre = queue_payload['preprocessing']
+                            an_run = sum(int(queue_payload[q]['running']) for q in ['mgmt','cnv','target','fusion'])
+                            an_tot = sum(int(queue_payload[q]['total']) for q in ['mgmt','cnv','target','fusion'])
+                            cl = queue_payload['classification']
+                            ot = queue_payload['other']
+                            summary = (
+                                f"Queues | Pre:{pre['running']}/{pre['total']} "
+                                f"| An:{an_run}/{an_tot} "
+                                f"| Cl:{cl['running']}/{cl['total']} "
+                                f"| Ot:{ot['running']}/{ot['total']}"
+                            )
+                            _gui_send_update(_GUIUpdateType.LOG_MESSAGE, {"message": summary, "level": "INFO"}, priority=0)
+                        except Exception:
+                            pass
 
                         # Active jobs table
                         rows = []
