@@ -549,8 +549,8 @@ class Coordinator:
                 else:
                     # advance linear chain if any
                     nxt = job.next_job()
-                if nxt:
-                    await self.submit_jobs([nxt])
+                    if nxt:
+                        await self.submit_jobs([nxt])
         else:
             self.failed.append(job.job_id)
             self.failed_by_type[job.job_type] = self.failed_by_type.get(job.job_type, 0) + 1
@@ -712,6 +712,11 @@ class Coordinator:
             waiting_serialized = sum(len(v) for v in getattr(self, 'waiting_by_type_sample', {}).values())
         except Exception:
             waiting_serialized = 0
+        # Count global backpressure queues (per-type)
+        try:
+            waiting_global = sum(len(v) for v in getattr(self, 'waiting_by_type_global', {}).values())
+        except Exception:
+            waiting_global = 0
         # Samples payload for GUI
         samples_payload: List[Dict[str, Any]] = []
         try:
@@ -739,6 +744,7 @@ class Coordinator:
             "active_by_worker": active_by_queue,  # compatibility for GUI table
             "active_count": len(self.active),
             "waiting_serialized": waiting_serialized,
+            "waiting_global": waiting_global,
             "running_by_category": running_counts,
             "totals_by_category": totals_counts,
             "samples": samples_payload,
