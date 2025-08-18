@@ -208,6 +208,6 @@ def add_classification_section(sample_dir: Path) -> None:
             except Exception:
                 pass
 
-    ui.timer(2.0, _refresh_classification, active=True)
+    ui.timer(30.0, _refresh_classification, active=True)
 
 

@@ -326,6 +326,6 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
         except Exception:
             pass
 
-    ui.timer(2.5, _refresh_coverage, active=True)
+    ui.timer(30.0, _refresh_coverage, active=True)
 
 

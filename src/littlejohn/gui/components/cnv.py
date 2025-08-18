@@ -72,6 +72,135 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             ],
         }).classes('w-full h-72')
 
+    # Adaptive thinning helpers
+    MAX_POINTS_PER_CHART = 2000
+
+    def _get_visible_range(chart, series_list):
+        try:
+            # Compute overall data span
+            min_x = None
+            max_x = None
+            for s in series_list:
+                data = s.get('data') or []
+                if not data:
+                    continue
+                sx = data[0][0] if isinstance(data[0], (list, tuple)) else None
+                ex = data[-1][0] if isinstance(data[-1], (list, tuple)) else None
+                if sx is None or ex is None:
+                    # Fallback compute min/max
+                    for p in data:
+                        try:
+                            x = float(p[0])
+                        except Exception:
+                            continue
+                        min_x = x if min_x is None else min(min_x, x)
+                        max_x = x if max_x is None else max(max_x, x)
+                else:
+                    vmin = min(float(sx), float(ex))
+                    vmax = max(float(sx), float(ex))
+                    min_x = vmin if min_x is None else min(min_x, vmin)
+                    max_x = vmax if max_x is None else max(max_x, vmax)
+            dz = None
+            try:
+                dzo = chart.options.get('dataZoom')
+                if isinstance(dzo, list) and dzo:
+                    dz = dzo[0]
+            except Exception:
+                dz = None
+            if not dz:
+                return (min_x, max_x)
+            # Prefer explicit values
+            sv = dz.get('startValue') if isinstance(dz, dict) else None
+            ev = dz.get('endValue') if isinstance(dz, dict) else None
+            if sv is not None or ev is not None:
+                left = float(sv) if sv is not None else min_x
+                right = float(ev) if ev is not None else max_x
+                return (left, right)
+            # Fallback to percentage range
+            sp = dz.get('start') if isinstance(dz, dict) else None
+            ep = dz.get('end') if isinstance(dz, dict) else None
+            if (sp is not None or ep is not None) and min_x is not None and max_x is not None:
+                width = max_x - min_x if max_x is not None and min_x is not None else None
+                if width and width > 0:
+                    left = min_x + (float(sp or 0) / 100.0) * width
+                    right = min_x + (float(ep or 100) / 100.0) * width
+                    return (left, right)
+            return (min_x, max_x)
+        except Exception:
+            return (None, None)
+
+    def _evenly_sample(seq, k):
+        try:
+            n = len(seq)
+            if k <= 0 or n <= k:
+                return list(seq)
+            if k == 1:
+                return [seq[n // 2]]
+            # Choose k indices evenly across [0, n-1]
+            return [seq[int(round(i * (n - 1) / (k - 1)))] for i in range(k)]
+        except Exception:
+            return list(seq)[:k]
+
+    def _thin_chart_series(chart, max_points: int = MAX_POINTS_PER_CHART) -> None:
+        try:
+            series = chart.options.get('series', [])
+            # Identify data series to thin (exclude overlays)
+            data_idx = []
+            data_series = []
+            for idx, s in enumerate(series):
+                name = s.get('name', '')
+                if s.get('type') == 'scatter' and name not in ('centromeres_highlight', 'cytobands_highlight'):
+                    data = s.get('data') or []
+                    if isinstance(data, list) and data:
+                        data_idx.append(idx)
+                        data_series.append(s)
+            if not data_series:
+                return
+            x_range = _get_visible_range(chart, data_series)
+            # Gather visible counts and data within range
+            vis_data = []
+            total = 0
+            left, right = x_range
+            for s in data_series:
+                pts = s.get('data') or []
+                if left is not None and right is not None:
+                    sub = [p for p in pts if isinstance(p, (list, tuple)) and left <= float(p[0]) <= right]
+                else:
+                    sub = list(pts)
+                vis_data.append(sub)
+                total += len(sub)
+            if total <= max_points:
+                return
+            # Allocate budgets proportional to visible counts with a small floor
+            budgets = []
+            remaining = max_points
+            for sub in vis_data:
+                share = int(max(1, round((len(sub) / total) * max_points)))
+                budgets.append(share)
+            # Normalize budgets to exactly max_points
+            adj = sum(budgets) - max_points
+            i = 0
+            while adj != 0 and budgets:
+                if adj > 0 and budgets[i] > 1:
+                    budgets[i] -= 1; adj -= 1
+                elif adj < 0:
+                    budgets[i] += 1; adj += 1
+                i = (i + 1) % len(budgets)
+            # Apply sampling and replace data (preserve points outside range sparsely)
+            for (idx, s), sub, k in zip(zip(data_idx, data_series), vis_data, budgets):
+                original = s.get('data') or []
+                # Keep outside-range points sparsely so context remains when zoomed out/in
+                if left is not None and right is not None:
+                    outside = [p for p in original if isinstance(p, (list, tuple)) and not (left <= float(p[0]) <= right)]
+                    outside_keep = _evenly_sample(outside, max(0, k // 10))  # at most 10% of budget
+                else:
+                    outside_keep = []
+                inside_keep = _evenly_sample(sub, max(1, k - len(outside_keep)))
+                new_data = inside_keep + outside_keep
+                chart.options['series'][idx]['data'] = new_data
+        except Exception:
+            pass
+
     @lru_cache(maxsize=1)
     def _load_centromere_regions() -> Dict[str, List[Tuple[int, int, str]]]:
         """Load centromere/satellite regions from packaged resources.
@@ -187,7 +316,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                     if color_mode == 'chromosome':
                         series_abs.append({
                             'type': 'scatter', 'name': contig, 'symbolSize': 3,
-                            'data': pts[::max(1, len(pts)//10000 or 1)]
+                            'data': pts
                         })
                     else:
                         try:
@@ -201,18 +330,18 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                             z = (vi - mean_val) / std_val if std_val > 0 else 0.0
                             (high if z > 0.5 else low if z < -0.5 else norm).append([xi, vi])
                         if high:
-                            series_abs.append({'type': 'scatter', 'name': f'High {contig}', 'symbolSize': 4, 'itemStyle': {'color': '#007AFF'}, 'data': high[::max(1, len(high)//10000 or 1)]})
+                            series_abs.append({'type': 'scatter', 'name': f'High {contig}', 'symbolSize': 4, 'itemStyle': {'color': '#007AFF'}, 'data': high})
                         if low:
-                            series_abs.append({'type': 'scatter', 'name': f'Low {contig}', 'symbolSize': 4, 'itemStyle': {'color': '#FF3B30'}, 'data': low[::max(1, len(low)//10000 or 1)]})
+                            series_abs.append({'type': 'scatter', 'name': f'Low {contig}', 'symbolSize': 4, 'itemStyle': {'color': '#FF3B30'}, 'data': low})
                         if norm:
-                            series_abs.append({'type': 'scatter', 'name': f'Normal {contig}', 'symbolSize': 2, 'itemStyle': {'color': '#8E8E93'}, 'data': norm[::max(1, len(norm)//10000 or 1)]})
+                            series_abs.append({'type': 'scatter', 'name': f'Normal {contig}', 'symbolSize': 2, 'itemStyle': {'color': '#8E8E93'}, 'data': norm})
             else:
                 cnv = cnv_map.get(selected)
                 if cnv is not None:
                     x = (np.arange(len(cnv))) * binw
                     pts = list(zip(x.tolist(), [float(v) for v in cnv]))
                     if color_mode == 'chromosome':
-                        series_abs.append({'type': 'scatter', 'name': selected, 'symbolSize': 3, 'data': pts[::max(1, len(pts)//10000 or 1)]})
+                        series_abs.append({'type': 'scatter', 'name': selected, 'symbolSize': 3, 'data': pts})
                     else:
                         expected = 2.0
                         try:
@@ -377,6 +506,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 # debug label removed
             except Exception:
                 pass
+            # Adaptive thinning based on current zoom and cap total points
+            _thin_chart_series(cnv_abs, MAX_POINTS_PER_CHART)
             cnv_abs.update()
             # Difference plot
             if cnv3_map:
@@ -389,7 +520,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                         x = (np.arange(len(cnv)) + total) * binw
                         pts = list(zip(x.tolist(), [float(v) for v in cnv]))
                         total += len(cnv)
-                        series_diff.append({'type': 'scatter', 'name': contig, 'symbolSize': 3, 'data': pts[::max(1, len(pts)//10000 or 1)]})
+                        series_diff.append({'type': 'scatter', 'name': contig, 'symbolSize': 3, 'data': pts})
                 else:
                     cnv = cnv3_map.get(selected)
                     if cnv is not None:
@@ -403,6 +534,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 except Exception:
                     keep = []
                 cnv_diff.options['series'] = series_diff + keep
+                _thin_chart_series(cnv_diff, MAX_POINTS_PER_CHART)
                 cnv_diff.update()
         except Exception:
             pass

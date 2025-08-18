@@ -157,6 +157,6 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
         except Exception:
             pass
 
-    ui.timer(3.0, _refresh_mgmt, active=True)
+    ui.timer(30.0, _refresh_mgmt, active=True)
 
 
