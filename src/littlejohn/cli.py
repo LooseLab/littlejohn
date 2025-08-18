@@ -548,6 +548,10 @@ def _display_workflow_config(path: Path, work_dir: Optional[Path], workflow_step
     help="Use Ray for distributed computing (experimental). This will distribute jobs across multiple CPU cores and potentially multiple machines for improved performance."
 )
 @click.option(
+    "--use-ray-core", is_flag=True,
+    help="Use the new Ray Core engine from workflow_ray_new.py instead of the legacy Ray runner."
+)
+@click.option(
     "--ray-num-cpus", type=int, default=None, 
     help="Number of CPUs to use for Ray (default: auto-detect). Only used when --use-ray is specified."
 )
@@ -558,6 +562,10 @@ def _display_workflow_config(path: Path, work_dir: Optional[Path], workflow_step
 @click.option(
     "--show-priorities", is_flag=True, 
     help="Show current queue priorities and exit. Only used when --use-ray is specified."
+)
+@click.option(
+    "--no-watch", is_flag=True,
+    help="Do not watch directories for new files (default: watch enabled)."
 )
 @click.option(
     "--with-gui", is_flag=True, 
@@ -580,8 +588,8 @@ def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool
             no_process_existing: bool, work_dir: Optional[Path], log_level: str, 
             job_log_level: tuple[str, ...], deduplicate_jobs: tuple[str, ...], 
             no_progress: bool, analysis_workers: int, preprocessing_workers: int, bed_workers: int, legacy_analysis_queue: bool, 
-            use_ray: bool, ray_num_cpus: Optional[int], queue_priority: tuple[str, ...], 
-            show_priorities: bool, with_gui: bool, gui_host: str, gui_port: int) -> None:
+            use_ray: bool, use_ray_core: bool, ray_num_cpus: Optional[int], queue_priority: tuple[str, ...], 
+            show_priorities: bool, with_gui: bool, gui_host: str, gui_port: int, no_watch: bool) -> None:
     """Run various operations on BAM files in a directory. Preprocessing is automatically included as the first step."""
     try:
         # Validate input parameters
@@ -616,8 +624,47 @@ def workflow(path: Path, workflow: str, commands: tuple[str, ...], verbose: bool
         
         # If using Ray and CPU count specified, initialize Ray BEFORE creating runner
         # so the runner respects the requested CPU resources
-        if use_ray and ray_num_cpus is not None:
+        if (use_ray or use_ray_core) and ray_num_cpus is not None:
             _initialize_ray(ray_num_cpus)
+
+        # New Ray Core engine path (bypass legacy runner)
+        if use_ray_core:
+            # Ensure Ray is initialized if CPUs not specified
+            try:
+                import ray
+                if not ray.is_initialized():
+                    ray.init(ignore_reinit_error=True)
+            except Exception:
+                pass
+
+            # Display configuration
+            _display_workflow_config(
+                path, work_dir, workflow_steps, command_map, log_level,
+                job_levels, deduplicate_jobs, legacy_analysis_queue,
+                analysis_workers, no_process_existing, uses_simplified_format,
+                workflow, True, ray_num_cpus, queue_priority
+            )
+
+            # Run Ray Core implementation
+            try:
+                import asyncio
+                from littlejohn import workflow_ray_new as wrn
+                asyncio.run(wrn.run(
+                    plan=workflow_steps,
+                    paths=[str(path)],
+                    analysis_workers=analysis_workers,
+                    process_existing=not no_process_existing,
+                    monitor=not no_progress,
+                    watch=(not no_watch),
+                    patterns=["*.bam"],
+                    ignore_patterns=None,
+                    recursive=True,
+                    work_dir=str(work_dir) if work_dir else None,
+                    log_level=log_level
+                ))
+            except KeyboardInterrupt:
+                print("Stopping workflow...")
+            return
 
         # Create workflow runner
         runner = _create_workflow_runner(use_ray, verbose, analysis_workers,

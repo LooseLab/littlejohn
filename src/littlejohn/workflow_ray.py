@@ -59,6 +59,7 @@ throughout for details on data flow and the scheduling rules.
 """
 
 import os
+import logging
 import time
 import threading
 import queue
@@ -351,66 +352,74 @@ class JobProcessor:
         try:
             # Deserialize the job
             job = pickle.loads(job_data)
-            
-            # Get job-specific logger
-            logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
-            
-            # Set log level for this job if needed
-            if hasattr(logger, 'setLevel'):
-                import logging
-                level_map = {
-                    "DEBUG": logging.DEBUG,
-                    "INFO": logging.INFO,
-                    "WARNING": logging.WARNING,
-                    "ERROR": logging.ERROR
-                }
-                logger.setLevel(level_map.get(self.log_level, logging.INFO))
-            
-            logger.info(f"Starting job {job.job_id} ({job.job_type}) for {job.context.filepath}")
-            
-            # Record the actual processing start time (excludes queue waiting time)
-            processing_start_time = time.time()
-            
-            # Process the job
-            if job.job_type in self.handlers:
+        except Exception as e:
+            logger.error(f"Failed to deserialize job data: {e}")
+            return {
+                'status': 'error',
+                'error': f"Deserialization error: {e}"
+            }
+
+        # Get job-specific logger
+        logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
+
+        # Set log level for this job if needed
+        if hasattr(logger, 'setLevel'):
+            import logging
+            level_map = {
+                "DEBUG": logging.DEBUG,
+                "INFO": logging.INFO,
+                "WARNING": logging.WARNING,
+                "ERROR": logging.ERROR
+            }
+            logger.setLevel(level_map.get(self.log_level, logging.INFO))
+
+        logger.info(f"Starting job {job.job_id} ({job.job_type}) for {job.context.filepath}")
+        logger.info(f"Job {job.job_id} ({job.job_type}) state transition: QUEUED -> PROCESSING")
+
+        # Record the actual processing start time (excludes queue waiting time)
+        processing_start_time = time.time()
+
+        # Process the job
+        if job.job_type in self.handlers:
+            try:
+                self.handlers[job.job_type](job)
+                logger.info(f"Job {job.job_id} ({job.job_type}) completed successfully")
+                logger.info(f"Job {job.job_id} ({job.job_type}) state transition: PROCESSING -> COMPLETED")
+                self.processed_jobs += 1
+                # Post-handler check: ensure preprocessing determined a sample_id
                 try:
-                    self.handlers[job.job_type](job)
-                    logger.info(f"Job {job.job_id} ({job.job_type}) completed successfully")
-                    self.processed_jobs += 1
-                    
-                    # Compute triggers explicitly so we can log them for diagnostics
-                    triggered_jobs = job.can_trigger_jobs()
-                    downstream = [tj.job_type for tj in triggered_jobs]
-                    # Diagnostics removed for clean CLI output
-                    
-                    # Return updated context and triggered jobs
-                    return {
-                        'status': 'success',
-                        'job_id': job.job_id,
-                        'job_type': job.job_type,
-                        'context': job.context,
-                        # Return only job types to avoid cross-process job_id collisions
-                        'triggered_job_types': downstream,
-                        'processing_start_time': processing_start_time
-                    }
-                except Exception as handler_error:
-                    error_msg = f"Handler execution failed: {str(handler_error)}"
-                    job.context.add_error(job.job_type, error_msg)
-                    logger.error(f"Job {job.job_id} failed: {error_msg}")
-                    self.failed_jobs += 1
-                    return {
-                        'status': 'error',
-                        'job_id': job.job_id,
-                        'job_type': job.job_type,
-                        'context': job.context,
-                        'error': error_msg,
-                        'processing_start_time': processing_start_time
-                    }
-            else:
-                available_handlers = list(self.handlers.keys())
-                error_msg = f"No handler found for job type: {job.job_type}. Available handlers: {available_handlers}"
+                    if job.job_type == 'preprocessing':
+                        sid = job.context.get_sample_id() if hasattr(job.context, 'get_sample_id') else None
+                        if not sid or sid == 'unknown':
+                            msg = (
+                                f"Unknown sample_id after preprocessing. File: {job.context.filepath}. "
+                                f"This will impact downstream per-sample dedup/tracking."
+                            )
+                            job.context.add_error('preprocessing', msg)
+                            logger.error(msg)
+                except Exception as e:
+                    logger.error(f"Error during post-handler check: {e}")
+
+                # Compute triggers explicitly so we can log them for diagnostics
+                triggered_jobs = job.can_trigger_jobs()
+                downstream = [tj.job_type for tj in triggered_jobs]
+                logger.info(f"Job {job.job_id} triggered downstream jobs: {downstream}")
+
+                # Return updated context and triggered jobs
+                return {
+                    'status': 'success',
+                    'job_id': job.job_id,
+                    'job_type': job.job_type,
+                    'context': job.context,
+                    # Return only job types to avoid cross-process job_id collisions
+                    'triggered_job_types': downstream,
+                    'processing_start_time': processing_start_time
+                }
+            except Exception as handler_error:
+                error_msg = f"Handler execution failed: {str(handler_error)}"
                 job.context.add_error(job.job_type, error_msg)
                 logger.error(f"Job {job.job_id} failed: {error_msg}")
+                logger.info(f"Job {job.job_id} ({job.job_type}) state transition: PROCESSING -> FAILED")
                 self.failed_jobs += 1
                 return {
                     'status': 'error',
@@ -420,18 +429,20 @@ class JobProcessor:
                     'error': error_msg,
                     'processing_start_time': processing_start_time
                 }
-                
-        except Exception as e:
-            error_msg = f"Job processing failed: {str(e)}"
-            if self.verbose:
-                print(f"JobProcessor {self.queue_type} error: {error_msg}")
+        else:
+            available_handlers = list(self.handlers.keys())
+            error_msg = f"No handler found for job type: {job.job_type}. Available handlers: {available_handlers}"
+            job.context.add_error(job.job_type, error_msg)
+            logger.error(f"Job {job.job_id} failed: {error_msg}")
+            logger.info(f"Job {job.job_id} ({job.job_type}) state transition: QUEUED -> NO_HANDLER")
             self.failed_jobs += 1
             return {
                 'status': 'error',
-                'job_id': job.job_id if 'job' in locals() else 'unknown',
-                'job_type': job.job_type if 'job' in locals() else 'unknown',
+                'job_id': job.job_id,
+                'job_type': job.job_type,
+                'context': job.context,
                 'error': error_msg,
-                'processing_start_time': time.time() if 'processing_start_time' not in locals() else processing_start_time
+                'processing_start_time': processing_start_time
             }
     
     def get_stats(self) -> Dict[str, int]:
@@ -459,7 +470,7 @@ class RayWorkflowManager:
     legacy `analysis` queue.
     """
 
-    def __init__(self, verbose: bool = False, analysis_workers: int = 1, use_separate_analysis_queues: bool = True, log_level: str = "INFO", preprocessing_workers: int = 1, bed_workers: int = 1):
+    def __init__(self, verbose: bool = False, analysis_workers: int = 1, use_separate_analysis_queues: bool = True, log_level: str = "INFO", preprocessing_workers: int = 1, bed_workers: int = 1, fair_submit: bool = True):
         # Initialize Ray if not already initialized
         if not ray.is_initialized():
             # Suppress Ray logging to prevent interference with progress bars
@@ -486,6 +497,32 @@ class RayWorkflowManager:
         self.use_separate_analysis_queues = use_separate_analysis_queues
         self.analysis_workers_count = analysis_workers
         self.log_level = log_level
+        # Allow disabling fairness throttling via arg or env var
+        try:
+            env_fair = os.environ.get("LJ_FAIR_SUBMIT")
+            if env_fair is not None:
+                fair_submit = (env_fair != "0")
+        except Exception:
+            pass
+        self.fair_submit = bool(fair_submit)
+        # Explicitly announce fairness mode to the CLI
+        try:
+            src = "env LJ_FAIR_SUBMIT" if env_fair is not None else "argument/default"
+            status = "enabled" if self.fair_submit else "disabled (unthrottled)"
+            print(f"Scheduling fairness throttling: {status} [{src}]")
+        except Exception:
+            pass
+
+        # Delta diagnostics (env LJ_DELTA_DEBUG=N; LJ_DELTA_DEBUG_INTERVAL=secs)
+        try:
+            self.delta_debug_n = int(os.environ.get("LJ_DELTA_DEBUG", "0"))
+        except Exception:
+            self.delta_debug_n = 0
+        try:
+            self.delta_debug_interval = float(os.environ.get("LJ_DELTA_DEBUG_INTERVAL", "10"))
+        except Exception:
+            self.delta_debug_interval = 10.0
+        self._last_delta_debug_print_ts = 0.0
         
         # Job handlers for each queue type
         self.job_handlers_preprocessing: Dict[str, Callable] = {}
@@ -524,6 +561,10 @@ class RayWorkflowManager:
         self._results_by_job_id: Dict[int, Dict[str, Any]] = {}
         # Track futures to ensure completion is observed even if active map is overwritten
         self._pending_futures: Dict[Any, int] = {}
+        # File-centric registry for stable, monotonic counting per display queue
+        self._files_registry: Dict[str, Dict[str, Any]] = {}
+        self._registry_submitted_by_queue: Dict[str, int] = {k: 0 for k in ['preprocessing','bed_conversion','mgmt','cnv','target','fusion','analysis','classification','slow']}
+        self._registry_completed_by_queue: Dict[str, int] = {k: 0 for k in ['preprocessing','bed_conversion','mgmt','cnv','target','fusion','analysis','classification','slow']}
         # Monotonic submitted counters per display queue for accurate totals
         self.submitted_jobs_by_queue: Dict[str, int] = {
             'preprocessing': 0,
@@ -549,7 +590,18 @@ class RayWorkflowManager:
         # Watchdog: maximum runtime per queue before considering a job stuck (seconds)
         # Keep conservative defaults; preprocessing can stall on malformed BAMs
         self.max_runtime_seconds_by_queue: Dict[str, int] = {
-            'preprocessing': 90,  # 90s per request
+            'preprocessing': 1800,
+            'bed_conversion': 1800,
+            # Legacy unified analysis queue
+            'analysis': 1800,
+            # Per-type entries used in legacy-mode display mapping
+            'mgmt': 1800,
+            'cnv': 1800,
+            'target': 1800,
+            'fusion': 1800,
+            # Classification and slow
+            'classification': 1800,
+            'slow': 1800,
         }
         
         # Per-sample tracking for GUI/monitoring (parity with threaded manager)
@@ -781,6 +833,7 @@ class RayWorkflowManager:
             if job_type:
                 entry['job_types'].add(job_type)
             entry['last_seen'] = time.time()
+        logging.info(f"Sample {sample_id} started job {job_type}. Active jobs: {entry['active_jobs']}, Total jobs: {entry['total_jobs']}")
 
     def _on_sample_job_finished(self, sample_id: str, job_type: str, success: bool) -> None:
         entry = self._ensure_sample_entry(sample_id)
@@ -794,9 +847,42 @@ class RayWorkflowManager:
             if job_type:
                 entry['job_types'].add(job_type)
             entry['last_seen'] = time.time()
-        
-        if self.verbose:
-            print("Ray processors reinitialized successfully")
+        logging.info(f"Sample {sample_id} finished job {job_type}. Success: {success}. Active jobs: {entry['active_jobs']}, Completed jobs: {entry['completed_jobs']}, Failed jobs: {entry['failed_jobs']}")
+
+    # === File registry helpers (stable counts) ===
+    def note_file_seen(self, filepath: str) -> None:
+        try:
+            if filepath not in self._files_registry:
+                self._files_registry[filepath] = {
+                    'submitted': set(),
+                    'completed': set(),
+                }
+        except Exception:
+            pass
+
+    def _registry_mark_submitted(self, filepath: str, display_queue: str) -> None:
+        try:
+            self.note_file_seen(filepath)
+            entry = self._files_registry[filepath]
+            if display_queue not in entry['submitted']:
+                entry['submitted'].add(display_queue)
+                if display_queue not in self._registry_submitted_by_queue:
+                    self._registry_submitted_by_queue[display_queue] = 0
+                self._registry_submitted_by_queue[display_queue] += 1
+        except Exception:
+            pass
+
+    def _registry_mark_completed(self, filepath: str, display_queue: str) -> None:
+        try:
+            self.note_file_seen(filepath)
+            entry = self._files_registry[filepath]
+            if display_queue not in entry['completed']:
+                entry['completed'].add(display_queue)
+                if display_queue not in self._registry_completed_by_queue:
+                    self._registry_completed_by_queue[display_queue] = 0
+                self._registry_completed_by_queue[display_queue] += 1
+        except Exception:
+            pass
     
     def add_deduplication_job_type(self, job_type: str) -> None:
         """Add a job type to the deduplication list."""
@@ -974,18 +1060,33 @@ class RayWorkflowManager:
         self._process_priority_queues()
     
     def _process_priority_queues(self) -> None:
-        """Process jobs fairly across priorities (one submission per priority per tick)."""
-        # Iterate priorities from high to low and submit at most one job per queue per tick
-        for priority in sorted(self.priority_queues.keys(), reverse=True):
-            queue = self.priority_queues[priority]
-            if not queue:
-                continue
-            job_info = queue[0]
-            job = job_info['job']
-            queue_type = job_info['queue_type']
-            if self._can_process_job(job, queue_type):
-                queue.pop(0)
-                self._submit_job_to_ray(job, queue_type)
+        """Process jobs across priorities.
+        - Fair mode: one submission per priority per tick.
+        - Unthrottled mode: drain all pending jobs high→low in this tick.
+        """
+        priorities = sorted(self.priority_queues.keys(), reverse=True)
+        if self.fair_submit:
+            for priority in priorities:
+                queue = self.priority_queues[priority]
+                if not queue:
+                    continue
+                job_info = queue[0]
+                job = job_info['job']
+                queue_type = job_info['queue_type']
+                if self._can_process_job(job, queue_type):
+                    queue.pop(0)
+                    self._submit_job_to_ray(job, queue_type)
+        else:
+            for priority in priorities:
+                queue = self.priority_queues[priority]
+                while queue:
+                    job_info = queue[0]
+                    job = job_info['job']
+                    queue_type = job_info['queue_type']
+                    if not self._can_process_job(job, queue_type):
+                        break
+                    queue.pop(0)
+                    self._submit_job_to_ray(job, queue_type)
     
     def _can_process_job(self, job: Job, queue_type: str) -> bool:
         """Check if a job can be processed based on available processors."""
@@ -1061,6 +1162,11 @@ class RayWorkflowManager:
                 if display_q not in self.submitted_jobs_by_queue:
                     self.submitted_jobs_by_queue[display_q] = 0
                 self.submitted_jobs_by_queue[display_q] += 1
+                # Stable file-centric submission tracking
+                try:
+                    self._registry_mark_submitted(job.context.filepath, display_q)
+                except Exception:
+                    pass
             except Exception:
                 pass
             # Track submission by job_id for reconciliation
@@ -1268,6 +1374,17 @@ class RayWorkflowManager:
                         triggered_jobs_to_enqueue = []
 
                 if triggered_jobs_to_enqueue:
+                    # Log cross-job transition: COMPLETED -> QUEUED for each triggered job
+                    try:
+                        ctx_for_fp = result.get('context') if isinstance(result, dict) else None
+                        fp_name = os.path.basename(ctx_for_fp.filepath) if ctx_for_fp and hasattr(ctx_for_fp, 'filepath') else 'unknown'
+                    except Exception:
+                        fp_name = 'unknown'
+                    for tj in triggered_jobs_to_enqueue:
+                        try:
+                            logging.info(f"File {fp_name}: {result['job_type']} COMPLETED -> {tj.job_type} QUEUED")
+                        except Exception:
+                            pass
                     self.enqueue_jobs(triggered_jobs_to_enqueue)
                 else:
                     if 'next_job' in result and result['next_job']:
@@ -1276,6 +1393,16 @@ class RayWorkflowManager:
                         if isinstance(maybe_next, Job):
                             if not isinstance(getattr(maybe_next, 'job_id', None), int):
                                 maybe_next.job_id = next(_job_id_counter)
+                            # Log cross-job transition for linear progression
+                            try:
+                                ctx_for_fp2 = result.get('context') if isinstance(result, dict) else None
+                                fp_name2 = os.path.basename(ctx_for_fp2.filepath) if ctx_for_fp2 and hasattr(ctx_for_fp2, 'filepath') else 'unknown'
+                            except Exception:
+                                fp_name2 = 'unknown'
+                            try:
+                                logging.info(f"File {fp_name2}: {result['job_type']} COMPLETED -> {maybe_next.job_type} QUEUED")
+                            except Exception:
+                                pass
                             self.enqueue_jobs([maybe_next])
                 
                 # Track completion by job type
@@ -1284,6 +1411,15 @@ class RayWorkflowManager:
                     if job_type not in self.completed_jobs_by_type:
                         self.completed_jobs_by_type[job_type] = 0
                     self.completed_jobs_by_type[job_type] += 1
+                    # Stable file-centric completion tracking
+                    try:
+                        display_q_res = self._get_display_queue_for_job(job_type)
+                        ctx = result.get('context')
+                        fp = ctx.filepath if ctx and hasattr(ctx, 'filepath') else None
+                        if fp:
+                            self._registry_mark_completed(fp, display_q_res)
+                    except Exception:
+                        pass
                 
                 # Unmark job for deduplication
                 if job_type in self.deduplicate_job_types and 'context' in result:
@@ -1417,12 +1553,8 @@ class RayWorkflowManager:
                     'sample_id': sample_id,
                     'duration': duration
                 })
-                # Aggregate by display queue. In legacy mode, keep mgmt/cnv/target/fusion separate
-                q_map = self._get_queue_type_for_job(job_type)
-                if not self.use_separate_analysis_queues and job_type in {'mgmt','cnv','target','fusion'}:
-                    q = job_type
-                else:
-                    q = q_map
+                # Aggregate by display queue consistently
+                q = self._get_display_queue_for_job(job_type)
                 if q not in active_by_queue:
                     active_by_queue[q] = []
                 active_by_queue[q].append({
@@ -1447,59 +1579,54 @@ class RayWorkflowManager:
                 for job_info in pending:
                     j: Job = job_info['job']
                     jt = j.job_type
-                    if jt == 'preprocessing':
-                        queue_sizes['preprocessing'] += 1
-                    elif jt == 'bed_conversion':
-                        queue_sizes['bed_conversion'] += 1
-                    elif jt in {'mgmt', 'cnv', 'target', 'fusion'}:
-                        queue_sizes[jt] += 1
-                    elif jt in {'sturgeon', 'nanodx', 'pannanodx'}:
-                        queue_sizes['classification'] += 1
-                    else:
-                        queue_sizes['slow'] += 1
+                    q = self._get_display_queue_for_job(jt)
+                    if q not in queue_sizes:
+                        queue_sizes[q] = 0
+                    queue_sizes[q] += 1
             
             # Aggregate completions by queue (for CLI progress parity with GUI)
             completed_by_queue: Dict[str, int] = {k: 0 for k in ['preprocessing','bed_conversion','mgmt','cnv','target','fusion','analysis','classification','slow']}
             for jt, count in self.completed_jobs_by_type.items():
-                q_map = self._get_queue_type_for_job(jt)
-                # In legacy mode, surface per-type counts for mgmt/cnv/target/fusion bars
-                if not self.use_separate_analysis_queues and jt in {'mgmt','cnv','target','fusion'}:
-                    q = jt
-                else:
-                    q = q_map
+                q = self._get_display_queue_for_job(jt)
                 completed_by_queue[q] = completed_by_queue.get(q, 0) + (count or 0)
 
             failed_by_queue: Dict[str, int] = {k: 0 for k in ['preprocessing','bed_conversion','mgmt','cnv','target','fusion','analysis','classification','slow']}
             for jt, count in self.failed_jobs_by_type.items():
-                q_map = self._get_queue_type_for_job(jt)
-                if not self.use_separate_analysis_queues and jt in {'mgmt','cnv','target','fusion'}:
-                    q = jt
-                else:
-                    q = q_map
+                q = self._get_display_queue_for_job(jt)
                 failed_by_queue[q] = failed_by_queue.get(q, 0) + (count or 0)
 
             # Aggregate skipped by queue (dedup skips)
             skipped_by_queue: Dict[str, int] = {k: 0 for k in ['preprocessing','bed_conversion','mgmt','cnv','target','fusion','analysis','classification','slow']}
             for jt, count in self.skipped_jobs_by_type.items():
-                q_map = self._get_queue_type_for_job(jt)
-                if not self.use_separate_analysis_queues and jt in {'mgmt','cnv','target','fusion'}:
-                    q = jt
-                else:
-                    q = q_map
+                q = self._get_display_queue_for_job(jt)
                 skipped_by_queue[q] = skipped_by_queue.get(q, 0) + (count or 0)
 
-            # Reconcile by queue: submitted - (completed + failed + active + pending)
-            submitted_totals = (self.submitted_jobs_by_queue.copy() if isinstance(self.submitted_jobs_by_queue, dict) else {})
+            # Registry-based submitted/completed totals (file-centric, monotonic)
+            submitted_by_queue_reg: Dict[str, int] = self._registry_submitted_by_queue.copy()
+            completed_by_queue_reg: Dict[str, int] = self._registry_completed_by_queue.copy()
+            # Stabilize submitted for core queues using monotonic counters as an upper bound
+            try:
+                monotonic_submitted = self.submitted_jobs_by_queue.copy()
+            except Exception:
+                monotonic_submitted = {}
+            for qname in ['preprocessing', 'bed_conversion', 'classification', 'slow']:
+                try:
+                    submitted_by_queue_reg[qname] = max(
+                        int(submitted_by_queue_reg.get(qname, 0) or 0),
+                        int(monotonic_submitted.get(qname, 0) or 0)
+                    )
+                except Exception:
+                    pass
+
+            # Reconcile by queue using registry-based submitted/completed counts
             unaccounted_by_queue: Dict[str, int] = {}
-            for qname in ['preprocessing','bed_conversion','mgmt','cnv','target','fusion','analysis','classification','slow']:
-                submitted_q = submitted_totals.get(qname, 0) or 0
-                completed_q = completed_by_queue.get(qname, 0) or 0
-                failed_q = failed_by_queue.get(qname, 0) or 0
+            for qname, submitted_q in submitted_by_queue_reg.items():
+                completed_q_reg = int(completed_by_queue_reg.get(qname, 0) or 0)
                 active_q = len(active_by_queue.get(qname, [])) if isinstance(active_by_queue.get(qname, []), list) else 0
                 pending_q = queue_sizes.get(qname, 0) or 0
-                unaccounted = submitted_q - (completed_q + failed_q + active_q + pending_q)
-                if unaccounted:
-                    unaccounted_by_queue[qname] = unaccounted
+                unacc = submitted_q - (completed_q_reg + active_q + pending_q)
+                if unacc:
+                    unaccounted_by_queue[qname] = unacc
 
             # Prepare samples payload for GUI
             samples_payload: List[Dict[str, Any]] = []
@@ -1516,15 +1643,48 @@ class RayWorkflowManager:
             
             # Overall processed should include both completed and failed
             overall_processed = len(self.completed_jobs) + len(self.failed_jobs)
-            # Derive total from submitted_by_queue for consistency across views
+            # Derive total from submission registry for consistency across views
             overall_total = 0
             try:
-                if isinstance(self.submitted_jobs_by_queue, dict):
-                    overall_total = sum(int(v or 0) for v in self.submitted_jobs_by_queue.values())
-                else:
-                    overall_total = self.total_jobs_enqueued
+                overall_total = sum(int(v or 0) for v in submitted_by_queue_reg.values())
             except Exception:
                 overall_total = self.total_jobs_enqueued
+
+            # Optionally print delta diagnostics for unaccounted job_ids
+            try:
+                if self.delta_debug_n and (time.time() - self._last_delta_debug_print_ts) >= self.delta_debug_interval:
+                    # Build sets for accounted job_ids
+                    active_jids_dbg = set(self.active_jobs.keys())
+                    pending_jids_dbg: Set[int] = set()
+                    for _prio, pending in self.priority_queues.items():
+                        for ji in pending:
+                            j_dbg: Job = ji['job']
+                            pending_jids_dbg.add(j_dbg.job_id)
+                    result_jids_dbg = set(self._results_by_job_id.keys())
+                    # For each queue with Δ, print up to N examples
+                    for qname, delta_val in unaccounted_by_queue.items():
+                        if delta_val <= 0:
+                            continue
+                        examples = []
+                        for jid, sub in self._submissions_by_job_id.items():
+                            dq = sub.get('display_queue') or sub.get('queue_type') or 'slow'
+                            if dq != qname:
+                                continue
+                            if jid in active_jids_dbg or jid in pending_jids_dbg or jid in result_jids_dbg:
+                                continue
+                            fp = sub.get('filepath', '')
+                            jt = sub.get('job_type', '')
+                            examples.append(f"{jid}:{jt}:{os.path.basename(fp)}")
+                            if len(examples) >= self.delta_debug_n:
+                                break
+                        if examples:
+                            try:
+                                logging.warning(f"Δ debug [{qname}]: {delta_val} unaccounted. Examples: {', '.join(examples)}")
+                            except Exception:
+                                print(f"Δ debug [{qname}]: {delta_val} unaccounted. Examples: {', '.join(examples)}", flush=True)
+                    self._last_delta_debug_print_ts = time.time()
+            except Exception:
+                pass
 
             return {
                 'total_jobs_enqueued': self.total_jobs_enqueued,
@@ -1546,8 +1706,8 @@ class RayWorkflowManager:
                 'failed_by_queue': failed_by_queue,
                 'skipped_by_queue': skipped_by_queue,
                 'unaccounted_by_queue': unaccounted_by_queue,
-                # Monotonic submitted totals per display queue
-                'submitted_by_queue': self.submitted_jobs_by_queue.copy(),
+                # Submitted totals derived from job_id registry
+                'submitted_by_queue': submitted_by_queue_reg,
                 'active_by_worker': active_by_worker,
                 'active_by_queue': active_by_queue,
                 'queue_sizes': queue_sizes,
@@ -2023,3 +2183,9 @@ def default_file_classifier(filepath: str, workflow_plan: List[str]) -> List[Job
     ))
     
     return jobs
+
+logging.basicConfig(
+    filename='workflow_ray.log',  # Log file name
+    level=logging.INFO,           # Log level
+    format='%(asctime)s - %(levelname)s - %(message)s'  # Log format
+)

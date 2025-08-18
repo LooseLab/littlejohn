@@ -116,6 +116,14 @@ class LogManager:
         
         # Add handler to root logger
         root_logger.addHandler(console_handler)
+        
+        # Create file handler
+        file_handler = logging.FileHandler('littlejohn.log')
+        file_handler.setLevel(getattr(logging, self.config.global_level.upper()))
+        file_handler.setFormatter(formatter)
+
+        # Add file handler to root logger
+        root_logger.addHandler(file_handler)
     
     def get_logger(self, name: str, level: str = None) -> logging.Logger:
         """Get or create a logger with the specified name and level"""

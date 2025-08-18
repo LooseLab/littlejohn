@@ -1,0 +1,937 @@
+"""
+Ray Core implementation of the LittleJohn workflow engine
+- Specialized per-queue actors (preprocessing, bed_conversion, mgmt, cnv, target, fusion, classification, slow)
+- Central Coordinator actor for dedup (1 running + 1 pending per (sample_id, job_type)), triggers, stats
+- Handlers registered for real LittleJohn job types, with resource hints per job
+- tqdm-based live monitor similar to the original implementation
+
+Usage (example):
+
+    pip install "ray>=2.30" tqdm watchdog
+
+    python ray_littlejohn_core.py \
+        --plan preprocessing:preprocessing \
+        --plan bed_conversion:bed_conversion \
+        --plan mgmt:mgmt \
+        --plan sturgeon:sturgeon \
+        --paths /data/incoming
+
+Replace/extend the plan and paths as needed. If you already have a Watchdog-based
+file watcher, call submit_jobs() on the Coordinator in your event handlers instead.
+"""
+
+from __future__ import annotations
+
+import os
+import time
+import asyncio
+import argparse
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set, Tuple, Callable
+import inspect
+from pathlib import Path
+import itertools
+
+import ray
+from tqdm import tqdm
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
+
+# --- Import your real handlers from LittleJohn ---
+# They are expected to be regular (non-Ray) callables of the form: handler(job: Job) -> None/Context-updates
+# If signatures differ, adapt below wrappers accordingly.
+try:
+    from littlejohn.bam_preprocessor import bam_preprocessing_handler as _preprocessing_handler
+except Exception:
+    _preprocessing_handler = None
+
+try:
+    from littlejohn.bed_conversion import bed_conversion_handler as _bed_conversion_handler
+except Exception:
+    _bed_conversion_handler = None
+
+try:
+    from littlejohn.mgmt_analysis import mgmt_handler as _mgmt_handler
+except Exception:
+    _mgmt_handler = None
+
+try:
+    from littlejohn.cnv_analysis import cnv_handler as _cnv_handler
+except Exception:
+    _cnv_handler = None
+
+try:
+    from littlejohn.target_analysis import target_handler as _target_handler
+except Exception:
+    _target_handler = None
+
+try:
+    from littlejohn.fusion_analysis import fusion_handler as _fusion_handler
+except Exception:
+    _fusion_handler = None
+
+try:
+    from littlejohn.sturgeon_analysis import sturgeon_handler as _sturgeon_handler
+except Exception:
+    _sturgeon_handler = None
+
+try:
+    from littlejohn.nanodx_analysis import nanodx_handler as _nanodx_handler
+except Exception:
+    _nanodx_handler = None
+
+try:
+    from littlejohn.nanodx_analysis import pannanodx_handler as _pannanodx_handler
+except Exception:
+    _pannanodx_handler = None
+
+try:
+    from littlejohn.random_forest_analysis import random_forest_handler as _random_forest_handler
+except Exception:
+    _random_forest_handler = None
+
+# Optional logging helper
+try:
+    from littlejohn.logging_config import get_job_logger as _get_job_logger, configure_logging as _configure_logging
+except Exception:
+    def _get_job_logger(job_id: str, job_type: str, filepath: str):
+        class _L:
+            def info(self, *a, **k): pass
+            def debug(self, *a, **k): pass
+            def error(self, *a, **k): pass
+        return _L()
+    def _configure_logging(global_level: str = "INFO", job_levels: Optional[Dict[str, str]] = None):
+        return None
+GLOBAL_LOG_LEVEL: str = "INFO"
+
+# ---------- Shared DTOs ----------
+@dataclass
+class WorkflowContext:
+    filepath: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    results: Dict[str, Any] = field(default_factory=dict)
+    history: List[str] = field(default_factory=list)
+    errors: List[Dict[str, Any]] = field(default_factory=list)
+
+    def add_metadata(self, key: str, value: Any) -> None:
+        self.metadata[key] = value
+
+    def add_result(self, job_type: str, result: Any) -> None:
+        self.results[job_type] = result
+        self.history.append(job_type)
+
+    def add_error(self, job_type: str, error: str) -> None:
+        self.errors.append({"job_type": job_type, "error": error, "timestamp": time.time()})
+
+    def get_sample_id(self) -> str:
+        bam_md = self.metadata.get("bam_metadata", {})
+        return bam_md.get("sample_id", "unknown")
+
+@dataclass
+class Job:
+    job_id: int
+    job_type: str
+    origin: str
+    workflow: List[str]
+    step: int
+    context: WorkflowContext
+
+    def next_job(self) -> Optional["Job"]:
+        if self.step + 1 >= len(self.workflow):
+            return None
+        next_step = self.workflow[self.step + 1]
+        if ":" not in next_step:
+            raise ValueError(f"Invalid workflow step: {next_step}")
+        queue_type, next_type = next_step.split(":", 1)
+        return Job(self.job_id, next_type, queue_type, self.workflow, self.step + 1, self.context)
+
+# ---------- Queue mapping & triggers ----------
+QUEUE_TO_TYPES: Dict[str, Set[str]] = {
+    "preprocessing": {"preprocessing"},
+    "bed_conversion": {"bed_conversion"},
+    "mgmt": {"mgmt"},
+    "cnv": {"cnv"},
+    "target": {"target"},
+    "fusion": {"fusion"},
+    "classification": {"sturgeon", "nanodx", "pannanodx"},
+    "slow": {"random_forest", "sleep", "echo"},
+}
+
+TRIGGERS: Dict[str, List[str]] = {
+    # preprocessing -> analyses
+    "preprocessing": ["bed_conversion", "mgmt", "cnv", "target", "fusion"],
+    # bed_conversion -> classifiers
+    "bed_conversion": ["sturgeon", "nanodx", "pannanodx", "random_forest"],
+}
+
+# Per-sample de-duplication to avoid output races. Ensure only one job of these types
+# runs concurrently per sample (max 1 running + 1 pending).
+# Only deduplicate classifiers/slow per sample; analysis/bed_conversion should queue, not skip
+DEDUP_TYPES: Set[str] = {
+    "sturgeon", "nanodx", "pannanodx", "random_forest"
+}
+
+# Per-sample serialization by type to avoid races on shared per-sample outputs
+# Disable per-sample serialization; rely on per-queue concurrency only
+SERIALIZE_BY_TYPE_PER_SAMPLE: Set[str] = {"cnv"}
+
+# Classification job types (single global pipeline per type)
+CLASSIFICATION_TYPES: Set[str] = {"sturgeon", "nanodx", "pannanodx", "random_forest"}
+
+# Job types that must be serialized per sample (no overlap across these types)
+## Removed per-sample cross-type serialization to allow one job per type globally
+
+RESOURCE_HINTS: Dict[str, Dict[str, Any]] = {
+    # Tune these to your cluster
+    "preprocessing": {"num_cpus": 2},
+    "bed_conversion": {"num_cpus": 2},
+    "mgmt": {"num_cpus": 2},
+    "cnv": {"num_cpus": 2},
+    "target": {"num_cpus": 2},
+    "fusion": {"num_cpus": 2},
+    # Classifiers do not require GPU by default (CPU-only)
+    "sturgeon": {"num_cpus": 1},
+    "nanodx": {"num_cpus": 1},
+    "pannanodx": {"num_cpus": 1},
+    "random_forest": {"num_cpus": 1},
+    # test utilities
+    "sleep": {"num_cpus": 0.1},
+    "echo": {"num_cpus": 0.1},
+}
+
+# ---------- Utilities ----------
+_job_id_counter = itertools.count(1000)
+
+def job_queue_of(job_type: str) -> str:
+    for q, types in QUEUE_TO_TYPES.items():
+        if job_type in types:
+            return q
+    return "slow"
+
+# ---------- Real handler wrappers as Ray tasks ----------
+# Each wrapper returns an updated WorkflowContext.
+
+NEEDS_WORK_DIR: Set[str] = {
+    "bed_conversion", "mgmt", "cnv", "target", "fusion",
+    "sturgeon", "nanodx", "pannanodx", "random_forest"
+}
+
+def _wrap_real_handler(py_handler: Optional[Callable[[Job], None]], job_type: str) -> Callable[[Job], WorkflowContext]:
+    def _impl(job: Job) -> WorkflowContext:
+        # Ensure per-process logging honors global level
+        try:
+            _configure_logging(global_level=GLOBAL_LOG_LEVEL)
+        except Exception:
+            pass
+        logger = _get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
+        try:
+            if py_handler is None:
+                raise RuntimeError(f"No implementation available for job_type='{job_type}'")
+            # Call user's handler; if they mutate job.context in-place, we just return it
+            work_dir = job.context.metadata.get("work_dir")
+            # Ensure output directories exist when a work_dir is provided
+            if work_dir:
+                try:
+                    os.makedirs(work_dir, exist_ok=True)
+                except Exception:
+                    pass
+                try:
+                    sid = job.context.get_sample_id() if hasattr(job.context, 'get_sample_id') else None
+                    if sid and sid != 'unknown':
+                        os.makedirs(os.path.join(work_dir, sid), exist_ok=True)
+                except Exception:
+                    pass
+            try:
+                sig = inspect.signature(py_handler)
+                if "work_dir" in sig.parameters and work_dir and (job_type in NEEDS_WORK_DIR):
+                    py_handler(job, work_dir=work_dir)
+                else:
+                    py_handler(job)
+            except Exception:
+                # Fallback to legacy call
+                py_handler(job)
+            logger.info(f"{job_type} completed")
+        except Exception as e:
+            job.context.add_error(job_type, str(e))
+            logger.error(f"{job_type} failed: {e}")
+            # still return context with error recorded
+        finally:
+            # Mark result if user handler didn't
+            if job_type not in job.context.results:
+                job.context.add_result(job_type, f"{job_type}_ok")
+        return job.context
+    return _impl
+
+# Build remote versions with no fixed options; Pool will apply .options(**RESOURCE_HINTS[job_type])
+@ray.remote
+def echo_handler(job: Job) -> WorkflowContext:
+    try:
+        _configure_logging(global_level=GLOBAL_LOG_LEVEL)
+    except Exception:
+        pass
+    time.sleep(0.1)
+    job.context.add_metadata("echo_processed", True)
+    job.context.add_result("echo", "echo_result")
+    return job.context
+
+@ray.remote
+def sleep_handler(job: Job, seconds: float = 1.0) -> WorkflowContext:
+    try:
+        _configure_logging(global_level=GLOBAL_LOG_LEVEL)
+    except Exception:
+        pass
+    time.sleep(seconds)
+    job.context.add_metadata("sleep_processed", True)
+    job.context.add_result("sleep", f"slept_{seconds}s")
+    return job.context
+
+# Real wrappers
+preprocessing_handler_remote = ray.remote(_wrap_real_handler(_preprocessing_handler, "preprocessing"))
+bed_conversion_handler_remote = ray.remote(_wrap_real_handler(_bed_conversion_handler, "bed_conversion"))
+mgmt_handler_remote = ray.remote(_wrap_real_handler(_mgmt_handler, "mgmt"))
+cnv_handler_remote = ray.remote(_wrap_real_handler(_cnv_handler, "cnv"))
+target_handler_remote = ray.remote(_wrap_real_handler(_target_handler, "target"))
+fusion_handler_remote = ray.remote(_wrap_real_handler(_fusion_handler, "fusion"))
+sturgeon_handler_remote = ray.remote(_wrap_real_handler(_sturgeon_handler, "sturgeon"))
+nanodx_handler_remote = ray.remote(_wrap_real_handler(_nanodx_handler, "nanodx"))
+pannanodx_handler_remote = ray.remote(_wrap_real_handler(_pannanodx_handler, "pannanodx"))
+random_forest_handler_remote = ray.remote(_wrap_real_handler(_random_forest_handler, "random_forest"))
+
+# ---------- TypeProcessor & Coordinator Actors ----------
+@ray.remote
+class TypeProcessor:
+    def __init__(self, job_type: str, remote_func, resource_options: Dict[str, Any]):
+        self.job_type = job_type
+        self.remote_func = remote_func
+        self.resource_options = resource_options or {}
+
+    def update_handler(self, remote_func, resource_options: Dict[str, Any]):
+        self.remote_func = remote_func
+        self.resource_options = resource_options or {}
+
+    async def process(self, job: Job):
+        # Submit the real handler task and await the result to avoid nested ObjectRefs
+        ref = self.remote_func.options(**(self.resource_options or {})).remote(job)
+        try:
+            ctx = await ref
+        except Exception as e:
+            # Propagate error to coordinator; it will handle ok=False
+            raise
+        return ctx
+
+@ray.remote
+class Coordinator:
+    def __init__(self, analysis_workers: int = 1):
+        # dedup maps
+        self.pending: Dict[Tuple[str, str], int] = {}
+        self.running: Dict[Tuple[str, str], int] = {}
+        # stats
+        self.completed: List[int] = []
+        self.failed: List[int] = []
+        self.completed_by_type: Dict[str, int] = {}
+        self.failed_by_type: Dict[str, int] = {}
+        self.total_enqueued = 0
+        self.total_skipped = 0
+        self.active: Dict[int, Dict[str, Any]] = {}
+
+        self.analysis_workers = analysis_workers
+
+        # Per-sample per-type serialization tracking
+        self.running_by_type_sample: Dict[Tuple[str, str], int] = {}
+        self.pending_by_type_sample: Dict[Tuple[str, str], int] = {}
+        self.waiting_by_type_sample: Dict[Tuple[str, str], List[Job]] = {}
+
+        # Per-sample one-shot scheduling for classifiers/slow
+        self.scheduled_by_sample: Dict[str, Set[str]] = {}
+
+        # Global one-in-flight (plus at most one waiting) per classification type
+        self.classif_pending_by_type: Dict[str, int] = {}
+        self.classif_waiting_by_type: Dict[str, Optional[Job]] = {}
+
+        # create one TypeProcessor actor per job type
+        self.processors: Dict[str, Any] = {}
+        # inflight tracking: ObjectRef -> job
+        self._inflight: Dict[Any, Job] = {}
+        # defer setup/registration to async setup()
+
+    # ----- handler registration API -----
+    async def register_handler(self, job_type: str, remote_func) -> None:
+        opts = RESOURCE_HINTS.get(job_type, {})
+        proc = self.processors.get(job_type)
+        if proc is not None:
+            await proc.update_handler.remote(remote_func, opts)
+
+    async def setup(self) -> None:
+        """Async setup to register default handlers and start drain loop."""
+        # register default handlers (can be re-registered later)
+        # we store (remote_func_handle, resource_options)
+        registrations = [
+            ("preprocessing", preprocessing_handler_remote),
+            ("bed_conversion", bed_conversion_handler_remote),
+            ("mgmt", mgmt_handler_remote),
+            ("cnv", cnv_handler_remote),
+            ("target", target_handler_remote),
+            ("fusion", fusion_handler_remote),
+            ("sturgeon", sturgeon_handler_remote),
+            ("nanodx", nanodx_handler_remote),
+            ("pannanodx", pannanodx_handler_remote),
+            ("random_forest", random_forest_handler_remote),
+            ("sleep", sleep_handler),
+            ("echo", echo_handler),
+        ]
+        for jt, rf in registrations:
+            opts = RESOURCE_HINTS.get(jt, {})
+            # Set actor concurrency via .options on the actor itself
+            max_conc = 1
+            if jt in {"mgmt", "cnv", "target", "fusion"}:
+                max_conc = max(1, int(self.analysis_workers))
+            name = f"typeproc_{jt}"
+            try:
+                proc = TypeProcessor.options(name=name, max_concurrency=max_conc).remote(jt, rf, opts)
+            except Exception:
+                proc = TypeProcessor.options(max_concurrency=max_conc).remote(jt, rf, opts)
+            self.processors[jt] = proc
+        # start drain loop to observe completions
+        try:
+            asyncio.create_task(self._drain_loop())
+        except Exception:
+            pass
+
+    # ----- submission & lifecycle -----
+    async def submit_jobs(self, jobs: List[Job]) -> None:
+        for job in jobs:
+            sample_id = job.context.get_sample_id()
+            if job.job_type in DEDUP_TYPES:
+                key = (sample_id, job.job_type)
+                run = self.running.get(key, 0)
+                pend = self.pending.get(key, 0)
+                if run + pend >= 2 or pend >= 1:
+                    self.total_skipped += 1
+                    continue
+                self.pending[key] = pend + 1
+            # Per-sample per-type serialization; queue instead of overlapping
+            if job.job_type in SERIALIZE_BY_TYPE_PER_SAMPLE:
+                sid = sample_id or "unknown"
+                key_ts = (job.job_type, sid)
+                ra = self.running_by_type_sample.get(key_ts, 0)
+                pa = self.pending_by_type_sample.get(key_ts, 0)
+                if (ra + pa) > 0:
+                    self.waiting_by_type_sample.setdefault(key_ts, []).append(job)
+                    self.pending_by_type_sample[key_ts] = pa + 1
+                    continue
+                else:
+                    self.running_by_type_sample[key_ts] = ra + 1
+
+            q = job_queue_of(job.job_type)
+            self.total_enqueued += 1
+            self.active[job.job_id] = {
+                "job_type": job.job_type,
+                "filepath": job.context.filepath,
+                "queue": q,
+                "start_time": time.time(),
+            }
+            # submit to dedicated job-type processor
+            proc = self.processors.get(job.job_type)
+            if proc is None:
+                continue
+            ref = proc.process.remote(job)
+            self._inflight[ref] = job
+
+    async def _on_finish(self, job: Job, ok: bool, ctx: WorkflowContext, err: Optional[str]):
+        # update dedup maps
+        if job.job_type in DEDUP_TYPES:
+            key = (job.context.get_sample_id(), job.job_type)
+            self.running[key] = max(0, self.running.get(key, 0) - 1)
+            if self.running[key] == 0:
+                self.running.pop(key, None)
+
+        # update active & stats
+        self.active.pop(job.job_id, None)
+        if ok:
+            self.completed.append(job.job_id)
+            self.completed_by_type[job.job_type] = self.completed_by_type.get(job.job_type, 0) + 1
+            # trigger downstream (preferred). For bed_conversion, schedule
+            # classifiers/slow once per sample instead of per-file.
+            requested = job.context.metadata.get("original_workflow", [])
+            req_types = [s.split(":", 1)[1] for s in requested] if requested else None
+            if job.job_type == "bed_conversion":
+                sample_id = ctx.get_sample_id() if hasattr(ctx, 'get_sample_id') else 'unknown'
+                # For each requested classification/slow type, allow at most
+                # one submitted at a time globally; keep at most one waiting.
+                for t in TRIGGERS.get("bed_conversion", []):
+                    if req_types is not None and t not in req_types:
+                        continue
+                    if t not in CLASSIFICATION_TYPES:
+                        continue
+                    busy = self.classif_pending_by_type.get(t, 0) >= 1
+                    if not busy:
+                        q = job_queue_of(t)
+                        j = Job(next(_job_id_counter), t, q, [f"{q}:{t}"], 0, ctx)
+                        # submit directly and mark pending
+                        proc = self.processors.get(t)
+                        if proc is not None:
+                            ref = proc.process.remote(j)
+                            self._inflight[ref] = j
+                            self.classif_pending_by_type[t] = self.classif_pending_by_type.get(t, 0) + 1
+                            self.total_enqueued += 1
+                            self.active[j.job_id] = {
+                                "job_type": j.job_type,
+                                "filepath": j.context.filepath,
+                                "queue": q,
+                                "start_time": time.time(),
+                            }
+                    else:
+                        # store single waiting job if none recorded yet
+                        if self.classif_waiting_by_type.get(t) is None:
+                            q = job_queue_of(t)
+                            self.classif_waiting_by_type[t] = Job(next(_job_id_counter), t, q, [f"{q}:{t}"], 0, ctx)
+            else:
+                triggered_jobs: List[Job] = []
+                for t in TRIGGERS.get(job.job_type, []):
+                    if (req_types is None) or (t in req_types):
+                        q = job_queue_of(t)
+                        triggered_jobs.append(Job(next(_job_id_counter), t, q, [f"{q}:{t}"], 0, ctx))
+                if triggered_jobs:
+                    await self.submit_jobs(triggered_jobs)
+                else:
+                    # advance linear chain if any
+                    nxt = job.next_job()
+                if nxt:
+                    await self.submit_jobs([nxt])
+        else:
+            self.failed.append(job.job_id)
+            self.failed_by_type[job.job_type] = self.failed_by_type.get(job.job_type, 0) + 1
+
+        # Promote next waiting job for this (type, sample) if any (CNV-only if enabled)
+        if job.job_type in SERIALIZE_BY_TYPE_PER_SAMPLE:
+            sid = job.context.get_sample_id() or "unknown"
+            key_ts = (job.job_type, sid)
+            if key_ts in self.running_by_type_sample:
+                self.running_by_type_sample[key_ts] = max(0, self.running_by_type_sample.get(key_ts, 0) - 1)
+                if self.running_by_type_sample[key_ts] == 0:
+                    self.running_by_type_sample.pop(key_ts, None)
+            queue_list = self.waiting_by_type_sample.get(key_ts, [])
+            if queue_list:
+                nxt_job = queue_list.pop(0)
+                if not queue_list:
+                    self.waiting_by_type_sample.pop(key_ts, None)
+                self.pending_by_type_sample[key_ts] = max(0, self.pending_by_type_sample.get(key_ts, 0) - 1)
+                if self.pending_by_type_sample[key_ts] == 0:
+                    self.pending_by_type_sample.pop(key_ts, None)
+                self.running_by_type_sample[key_ts] = self.running_by_type_sample.get(key_ts, 0) + 1
+                proc2 = self.processors.get(nxt_job.job_type)
+                if proc2 is not None:
+                    ref2 = proc2.process.remote(nxt_job)
+                    self._inflight[ref2] = nxt_job
+                    self.active[nxt_job.job_id] = {
+                        "job_type": nxt_job.job_type,
+                        "filepath": nxt_job.context.filepath,
+                        "queue": job_queue_of(nxt_job.job_type),
+                        "start_time": time.time(),
+                    }
+
+        # Promote next classification job for this type if any (single global pipeline)
+        if job.job_type in CLASSIFICATION_TYPES:
+            # decrement pending for this type
+            if self.classif_pending_by_type.get(job.job_type, 0) > 0:
+                self.classif_pending_by_type[job.job_type] -= 1
+                if self.classif_pending_by_type[job.job_type] == 0:
+                    self.classif_pending_by_type.pop(job.job_type, None)
+            nxt = self.classif_waiting_by_type.get(job.job_type)
+            if nxt is not None:
+                self.classif_waiting_by_type[job.job_type] = None
+                proc3 = self.processors.get(job.job_type)
+                if proc3 is not None:
+                    ref3 = proc3.process.remote(nxt)
+                    self._inflight[ref3] = nxt
+                    self.classif_pending_by_type[job.job_type] = 1
+                    self.total_enqueued += 1
+                    self.active[nxt.job_id] = {
+                        "job_type": nxt.job_type,
+                        "filepath": nxt.context.filepath,
+                        "queue": job_queue_of(nxt.job_type),
+                        "start_time": time.time(),
+                    }
+
+    async def _drain_loop(self):
+        while True:
+            try:
+                if not self._inflight:
+                    await asyncio.sleep(0.1)
+                    continue
+                refs = list(self._inflight.keys())
+                ready, _ = ray.wait(refs, num_returns=1, timeout=0.1)
+                for r in ready:
+                    job = self._inflight.pop(r, None)
+                    ok, ctx, err = True, None, None
+                    try:
+                        ctx = await r
+                    except Exception as e:
+                        ok, err = False, str(e)
+                        ctx = job.context if job else WorkflowContext(filepath="")
+                    if job:
+                        await self._on_finish(job, ok, ctx, err)
+            except Exception:
+                await asyncio.sleep(0.1)
+
+    async def mark_running(self, job: Job):
+        if job.job_type in DEDUP_TYPES:
+            key = (job.context.get_sample_id(), job.job_type)
+            self.pending[key] = max(0, self.pending.get(key, 0) - 1)
+            if self.pending[key] == 0:
+                self.pending.pop(key, None)
+            self.running[key] = self.running.get(key, 0) + 1
+
+    async def stats(self) -> Dict[str, Any]:
+        # per-queue active summary
+        active_by_queue: Dict[str, List[Dict[str, Any]]] = {}
+        now = time.time()
+        for info in self.active.values():
+            q = info["queue"]
+            active_by_queue.setdefault(q, []).append({
+                "job_type": info["job_type"],
+                "filepath": info["filepath"],
+                "duration": int(now - info["start_time"]) ,
+            })
+        # Count waiting (serialized) jobs so the monitor can account for them
+        try:
+            waiting_serialized = sum(len(v) for v in getattr(self, 'waiting_by_type_sample', {}).values())
+        except Exception:
+            waiting_serialized = 0
+        return {
+            "completed": len(self.completed),
+            "failed": len(self.failed),
+            "total_enqueued": self.total_enqueued,
+            "total_skipped": self.total_skipped,
+            "completed_by_type": dict(self.completed_by_type),
+            "failed_by_type": dict(self.failed_by_type),
+            "active_by_queue": active_by_queue,
+            "active_count": len(self.active),
+            "waiting_serialized": waiting_serialized,
+        }
+
+@ray.remote
+class Pool:
+    def __init__(self, queue_name: str, max_parallel: int = 1):
+        self.queue_name = queue_name
+        self.max_parallel = max(1, int(max_parallel))
+        # job_type -> (remote_func, resource_options)
+        self.handlers: Dict[str, Tuple[Any, Dict[str, Any]]] = {}
+        # callback to Coordinator actor
+        self._coordinator = None
+        self._coordinator_name: Optional[str] = None
+        self._inflight: Set[ray.ObjectRef] = set()
+        self._running_count: int = 0
+
+    async def set_coordinator_name(self, coord_name: str):
+        # store Coordinator actor name; resolve handle lazily
+        self._coordinator_name = coord_name
+        try:
+            self._coordinator = ray.get_actor(coord_name)
+        except Exception:
+            self._coordinator = None
+        return True
+
+    def _get_coordinator(self):
+        if self._coordinator is None and self._coordinator_name:
+            try:
+                self._coordinator = ray.get_actor(self._coordinator_name)
+            except Exception:
+                self._coordinator = None
+        return self._coordinator
+
+    async def register_handler(self, job_type: str, remote_func, resource_options: Dict[str, Any]):
+        self.handlers[job_type] = (remote_func, resource_options)
+
+    async def enqueue(self, job: Job):
+        # tell coordinator that we're starting this job (updates dedup maps)
+        # We cannot call back into Coordinator directly from here without a reference;
+        # pass coordinator handle via callback's bound actor method (Ray passes actor ref implicitly).
+        # Instead, we expose a small trampoline: the driver calls mark_running before enqueue.
+        # For simplicity, Coordinator calls mark_running() before Pool.enqueue().
+        tup = self.handlers.get(job.job_type)
+        if tup is None:
+            ctx = job.context
+            ctx.add_error(job.job_type, f"No handler for {job.job_type} in queue {self.queue_name}")
+            coord = self._get_coordinator()
+            if coord is not None:
+                await coord._on_finish.remote(job, False, ctx, f"no_handler:{job.job_type}")
+            return
+        remote_func, opts = tup
+        # Apply resource hints at call site
+        # Bound concurrency to max_parallel to emulate thread runner
+        while self._running_count >= self.max_parallel:
+            await asyncio.sleep(0.005)
+        ref = remote_func.options(**opts).remote(job)
+        self._inflight.add(ref)
+        self._running_count += 1
+
+        async def _wait(r):
+            ok, ctx, err = True, None, None
+            try:
+                ctx = await r
+            except Exception as e:
+                ok, err = False, str(e)
+                ctx = job.context
+                ctx.add_error(job.job_type, err)
+            coord2 = self._get_coordinator()
+            if coord2 is not None:
+                await coord2._on_finish.remote(job, ok, ctx, err)
+            self._inflight.discard(r)
+            if self._running_count > 0:
+                self._running_count -= 1
+
+        asyncio.create_task(_wait(ref))
+
+# ---------- Classifier & Runner ----------
+
+def default_file_classifier(filepath: str, plan: List[str]) -> List[Job]:
+    ctx = WorkflowContext(filepath)
+    ctx.add_metadata("filename", os.path.basename(filepath))
+    ctx.add_metadata("created", time.time())
+    try:
+        ctx.add_metadata("file_size", os.path.getsize(filepath))
+    except OSError:
+        ctx.add_metadata("file_size", 0)
+    ctx.add_metadata("original_workflow", plan)
+
+    job_id = next(_job_id_counter)
+    first = plan[0]
+    if ":" not in first:
+        raise ValueError(f"Invalid workflow step: {first}")
+    q, jt = first.split(":", 1)
+    return [Job(job_id, jt, q, plan, 0, ctx)]
+
+def _matches_any_pattern(p: Path, patterns: Optional[List[str]]) -> bool:
+    if not patterns:
+        return True
+    try:
+        return any(p.match(pat) for pat in patterns)
+    except Exception:
+        return True
+
+def _matches_no_ignores(p: Path, ignore_patterns: Optional[List[str]]) -> bool:
+    if not ignore_patterns:
+        return True
+    try:
+        return not any(p.match(pat) for pat in ignore_patterns)
+    except Exception:
+        return True
+
+async def submit_existing_paths(coord, paths: List[str], plan: List[str], patterns: Optional[List[str]] = None, ignore_patterns: Optional[List[str]] = None, recursive: bool = True, work_dir: Optional[str] = None) -> None:
+    seed_jobs: List[Job] = []
+    for p in paths:
+        pth = Path(p)
+        if pth.is_file():
+            if _matches_any_pattern(pth, patterns) and _matches_no_ignores(pth, ignore_patterns):
+                jobs = default_file_classifier(str(pth), plan)
+                if work_dir:
+                    for j in jobs:
+                        j.context.add_metadata("work_dir", work_dir)
+                seed_jobs += jobs
+        elif pth.is_dir():
+            walker = pth.rglob("*") if recursive else pth.glob("*")
+            for f in walker:
+                if f.is_file() and _matches_any_pattern(f, patterns) and _matches_no_ignores(f, ignore_patterns):
+                    jobs = default_file_classifier(str(f), plan)
+                    if work_dir:
+                        for j in jobs:
+                            j.context.add_metadata("work_dir", work_dir)
+                    seed_jobs += jobs
+    if seed_jobs:
+        await coord.submit_jobs.remote(seed_jobs)
+
+async def tqdm_monitor(coord, continuous: bool = False) -> None:
+    # Create queue-specific progress bars (similar to your original). If
+    # continuous=True, do not exit when queues drain; keep running for
+    # watchdog-driven new work until interrupted.
+    order = [
+        "preprocessing", "bed_conversion", "mgmt", "cnv", "target", "fusion", "classification", "slow"
+    ]
+    bars = {q: tqdm(desc=q.title(), unit="jobs", position=i, leave=True) for i, q in enumerate(order)}
+    overall = tqdm(desc="Overall Progress", unit="jobs", position=len(order), leave=True)
+
+    try:
+        last_completed = 0
+        while True:
+            s = await coord.stats.remote()
+            # Build completed per queue (completed + failed)
+            completed_by_type = s.get("completed_by_type", {})
+            failed_by_type = s.get("failed_by_type", {})
+
+            completed_queue_counts: Dict[str, int] = {q: 0 for q in order}
+            for jt, c in completed_by_type.items():
+                q = job_queue_of(jt)
+                completed_queue_counts[q] += c
+            for jt, c in failed_by_type.items():
+                q = job_queue_of(jt)
+                completed_queue_counts[q] += c
+
+            # Active per queue
+            active_by_queue = s.get("active_by_queue", {})
+
+            # Update per-queue bars
+            for q in order:
+                completed_in_q = completed_queue_counts.get(q, 0)
+                active_in_q = len(active_by_queue.get(q, []))
+                total_for_q = completed_in_q + active_in_q
+                b = bars[q]
+                b.total = max(b.total or 0, total_for_q)
+                b.n = completed_in_q
+                # show up to 2 active jobs
+                active_jobs_info = active_by_queue.get(q, [])
+                if active_jobs_info:
+                    parts = []
+                    for j in active_jobs_info[:2]:
+                        fn = os.path.basename(j.get("filepath", ""))
+                        parts.append(f"{j['job_type']}:{fn}({j['duration']}s)")
+                    b.set_postfix_str(" | ".join(parts))
+                else:
+                    b.set_postfix_str("")
+                b.refresh()
+
+            # Overall
+            total_with_waiting = (s.get("total_enqueued", 0) - s.get("total_skipped", 0)) + int(s.get("waiting_serialized", 0) or 0)
+            overall.total = max(overall.total or 0, total_with_waiting) or 0
+            overall.n = s["completed"] + s["failed"]
+            overall.set_postfix_str(
+                f"Active:{s['active_count']} | Completed:{s['completed']} | "
+                f"Failed:{s['failed']} | Skipped:{s['total_skipped']} | Total:{s['total_enqueued']}"
+            )
+            overall.refresh()
+
+            # exit condition: only in non-continuous mode (batch). In continuous
+            # mode, keep monitoring to allow watchdog to enqueue new files.
+            if (not continuous) and s["active_count"] == 0 and overall.n >= overall.total:
+                break
+
+            await asyncio.sleep(0.5)
+    finally:
+        for b in bars.values():
+            b.close()
+        overall.close()
+
+class RayFileWatcher(FileSystemEventHandler):
+    def __init__(self, coord, plan: List[str], patterns: Optional[List[str]] = None, ignore_patterns: Optional[List[str]] = None, recursive: bool = True, work_dir: Optional[str] = None):
+        self.coord = coord
+        self.plan = plan
+        self.patterns = patterns or ["*"]
+        self.ignore_patterns = ignore_patterns or []
+        self.recursive = recursive
+        self.work_dir = work_dir
+        self.processed: set[str] = set()
+
+    def _should_process(self, fp: str) -> bool:
+        p = Path(fp)
+        if any(p.match(ip) for ip in self.ignore_patterns):
+            return False
+        if self.patterns:
+            return any(p.match(pt) for pt in self.patterns)
+        return True
+
+    def _handle(self, fp: str):
+        if fp in self.processed:
+            return
+        if not self._should_process(fp):
+            return
+        self.processed.add(fp)
+        jobs = default_file_classifier(fp, self.plan)
+        if self.work_dir:
+            for j in jobs:
+                j.context.add_metadata("work_dir", self.work_dir)
+        ray.get(self.coord.submit_jobs.remote(jobs))
+
+    def on_created(self, event):
+        if not event.is_directory:
+            self._handle(event.src_path)
+
+    def on_modified(self, event):
+        if not event.is_directory:
+            self._handle(event.src_path)
+
+
+async def run(plan: List[str], paths: List[str], analysis_workers: int = 1, process_existing: bool = True, monitor: bool = True, watch: bool = False, patterns: Optional[List[str]] = None, ignore_patterns: Optional[List[str]] = None, recursive: bool = True, work_dir: Optional[str] = None, log_level: str = "INFO"):
+    global GLOBAL_LOG_LEVEL
+    GLOBAL_LOG_LEVEL = (log_level or "INFO").upper()
+    # Ensure any previous coordinator is terminated to avoid stale-code actors
+    try:
+        old = ray.get_actor("littlejohn_coordinator")
+        try:
+            ray.kill(old)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    # Start a fresh coordinator (not detached)
+    coord = Coordinator.options(name="littlejohn_coordinator").remote(analysis_workers=analysis_workers)
+    # run async setup without blocking the event loop
+    try:
+        await coord.setup.remote()
+    except Exception:
+        pass
+
+    if process_existing and paths:
+        await submit_existing_paths(coord, paths, plan, patterns=patterns, ignore_patterns=ignore_patterns, recursive=recursive, work_dir=work_dir)
+
+    observer = None
+    if watch and paths:
+        observer = Observer()
+        watcher = RayFileWatcher(coord, plan, patterns=patterns, ignore_patterns=ignore_patterns, recursive=recursive, work_dir=work_dir)
+        for p in paths:
+            if Path(p).is_dir():
+                observer.schedule(watcher, p, recursive=recursive)
+        observer.start()
+
+    tasks = []
+    if monitor:
+        tasks.append(asyncio.create_task(tqdm_monitor(coord, continuous=watch)))
+
+    try:
+        if tasks:
+            await asyncio.gather(*tasks)
+    finally:
+        if observer is not None:
+            observer.stop()
+            observer.join()
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Ray Core LittleJohn workflow")
+    p.add_argument("--plan", action="append", default=[], help="Workflow plan entries like 'queue:job_type' in order")
+    p.add_argument("--paths", nargs="*", default=[], help="Files/dirs to process immediately (optional)")
+    p.add_argument("--analysis-workers", type=int, default=1, help="Parallel workers per analysis queue")
+    p.add_argument("--no-monitor", action="store_true", help="Disable tqdm monitor")
+    p.add_argument("--no-process-existing", action="store_true", help="Do not process existing files/dirs")
+    p.add_argument("--watch", action="store_true", help="Watch directories for new files (Watchdog)")
+    p.add_argument("--patterns", action="append", default=None, help="Glob patterns to include (repeatable)")
+    p.add_argument("--ignore", action="append", default=None, help="Glob patterns to ignore (repeatable)")
+    p.add_argument("--no-recursive", action="store_true", help="Disable recursive directory watching")
+    p.add_argument("--ray-address", default=None, help="Ray cluster address (None = local)")
+    return p.parse_args()
+
+if __name__ == "__main__":
+    args = parse_args()
+    ray.init(address=args.ray_address)
+
+    if not args.plan:
+        # default example
+        args.plan = [
+            "preprocessing:preprocessing",
+            "bed_conversion:bed_conversion",
+            "mgmt:mgmt",
+            "sturgeon:sturgeon",
+        ]
+
+    try:
+        asyncio.run(run(
+            plan=args.plan,
+            paths=args.paths,
+            analysis_workers=args.analysis_workers,
+            process_existing=not args.no_process_existing,
+            monitor=not args.no_monitor,
+            watch=args.watch,
+            patterns=args.patterns,
+            ignore_patterns=args.ignore,
+            recursive=not args.no_recursive,
+        ))
+    except KeyboardInterrupt:
+        pass
