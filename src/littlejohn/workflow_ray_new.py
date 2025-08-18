@@ -181,8 +181,8 @@ DEDUP_TYPES: Set[str] = {
 }
 
 # Per-sample serialization by type to avoid races on shared per-sample outputs
-# Disable per-sample serialization; rely on per-queue concurrency only
-SERIALIZE_BY_TYPE_PER_SAMPLE: Set[str] = {"cnv"}
+# Disabled: treat CNV like other analysis jobs (mgmt/target/fusion)
+SERIALIZE_BY_TYPE_PER_SAMPLE: Set[str] = set()
 
 # Classification job types (single global pipeline per type)
 CLASSIFICATION_TYPES: Set[str] = {"sturgeon", "nanodx", "pannanodx", "random_forest"}
