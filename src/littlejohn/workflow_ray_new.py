@@ -873,7 +873,10 @@ async def submit_existing_paths(coord, paths: List[str], plan: List[str], patter
                             j.context.add_metadata("work_dir", work_dir)
                     seed_jobs += jobs
     if seed_jobs:
-        await coord.submit_jobs.remote(seed_jobs)
+        # Submit in bounded batches to avoid flooding the coordinator/actors
+        BATCH = 256
+        for i in range(0, len(seed_jobs), BATCH):
+            await coord.submit_jobs.remote(seed_jobs[i:i+BATCH])
 
 async def tqdm_monitor(coord, continuous: bool = False) -> None:
     # Create queue-specific progress bars (similar to your original). If
@@ -954,6 +957,11 @@ class RayFileWatcher(FileSystemEventHandler):
         self.recursive = recursive
         self.work_dir = work_dir
         self.processed: set[str] = set()
+        # Rate limiting / batching
+        self._pending_jobs: List[Job] = []
+        self._last_flush: float = time.time()
+        self._flush_interval_s: float = 0.5
+        self._batch_size: int = 128
 
     def _should_process(self, fp: str) -> bool:
         p = Path(fp)
@@ -962,6 +970,22 @@ class RayFileWatcher(FileSystemEventHandler):
         if self.patterns:
             return any(p.match(pt) for pt in self.patterns)
         return True
+
+    def _flush_if_needed(self, force: bool = False) -> None:
+        try:
+            if not self._pending_jobs:
+                return
+            now = time.time()
+            if force or len(self._pending_jobs) >= self._batch_size or (now - self._last_flush) >= self._flush_interval_s:
+                batch = self._pending_jobs[:self._batch_size]
+                del self._pending_jobs[:self._batch_size]
+                try:
+                    ray.get(self.coord.submit_jobs.remote(batch))
+                except Exception:
+                    pass
+                self._last_flush = now
+        except Exception:
+            pass
 
     def _handle(self, fp: str):
         if fp in self.processed:
@@ -973,7 +997,9 @@ class RayFileWatcher(FileSystemEventHandler):
         if self.work_dir:
             for j in jobs:
                 j.context.add_metadata("work_dir", self.work_dir)
-        ray.get(self.coord.submit_jobs.remote(jobs))
+        # enqueue and flush under rate limiter
+        self._pending_jobs.extend(jobs)
+        self._flush_if_needed()
 
     def on_created(self, event):
         if not event.is_directory:
@@ -982,6 +1008,11 @@ class RayFileWatcher(FileSystemEventHandler):
     def on_modified(self, event):
         if not event.is_directory:
             self._handle(event.src_path)
+
+    # Ensure remaining jobs are flushed on shutdown
+    def flush_remaining(self):
+        while self._pending_jobs:
+            self._flush_if_needed(force=True)
 
 
 async def run(plan: List[str], paths: List[str], analysis_workers: int = 1, process_existing: bool = True, monitor: bool = True, watch: bool = False, patterns: Optional[List[str]] = None, ignore_patterns: Optional[List[str]] = None, recursive: bool = True, work_dir: Optional[str] = None, log_level: str = "INFO"):
@@ -1008,6 +1039,7 @@ async def run(plan: List[str], paths: List[str], analysis_workers: int = 1, proc
         await submit_existing_paths(coord, paths, plan, patterns=patterns, ignore_patterns=ignore_patterns, recursive=recursive, work_dir=work_dir)
 
     observer = None
+    watcher = None
     if watch and paths:
         observer = Observer()
         watcher = RayFileWatcher(coord, plan, patterns=patterns, ignore_patterns=ignore_patterns, recursive=recursive, work_dir=work_dir)
@@ -1092,6 +1124,11 @@ async def run(plan: List[str], paths: List[str], analysis_workers: int = 1, proc
         if tasks:
             await asyncio.gather(*tasks)
     finally:
+        if watcher is not None:
+            try:
+                watcher.flush_remaining()
+            except Exception:
+                pass
         if observer is not None:
             observer.stop()
             observer.join()
