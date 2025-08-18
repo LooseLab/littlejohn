@@ -362,6 +362,11 @@ class Coordinator:
         self.processors: Dict[str, Any] = {}
         # inflight tracking: ObjectRef -> job
         self._inflight: Dict[Any, Job] = {}
+        # backpressure: limit outstanding submissions per job type to avoid
+        # massive pending tasks and worker explosion
+        self.max_inflight_per_type: int = 64
+        self.inflight_by_type: Dict[str, int] = {}
+        self.waiting_by_type_global: Dict[str, List[Job]] = {}
         # per-sample tracking for GUI
         self.samples_by_id: Dict[str, Dict[str, Any]] = {}
         # defer setup/registration to async setup()
@@ -475,8 +480,15 @@ class Coordinator:
             proc = self.processors.get(job.job_type)
             if proc is None:
                 continue
+            # Backpressure: if too many outstanding for this type, queue locally
+            inflight_for_type = int(self.inflight_by_type.get(job.job_type, 0))
+            if inflight_for_type >= self.max_inflight_per_type:
+                self.waiting_by_type_global.setdefault(job.job_type, []).append(job)
+                # do not count as submitted yet; GUI totals reflect actual submissions
+                continue
             ref = proc.process.remote(job)
             self._inflight[ref] = job
+            self.inflight_by_type[job.job_type] = inflight_for_type + 1
 
     async def _on_finish(self, job: Job, ok: bool, ctx: WorkflowContext, err: Optional[str]):
         # update dedup maps
@@ -587,6 +599,35 @@ class Coordinator:
                     }
 
         # Promote next classification job for this type if any (single global pipeline)
+        # Global backpressure release: for the finished job type, submit one waiting
+        # job if we are below the max_inflight threshold.
+        try:
+            jt = job.job_type
+            # decrement inflight count for this type
+            if self.inflight_by_type.get(jt, 0) > 0:
+                self.inflight_by_type[jt] -= 1
+                if self.inflight_by_type[jt] == 0:
+                    self.inflight_by_type.pop(jt, None)
+            queue_global = self.waiting_by_type_global.get(jt, [])
+            if queue_global and int(self.inflight_by_type.get(jt, 0)) < self.max_inflight_per_type:
+                nxt_job_g = queue_global.pop(0)
+                if not queue_global:
+                    self.waiting_by_type_global.pop(jt, None)
+                proc_g = self.processors.get(jt)
+                if proc_g is not None:
+                    ref_g = proc_g.process.remote(nxt_job_g)
+                    self._inflight[ref_g] = nxt_job_g
+                    self.inflight_by_type[jt] = int(self.inflight_by_type.get(jt, 0)) + 1
+                    self.submitted_by_type[jt] = self.submitted_by_type.get(jt, 0) + 1
+                    self.total_enqueued += 1
+                    self.active[nxt_job_g.job_id] = {
+                        "job_type": nxt_job_g.job_type,
+                        "filepath": nxt_job_g.context.filepath,
+                        "queue": job_queue_of(nxt_job_g.job_type),
+                        "start_time": time.time(),
+                    }
+        except Exception:
+            pass
         if job.job_type in CLASSIFICATION_TYPES:
             # decrement pending for this type
             if self.classif_pending_by_type.get(job.job_type, 0) > 0:
