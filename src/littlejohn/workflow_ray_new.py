@@ -36,6 +36,15 @@ import ray
 from tqdm import tqdm
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
+# Optional GUI hook integration
+try:
+    from littlejohn.gui_launcher import send_gui_update as _gui_send_update, UpdateType as _GUIUpdateType, launch_gui as _gui_launch
+except Exception:
+    def _gui_send_update(*args, **kwargs):
+        return None
+    _GUIUpdateType = None
+    def _gui_launch(*args, **kwargs):
+        return None
 
 # --- Import your real handlers from LittleJohn ---
 # They are expected to be regular (non-Ray) callables of the form: handler(job: Job) -> None/Context-updates
@@ -330,6 +339,7 @@ class Coordinator:
         self.failed: List[int] = []
         self.completed_by_type: Dict[str, int] = {}
         self.failed_by_type: Dict[str, int] = {}
+        self.submitted_by_type: Dict[str, int] = {}
         self.total_enqueued = 0
         self.total_skipped = 0
         self.active: Dict[int, Dict[str, Any]] = {}
@@ -352,6 +362,8 @@ class Coordinator:
         self.processors: Dict[str, Any] = {}
         # inflight tracking: ObjectRef -> job
         self._inflight: Dict[Any, Job] = {}
+        # per-sample tracking for GUI
+        self.samples_by_id: Dict[str, Dict[str, Any]] = {}
         # defer setup/registration to async setup()
 
     # ----- handler registration API -----
@@ -424,12 +436,41 @@ class Coordinator:
 
             q = job_queue_of(job.job_type)
             self.total_enqueued += 1
+            # submitted counter per job type for GUI totals
+            try:
+                self.submitted_by_type[job.job_type] = self.submitted_by_type.get(job.job_type, 0) + 1
+            except Exception:
+                pass
             self.active[job.job_id] = {
                 "job_type": job.job_type,
                 "filepath": job.context.filepath,
                 "queue": q,
                 "start_time": time.time(),
             }
+            # update per-sample totals
+            try:
+                sid = sample_id or 'unknown'
+                ent = self.samples_by_id.get(sid)
+                if ent is None:
+                    ent = {
+                        'sample_id': sid,
+                        'active_jobs': 0,
+                        'total_jobs': 0,
+                        'completed_jobs': 0,
+                        'failed_jobs': 0,
+                        'job_types': set(),
+                        'last_seen': time.time(),
+                    }
+                    self.samples_by_id[sid] = ent
+                ent['total_jobs'] += 1
+                ent['active_jobs'] += 1
+                try:
+                    ent['job_types'].add(job.job_type)
+                except Exception:
+                    pass
+                ent['last_seen'] = time.time()
+            except Exception:
+                pass
             # submit to dedicated job-type processor
             proc = self.processors.get(job.job_type)
             if proc is None:
@@ -501,6 +542,21 @@ class Coordinator:
         else:
             self.failed.append(job.job_id)
             self.failed_by_type[job.job_type] = self.failed_by_type.get(job.job_type, 0) + 1
+
+        # per-sample finish updates
+        try:
+            sid2 = job.context.get_sample_id() if hasattr(job.context, 'get_sample_id') else 'unknown'
+            ent2 = self.samples_by_id.get(sid2)
+            if ent2 is not None:
+                if ent2.get('active_jobs', 0) > 0:
+                    ent2['active_jobs'] -= 1
+                if ok:
+                    ent2['completed_jobs'] = ent2.get('completed_jobs', 0) + 1
+                else:
+                    ent2['failed_jobs'] = ent2.get('failed_jobs', 0) + 1
+                ent2['last_seen'] = time.time()
+        except Exception:
+            pass
 
         # Promote next waiting job for this (type, sample) if any (CNV-only if enabled)
         if job.job_type in SERIALIZE_BY_TYPE_PER_SAMPLE:
@@ -583,21 +639,54 @@ class Coordinator:
             self.running[key] = self.running.get(key, 0) + 1
 
     async def stats(self) -> Dict[str, Any]:
-        # per-queue active summary
+        # per-queue active summary (also expose as 'active_by_worker' for GUI compat)
         active_by_queue: Dict[str, List[Dict[str, Any]]] = {}
         now = time.time()
-        for info in self.active.values():
+        for jid, info in self.active.items():
             q = info["queue"]
             active_by_queue.setdefault(q, []).append({
+                "job_id": jid,
                 "job_type": info["job_type"],
                 "filepath": info["filepath"],
                 "duration": int(now - info["start_time"]) ,
             })
+        # build category counts
+        def _cat_of(jt: str) -> str:
+            if jt == 'preprocessing':
+                return 'preprocessing'
+            if jt in {'mgmt','cnv','target','fusion'}:
+                return jt
+            if jt in CLASSIFICATION_TYPES:
+                return 'classification'
+            return 'other'
+        running_counts: Dict[str, int] = {'preprocessing':0,'mgmt':0,'cnv':0,'target':0,'fusion':0,'classification':0,'other':0}
+        totals_counts: Dict[str, int] = {'preprocessing':0,'mgmt':0,'cnv':0,'target':0,'fusion':0,'classification':0,'other':0}
+        for info in self.active.values():
+            running_counts[_cat_of(info['job_type'])] += 1
+        # totals are the submitted (ever) per type/category
+        for jt, c in self.submitted_by_type.items():
+            totals_counts[_cat_of(jt)] += int(c or 0)
         # Count waiting (serialized) jobs so the monitor can account for them
         try:
             waiting_serialized = sum(len(v) for v in getattr(self, 'waiting_by_type_sample', {}).values())
         except Exception:
             waiting_serialized = 0
+        # Samples payload for GUI
+        samples_payload: List[Dict[str, Any]] = []
+        try:
+            for sid, ent in self.samples_by_id.items():
+                samples_payload.append({
+                    'sample_id': sid,
+                    'active_jobs': ent.get('active_jobs', 0),
+                    'total_jobs': ent.get('total_jobs', 0),
+                    'completed_jobs': ent.get('completed_jobs', 0),
+                    'failed_jobs': ent.get('failed_jobs', 0),
+                    'job_types': list(ent.get('job_types', set())),
+                    'last_seen': ent.get('last_seen', now),
+                })
+        except Exception:
+            samples_payload = []
+
         return {
             "completed": len(self.completed),
             "failed": len(self.failed),
@@ -606,8 +695,12 @@ class Coordinator:
             "completed_by_type": dict(self.completed_by_type),
             "failed_by_type": dict(self.failed_by_type),
             "active_by_queue": active_by_queue,
+            "active_by_worker": active_by_queue,  # compatibility for GUI table
             "active_count": len(self.active),
             "waiting_serialized": waiting_serialized,
+            "running_by_category": running_counts,
+            "totals_by_category": totals_counts,
+            "samples": samples_payload,
         }
 
 @ray.remote
@@ -885,6 +978,74 @@ async def run(plan: List[str], paths: List[str], analysis_workers: int = 1, proc
     tasks = []
     if monitor:
         tasks.append(asyncio.create_task(tqdm_monitor(coord, continuous=watch)))
+
+    # Optional GUI integration
+    try:
+        if _GUIUpdateType is None:
+            print("GUI not launched: GUI modules unavailable on this environment.")
+        elif not work_dir:
+            print("GUI not launched: --work-dir not provided.")
+        else:
+            launcher = _gui_launch(workflow_runner=None, workflow_steps=plan, monitored_directory=work_dir)
+            try:
+                url = launcher.get_gui_url() if hasattr(launcher, 'get_gui_url') else 'http://localhost:8081'
+                print(f"NiceGUI ready to go on {url}")
+            except Exception:
+                print("NiceGUI launched.")
+
+            async def _publish_gui():
+                while True:
+                    try:
+                        s = await coord.stats.remote()
+                        # Basic workflow status & progress
+                        total = int((s.get('total_enqueued', 0) - s.get('total_skipped', 0)) or 0)
+                        completed = int(s.get('completed', 0) or 0)
+                        failed = int(s.get('failed', 0) or 0)
+                        active = int(s.get('active_count', 0) or 0)
+                        progress = (completed + failed) / total if total > 0 else 0.0
+                        _gui_send_update(_GUIUpdateType.WORKFLOW_STATUS, {"is_running": True, "start_time": time.time()}, priority=1)
+                        _gui_send_update(_GUIUpdateType.PROGRESS_UPDATE, {"progress": progress, "completed": completed, "failed": failed, "total": total}, priority=1)
+
+                        # Queue status (running/total by category)
+                        ru = s.get('running_by_category', {}) or {}
+                        tu = s.get('totals_by_category', {}) or {}
+                        queue_payload = {
+                            'preprocessing': {'running': int(ru.get('preprocessing', 0) or 0), 'total': int(tu.get('preprocessing', 0) or 0)},
+                            'mgmt': {'running': int(ru.get('mgmt', 0) or 0), 'total': int(tu.get('mgmt', 0) or 0)},
+                            'cnv': {'running': int(ru.get('cnv', 0) or 0), 'total': int(tu.get('cnv', 0) or 0)},
+                            'target': {'running': int(ru.get('target', 0) or 0), 'total': int(tu.get('target', 0) or 0)},
+                            'fusion': {'running': int(ru.get('fusion', 0) or 0), 'total': int(tu.get('fusion', 0) or 0)},
+                            'classification': {'running': int(ru.get('classification', 0) or 0), 'total': int(tu.get('classification', 0) or 0)},
+                            'other': {'running': int(ru.get('other', 0) or 0), 'total': int(tu.get('other', 0) or 0)},
+                        }
+                        _gui_send_update(_GUIUpdateType.QUEUE_UPDATE, queue_payload, priority=2)
+
+                        # Active jobs table
+                        rows = []
+                        for qname, jobs in (s.get('active_by_queue', {}) or {}).items():
+                            for j in jobs:
+                                rows.append({
+                                    'job_id': str(j.get('job_id', '')),
+                                    'job_type': j.get('job_type', ''),
+                                    'filepath': j.get('filepath', ''),
+                                    'worker_name': qname,
+                                    'duration': int(j.get('duration', 0) or 0),
+                                    'progress': 0.0,
+                                })
+                        _gui_send_update(_GUIUpdateType.JOB_UPDATE, {'active_jobs': rows}, priority=1)
+
+                        # Samples overview
+                        samples = s.get('samples', []) or []
+                        _gui_send_update(_GUIUpdateType.SAMPLES_UPDATE, {'samples': samples}, priority=1)
+
+                        await asyncio.sleep(1.0)
+                    except asyncio.CancelledError:
+                        break
+                    except Exception:
+                        await asyncio.sleep(1.0)
+            tasks.append(asyncio.create_task(_publish_gui()))
+    except Exception as e:
+        print(f"Warning: GUI failed to launch: {e}")
 
     try:
         if tasks:
