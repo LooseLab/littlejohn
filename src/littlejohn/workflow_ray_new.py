@@ -439,9 +439,19 @@ class Coordinator:
                 else:
                     self.running_by_type_sample[key_ts] = ra + 1
 
+            # submit to dedicated job-type processor
+            proc = self.processors.get(job.job_type)
+            if proc is None:
+                continue
+            # Backpressure: if too many outstanding for this type, queue locally
+            inflight_for_type = int(self.inflight_by_type.get(job.job_type, 0))
+            if inflight_for_type >= self.max_inflight_per_type:
+                self.waiting_by_type_global.setdefault(job.job_type, []).append(job)
+                # do not count as submitted yet; GUI totals reflect actual submissions
+                continue
+            # Mark submission only when actually dispatching to a processor
             q = job_queue_of(job.job_type)
             self.total_enqueued += 1
-            # submitted counter per job type for GUI totals
             try:
                 self.submitted_by_type[job.job_type] = self.submitted_by_type.get(job.job_type, 0) + 1
             except Exception:
@@ -452,7 +462,7 @@ class Coordinator:
                 "queue": q,
                 "start_time": time.time(),
             }
-            # update per-sample totals
+            # update per-sample totals and active only on actual submission
             try:
                 sid = sample_id or 'unknown'
                 ent = self.samples_by_id.get(sid)
@@ -476,16 +486,6 @@ class Coordinator:
                 ent['last_seen'] = time.time()
             except Exception:
                 pass
-            # submit to dedicated job-type processor
-            proc = self.processors.get(job.job_type)
-            if proc is None:
-                continue
-            # Backpressure: if too many outstanding for this type, queue locally
-            inflight_for_type = int(self.inflight_by_type.get(job.job_type, 0))
-            if inflight_for_type >= self.max_inflight_per_type:
-                self.waiting_by_type_global.setdefault(job.job_type, []).append(job)
-                # do not count as submitted yet; GUI totals reflect actual submissions
-                continue
             ref = proc.process.remote(job)
             self._inflight[ref] = job
             self.inflight_by_type[job.job_type] = inflight_for_type + 1
@@ -864,14 +864,24 @@ async def submit_existing_paths(coord, paths: List[str], plan: List[str], patter
                         j.context.add_metadata("work_dir", work_dir)
                 seed_jobs += jobs
         elif pth.is_dir():
+            # Stream directory walk in small batches; avoid building huge lists
             walker = pth.rglob("*") if recursive else pth.glob("*")
+            batch: List[Job] = []
             for f in walker:
-                if f.is_file() and _matches_any_pattern(f, patterns) and _matches_no_ignores(f, ignore_patterns):
-                    jobs = default_file_classifier(str(f), plan)
-                    if work_dir:
-                        for j in jobs:
-                            j.context.add_metadata("work_dir", work_dir)
-                    seed_jobs += jobs
+                if not f.is_file():
+                    continue
+                if not _matches_any_pattern(f, patterns) or not _matches_no_ignores(f, ignore_patterns):
+                    continue
+                jobs = default_file_classifier(str(f), plan)
+                if work_dir:
+                    for j in jobs:
+                        j.context.add_metadata("work_dir", work_dir)
+                batch += jobs
+                if len(batch) >= 256:
+                    await coord.submit_jobs.remote(batch)
+                    batch = []
+            if batch:
+                await coord.submit_jobs.remote(batch)
     if seed_jobs:
         # Submit in bounded batches to avoid flooding the coordinator/actors
         BATCH = 256
