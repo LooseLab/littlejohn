@@ -772,7 +772,7 @@ def process_single_bam(bam_path, metadata, work_dir, logger):
                     ref_cnv_dict,
                     temp_dir,
                     logger,
-                    threads=1,
+                    threads=4,
                     mapq_filter=60
                 )
                 
