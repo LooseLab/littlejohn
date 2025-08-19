@@ -19,7 +19,10 @@ from typing import Optional, Dict, Any, List
 from pathlib import Path
 from dataclasses import dataclass
 from enum import Enum
+import os
 
+from littlejohn.gui import theme
+from littlejohn.gui import images
 try:
     from nicegui import ui, app
 except ImportError:
@@ -119,7 +122,7 @@ class GUILauncher:
             # NOTE: Update processing now happens inside the UI thread via ui.timer for thread-safety
             
             # Wait a moment for GUI to start
-            time.sleep(2)
+            time.sleep(1)
             
             # Check if thread is still running
             if self.gui_thread.is_alive():
@@ -448,13 +451,32 @@ class GUILauncher:
                 ui.timer(3.0, self._scan_for_new_samples, active=True)
             except Exception:
                 pass
+            ui.add_css(
+                """
+                .shadows-into light-regular {
+                    font-family: "Shadows Into Light", cursive;
+                    font-weight: 800;
+                    font-style: normal;
+                }
+            """
+            )
+            # Register fonts from the GUI package if available
+            try:
+                fonts_dir = Path(__file__).parent / "gui" / "fonts"
+                if fonts_dir.exists():
+                    app.add_static_files("/fonts", str(fonts_dir))
+                else:
+                    logging.debug(f"Fonts directory not found: {fonts_dir}")
+            except Exception as e:
+                logging.debug(f"Could not register fonts static dir: {e}")
             
             # Start the GUI
             ui.run(
                 host=self.host,
                 port=self.port,
                 show=False,
-                reload=False
+                reload=False,
+                storage_secret="robin"
             )
         except Exception as e:
             print(f"❌ GUI worker error: {e}")
@@ -464,136 +486,218 @@ class GUILauncher:
     def _create_welcome_page(self):
         """Create the welcome page."""
         # Background and main container
-        with ui.column().classes('w-full h-full items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100 p-8'):
-            # Main title and description
-            ui.label('🧬 LittleJohn').classes('text-6xl font-bold mb-4 text-blue-700')
-            ui.label('Advanced BAM File Analysis & Workflow Management').classes('text-2xl text-gray-700 mb-8 text-center max-w-3xl')
-            
-            # Description card
-            with ui.card().classes('w-full max-w-4xl mb-8 bg-white shadow-lg'):
-                with ui.column().classes('p-6'):
-                    ui.label('What is LittleJohn?').classes('text-xl font-semibold mb-4 text-blue-800')
-                    ui.label('LittleJohn is a comprehensive bioinformatics workflow system designed for processing and analyzing BAM files. It provides automated preprocessing, multiple analysis pipelines, and real-time monitoring capabilities.').classes('text-gray-700 mb-4')
+        with theme.frame(
+            "Welcome",
+            smalltitle="Welcome",
+            batphone=False,
+        ):
+            with ui.card().classes("w-full shadow-lg rounded-xl"):
+                with ui.row().classes(
+                    "w-full items-center justify-between p-4 border-b border-gray-200"
+                ):
+                    with ui.row().classes("items-center gap-2"):
+                        # ui.icon('feed', color='primary').classes('text-xl')
+                        ui.label("Welcome to R.O.B.I.N").classes(
+                            "text-sky-600 dark:text-white"
+                        ).style("font-size: 150%; font-weight: 300").tailwind(
+                            "drop-shadow", "font-bold"
+                        )
+                with ui.row().classes(
+                    "w-full items-center justify-between p-4 border-b border-gray-200"
+                ):
+                    ui.label(
+                        "This tool enables classification of brain tumours in real time from Oxford Nanopore Data."
+                    ).classes("text-black-600 dark:text-white").style(
+                        "font-size: 100%; font-weight: 300"
+                    ).tailwind(
+                        "drop-shadow", "font-bold"
+                    )
                     
-                    with ui.row().classes('w-full justify-center gap-8 mt-6'):
-                        with ui.column().classes('text-center'):
-                            ui.label('🔬').classes('text-3xl mb-2')
-                            ui.label('Preprocessing').classes('text-sm font-medium text-gray-600')
-                        with ui.column().classes('text-center'):
-                            ui.label('🧬').classes('text-3xl mb-2')
-                            ui.label('MGMT Analysis').classes('text-sm font-medium text-gray-600')
-                        with ui.column().classes('text-center'):
-                            ui.label('📊').classes('text-3xl mb-2')
-                            ui.label('CNV Detection').classes('text-sm font-medium text-gray-600')
-                        with ui.column().classes('text-center'):
-                            ui.label('🎯').classes('text-3xl mb-2')
-                            ui.label('Target Analysis').classes('text-sm font-medium text-gray-600')
-                        with ui.column().classes('text-center'):
-                            ui.label('🔗').classes('text-3xl mb-2')
-                            ui.label('Fusion Detection').classes('text-sm font-medium text-gray-600')
-            
-            # Action buttons
-            with ui.row().classes('gap-6'):
-                ui.link('📊 Open Workflow Monitor', '/littlejohn').classes('bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-8 py-4 rounded-lg shadow-lg transition-colors')
+                    # Description card
+                    with ui.card().classes('w-full bg-white shadow-lg'):
+                        with ui.column().classes('p-6'):
+                            ui.label('What is R.O.B.I.N?').classes('text-xl font-semibold mb-4')
+                            ui.label('ROBIN is a comprehensive bioinformatics workflow system designed for processing and analyzing BAM files. It provides automated preprocessing, multiple analysis pipelines, and real-time monitoring capabilities. It now encorporates Little John to help with the heavy lifting.').classes('text-gray-700 mb-4')
+                            
+                            with ui.row().classes('w-full justify-center gap-8 mt-6'):
+                                ui.link('�� View All Samples', '/live_data').classes('bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-8 py-4 rounded-lg shadow-lg transition-colors')
+                                ui.link('📊 Open Workflow Monitor', '/littlejohn').classes('bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-8 py-4 rounded-lg shadow-lg transition-colors')
+                                
+                                # Placeholder buttons for future functionality
+                                ui.button('🚀 Launch New Workflow', on_click=lambda: self._launch_workflow_button_clicked()).classes('bg-green-600 hover:bg-green-700 text-white text-lg font-semibold px-8 py-4 rounded-lg shadow-lg transition-colors')
+                                ui.button('📋 View Documentation', on_click=lambda: self._view_docs_button_clicked()).classes('bg-purple-600 hover:bg-purple-700 text-white text-lg font-semibold px-8 py-4 rounded-lg shadow-lg transition-colors')
+                            
+                            with ui.row().classes('w-full justify-center gap-8 mt-6'):
+                                with ui.column().classes('text-center'):
+                                    ui.label('🔬').classes('text-3xl mb-2')
+                                    ui.label('Preprocessing').classes('text-sm font-medium text-gray-600')
+                                with ui.column().classes('text-center'):
+                                    ui.label('🧬').classes('text-3xl mb-2')
+                                    ui.label('Methylation Classification').classes('text-sm font-medium text-gray-600')
+                                with ui.column().classes('text-center'):
+                                    ui.label('🧬').classes('text-3xl mb-2')
+                                    ui.label('MGMT Analysis').classes('text-sm font-medium text-gray-600')
+                                with ui.column().classes('text-center'):
+                                    ui.label('📊').classes('text-3xl mb-2')
+                                    ui.label('CNV Detection').classes('text-sm font-medium text-gray-600')
+                                with ui.column().classes('text-center'):
+                                    ui.label('🎯').classes('text-3xl mb-2')
+                                    ui.label('Target Analysis').classes('text-sm font-medium text-gray-600')
+                                with ui.column().classes('text-center'):
+                                    ui.label('🔗').classes('text-3xl mb-2')
+                                    ui.label('Fusion Detection').classes('text-sm font-medium text-gray-600')
+                    
+                    # Action buttons
+                    
+                    
+                    
+            #ToDo: Reimplement this.
+            """
+            with ui.row().classes("w-full no-wrap"):
+                with ui.column().classes("w-1/4"):
+                    with ui.card().classes("w-full shadow-lg rounded-xl"):
+                        with ui.row().classes(
+                            "w-full items-center justify-between p-4 border-b border-gray-200"
+                        ):
+                            with ui.row().classes("items-center gap-2"):
+                                # ui.icon('feed', color='primary').classes('text-xl')
+                                ui.label("View Data").classes(
+                                    "text-sky-600 dark:text-white"
+                                ).style("font-size: 150%; font-weight: 300").tailwind(
+                                    "drop-shadow", "font-bold"
+                                )
+                        with ui.button(on_click=lambda: ui.navigate.to("/live")).props(
+                            "color=green"
+                        ):
+                            ui.label("View Live Data")
+                            ui.image(
+                                os.path.join(
+                                    os.path.dirname(os.path.abspath(images.__file__)),
+                                    "ROBIN_logo_small.png",
+                                )
+                            ).classes("rounded-full w-16 h-16 ml-4")
+                        with ui.button(
+                            on_click=lambda: ui.navigate.to("/browse")
+                        ).props("color=green"):
+                            ui.label("Browse Historic Data")
+                            ui.image(
+                                os.path.join(
+                                    os.path.dirname(os.path.abspath(images.__file__)),
+                                    "ROBIN_logo_small.png",
+                                )
+                            ).classes("rounded-full w-16 h-16 ml-4")
                 
-                # Placeholder buttons for future functionality
-                ui.button('🚀 Launch New Workflow', on_click=lambda: self._launch_workflow_button_clicked()).classes('bg-green-600 hover:bg-green-700 text-white text-lg font-semibold px-8 py-4 rounded-lg shadow-lg transition-colors')
-                ui.button('📋 View Documentation', on_click=lambda: self._view_docs_button_clicked()).classes('bg-purple-600 hover:bg-purple-700 text-white text-lg font-semibold px-8 py-4 rounded-lg shadow-lg transition-colors')
+                with ui.column().classes("w-2/4"):
+                    # Initialize news feed only if it hasn't been initialized yet
+                    if self.news_feed is None:
+                        self.news_feed = NewsFeed()
+                        self.news_feed.start_update_timer()
+                    # Create the news element
+                    self.news_feed.create_news_element()
+                with ui.column().classes("w-1/4"):
+                    # Initialize telemetry if enabled
+                    if self.telemetry:
+                        logging.info("Adding telemetry map to splash screen")
+                        self.telemetry.create_map_element()
+                    else:
+                        logging.warning(
+                            "No telemetry instance available for map display"
+                        )
+            """
             
-            # Sample Tracking Preview - SIMPLIFIED: Show basic info without workflow_state access
-            with ui.card().classes('w-full max-w-4xl mt-8 bg-white shadow-lg'):
-                with ui.column().classes('p-6'):
-                    ui.label('🧬 Live Sample Tracking').classes('text-xl font-semibold mb-4 text-blue-800')
-                    ui.label('Sample tracking will be available once the workflow is running.').classes('text-sm text-gray-600')
-                    
-                    with ui.row().classes('w-full justify-center gap-4 mt-4'):
-                        ui.link('�� View All Samples', '/live_data').classes('bg-blue-600 hover:bg-blue-700 text-white text-sm px-4 py-2 rounded-lg')
-                        ui.link('📊 Workflow Monitor', '/littlejohn').classes('bg-green-600 hover:bg-green-700 text-white text-sm px-4 py-2 rounded-lg')
-            
-            # Footer information
-            with ui.row().classes('mt-12 text-center text-gray-500'):
-                ui.label('LittleJohn Workflow Monitor - Advanced Bioinformatics Analysis Platform').classes('text-sm')
     
     def _create_samples_overview(self):
         """Create the samples overview page showing all tracked samples."""
         # Page title and navigation
-        with ui.row().classes('w-full bg-blue-600 text-white p-4 items-center justify-between'):
-            with ui.row().classes('items-center'):
-                ui.label('🧬 Sample Tracking Overview').classes('text-2xl font-bold')
-                ui.label('All samples processed by LittleJohn').classes('text-sm ml-4 opacity-80')
-            
-            # Navigation links
-            with ui.row().classes('gap-4'):
-                ui.link('🏠 Welcome', '/').classes('text-white hover:text-blue-200 text-sm')
-                ui.link('📊 Workflow Monitor', '/littlejohn').classes('text-white hover:text-blue-200 text-sm')
-                ui.label('📋 Sample Overview').classes('text-white text-sm font-semibold')
-        
-        # Main content area
-        with ui.column().classes('w-full p-4 gap-4'):
-            # Sample statistics
-            with ui.card().classes('w-full bg-gradient-to-r from-blue-50 to-indigo-50'):
-                ui.label('📊 Sample Statistics').classes('text-lg font-semibold mb-4 text-blue-800')
+        with theme.frame(
+            "R.O.B.I.N - Sample Tracking Overview",
+            smalltitle="Samples",
+            batphone=False,
+        ):
+            with ui.row().classes('w-full bg-blue-600 text-white p-4 items-center justify-between'):
+                with ui.row().classes('items-center'):
+                    ui.label('🧬 Sample Tracking Overview').classes('text-2xl font-bold')
+                    ui.label('All samples processed by LittleJohn').classes('text-sm ml-4 opacity-80')
                 
-                # SIMPLIFIED: Show basic info without workflow_state access
-                ui.label('Sample statistics will be available once the workflow is running.').classes('text-sm text-gray-600')
+                # Navigation links
+                with ui.row().classes('gap-4'):
+                    ui.link('🏠 Welcome', '/').classes('text-white hover:text-blue-200 text-sm')
+                    ui.link('📊 Workflow Monitor', '/littlejohn').classes('text-white hover:text-blue-200 text-sm')
+                    ui.label('📋 Sample Overview').classes('text-white text-sm font-semibold')
             
-            # Samples table
-            with ui.card().classes('w-full'):
-                ui.label('📋 All Tracked Samples').classes('text-lg font-semibold mb-4')
-                with ui.row().classes('items-center gap-2 mb-2'):
-                    self.view_sample_button = ui.button(
-                        'View',
-                        on_click=lambda: ui.navigate.to(f"/live_data/{self._selected_sample_id}") if self._selected_sample_id else ui.notify('Select a sample first', type='warning')
-                    ).props('color=primary')
-                    self.view_sample_button.disable()
+            # Main content area
+            with ui.column().classes('w-full p-4 gap-4'):
+                # Sample statistics
+                with ui.card().classes('w-full bg-gradient-to-r from-blue-50 to-indigo-50'):
+                    ui.label('📊 Sample Statistics').classes('text-lg font-semibold mb-4 text-blue-800')
+                    
+                    # SIMPLIFIED: Show basic info without workflow_state access
+                    ui.label('Sample statistics will be available once the workflow is running.').classes('text-sm text-gray-600')
+                
+                # Samples table
+                with ui.card().classes('w-full'):
+                    ui.label('📋 All Tracked Samples').classes('text-lg font-semibold mb-4')
+                    # Filters & actions row
+                    with ui.row().classes('items-center gap-2 mb-2'):
+                        self.view_sample_button = ui.button(
+                            'View',
+                            on_click=lambda: ui.navigate.to(f"/live_data/{self._selected_sample_id}") if self._selected_sample_id else ui.notify('Select a sample first', type='warning')
+                        ).props('color=primary')
+                        self.view_sample_button.disable()
 
-                # Create a placeholder table that will be updated later
-                self.samples_table = ui.table(
-                    columns=[
-                        {'name': 'sample_id', 'label': 'Sample ID', 'field': 'sample_id'},
-                        {'name': 'origin', 'label': 'Origin', 'field': 'origin'},
-                        {'name': 'active_jobs', 'label': 'Active', 'field': 'active_jobs'},
-                        {'name': 'total_jobs', 'label': 'Total', 'field': 'total_jobs'},
-                        {'name': 'completed_jobs', 'label': 'Completed', 'field': 'completed_jobs'},
-                        {'name': 'failed_jobs', 'label': 'Failed', 'field': 'failed_jobs'},
-                        {'name': 'job_types', 'label': 'Job Types', 'field': 'job_types'},
-                        {'name': 'last_seen', 'label': 'Last Activity', 'field': 'last_seen'}
-                    ],
-                    rows=[],
-                    row_key='sample_id',
-                    selection='single',
-                    pagination=20
-                ).classes('w-full')
+                        # Initialize filters model
+                        self._samples_filters = getattr(self, '_samples_filters', None) or {'query': '', 'origin': 'All'}
 
-                # Selection handler to enable the external View button
-                try:
-                    self.samples_table.on('selection', self._on_sample_selected)
-                except Exception:
-                    pass
+                        # Global search box
+                        self.samples_search = ui.input(placeholder='Search…').props('clearable dense').on(
+                            'update:model-value',
+                            lambda e: self._set_samples_query((e.args or '') if isinstance(e.args, str) else str(e.args or ''))
+                        ).classes('ml-auto')
 
-                # If we have cached rows, show them immediately for instant UX
-                if self._last_samples_rows:
+                        # Origin filter
+                        self.origin_filter = ui.select(
+                            options=['All', 'Live', 'Pre-existing'],
+                            value=self._samples_filters.get('origin', 'All'),
+                            label='Origin'
+                        ).props('dense clearable').on(
+                            'update:model-value',
+                            lambda e: self._set_samples_origin_filter((e.args or 'All') if isinstance(e.args, str) else str(e.args or 'All'))
+                        )
+
+                    # Create a placeholder table that will be updated later
+                    self.samples_table = ui.table(
+                        columns=[
+                            {'name': 'sample_id', 'label': 'Sample ID', 'field': 'sample_id', 'sortable': True},
+                            {'name': 'origin', 'label': 'Origin', 'field': 'origin', 'sortable': True},
+                            {'name': 'active_jobs', 'label': 'Active', 'field': 'active_jobs', 'sortable': True},
+                            {'name': 'total_jobs', 'label': 'Total', 'field': 'total_jobs', 'sortable': True},
+                            {'name': 'completed_jobs', 'label': 'Completed', 'field': 'completed_jobs', 'sortable': True},
+                            {'name': 'failed_jobs', 'label': 'Failed', 'field': 'failed_jobs', 'sortable': True},
+                            {'name': 'job_types', 'label': 'Job Types', 'field': 'job_types', 'sortable': True},
+                            {'name': 'last_seen', 'label': 'Last Activity', 'field': 'last_seen', 'sortable': True}
+                        ],
+                        rows=[],
+                        row_key='sample_id',
+                        selection='single',
+                        pagination=20
+                    ).props('rows-per-page-options=[10,20,50,0]').classes('w-full')
+
+                    # Selection handler to enable the external View button
                     try:
-                        # Filter out placeholder/unknown entries that can appear before
-                        # sample_id is known, and normalize job_types for display.
-                        rows_to_show = []
-                        for r in self._last_samples_rows:
-                            sid = r.get('sample_id')
-                            if not sid or sid == 'unknown':
-                                continue
-                            jt = r.get('job_types')
-                            if isinstance(jt, set):
-                                r = dict(r)
-                                r['job_types'] = ','.join(sorted(jt))
-                            rows_to_show.append(r)
-                        self.samples_table.rows = rows_to_show
-                        self.samples_table.update()
-                        # Auto-select if only one sample
-                        if len(rows_to_show) == 1:
-                            self._selected_sample_id = rows_to_show[0].get('sample_id')
-                            self.view_sample_button.enable()
+                        self.samples_table.on('selection', self._on_sample_selected)
                     except Exception:
                         pass
+
+                    # If we have cached rows, show them immediately for instant UX
+                    if self._last_samples_rows:
+                        try:
+                            self._apply_samples_table_filters()
+                            # Auto-select if only one sample
+                            if len(self.samples_table.rows or []) == 1:
+                                self._selected_sample_id = (self.samples_table.rows or [])[0].get('sample_id')
+                                self.view_sample_button.enable()
+                        except Exception:
+                            pass
 
     def _update_samples_table(self, data: Dict[str, Any]):
         """Update the samples overview table with new data."""
@@ -626,33 +730,22 @@ class GUILauncher:
             for sid, row in by_id.items():
                 existing_rows_by_id[sid] = row
             rows = list(existing_rows_by_id.values())
-            # Replace rows to avoid duplicates
-            self.samples_table.rows = rows
-            self.samples_table.update()
-            # Cache for persistence
-            # Hide 'unknown' placeholder entries from the overview and normalize job_types
-            filtered_rows = []
-            for r in rows:
-                sid = r.get('sample_id')
-                if not sid or sid == 'unknown':
-                    continue
-                jt = r.get('job_types')
-                if isinstance(jt, set):
-                    r = dict(r)
-                    r['job_types'] = ','.join(sorted(jt))
-                filtered_rows.append(r)
-            self._last_samples_rows = filtered_rows
-            self._known_sample_ids = {r.get('sample_id') for r in filtered_rows if r.get('sample_id')}
+            # Replace rows to avoid duplicates then apply filters
+            self._last_samples_rows = rows
+            self._apply_samples_table_filters()
+            # Update known IDs from unfiltered cache
+            self._known_sample_ids = {r.get('sample_id') for r in (self._last_samples_rows or []) if r.get('sample_id') and r.get('sample_id') != 'unknown'}
             # Track currently most active/recent sample
-            if filtered_rows:
-                rows_sorted = sorted(filtered_rows, key=lambda r: (r.get('active_jobs', 0), r.get('_last_seen_raw', 0)), reverse=True)
+            visible_rows = self.samples_table.rows or []
+            if visible_rows:
+                rows_sorted = sorted(visible_rows, key=lambda r: (r.get('active_jobs', 0), r.get('_last_seen_raw', 0)), reverse=True)
                 self._current_sample_id = rows_sorted[0].get('sample_id')
             # Update external button state
-            if self._selected_sample_id and any(r.get('sample_id') == self._selected_sample_id for r in filtered_rows):
+            if self._selected_sample_id and any(r.get('sample_id') == self._selected_sample_id for r in visible_rows):
                 self.view_sample_button.enable()
-            elif filtered_rows:
-                if len(filtered_rows) == 1:
-                    self._selected_sample_id = filtered_rows[0].get('sample_id')
+            elif visible_rows:
+                if len(visible_rows) == 1:
+                    self._selected_sample_id = visible_rows[0].get('sample_id')
                     self.view_sample_button.enable()
                 else:
                     self.view_sample_button.disable()
@@ -678,87 +771,163 @@ class GUILauncher:
                     self.view_sample_button.disable()
         except Exception:
             pass
-    
+
+    # -------- Samples table helpers: search, filter, sort --------
+    def _normalize_rows_for_display(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        for r in rows or []:
+            sid = r.get('sample_id')
+            if not sid or sid == 'unknown':
+                continue
+            jt = r.get('job_types')
+            if isinstance(jt, set):
+                r = dict(r)
+                r['job_types'] = ','.join(sorted(jt))
+            normalized.append(r)
+        return normalized
+
+    def _set_samples_query(self, query: str) -> None:
+        try:
+            self._samples_filters['query'] = (query or '').strip().lower()
+            self._apply_samples_table_filters()
+        except Exception:
+            pass
+
+    def _set_samples_origin_filter(self, origin_value: str) -> None:
+        try:
+            self._samples_filters['origin'] = origin_value or 'All'
+            self._apply_samples_table_filters()
+        except Exception:
+            pass
+
+    def _apply_samples_table_filters(self) -> None:
+        try:
+            base_rows = getattr(self, '_last_samples_rows', []) or []
+            rows = self._normalize_rows_for_display(base_rows)
+
+            # Origin filter
+            origin = (self._samples_filters or {}).get('origin', 'All')
+            if origin and origin != 'All':
+                rows = [r for r in rows if (r.get('origin') == origin)]
+
+            # Global query filter
+            q = (self._samples_filters or {}).get('query', '')
+            if q:
+                ql = q.lower()
+                def match_any(r: Dict[str, Any]) -> bool:
+                    return any(
+                        (str(r.get(k, '')).lower().find(ql) >= 0)
+                        for k in ['sample_id', 'origin', 'job_types', 'last_seen']
+                    ) or any(
+                        (str(r.get(k, 0)).lower().find(ql) >= 0)
+                        for k in ['active_jobs', 'total_jobs', 'completed_jobs', 'failed_jobs']
+                    )
+                rows = [r for r in rows if match_any(r)]
+
+            self.samples_table.rows = rows
+            self.samples_table.update()
+        except Exception:
+            pass
+
     def _create_sample_detail_page(self, sample_id: str):
         """Create the individual sample detail page."""
-        # Guard: unknown sample -> show message and back button; also redirect
-        if self._known_sample_ids and sample_id not in self._known_sample_ids:
-            with ui.column().classes('w-full items-center justify-center p-8'):
-                ui.label(f'Unknown sample: {sample_id}').classes('text-xl font-semibold text-red-600')
-                ui.label('This sample ID has not been seen yet in the current session.').classes('text-sm text-gray-600')
-                ui.button('Back to Samples', on_click=lambda: ui.navigate.to('/live_data')).props('color=primary')
-            # Soft redirect after short delay
-            try:
-                ui.timer(1.5, lambda: ui.navigate.to('/live_data'), once=True)
-            except Exception:
-                pass
-            return
+        with theme.frame(
+            f"R.O.B.I.N - Sample {sample_id}",
+            smalltitle="Samples",
+            batphone=False,
+        ):
+            # Guard: unknown sample -> show message and back button; also redirect
+            if self._known_sample_ids and sample_id not in self._known_sample_ids:
+                with ui.column().classes('w-full items-center justify-center p-8'):
+                    ui.label(f'Unknown sample: {sample_id}').classes('text-xl font-semibold text-red-600')
+                    ui.label('This sample ID has not been seen yet in the current session.').classes('text-sm text-gray-600')
+                    ui.button('Back to Samples', on_click=lambda: ui.navigate.to('/live_data')).props('color=primary')
+                # Soft redirect after short delay
+                try:
+                    ui.timer(1.5, lambda: ui.navigate.to('/live_data'), once=True)
+                except Exception:
+                    pass
+                return
 
-        sample_dir = Path(self.monitored_directory) / sample_id if self.monitored_directory else None
+            sample_dir = Path(self.monitored_directory) / sample_id if self.monitored_directory else None
 
-        # Page title and navigation
-        with ui.row().classes('w-full bg-blue-600 text-white p-4 items-center justify-between'):
-            with ui.row().classes('items-center'):
-                ui.label(f'🧬 Sample: {sample_id}').classes('text-2xl font-bold')
-                ui.label('Detailed sample information and job history').classes('text-sm ml-4 opacity-80')
-            with ui.row().classes('gap-4'):
-                ui.link('📋 Sample Overview', '/live_data').classes('text-white hover:text-blue-200 text-sm')
-                ui.link('📊 Workflow Monitor', '/littlejohn').classes('text-white hover:text-blue-200 text-sm')
+            # Page title and navigation
+            with ui.row().classes('w-full bg-blue-600 text-white p-4 items-center justify-between'):
+                with ui.row().classes('items-center'):
+                    ui.label(f'🧬 Sample: {sample_id}').classes('text-2xl font-bold')
+                    ui.label('Detailed sample information and job history').classes('text-sm ml-4 opacity-80')
+                with ui.row().classes('gap-4'):
+                    ui.link('📋 Sample Overview', '/live_data').classes('text-white hover:text-blue-200 text-sm')
+                    ui.link('📊 Workflow Monitor', '/littlejohn').classes('text-white hover:text-blue-200 text-sm')
 
-        with ui.column().classes('w-full p-4 gap-4'):
-            # Coverage section (refactored component)
-            try:
-                from .gui.components.coverage import add_coverage_section  # type: ignore
-                add_coverage_section(self, sample_dir)
-            except Exception:
-                pass
+            with ui.column().classes('w-full p-4 gap-4'):
+                # Coverage section (refactored component)
+                try:
+                    from .gui.components.coverage import add_coverage_section  # type: ignore
+                    add_coverage_section(self, sample_dir)
+                except Exception:
+                    pass
 
-            # Classification section (refactored component)
-            try:
-                from .gui.components.classification import add_classification_section  # type: ignore
-                add_classification_section(sample_dir)
-            except Exception as e:
-                logging.exception(f"[GUI] Classification section failed: {e}")
+                # Classification section (refactored component)
+                try:
+                    from .gui.components.classification import add_classification_section  # type: ignore
+                    add_classification_section(sample_dir)
+                except Exception as e:
+                    logging.exception(f"[GUI] Classification section failed: {e}")
 
-            # MGMT section (refactored component)
-            try:
-                from .gui.components.mgmt import add_mgmt_section  # type: ignore
-                add_mgmt_section(self, sample_dir)
-            except Exception as e:
-                logging.exception(f"[GUI] MGMT section failed: {e}")
+                # MGMT section (refactored component)
+                try:
+                    from .gui.components.mgmt import add_mgmt_section  # type: ignore
+                    add_mgmt_section(self, sample_dir)
+                except Exception as e:
+                    logging.exception(f"[GUI] MGMT section failed: {e}")
 
-            # CNV section (refactored component)
-            try:
-                from .gui.components.cnv import add_cnv_section  # type: ignore
-                # Pass launcher for shared state access (launcher._cnv_state)
-                add_cnv_section(self, sample_dir)
-            except Exception as e:
-                logging.exception(f"[GUI] CNV section failed: {e}")
-            
-            # Files in output directory
-            with ui.card().classes('w-full'):
-                ui.label('📁 Output Files').classes('text-lg font-semibold mb-2')
-                files_table = ui.table(
-                    columns=[
-                        {'name': 'name', 'label': 'File', 'field': 'name'},
-                        {'name': 'size', 'label': 'Size (bytes)', 'field': 'size'},
-                        {'name': 'mtime', 'label': 'Last Modified', 'field': 'mtime'},
-                    ],
-                    rows=[],
-                    pagination=20
-                ).classes('w-full')
+                # CNV section (refactored component)
+                try:
+                    from .gui.components.cnv import add_cnv_section  # type: ignore
+                    # Pass launcher for shared state access (launcher._cnv_state)
+                    add_cnv_section(self, sample_dir)
+                except Exception as e:
+                    logging.exception(f"[GUI] CNV section failed: {e}")
+                
+                # Files in output directory
+                with ui.card().classes('w-full'):
+                    ui.label('📁 Output Files').classes('text-lg font-semibold mb-2')
+                    with ui.row().classes('items-center gap-3 mb-2'):
+                        files_search = ui.input('Search files…').props('borderless dense clearable')
+                    files_table = ui.table(
+                        columns=[
+                            {'name': 'name', 'label': 'File', 'field': 'name', 'sortable': True},
+                            {'name': 'size', 'label': 'Size (bytes)', 'field': 'size', 'sortable': True},
+                            {'name': 'mtime', 'label': 'Last Modified', 'field': 'mtime', 'sortable': True},
+                        ],
+                        rows=[],
+                        pagination=20
+                    ).classes('w-full')
+                    try:
+                        files_table.props('multi-sort rows-per-page-options="[10,20,50,0]"')
+                        files_search.bind_value(files_table, 'filter')
+                    except Exception:
+                        pass
 
-            # master.csv summary
-            with ui.card().classes('w-full'):
-                ui.label('📊 master.csv Summary').classes('text-lg font-semibold mb-2')
-                summary_table = ui.table(
-                    columns=[
-                        {'name': 'key', 'label': 'Field', 'field': 'key'},
-                        {'name': 'value', 'label': 'Value', 'field': 'value'},
-                    ],
-                    rows=[],
-                    pagination=0
-                ).classes('w-full')
+                # master.csv summary
+                with ui.card().classes('w-full'):
+                    ui.label('📊 master.csv Summary').classes('text-lg font-semibold mb-2')
+                    with ui.row().classes('items-center gap-3 mb-2'):
+                        summary_search = ui.input('Search fields…').props('borderless dense clearable')
+                    summary_table = ui.table(
+                        columns=[
+                            {'name': 'key', 'label': 'Field', 'field': 'key', 'sortable': True},
+                            {'name': 'value', 'label': 'Value', 'field': 'value', 'sortable': True},
+                        ],
+                        rows=[],
+                        pagination=0
+                    ).classes('w-full')
+                    try:
+                        summary_table.props('multi-sort')
+                        summary_search.bind_value(summary_table, 'filter')
+                    except Exception:
+                        pass
 
             # Periodic refresher for files table and master.csv summary
             def _refresh_sample_detail() -> None:
@@ -817,186 +986,191 @@ class GUILauncher:
     
     def _create_workflow_monitor(self):
         """Create the main workflow monitoring page."""
-        # Page title and navigation
-        with ui.row().classes('w-full bg-blue-600 text-white p-4 items-center justify-between'):
-            with ui.row().classes('items-center'):
-                ui.label('📊 LittleJohn Workflow Monitor').classes('text-2xl font-bold')
-                ui.label('Real-time workflow monitoring and control').classes('text-sm ml-4 opacity-80')
+        with theme.frame(
+            f"R.O.B.I.N - LittleJohn Workflow Monitor",
+            smalltitle="Samples",
+            batphone=False,
+        ):
+            # Page title and navigation
+            with ui.row().classes('w-full bg-blue-600 text-white p-4 items-center justify-between'):
+                with ui.row().classes('items-center'):
+                    ui.label('📊 LittleJohn Workflow Monitor').classes('text-2xl font-bold')
+                    ui.label('Real-time workflow monitoring and control').classes('text-sm ml-4 opacity-80')
+                
+                # Navigation links
+                with ui.row().classes('gap-4'):
+                    ui.link('🏠 Welcome', '/').classes('text-white hover:text-blue-200 text-sm')
+                    ui.link('📋 Sample Overview', '/live_data').classes('text-white hover:text-blue-200 text-sm')
+                    ui.label('📊 Workflow Monitor').classes('text-white text-sm font-semibold')
             
-            # Navigation links
-            with ui.row().classes('gap-4'):
-                ui.link('🏠 Welcome', '/').classes('text-white hover:text-blue-200 text-sm')
-                ui.link('📋 Sample Overview', '/live_data').classes('text-white hover:text-blue-200 text-sm')
-                ui.label('📊 Workflow Monitor').classes('text-white text-sm font-semibold')
-        
-        # Main content area
-        with ui.column().classes('w-full p-4 gap-4'):
-            # Workflow Status Overview
-            with ui.card().classes('w-full bg-gradient-to-r from-blue-50 to-indigo-50'):
-                ui.label('🚀 Workflow Status Overview').classes('text-lg font-semibold mb-4 text-blue-800')
-                
-                # Status indicator
-                with ui.row().classes('w-full items-center gap-4'):
-                    self.status_indicator = ui.label('🟢').classes('text-2xl')
-                    self.status_label = ui.label('Workflow Status: Running').classes('text-sm font-medium text-green-600')
-                
-                # Timing information
-                with ui.row().classes('w-full gap-8 mt-4'):
-                    self.workflow_start_time = ui.label('Started: --').classes('text-sm text-gray-600')
-                    self.workflow_duration = ui.label('Duration: --').classes('text-sm text-gray-600')
-                
-                # Progress bar (hide internal float value text; use external formatted label below)
-                self.progress_bar = ui.linear_progress(0.0).classes('w-full mt-4').style('color: transparent')
-                self.progress_label = ui.label('0% Complete').classes('text-sm text-center text-gray-600')
-
-                # Counts summary
-                with ui.row().classes('w-full gap-6 mt-2'):
-                    with ui.row().classes('items-center gap-2'):
-                        ui.label('Completed:').classes('text-xs text-gray-600')
-                        self.completed_count = ui.label('0').classes('text-xs font-semibold')
-                    with ui.row().classes('items-center gap-2'):
-                        ui.label('Failed:').classes('text-xs text-gray-600')
-                        self.failed_count = ui.label('0').classes('text-xs font-semibold')
-                    with ui.row().classes('items-center gap-2'):
-                        ui.label('Total:').classes('text-xs text-gray-600')
-                        self.total_count = ui.label('0').classes('text-xs font-semibold')
-            
-            # Queue Status
-            with ui.card().classes('w-full'):
-                ui.label('📋 Queue Status').classes('text-lg font-semibold mb-4')
-                
-                # Queue status grid
-                with ui.grid(columns=4).classes('w-full gap-4'):
-                    # Preprocessing
-                    with ui.card().classes('bg-green-50 p-4'):
-                        ui.label('🔬 Preprocessing').classes('text-sm font-medium text-green-800')
-                        self.preprocessing_status = ui.label('0/0').classes('text-2xl font-bold text-green-600')
+            # Main content area
+            with ui.column().classes('w-full p-4 gap-4'):
+                # Workflow Status Overview
+                with ui.card().classes('w-full bg-gradient-to-r from-blue-50 to-indigo-50'):
+                    ui.label('🚀 Workflow Status Overview').classes('text-lg font-semibold mb-4 text-blue-800')
                     
-                    # Analysis
-                    with ui.card().classes('bg-blue-50 p-4'):
-                        ui.label('🧬 Analysis').classes('text-sm font-medium text-blue-800')
-                        self.analysis_status = ui.label('0/0').classes('text-2xl font-bold text-blue-600')
+                    # Status indicator
+                    with ui.row().classes('w-full items-center gap-4'):
+                        self.status_indicator = ui.label('🟢').classes('text-2xl')
+                        self.status_label = ui.label('Workflow Status: Running').classes('text-sm font-medium text-green-600')
                     
-                    # Classification
-                    with ui.card().classes('bg-purple-50 p-4'):
-                        ui.label('🎯 Classification').classes('text-sm font-medium text-purple-800')
-                        self.classification_status = ui.label('0/0').classes('text-2xl font-bold text-purple-800')
+                    # Timing information
+                    with ui.row().classes('w-full gap-8 mt-4'):
+                        self.workflow_start_time = ui.label('Started: --').classes('text-sm text-gray-600')
+                        self.workflow_duration = ui.label('Duration: --').classes('text-sm text-gray-600')
                     
-                    # Other
-                    with ui.card().classes('bg-gray-50 p-4'):
-                        ui.label('⚙️ Other').classes('text-sm font-medium text-gray-800')
-                        self.other_status = ui.label('0/0').classes('text-2xl font-bold text-gray-600')
+                    # Progress bar (hide internal float value text; use external formatted label below)
+                    self.progress_bar = ui.linear_progress(0.0).classes('w-full mt-4').style('color: transparent')
+                    self.progress_label = ui.label('0% Complete').classes('text-sm text-center text-gray-600')
 
-                # If we have a cached queue status from before the page was created, apply it now
-                try:
-                    if self._last_queue_status:
-                        self._update_queue_status(self._last_queue_status)
-                except Exception:
-                    pass
-            
-            # Active Jobs
-            with ui.card().classes('w-full'):
-                ui.label('⚡ Active Jobs').classes('text-lg font-semibold mb-4')
+                    # Counts summary
+                    with ui.row().classes('w-full gap-6 mt-2'):
+                        with ui.row().classes('items-center gap-2'):
+                            ui.label('Completed:').classes('text-xs text-gray-600')
+                            self.completed_count = ui.label('0').classes('text-xs font-semibold')
+                        with ui.row().classes('items-center gap-2'):
+                            ui.label('Failed:').classes('text-xs text-gray-600')
+                            self.failed_count = ui.label('0').classes('text-xs font-semibold')
+                        with ui.row().classes('items-center gap-2'):
+                            ui.label('Total:').classes('text-xs text-gray-600')
+                            self.total_count = ui.label('0').classes('text-xs font-semibold')
                 
-                with ui.row().classes('items-center gap-3 mb-2'):
-                    self.active_jobs_search = ui.input('Search…').props('borderless dense clearable')
-                    self.active_jobs_type_filter = ui.select(options=['All'], value='All', label='Type').props('dense clearable').classes('w-40')
-                    self.active_jobs_worker_filter = ui.select(options=['All'], value='All', label='Worker').props('dense clearable').classes('w-40')
-
-                # Active jobs table
-                self.active_jobs_table = ui.table(
-                    columns=[
-                        {'name': 'job_id', 'label': 'Job ID', 'field': 'job_id', 'sortable': True},
-                        {'name': 'job_type', 'label': 'Type', 'field': 'job_type', 'sortable': True},
-                        {'name': 'filepath', 'label': 'File', 'field': 'filepath', 'sortable': True},
-                        {'name': 'worker', 'label': 'Worker', 'field': 'worker', 'sortable': True},
-                        {'name': 'duration', 'label': 'Duration', 'field': 'duration', 'sortable': True},
-                        {'name': 'progress', 'label': 'Progress', 'field': 'progress', 'sortable': True}
-                    ],
-                    rows=[],
-                    pagination=10
-                ).classes('w-full')
-                try:
-                    self.active_jobs_table.props('multi-sort rows-per-page-options="[10,20,50,0]"')
-                    self.active_jobs_search.bind_value(self.active_jobs_table, 'filter')
-                except Exception:
-                    pass
-                try:
-                    def _on_active_jobs_filter_change(_=None):
-                        self._apply_active_jobs_filters_and_update()
-                    self.active_jobs_type_filter.on('update:model-value', _on_active_jobs_filter_change)
-                    self.active_jobs_worker_filter.on('update:model-value', _on_active_jobs_filter_change)
-                except Exception:
-                    pass
-                
-                # Placeholder for when no jobs are active
-                ui.label('No active jobs at the moment.').classes('text-sm text-gray-500 mt-2')
-            
-            # Live Logs
-            with ui.card().classes('w-full'):
-                ui.label('📝 Live Logs').classes('text-lg font-semibold mb-4')
-                
-                # Log controls
-                with ui.row().classes('w-full justify-between items-center mb-2'):
-                    with ui.row().classes('gap-2'):
-                        ui.button('Clear', on_click=self._clear_logs).classes('bg-gray-500 hover:bg-gray-600 text-white text-xs')
-                        ui.button('Export', on_click=lambda: self._export_logs()).classes('bg-blue-500 hover:bg-blue-600 text-white text-xs')
-                
-                # Log area
-                self.log_area = ui.textarea('Workflow logs will appear here...').classes('w-full h-40').props('readonly')
-            
-            # Configuration
-            with ui.card().classes('w-full'):
-                ui.label('⚙️ Workflow Configuration').classes('text-lg font-semibold mb-4')
-                
-                # Configuration details
-                with ui.grid(columns=2).classes('w-full gap-4'):
-                    with ui.column():
-                        ui.label('Monitored Directory:').classes('text-sm font-medium')
-                        ui.label(self.monitored_directory or 'Not specified').classes('text-sm text-gray-600')
+                # Queue Status
+                with ui.card().classes('w-full'):
+                    ui.label('📋 Queue Status').classes('text-lg font-semibold mb-4')
+                    
+                    # Queue status grid
+                    with ui.grid(columns=4).classes('w-full gap-4'):
+                        # Preprocessing
+                        with ui.card().classes('bg-green-50 p-4'):
+                            ui.label('🔬 Preprocessing').classes('text-sm font-medium text-green-800')
+                            self.preprocessing_status = ui.label('0/0').classes('text-2xl font-bold text-green-600')
                         
-                        ui.label('Workflow Steps:').classes('text-sm font-medium mt-2')
-                        ui.label(', '.join(self.workflow_steps) if self.workflow_steps else 'Not specified').classes('text-sm text-gray-600')
-                    
-                    with ui.column():
-                        ui.label('Log Level:').classes('text-sm font-medium')
-                        ui.label('--').classes('text-sm text-gray-600')
+                        # Analysis
+                        with ui.card().classes('bg-blue-50 p-4'):
+                            ui.label('🧬 Analysis').classes('text-sm font-medium text-blue-800')
+                            self.analysis_status = ui.label('0/0').classes('text-2xl font-bold text-blue-600')
                         
-                        ui.label('Analysis Workers:').classes('text-sm font-medium mt-2')
-                        ui.label('--').classes('text-sm text-gray-600')
-            
-            # Error Summary & Troubleshooting
-            with ui.card().classes('w-full'):
-                ui.label('⚠️ Error Summary & Troubleshooting').classes('text-lg font-semibold mb-2')
+                        # Classification
+                        with ui.card().classes('bg-purple-50 p-4'):
+                            ui.label('🎯 Classification').classes('text-sm font-medium text-purple-800')
+                            self.classification_status = ui.label('0/0').classes('text-2xl font-bold text-purple-800')
+                        
+                        # Other
+                        with ui.card().classes('bg-gray-50 p-4'):
+                            ui.label('⚙️ Other').classes('text-sm font-medium text-gray-800')
+                            self.other_status = ui.label('0/0').classes('text-2xl font-bold text-gray-600')
+
+                    # If we have a cached queue status from before the page was created, apply it now
+                    try:
+                        if self._last_queue_status:
+                            self._update_queue_status(self._last_queue_status)
+                    except Exception:
+                        pass
                 
-                # Error counts by type
-                with ui.row().classes('w-full justify-between'):
-                    with ui.column().classes('text-center'):
-                        self.preprocessing_errors = ui.label('0').classes('text-xl font-bold text-red-600')
-                        ui.label('Preprocessing').classes('text-xs text-gray-600')
-                    with ui.column().classes('text-center'):
-                        self.analysis_errors = ui.label('0').classes('text-xl font-bold text-red-600')
-                        ui.label('Analysis').classes('text-xs text-gray-600')
-                    with ui.column().classes('text-center'):
-                        self.classification_errors = ui.label('0').classes('text-xl font-bold text-red-600')
-                        ui.label('Classification').classes('text-xs text-gray-600')
+                # Active Jobs
+                with ui.card().classes('w-full'):
+                    ui.label('⚡ Active Jobs').classes('text-lg font-semibold mb-4')
+                    
+                    with ui.row().classes('items-center gap-3 mb-2'):
+                        self.active_jobs_search = ui.input('Search…').props('borderless dense clearable')
+                        self.active_jobs_type_filter = ui.select(options=['All'], value='All', label='Type').props('dense clearable').classes('w-40')
+                        self.active_jobs_worker_filter = ui.select(options=['All'], value='All', label='Worker').props('dense clearable').classes('w-40')
+
+                    # Active jobs table
+                    self.active_jobs_table = ui.table(
+                        columns=[
+                            {'name': 'job_id', 'label': 'Job ID', 'field': 'job_id', 'sortable': True},
+                            {'name': 'job_type', 'label': 'Type', 'field': 'job_type', 'sortable': True},
+                            {'name': 'filepath', 'label': 'File', 'field': 'filepath', 'sortable': True},
+                            {'name': 'worker', 'label': 'Worker', 'field': 'worker', 'sortable': True},
+                            {'name': 'duration', 'label': 'Duration', 'field': 'duration', 'sortable': True},
+                            {'name': 'progress', 'label': 'Progress', 'field': 'progress', 'sortable': True}
+                        ],
+                        rows=[],
+                        pagination=10
+                    ).classes('w-full')
+                    try:
+                        self.active_jobs_table.props('multi-sort rows-per-page-options="[10,20,50,0]"')
+                        self.active_jobs_search.bind_value(self.active_jobs_table, 'filter')
+                    except Exception:
+                        pass
+                    try:
+                        def _on_active_jobs_filter_change(_=None):
+                            self._apply_active_jobs_filters_and_update()
+                        self.active_jobs_type_filter.on('update:model-value', _on_active_jobs_filter_change)
+                        self.active_jobs_worker_filter.on('update:model-value', _on_active_jobs_filter_change)
+                    except Exception:
+                        pass
+                    
+                    # Placeholder for when no jobs are active
+                    ui.label('No active jobs at the moment.').classes('text-sm text-gray-500 mt-2')
                 
-                # Common error messages
-                ui.separator()
-                ui.label('Recent Errors').classes('text-sm font-medium mt-2')
-                self.error_summary_label = ui.label('No errors detected').classes('text-xs text-gray-600')
-            
-            # Footer
-            with ui.row().classes('w-full bg-gray-200 p-2 justify-center'):
-                ui.label('LittleJohn Workflow Monitor - Running').classes('text-sm text-gray-600')
-            
-            # Signal that GUI is ready to receive updates
-            self.gui_ready.set()
-            logging.info("[GUI] UI created and ready to receive updates")
-            # Start a periodic UI-thread drain of the update queue
-            ui.timer(0.3, self._drain_updates_on_ui, active=True)
-            # Start duration refresher
-            ui.timer(1.0, lambda: self._refresh_duration(), active=True)
+                # Live Logs
+                with ui.card().classes('w-full'):
+                    ui.label('📝 Live Logs').classes('text-lg font-semibold mb-4')
+                    
+                    # Log controls
+                    with ui.row().classes('w-full justify-between items-center mb-2'):
+                        with ui.row().classes('gap-2'):
+                            ui.button('Clear', on_click=self._clear_logs).classes('bg-gray-500 hover:bg-gray-600 text-white text-xs')
+                            ui.button('Export', on_click=lambda: self._export_logs()).classes('bg-blue-500 hover:bg-blue-600 text-white text-xs')
+                    
+                    # Log area
+                    self.log_area = ui.textarea('Workflow logs will appear here...').classes('w-full h-40').props('readonly')
+                
+                # Configuration
+                with ui.card().classes('w-full'):
+                    ui.label('⚙️ Workflow Configuration').classes('text-lg font-semibold mb-4')
+                    
+                    # Configuration details
+                    with ui.grid(columns=2).classes('w-full gap-4'):
+                        with ui.column():
+                            ui.label('Monitored Directory:').classes('text-sm font-medium')
+                            ui.label(self.monitored_directory or 'Not specified').classes('text-sm text-gray-600')
+                            
+                            ui.label('Workflow Steps:').classes('text-sm font-medium mt-2')
+                            ui.label(', '.join(self.workflow_steps) if self.workflow_steps else 'Not specified').classes('text-sm text-gray-600')
+                        
+                        with ui.column():
+                            ui.label('Log Level:').classes('text-sm font-medium')
+                            ui.label('--').classes('text-sm text-gray-600')
+                            
+                            ui.label('Analysis Workers:').classes('text-sm font-medium mt-2')
+                            ui.label('--').classes('text-sm text-gray-600')
+                
+                # Error Summary & Troubleshooting
+                with ui.card().classes('w-full'):
+                    ui.label('⚠️ Error Summary & Troubleshooting').classes('text-lg font-semibold mb-2')
+                    
+                    # Error counts by type
+                    with ui.row().classes('w-full justify-between'):
+                        with ui.column().classes('text-center'):
+                            self.preprocessing_errors = ui.label('0').classes('text-xl font-bold text-red-600')
+                            ui.label('Preprocessing').classes('text-xs text-gray-600')
+                        with ui.column().classes('text-center'):
+                            self.analysis_errors = ui.label('0').classes('text-xl font-bold text-red-600')
+                            ui.label('Analysis').classes('text-xs text-gray-600')
+                        with ui.column().classes('text-center'):
+                            self.classification_errors = ui.label('0').classes('text-xl font-bold text-red-600')
+                            ui.label('Classification').classes('text-xs text-gray-600')
+                    
+                    # Common error messages
+                    ui.separator()
+                    ui.label('Recent Errors').classes('text-sm font-medium mt-2')
+                    self.error_summary_label = ui.label('No errors detected').classes('text-xs text-gray-600')
+                
+                # Footer
+                with ui.row().classes('w-full bg-gray-200 p-2 justify-center'):
+                    ui.label('LittleJohn Workflow Monitor - Running').classes('text-sm text-gray-600')
+                
+                # Signal that GUI is ready to receive updates
+                self.gui_ready.set()
+                logging.info("[GUI] UI created and ready to receive updates")
+                # Start a periodic UI-thread drain of the update queue
+                ui.timer(0.3, self._drain_updates_on_ui, active=True)
+                # Start duration refresher
+                ui.timer(1.0, lambda: self._refresh_duration(), active=True)
 
     def _refresh_duration(self):
         if self._is_running and self._start_time and hasattr(self, 'workflow_duration'):

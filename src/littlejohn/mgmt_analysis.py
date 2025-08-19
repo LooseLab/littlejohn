@@ -392,8 +392,8 @@ def process_bam_file(bam_path: str, metadata: Dict[str, Any], work_dir: str, thr
         try:
             # Sort and index the accumulated mgmt.bam file for methylartist
             sorted_mgmt_bam = os.path.join(sample_dir, "mgmt_sorted.bam")
-            temp_files.append(sorted_mgmt_bam)
-            temp_files.append(f"{sorted_mgmt_bam}.bai")
+            #temp_files.append(sorted_mgmt_bam)
+            #temp_files.append(f"{sorted_mgmt_bam}.bai")
             
             try:
                 pysam.sort("-o", sorted_mgmt_bam, mgmt_bam_output)

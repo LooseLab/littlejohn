@@ -69,38 +69,45 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
     with ui.card().classes('w-full'):
         ui.label('🎯 Target Coverage').classes('text-lg font-semibold mb-2')
-        with ui.grid(columns=2).classes('w-full gap-4'):
-            target_boxplot = ui.echart({
-                'backgroundColor': 'transparent',
-                'title': {'text': 'Target Coverage', 'left': 'center', 'top': 10, 'textStyle': {'fontSize': 16, 'color': '#000'}},
-                'grid': {'left': '5%', 'right': '5%', 'bottom': '10%', 'top': '20%', 'containLabel': True},
-                'dataset': [
-                    {'id': 'raw', 'dimensions': ['chrom','min','Q1','median','Q3','max','chrom_index'], 'source': []},
-                    {'id': 'rawdata', 'dimensions': ['chrom','coverage','name'], 'source': []},
-                    {'id': 'outliers', 'dimensions': ['chrom','coverage','name'], 'source': []},
-                    {'id': 'globaloutliers', 'dimensions': ['chrom','coverage','name'], 'source': []},
-                ],
-                'xAxis': {'type': 'category', 'name': 'Chromosome', 'nameGap': 30, 'axisLabel': {'interval': 0, 'rotate': 45}},
-                'yAxis': {'type': 'value', 'name': 'Coverage (x)'},
-                'legend': {'top': 50, 'selected': {'box plot': True, 'outliers': True, 'global outliers': True, 'raw data': False}},
-                'series': [
-                    {'name': 'box plot', 'type': 'boxplot', 'datasetId': 'raw', 'encode': {'x': 'chrom', 'y': ['min','Q1','median','Q3','max'], 'itemName': ['chrom'], 'tooltip': ['min','Q1','median','Q3','max']}},
-                    {'name': 'outliers', 'type': 'scatter', 'datasetId': 'outliers', 'symbolSize': 6, 'label': {'show': True, 'position': 'right', 'formatter': '{@name}'}, 'encode': {'x': 'chrom', 'y': 'coverage', 'label': ['name'], 'tooltip': ['name','coverage']}},
-                    {'name': 'global outliers', 'type': 'scatter', 'datasetId': 'globaloutliers', 'symbolSize': 6, 'label': {'show': True, 'position': 'right', 'formatter': '{@name}'}, 'encode': {'x': 'chrom', 'y': 'coverage', 'label': ['name'], 'tooltip': ['name','coverage']}},
-                ],
-            }).classes('w-full h-80')
-            target_cov_table = ui.table(
-                columns=[
-                    {'name': 'chrom', 'label': 'Chrom', 'field': 'chrom'},
-                    {'name': 'startpos', 'label': 'Start', 'field': 'startpos'},
-                    {'name': 'endpos', 'label': 'End', 'field': 'endpos'},
-                    {'name': 'name', 'label': 'Name', 'field': 'name'},
-                    {'name': 'coverage', 'label': 'Coverage (x)', 'field': 'coverage'},
-                ],
-                rows=[],
-                pagination=20
-            ).classes('w-full h-80')
-            target_cov_table.add_slot('body-cell-coverage', """
+        target_boxplot = ui.echart({
+            'backgroundColor': 'transparent',
+            'title': {'text': 'Target Coverage', 'left': 'center', 'top': 10, 'textStyle': {'fontSize': 16, 'color': '#000'}},
+            'grid': {'left': '5%', 'right': '5%', 'bottom': '10%', 'top': '20%', 'containLabel': True},
+            'dataset': [
+                {'id': 'raw', 'dimensions': ['chrom','min','Q1','median','Q3','max','chrom_index'], 'source': []},
+                {'id': 'rawdata', 'dimensions': ['chrom','coverage','name'], 'source': []},
+                {'id': 'outliers', 'dimensions': ['chrom','coverage','name'], 'source': []},
+                {'id': 'globaloutliers', 'dimensions': ['chrom','coverage','name'], 'source': []},
+            ],
+            'xAxis': {'type': 'category', 'name': 'Chromosome', 'nameGap': 30, 'axisLabel': {'interval': 0, 'rotate': 45}},
+            'yAxis': {'type': 'value', 'name': 'Coverage (x)'},
+            'legend': {'top': 50, 'selected': {'box plot': True, 'outliers': True, 'global outliers': True, 'raw data': False}},
+            'series': [
+                {'name': 'box plot', 'type': 'boxplot', 'datasetId': 'raw', 'encode': {'x': 'chrom', 'y': ['min','Q1','median','Q3','max'], 'itemName': ['chrom'], 'tooltip': ['min','Q1','median','Q3','max']}},
+                {'name': 'outliers', 'type': 'scatter', 'datasetId': 'outliers', 'symbolSize': 6, 'label': {'show': True, 'position': 'right', 'formatter': '{@name}'}, 'encode': {'x': 'chrom', 'y': 'coverage', 'label': ['name'], 'tooltip': ['name','coverage']}},
+                {'name': 'global outliers', 'type': 'scatter', 'datasetId': 'globaloutliers', 'symbolSize': 6, 'label': {'show': True, 'position': 'right', 'formatter': '{@name}'}, 'encode': {'x': 'chrom', 'y': 'coverage', 'label': ['name'], 'tooltip': ['name','coverage']}},
+            ],
+        }).classes('w-full h-80')
+    with ui.card().classes('w-full'):
+        with ui.row().classes('items-center gap-3'):
+            target_search = ui.input('Search targets…').props('borderless dense clearable')
+        target_cov_table = ui.table(
+            columns=[
+                {'name': 'chrom', 'label': 'Chrom', 'field': 'chrom', 'sortable': True},
+                {'name': 'startpos', 'label': 'Start', 'field': 'startpos', 'sortable': True},
+                {'name': 'endpos', 'label': 'End', 'field': 'endpos', 'sortable': True},
+                {'name': 'name', 'label': 'Name', 'field': 'name', 'sortable': True},
+                {'name': 'coverage', 'label': 'Coverage (x)', 'field': 'coverage', 'sortable': True},
+            ],
+            rows=[],
+            pagination=20
+        ).classes('w-full h-80')
+        try:
+            target_cov_table.props('multi-sort rows-per-page-options="[10,20,50,0]"')
+            target_search.bind_value(target_cov_table, 'filter')
+        except Exception:
+            pass
+        target_cov_table.add_slot('body-cell-coverage', """
 <q-td key="coverage" :props="props">
   <q-badge :color="props.value >= 30 ? 'green' : props.value >= 20 ? 'blue' : props.value >= 10 ? 'orange' : 'red'">
     {{ Number(props.value).toFixed(2) }}

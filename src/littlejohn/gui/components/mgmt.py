@@ -10,9 +10,13 @@ try:
 except ImportError:  # pragma: no cover
     ui = None
 
+ 
 
 def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
     """Build the MGMT section and attach refresh timer. Uses launcher._mgmt_state."""
+    print("--------------------------------")
+    print("Adding MGMT section")
+    print("--------------------------------")
     with ui.card().classes('w-full'):
         mgmt_exp = ui.expansion('MGMT', icon='science').classes('w-full')
         with mgmt_exp:
@@ -22,7 +26,9 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                     mgmt_avg = ui.label('Average: --%').classes('text-sm text-gray-700')
                     mgmt_pred = ui.label('Prediction: --%').classes('text-sm text-gray-700')
             ui.label('MGMT methylation plot').classes('text-sm text-gray-700')
-            mgmt_img = ui.image('')
+            #mgmt_img = ui.image('')
+            # Persistent Matplotlib element (NiceGUI integration)
+            mgmt_mpl = ui.matplotlib(figsize=(4, 3))
             ui.separator()
             ui.label('MGMT results (latest)').classes('text-sm text-gray-700 mt-2')
             mgmt_results_table = ui.table(
@@ -127,6 +133,7 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                 mgmt_exp.props(f'label="MGMT — {status} ({pred:.2f}%)"')
             except Exception:
                 pass
+            """
             img_path = sample_dir / f"{current_count}_mgmt.png"
             if img_path.exists():
                 img_mtime = img_path.stat().st_mtime
@@ -135,6 +142,9 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                         mgmt_img.set_source(str(img_path))
                     except Exception:
                         mgmt_img.source = str(img_path)
+            """
+            # Gather site_rows for table and plot annotations
+            site_rows: List[Dict[str, Any]] = []
             bed_path = sample_dir / f"{current_count}_mgmt.bed"
             if not bed_path.exists():
                 alt_bed = sample_dir / f"{current_count}_mgmt_mgmt.bed"
@@ -148,15 +158,37 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                         mgmt_sites_table.update()
                     except Exception:
                         pass
+                else:
+                    # still populate for plotting if unchanged
+                    site_rows = _extract_mgmt_specific_sites(bed_path)
+            
+            bam_path = sample_dir / f"mgmt_sorted.bam"
+            if bam_path.exists():
+                from littlejohn.methylation_wrapper import locus_figure, save_figure_pickle, load_figure_pickle
+
+                fig = locus_figure(
+                    interval="chr10:129466536-129467536",
+                    bam_path=str(bam_path),
+                    motif="CG",
+                    mods="m",
+                    extra_cli=[
+                        # "--minqual","20", "--reads","2000", "--height","6", "--width","10"
+                    ],
+                    site_rows=site_rows,
+                )
+                # Update NiceGUI Matplotlib element
+                mgmt_mpl.figure = fig
+                mgmt_mpl.update()
+                
             launcher._mgmt_state[key] = {
                 'last_count': current_count,
                 'csv_path': str(latest_csv), 'csv_mtime': csv_mtime,
-                'png_path': str(img_path) if img_path.exists() else '', 'png_mtime': img_path.stat().st_mtime if img_path.exists() else 0,
+                #'png_path': str(img_path) if img_path.exists() else '', 'png_mtime': img_path.stat().st_mtime if img_path.exists() else 0,
                 'bed_path': str(bed_path) if bed_path.exists() else '', 'bed_mtime': bed_path.stat().st_mtime if bed_path.exists() else 0,
             }
-        except Exception:
-            pass
+        except Exception as e:
+            print(e)
+            raise Exception(f"Failed to refresh MGMT section: {e}")
 
     ui.timer(30.0, _refresh_mgmt, active=True)
-
-
+ 

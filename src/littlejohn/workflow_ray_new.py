@@ -39,7 +39,8 @@ from watchdog.observers import Observer
 # Optional GUI hook integration
 try:
     from littlejohn.gui_launcher import send_gui_update as _gui_send_update, UpdateType as _GUIUpdateType, launch_gui as _gui_launch
-except Exception:
+except Exception as e:
+    raise Exception(f"GUI not available: {e}")
     def _gui_send_update(*args, **kwargs):
         return None
     _GUIUpdateType = None
