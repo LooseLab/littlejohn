@@ -46,9 +46,7 @@ except Exception:
     def _gui_launch(*args, **kwargs):
         return None
 
-# --- Import your real handlers from LittleJohn ---
-# They are expected to be regular (non-Ray) callables of the form: handler(job: Job) -> None/Context-updates
-# If signatures differ, adapt below wrappers accordingly.
+#Import handlers
 try:
     from littlejohn.bam_preprocessor import bam_preprocessing_handler as _preprocessing_handler
 except Exception:
@@ -111,6 +109,7 @@ except Exception:
         return _L()
     def _configure_logging(global_level: str = "INFO", job_levels: Optional[Dict[str, str]] = None):
         return None
+
 GLOBAL_LOG_LEVEL: str = "INFO"
 
 # ---------- Shared DTOs ----------
@@ -153,6 +152,7 @@ class Job:
             raise ValueError(f"Invalid workflow step: {next_step}")
         queue_type, next_type = next_step.split(":", 1)
         return Job(self.job_id, next_type, queue_type, self.workflow, self.step + 1, self.context)
+    
 
 # ---------- Queue mapping & triggers ----------
 QUEUE_TO_TYPES: Dict[str, Set[str]] = {
@@ -259,7 +259,21 @@ def _wrap_real_handler(py_handler: Optional[Callable[[Job], None]], job_type: st
             except Exception:
                 # Fallback to legacy call
                 py_handler(job)
-            logger.info(f"{job_type} completed")
+            # Log completion or skip based on handler-set context
+            skipped = False
+            try:
+                skipped = bool(job.context.metadata.get("skip_downstream", False))
+            except Exception:
+                skipped = False
+            if skipped and job_type == "preprocessing":
+                logger.warning(f"{job_type} skipped (deliberate): {os.path.basename(job.context.filepath)}")
+                try:
+                    # Inform GUI/CLI via GUI hook if available
+                    _gui_send_update(_GUIUpdateType.LOG_MESSAGE, {"message": f"Skipped (too many reads): {os.path.basename(job.context.filepath)}", "level": "WARNING"}, priority=0)
+                except Exception:
+                    pass
+            else:
+                logger.info(f"{job_type} completed")
         except Exception as e:
             job.context.add_error(job_type, str(e))
             logger.error(f"{job_type} failed: {e}")
@@ -501,9 +515,19 @@ class Coordinator:
 
         # update active & stats
         self.active.pop(job.job_id, None)
+        # Detect deliberate skip (large BAM)
+        is_skipped = False
+        try:
+            is_skipped = (job.job_type == "preprocessing") and bool(ctx.metadata.get("skip_downstream", False))
+        except Exception:
+            is_skipped = False
         if ok:
-            self.completed.append(job.job_id)
-            self.completed_by_type[job.job_type] = self.completed_by_type.get(job.job_type, 0) + 1
+            if not is_skipped:
+                self.completed.append(job.job_id)
+                self.completed_by_type[job.job_type] = self.completed_by_type.get(job.job_type, 0) + 1
+            else:
+                # Track skip for stats
+                self.total_skipped += 1
             # trigger downstream (preferred). For bed_conversion, schedule
             # classifiers/slow once per sample instead of per-file.
             requested = job.context.metadata.get("original_workflow", [])
@@ -575,16 +599,18 @@ class Coordinator:
                     if (req_types is None) or (t in req_types):
                         q = job_queue_of(t)
                         triggered_jobs.append(Job(next(_job_id_counter), t, q, [f"{q}:{t}"], 0, ctx))
-                if triggered_jobs:
+                if (not is_skipped) and triggered_jobs:
                     await self.submit_jobs(triggered_jobs)
                 else:
                     # advance linear chain if any
                     nxt = job.next_job()
-                    if nxt:
+                    if (not is_skipped) and nxt:
                         await self.submit_jobs([nxt])
         else:
-            self.failed.append(job.job_id)
-            self.failed_by_type[job.job_type] = self.failed_by_type.get(job.job_type, 0) + 1
+            # Only record as failed if not a deliberate skip
+            if not is_skipped:
+                self.failed.append(job.job_id)
+                self.failed_by_type[job.job_type] = self.failed_by_type.get(job.job_type, 0) + 1
 
         # per-sample finish updates
         try:
@@ -593,10 +619,17 @@ class Coordinator:
             if ent2 is not None:
                 if ent2.get('active_jobs', 0) > 0:
                     ent2['active_jobs'] -= 1
-                if ok:
-                    ent2['completed_jobs'] = ent2.get('completed_jobs', 0) + 1
-                else:
-                    ent2['failed_jobs'] = ent2.get('failed_jobs', 0) + 1
+                # Do not count deliberately skipped preprocessing as completed or failed
+                is_skipped = False
+                try:
+                    is_skipped = (job.job_type == 'preprocessing') and bool(job.context.metadata.get('skip_downstream', False))
+                except Exception:
+                    is_skipped = False
+                if not is_skipped:
+                    if ok:
+                        ent2['completed_jobs'] = ent2.get('completed_jobs', 0) + 1
+                    else:
+                        ent2['failed_jobs'] = ent2.get('failed_jobs', 0) + 1
                 ent2['last_seen'] = time.time()
         except Exception:
             pass

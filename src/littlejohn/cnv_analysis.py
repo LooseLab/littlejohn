@@ -747,6 +747,7 @@ def process_single_bam(bam_path, metadata, work_dir, logger):
                         load_exc = None
                         break
                     except Exception as e:
+                        print ("Cnv LOADING failed - trying again.")
                         load_exc = e
                         time.sleep(0.2 * (attempt + 1))
                 if load_exc is not None:

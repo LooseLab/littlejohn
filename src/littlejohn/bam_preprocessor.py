@@ -578,6 +578,28 @@ def bam_preprocessing_handler(job):
         job.context.add_metadata('creation_time', metadata.creation_time)
         job.context.add_metadata('processing_steps', metadata.processing_steps)
         
+        # Check read count threshold and deliberately skip large BAMs
+        try:
+            total_reads = int(metadata.extracted_data.get('mapped_reads', 0)) + int(metadata.extracted_data.get('unmapped_reads', 0))
+        except Exception:
+            total_reads = 0
+        if total_reads > 50000:
+            # Mark in context to prevent downstream triggers; record reason and count
+            job.context.add_metadata('skip_downstream', True)
+            job.context.add_metadata('skip_reason', 'too_many_reads')
+            job.context.add_metadata('skip_read_count', total_reads)
+            # Add an explicit result so the wrapper can log appropriately
+            job.context.add_result('preprocessing', {
+                'status': 'skipped',
+                'reason': 'too_many_reads',
+                'read_count': total_reads,
+                'message': f"Deliberately not processed (>50,000 reads)"
+            })
+            # CLI warning (logger goes to CLI) with filename
+            logger.warning(f"Skipping {os.path.basename(bam_path)}: {total_reads} reads exceeds 50,000 limit. File deliberately not processed.")
+            # Do not proceed with CSV updates or further processing
+            return
+        
         # Persist supplementary_read_ids to a temp file to avoid retaining large lists in memory
         try:
             supp_ids = metadata.extracted_data.get('supplementary_read_ids', [])
