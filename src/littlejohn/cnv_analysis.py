@@ -74,7 +74,6 @@ Matt Loose
 """
 
 import os
-import tempfile
 import logging
 import time
 import pickle
@@ -106,7 +105,17 @@ _REF_CNV_CACHE = {}
 CHUNK_SIZE = 1000  # For processing large arrays in chunks
 MAX_WORKERS = min(4, mp.cpu_count())  # Limit parallel processing
 
-def run_cnv_analysis_subprocess(bam_path, copy_numbers, ref_cnv_dict, temp_dir, logger, threads=1, mapq_filter=60):
+def run_cnv_analysis_subprocess(
+    bam_path,
+    copy_numbers,
+    ref_cnv_dict,
+    temp_dir,
+    logger,
+    threads=1,
+    mapq_filter=60,
+    sample_id: str = None,
+    update_cnv_dict_path: str = None,
+):
     """
     Run CNV analysis using cnv_from_bam in a subprocess to avoid signal handling issues.
     
@@ -126,15 +135,16 @@ def run_cnv_analysis_subprocess(bam_path, copy_numbers, ref_cnv_dict, temp_dir, 
         # Ensure temp directory exists
         os.makedirs(temp_dir, exist_ok=True)
         
-        # Save copy numbers to temporary file
-        copy_numbers_path = os.path.join(temp_dir, 'copy_numbers.pkl')
-        with open(copy_numbers_path, 'wb') as f:
-            pickle.dump(copy_numbers, f)
+        # In multi-sample mode we can avoid writing per-sample copy_numbers
+        copy_numbers_path = None
         
-        # Save reference CNV dict to temporary file
-        ref_cnv_dict_path = os.path.join(temp_dir, 'ref_cnv_dict.pkl')
-        with open(ref_cnv_dict_path, 'wb') as f:
-            pickle.dump(ref_cnv_dict, f)
+        # Determine reference CNV dict path: if provided a path, use it; otherwise serialize dict
+        if isinstance(ref_cnv_dict, str) and os.path.exists(ref_cnv_dict):
+            ref_cnv_dict_path = ref_cnv_dict
+        else:
+            ref_cnv_dict_path = os.path.join(temp_dir, 'ref_cnv_dict.pkl')
+            with open(ref_cnv_dict_path, 'wb') as f:
+                pickle.dump(ref_cnv_dict, f)
         
         # Get path to the subprocess script
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -145,7 +155,9 @@ def run_cnv_analysis_subprocess(bam_path, copy_numbers, ref_cnv_dict, temp_dir, 
             sys.executable,  # Use the same Python interpreter
             subprocess_script,
             '--bam-path', bam_path,
-            '--copy-numbers-path', copy_numbers_path,
+            # Prefer multi-sample update_cnv_dict with sample id to avoid extra serialization
+            '--update-cnv-dict-path', update_cnv_dict_path if update_cnv_dict_path else os.path.join(temp_dir, 'update_cnv_dict.pkl'),
+            '--sample-id', sample_id if sample_id else 'unknown',
             '--ref-cnv-dict-path', ref_cnv_dict_path,
             '--output-dir', temp_dir,
             '--threads', str(threads),
@@ -715,148 +727,152 @@ def process_single_bam(bam_path, metadata, work_dir, logger):
     }
     
     try:
-        # Create temporary directory for this analysis within the sample directory
-        with tempfile.TemporaryDirectory(dir=sample_output_dir) as temp_dir:
-            logger.debug(f"Created temporary directory: {temp_dir}")
-            
-            # Check if BAM has reads
-            if not has_reads(bam_path):
-                logger.warning(f"No reads found in BAM file for {sample_id}")
-                analysis_result['error_message'] = "No reads found in BAM file"
-                analysis_result['processing_steps'].append('no_reads_found')
-                return analysis_result
-            
-            analysis_result['processing_steps'].append('reads_found')
-            
-            # Load accumulated copy numbers from previous iterations
-            update_cnv_dict_path = os.path.join(sample_output_dir, "update_cnv_dict.pkl")
-            if os.path.exists(update_cnv_dict_path):
-                # Robust load with retries to avoid reading while a writer is replacing the file
-                load_exc = None
-                for attempt in range(5):
-                    try:
-                        with open(update_cnv_dict_path, "rb") as f:
-                            update_cnv_dict = pickle.load(f)
-                        logger.debug(f"Loaded accumulated copy numbers from previous iterations")
-                        if sample_id in update_cnv_dict:
-                            copy_numbers = update_cnv_dict[sample_id]
-                            logger.debug(f"Found existing data for {sample_id}")
-                        else:
-                            copy_numbers = {}
-                            logger.debug(f"No existing data for {sample_id}, starting fresh")
-                        load_exc = None
-                        break
-                    except Exception as e:
-                        print ("Cnv LOADING failed - trying again.")
-                        load_exc = e
-                        time.sleep(0.2 * (attempt + 1))
-                if load_exc is not None:
-                    logger.warning(f"Error loading accumulated copy numbers after retries: {load_exc}")
-                    copy_numbers = {}
-                    update_cnv_dict = {}
-            else:
+        # Use the sample output directory directly for intermediate files
+        temp_dir = sample_output_dir
+        
+        # Check if BAM has reads
+        if not has_reads(bam_path):
+            logger.warning(f"No reads found in BAM file for {sample_id}")
+            analysis_result['error_message'] = "No reads found in BAM file"
+            analysis_result['processing_steps'].append('no_reads_found')
+            return analysis_result
+        
+        analysis_result['processing_steps'].append('reads_found')
+        
+        # Load accumulated copy numbers from previous iterations
+        update_cnv_dict_path = os.path.join(sample_output_dir, "update_cnv_dict.pkl")
+        if os.path.exists(update_cnv_dict_path):
+            # Robust load with retries to avoid reading while a writer is replacing the file
+            load_exc = None
+            for attempt in range(5):
+                try:
+                    with open(update_cnv_dict_path, "rb") as f:
+                        update_cnv_dict = pickle.load(f)
+                    logger.debug(f"Loaded accumulated copy numbers from previous iterations")
+                    if sample_id in update_cnv_dict:
+                        copy_numbers = update_cnv_dict[sample_id]
+                        logger.debug(f"Found existing data for {sample_id}")
+                    else:
+                        copy_numbers = {}
+                        logger.debug(f"No existing data for {sample_id}, starting fresh")
+                    load_exc = None
+                    break
+                except Exception as e:
+                    print ("Cnv LOADING failed - trying again.")
+                    load_exc = e
+                    time.sleep(0.2 * (attempt + 1))
+            if load_exc is not None:
+                logger.warning(f"Error loading accumulated copy numbers after retries: {load_exc}")
                 copy_numbers = {}
                 update_cnv_dict = {}
-                logger.debug(f"No previous copy numbers found, starting fresh")
+        else:
+            copy_numbers = {}
+            update_cnv_dict = {}
+            logger.debug(f"No previous copy numbers found, starting fresh")
+        
+        # Compute existing reference CNV dict path (avoid re-serializing; pass path)
+        ref_cnv_path = os.path.join(
+            os.path.dirname(os.path.abspath(resources.__file__)),
+            "HG01280_control_new.pkl",
+        )
+        
+        # Process BAM file with cnv_from_bam using subprocess
+        logger.debug(f"Processing BAM file with cnv_from_bam (subprocess)")
+        try:
+            # Run CNV analysis in subprocess
+            subprocess_result = run_cnv_analysis_subprocess(
+                bam_path,
+                copy_numbers,
+                ref_cnv_path,
+                temp_dir,
+                logger,
+                threads=4,
+                mapq_filter=60,
+                sample_id=sample_id,
+                update_cnv_dict_path=update_cnv_dict_path,
+            )
             
-            # Load reference CNV dictionary with caching
-            ref_cnv_dict = load_reference_cnv_data(logger)
+            if subprocess_result is None or not subprocess_result.get('success', False):
+                error_msg = subprocess_result.get('error', 'Unknown error') if subprocess_result else 'Subprocess failed'
+                raise RuntimeError(f"CNV analysis subprocess failed: {error_msg}")
             
-            # Process BAM file with cnv_from_bam using subprocess
-            logger.debug(f"Processing BAM file with cnv_from_bam (subprocess)")
-            try:
-                # Run CNV analysis in subprocess
-                subprocess_result = run_cnv_analysis_subprocess(
-                    bam_path,
-                    copy_numbers,
-                    ref_cnv_dict,
-                    temp_dir,
-                    logger,
-                    threads=4,
-                    mapq_filter=60
-                )
-                
-                if subprocess_result is None or not subprocess_result.get('success', False):
-                    error_msg = subprocess_result.get('error', 'Unknown error') if subprocess_result else 'Subprocess failed'
-                    raise RuntimeError(f"CNV analysis subprocess failed: {error_msg}")
-                
-                # Extract results from subprocess
-                r_cnv = subprocess_result['r_cnv']
-                r_bin = subprocess_result['r_bin']
-                r_var = subprocess_result['r_var']
-                genome_length = subprocess_result['genome_length']
-                r2_cnv = subprocess_result['r2_cnv']
-                updated_copy_numbers = subprocess_result['updated_copy_numbers']
-                
-                # Update the copy numbers dictionary
-                if sample_id not in update_cnv_dict:
-                    update_cnv_dict[sample_id] = {}
-                update_cnv_dict[sample_id] = updated_copy_numbers
-                
-                analysis_result['processing_steps'].append('cnv_data_extracted')
-                logger.debug(f"CNV data extracted successfully")
-                logger.debug(f"Bin width: {r_bin:,}, Variance: {r_var:.6f}, Genome length: {genome_length:,}")
-                
-            except Exception as e:
-                logger.error(f"Error extracting CNV data: {e}")
-                analysis_result['error_message'] = f"CNV extraction failed: {str(e)}"
-                analysis_result['processing_steps'].append('cnv_extraction_failed')
-                return analysis_result
-
-            # Calculate normalized CNV data (difference between sample and reference)
-            logger.debug(f"Calculating normalized CNV data")
-            result3_cnv = {}
-            for key in r_cnv.keys():
-                if key != "chrM" and key in r2_cnv:
-                    moving_avg_data1 = moving_average(r_cnv[key])
-                    moving_avg_data2 = moving_average(r2_cnv[key])
-                    moving_avg_data1, moving_avg_data2 = pad_arrays(moving_avg_data1, moving_avg_data2)
-                    result3_cnv[key] = moving_avg_data1 - moving_avg_data2
+            # Extract results from subprocess
+            r_cnv = subprocess_result['r_cnv']
+            r_bin = subprocess_result['r_bin']
+            r_var = subprocess_result['r_var']
+            genome_length = subprocess_result['genome_length']
+            r2_cnv = subprocess_result['r2_cnv']
+            updated_copy_numbers = subprocess_result['updated_copy_numbers']
             
-            analysis_result['processing_steps'].append('normalized_cnv_calculated')
+            # Update the copy numbers dictionary
+            if sample_id not in update_cnv_dict:
+                update_cnv_dict[sample_id] = {}
+            update_cnv_dict[sample_id] = updated_copy_numbers
             
-            # Estimate sex from CNV data
-            sex_estimate = estimate_sex_from_cnv(result3_cnv, logger)
-            analysis_result['sex_estimate'] = sex_estimate
-            analysis_result['processing_steps'].append('sex_estimated')
+            analysis_result['processing_steps'].append('cnv_data_extracted')
+            logger.debug(f"CNV data extracted successfully")
+            logger.debug(f"Bin width: {r_bin:,}, Variance: {r_var:.6f}, Genome length: {genome_length:,}")
             
-            # Detect breakpoints
-            breakpoints = detect_breakpoints_from_cnv(r_cnv, r_bin, logger)
-            analysis_result['breakpoints'] = breakpoints
-            analysis_result['processing_steps'].append('breakpoints_detected')
-            
-            # Calculate chromosome statistics
-            chromosome_stats = calculate_chromosome_stats_from_cnv(result3_cnv, logger)
-            analysis_result['chromosome_stats'] = chromosome_stats
-            analysis_result['processing_steps'].append('chromosome_stats_calculated')
-            
-            # Save CNV data in the specified format
-            analysis_counter += 1
-            
-            # Save CNV data files as specified in the documentation
-            save_cnv_files(sample_output_dir, analysis_counter, r_cnv, r2_cnv, result3_cnv, 
-                          r_bin, r_var, breakpoints, sex_estimate, update_cnv_dict, logger)
-            
-            analysis_result['cnv_data_path'] = os.path.join(sample_output_dir, f"{analysis_counter}_cnv_data.json")
-            analysis_result['processing_steps'].append('cnv_data_saved')
-            
-            # Save updated analysis counter to disk
-            save_analysis_counter(sample_id, analysis_counter, work_dir, logger)
-            analysis_result['analysis_counter'] = analysis_counter
-            logger.debug(f"Saved analysis counter: {analysis_counter}")
-            
-            # Force garbage collection
-            gc.collect()
-            
-            analysis_result['processing_steps'].append('cnv_analysis_complete')
-            
-            # Replace print with logging
-            logger.debug(f"Analysis result: {analysis_result}")
-            logger.info(f"CNV analysis complete for {sample_id}")
-            logger.info(f"Sex Estimate: {analysis_result['sex_estimate']}")
-            logger.info(f"Breakpoints: {len(analysis_result['breakpoints'])} detected")
-            
+        except Exception as e:
+            logger.error(f"Error extracting CNV data: {e}")
+            analysis_result['error_message'] = f"CNV extraction failed: {str(e)}"
+            analysis_result['processing_steps'].append('cnv_extraction_failed')
             return analysis_result
+
+        # Calculate normalized CNV data (difference between sample and reference)
+        logger.debug(f"Calculating normalized CNV data")
+        result3_cnv = {}
+        for key in r_cnv.keys():
+            if key != "chrM" and key in r2_cnv:
+                moving_avg_data1 = moving_average(r_cnv[key])
+                moving_avg_data2 = moving_average(r2_cnv[key])
+                moving_avg_data1, moving_avg_data2 = pad_arrays(moving_avg_data1, moving_avg_data2)
+                result3_cnv[key] = moving_avg_data1 - moving_avg_data2
+        
+        analysis_result['processing_steps'].append('normalized_cnv_calculated')
+        
+        # Estimate sex from CNV data
+        sex_estimate = estimate_sex_from_cnv(result3_cnv, logger)
+        analysis_result['sex_estimate'] = sex_estimate
+        analysis_result['processing_steps'].append('sex_estimated')
+        
+        # Detect breakpoints
+        breakpoints = detect_breakpoints_from_cnv(r_cnv, r_bin, logger)
+        analysis_result['breakpoints'] = breakpoints
+        analysis_result['processing_steps'].append('breakpoints_detected')
+        
+        # Calculate chromosome statistics
+        chromosome_stats = calculate_chromosome_stats_from_cnv(result3_cnv, logger)
+        analysis_result['chromosome_stats'] = chromosome_stats
+        analysis_result['processing_steps'].append('chromosome_stats_calculated')
+        
+        # Save CNV data in the specified format
+        analysis_counter += 1
+        
+        # Save CNV data files as specified in the documentation
+        save_cnv_files(sample_output_dir, analysis_counter, r_cnv, r2_cnv, result3_cnv, 
+                      r_bin, r_var, breakpoints, sex_estimate, update_cnv_dict, logger)
+        
+        analysis_result['cnv_data_path'] = os.path.join(sample_output_dir, f"{analysis_counter}_cnv_data.json")
+        analysis_result['processing_steps'].append('cnv_data_saved')
+        
+        # Save updated analysis counter to disk
+        save_analysis_counter(sample_id, analysis_counter, work_dir, logger)
+        analysis_result['analysis_counter'] = analysis_counter
+        logger.debug(f"Saved analysis counter: {analysis_counter}")
+        
+        # Force garbage collection
+        gc.collect()
+        
+        analysis_result['processing_steps'].append('cnv_analysis_complete')
+        
+        # Replace print with logging
+        logger.debug(f"Analysis result: {analysis_result}")
+        logger.info(f"CNV analysis complete for {sample_id}")
+        logger.info(f"Sex Estimate: {analysis_result['sex_estimate']}")
+        logger.info(f"Breakpoints: {len(analysis_result['breakpoints'])} detected")
+        
+        return analysis_result
             
     except Exception as e:
         logger.error(f"Error in CNV analysis for {sample_id}: {e}")

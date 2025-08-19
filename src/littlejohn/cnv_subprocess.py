@@ -12,7 +12,19 @@ import logging
 import argparse
 from pathlib import Path
 
-def run_cnv_analysis(bam_path, copy_numbers_path, ref_cnv_dict_path, output_dir, threads=1, mapq_filter=60):
+# Import cnv_from_bam only in this subprocess
+import cnv_from_bam
+
+def run_cnv_analysis(
+    bam_path,
+    copy_numbers_path=None,
+    ref_cnv_dict_path=None,
+    output_dir=None,
+    threads=1,
+    mapq_filter=60,
+    update_cnv_dict_path=None,
+    sample_id=None,
+):
     """
     Run CNV analysis using cnv_from_bam in an isolated subprocess.
     
@@ -27,6 +39,16 @@ def run_cnv_analysis(bam_path, copy_numbers_path, ref_cnv_dict_path, output_dir,
     Returns:
         Dictionary with analysis results
     """
+    print ("CNV Subprocess started")
+    print(f"BAM path: {bam_path}")
+    print(f"Copy numbers path: {copy_numbers_path}")
+    print(f"Update CNV dict path: {update_cnv_dict_path}")
+    print(f"Sample ID: {sample_id}")
+    print(f"Ref CNV dict path: {ref_cnv_dict_path}")
+    print(f"Output dir: {output_dir}")
+    print(f"Threads: {threads}")
+    print(f"Mapq filter: {mapq_filter}")
+    
     try:
         # Ensure output directory exists
         os.makedirs(output_dir, exist_ok=True)
@@ -34,17 +56,23 @@ def run_cnv_analysis(bam_path, copy_numbers_path, ref_cnv_dict_path, output_dir,
         # Verify input files exist
         if not os.path.exists(bam_path):
             raise FileNotFoundError(f"BAM file not found: {bam_path}")
-        if not os.path.exists(copy_numbers_path):
-            raise FileNotFoundError(f"Copy numbers file not found: {copy_numbers_path}")
-        if not os.path.exists(ref_cnv_dict_path):
+        if ref_cnv_dict_path is None or not os.path.exists(ref_cnv_dict_path):
             raise FileNotFoundError(f"Reference CNV dict file not found: {ref_cnv_dict_path}")
         
-        # Import cnv_from_bam only in this subprocess
-        import cnv_from_bam
-        
-        # Load copy numbers
-        with open(copy_numbers_path, 'rb') as f:
-            copy_numbers = pickle.load(f)
+        # Load copy numbers either from per-sample file or from multi-sample dict
+        if copy_numbers_path is not None:
+            with open(copy_numbers_path, 'rb') as f:
+                copy_numbers = pickle.load(f)
+        else:
+            if update_cnv_dict_path is None or sample_id is None:
+                raise ValueError("Either copy_numbers_path must be provided or both update_cnv_dict_path and sample_id must be provided")
+            if not os.path.exists(update_cnv_dict_path):
+                # If the multi-sample file doesn't exist yet, start with empty dict
+                copy_numbers = {}
+            else:
+                with open(update_cnv_dict_path, 'rb') as f:
+                    multi_sample_dict = pickle.load(f)
+                copy_numbers = multi_sample_dict.get(sample_id, {})
         
         # Load reference CNV data
         with open(ref_cnv_dict_path, 'rb') as f:
@@ -111,7 +139,9 @@ def run_cnv_analysis(bam_path, copy_numbers_path, ref_cnv_dict_path, output_dir,
 def main():
     parser = argparse.ArgumentParser(description='Run CNV analysis in subprocess')
     parser.add_argument('--bam-path', required=True, help='Path to BAM file')
-    parser.add_argument('--copy-numbers-path', required=True, help='Path to copy numbers pickle file')
+    parser.add_argument('--copy-numbers-path', required=False, help='Path to per-sample copy numbers pickle file')
+    parser.add_argument('--update-cnv-dict-path', required=False, help='Path to multi-sample update_cnv_dict.pkl file')
+    parser.add_argument('--sample-id', required=False, help='Sample ID to extract from multi-sample copy numbers file')
     parser.add_argument('--ref-cnv-dict-path', required=True, help='Path to reference CNV dict pickle file')
     parser.add_argument('--output-dir', required=True, help='Output directory for results')
     parser.add_argument('--threads', type=int, default=1, help='Number of threads')
@@ -123,27 +153,37 @@ def main():
     print(f"Subprocess working directory: {os.getcwd()}", file=sys.stderr)
     print(f"BAM path: {args.bam_path}", file=sys.stderr)
     print(f"Copy numbers path: {args.copy_numbers_path}", file=sys.stderr)
+    print(f"Update CNV dict path: {args.update_cnv_dict_path}", file=sys.stderr)
+    print(f"Sample ID: {args.sample_id}", file=sys.stderr)
     print(f"Ref CNV dict path: {args.ref_cnv_dict_path}", file=sys.stderr)
     print(f"Output dir: {args.output_dir}", file=sys.stderr)
     
-    # Check if files exist
-    for path_name, path in [
-        ('BAM file', args.bam_path),
-        ('Copy numbers file', args.copy_numbers_path),
-        ('Reference CNV dict file', args.ref_cnv_dict_path)
-    ]:
-        if not os.path.exists(path):
-            print(f"ERROR: {path_name} does not exist: {path}", file=sys.stderr)
+    # Check if required files exist
+    if not os.path.exists(args.bam_path):
+        print(f"ERROR: BAM file does not exist: {args.bam_path}", file=sys.stderr)
+        sys.exit(1)
+    if not os.path.exists(args.ref_cnv_dict_path):
+        print(f"ERROR: Reference CNV dict file does not exist: {args.ref_cnv_dict_path}", file=sys.stderr)
+        sys.exit(1)
+    if args.copy_numbers_path is None:
+        # Using multi-sample mode: update_cnv_dict_path and sample_id must be provided
+        if args.update_cnv_dict_path is not None and args.sample_id is not None:
+            # ok even if file doesn't exist; we'll start empty
+            pass
+        else:
+            print("ERROR: Provide either --copy-numbers-path or both --update-cnv-dict-path and --sample-id", file=sys.stderr)
             sys.exit(1)
     
     # Run the analysis
     result = run_cnv_analysis(
         args.bam_path,
-        args.copy_numbers_path,
-        args.ref_cnv_dict_path,
-        args.output_dir,
-        args.threads,
-        args.mapq_filter
+        copy_numbers_path=args.copy_numbers_path,
+        ref_cnv_dict_path=args.ref_cnv_dict_path,
+        output_dir=args.output_dir,
+        threads=args.threads,
+        mapq_filter=args.mapq_filter,
+        update_cnv_dict_path=args.update_cnv_dict_path,
+        sample_id=args.sample_id,
     )
     
     # Exit with appropriate code
