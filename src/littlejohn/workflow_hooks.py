@@ -12,7 +12,9 @@ from typing import Any, List, Dict
 from .gui_launcher import send_gui_update, UpdateType
 
 
-def install_workflow_hooks(workflow_runner: Any, workflow_steps: List[str], monitored_directory: str) -> None:
+def install_workflow_hooks(
+    workflow_runner: Any, workflow_steps: List[str], monitored_directory: str
+) -> None:
     """Install hooks into the workflow system for GUI updates.
 
     The hooks are intentionally non-invasive: we wrap public methods and start a
@@ -54,8 +56,18 @@ def _infer_sample_id_from_path(filepath: str) -> str:
     """
     try:
         from pathlib import Path
+
         p = Path(filepath)
-        disallowed = {"bam_fail", "bam_pass", "bam", "fastq", "fastq_fail", "fastq_pass", "pass", "fail"}
+        disallowed = {
+            "bam_fail",
+            "bam_pass",
+            "bam",
+            "fastq",
+            "fastq_fail",
+            "fastq_pass",
+            "pass",
+            "fail",
+        }
         # Look up to 5 ancestors for a reasonable sample folder
         current = p.parent
         for _ in range(5):
@@ -71,7 +83,9 @@ def _infer_sample_id_from_path(filepath: str) -> str:
         return "unknown"
 
 
-def _install_runner_hooks(workflow_runner: Any, workflow_steps: List[str], monitored_directory: str) -> None:
+def _install_runner_hooks(
+    workflow_runner: Any, workflow_steps: List[str], monitored_directory: str
+) -> None:
     """Wrap `run_workflow` to emit start/stop UI events."""
     try:
         if not hasattr(workflow_runner, "run_workflow"):
@@ -109,7 +123,9 @@ def _install_runner_hooks(workflow_runner: Any, workflow_steps: List[str], monit
 def _install_manager_hooks(workflow_runner: Any) -> None:
     """Start a polling thread based on the runner's manager."""
     try:
-        manager = getattr(workflow_runner, "manager", None) or getattr(workflow_runner, "workflow_manager", None)
+        manager = getattr(workflow_runner, "manager", None) or getattr(
+            workflow_runner, "workflow_manager", None
+        )
         if manager is None:
             logging.debug("No workflow manager found on runner; skipping manager hooks")
             return
@@ -177,12 +193,18 @@ def _start_polling_updates(manager: Any, interval_seconds: float = 1.5) -> None:
                         return int(queue_sizes.get(q, 0) or 0)
 
                     queue_update: Dict[str, Dict[str, int]] = {
-                        "preprocessing": {"running": 0, "total": _total_for("preprocessing")},
+                        "preprocessing": {
+                            "running": 0,
+                            "total": _total_for("preprocessing"),
+                        },
                         "mgmt": {"running": 0, "total": _total_for("mgmt")},
                         "cnv": {"running": 0, "total": _total_for("cnv")},
                         "target": {"running": 0, "total": _total_for("target")},
                         "fusion": {"running": 0, "total": _total_for("fusion")},
-                        "classification": {"running": 0, "total": _total_for("classification")},
+                        "classification": {
+                            "running": 0,
+                            "total": _total_for("classification"),
+                        },
                         "other": {"running": 0, "total": _total_for("other")},
                     }
 
@@ -190,8 +212,18 @@ def _start_polling_updates(manager: Any, interval_seconds: float = 1.5) -> None:
                     running_by_category = stats.get("running_by_category", {}) or {}
                     if running_by_category:
                         # Direct consumption from new coordinator
-                        for k in ["preprocessing","mgmt","cnv","target","fusion","classification","other"]:
-                            queue_update[k]["running"] = int(running_by_category.get(k, 0) or 0)
+                        for k in [
+                            "preprocessing",
+                            "mgmt",
+                            "cnv",
+                            "target",
+                            "fusion",
+                            "classification",
+                            "other",
+                        ]:
+                            queue_update[k]["running"] = int(
+                                running_by_category.get(k, 0) or 0
+                            )
                     else:
                         # Legacy path: derive from active_by_worker prefixes OR from active_by_queue lengths
                         active_by_worker = stats.get("active_by_worker", {}) or {}
@@ -199,7 +231,10 @@ def _start_polling_updates(manager: Any, interval_seconds: float = 1.5) -> None:
                             for worker_name, jobs in active_by_worker.items():
                                 wn = str(worker_name)
                                 n = len(jobs) if isinstance(jobs, list) else 0
-                                if wn.startswith("PreprocessingWorker") or wn == "preprocessing":
+                                if (
+                                    wn.startswith("PreprocessingWorker")
+                                    or wn == "preprocessing"
+                                ):
                                     queue_update["preprocessing"]["running"] += n
                                 elif wn.startswith("MGMTWorker") or wn == "mgmt":
                                     queue_update["mgmt"]["running"] += n
@@ -209,9 +244,15 @@ def _start_polling_updates(manager: Any, interval_seconds: float = 1.5) -> None:
                                     queue_update["target"]["running"] += n
                                 elif wn.startswith("FusionWorker") or wn == "fusion":
                                     queue_update["fusion"]["running"] += n
-                                elif wn.startswith("ClassificationWorker") or wn == "classification":
+                                elif (
+                                    wn.startswith("ClassificationWorker")
+                                    or wn == "classification"
+                                ):
                                     queue_update["classification"]["running"] += n
-                                elif wn.startswith("SlowWorker") or wn in {"other","slow"}:
+                                elif wn.startswith("SlowWorker") or wn in {
+                                    "other",
+                                    "slow",
+                                }:
                                     queue_update["other"]["running"] += n
 
                     send_gui_update(UpdateType.QUEUE_UPDATE, queue_update, priority=4)
@@ -233,14 +274,16 @@ def _start_polling_updates(manager: Any, interval_seconds: float = 1.5) -> None:
                                     "progress": 0.0,
                                 }
                             )
-                    send_gui_update(UpdateType.JOB_UPDATE, {"active_jobs": job_rows}, priority=5)
+                    send_gui_update(
+                        UpdateType.JOB_UPDATE, {"active_jobs": job_rows}, priority=5
+                    )
                 except Exception:
                     pass
 
                 # Overall progress (include counts for the UI summary)
                 try:
-                    total_processed = stats.get('total_processed', 0)
-                    total_actual_jobs = stats.get('total_actual_jobs', 0)
+                    total_processed = stats.get("total_processed", 0)
+                    total_actual_jobs = stats.get("total_actual_jobs", 0)
                     progress = (
                         min(0.999, float(total_processed) / float(total_actual_jobs))
                         if total_actual_jobs > 0
@@ -250,8 +293,8 @@ def _start_polling_updates(manager: Any, interval_seconds: float = 1.5) -> None:
                         UpdateType.PROGRESS_UPDATE,
                         {
                             "progress": progress,
-                            "completed": stats.get('completed', 0),
-                            "failed": stats.get('failed', 0),
+                            "completed": stats.get("completed", 0),
+                            "failed": stats.get("failed", 0),
                             "total": total_actual_jobs,
                         },
                         priority=2,
@@ -266,23 +309,39 @@ def _start_polling_updates(manager: Any, interval_seconds: float = 1.5) -> None:
                             f"Heartbeat: active={stats.get('active_jobs', 0)}, "
                             f"completed={stats.get('completed', 0)}, failed={stats.get('failed', 0)}"
                         )
-                        send_gui_update(UpdateType.LOG_MESSAGE, {"level": "INFO", "message": msg}, priority=1)
+                        send_gui_update(
+                            UpdateType.LOG_MESSAGE,
+                            {"level": "INFO", "message": msg},
+                            priority=1,
+                        )
                         last_log_sent = now
                     except Exception:
                         pass
 
                 # Samples overview using manager-provided per-sample stats when available
                 try:
-                    if 'samples' in stats and isinstance(stats['samples'], list):
-                        send_gui_update(UpdateType.SAMPLES_UPDATE, {"samples": stats['samples']}, priority=1)
+                    if "samples" in stats and isinstance(stats["samples"], list):
+                        send_gui_update(
+                            UpdateType.SAMPLES_UPDATE,
+                            {"samples": stats["samples"]},
+                            priority=1,
+                        )
                     else:
                         # Fallback to aggregation from active_by_worker (legacy)
                         samples_map: Dict[str, Dict[str, Any]] = {}
-                        for _worker, jobs in stats.get('active_by_worker', {}).items():  # type: ignore
+                        for _worker, jobs in stats.get("active_by_worker", {}).items():  # type: ignore
                             for job in jobs:
-                                fp = job.get('filepath', '')
-                                sid = job.get('sample_id') or _infer_sample_id_from_path(fp)
-                                if sid.lower() in {"bam_fail", "bam_pass", "bam", "pass", "fail"}:
+                                fp = job.get("filepath", "")
+                                sid = job.get(
+                                    "sample_id"
+                                ) or _infer_sample_id_from_path(fp)
+                                if sid.lower() in {
+                                    "bam_fail",
+                                    "bam_pass",
+                                    "bam",
+                                    "pass",
+                                    "fail",
+                                }:
                                     sid = _infer_sample_id_from_path(fp)
                                 entry = samples_map.setdefault(
                                     sid,
@@ -317,7 +376,11 @@ def _start_polling_updates(manager: Any, interval_seconds: float = 1.5) -> None:
                                     "last_seen": entry["last_seen"],
                                 }
                             )
-                        send_gui_update(UpdateType.SAMPLES_UPDATE, {"samples": samples_payload}, priority=1)
+                        send_gui_update(
+                            UpdateType.SAMPLES_UPDATE,
+                            {"samples": samples_payload},
+                            priority=1,
+                        )
                 except Exception:
                     pass
 

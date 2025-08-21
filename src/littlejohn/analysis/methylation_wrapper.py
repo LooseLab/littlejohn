@@ -8,18 +8,22 @@ import io
 from matplotlib.figure import Figure
 from typing import List, Optional, Dict, Any
 
+
 @contextmanager
 def _patch_fig_savefig(capture_dict):
     orig = Figure.savefig
+
     def _capture(self, *args, **kwargs):
         capture_dict["fig"] = self
         # swallow file I/O
         return None
+
     Figure.savefig = _capture
     try:
         yield
     finally:
         Figure.savefig = orig
+
 
 @contextmanager
 def _patch_argv(argv):
@@ -30,10 +34,12 @@ def _patch_argv(argv):
     finally:
         sys.argv = old
 
+
 @contextmanager
 def _suppress_methylartist_warnings():
     """Temporarily suppress WARNING-level logs and stderr noise from methylartist."""
     import logging
+
     previous_disable = logging.root.manager.disable
     # Disable WARNING and below (keeps ERROR/CRITICAL visible)
     logging.disable(logging.WARNING)
@@ -48,6 +54,7 @@ def _suppress_methylartist_warnings():
         except Exception:
             pass
 
+
 def _find_cli_or_raise() -> str:
     cli = shutil.which("methylartist")
     if not cli:
@@ -57,6 +64,7 @@ def _find_cli_or_raise() -> str:
             "or add the env's bin/Scripts directory to PATH."
         )
     return cli
+
 
 def _choose_main_axis(fig: Figure):
     axes = [ax for ax in getattr(fig, "axes", []) if hasattr(ax, "get_xlim")]
@@ -73,6 +81,7 @@ def _choose_main_axis(fig: Figure):
         return fig.gca()
     spans.sort(key=lambda t: t[1], reverse=True)
     return spans[0][0]
+
 
 def locus_figure(
     interval: str,
@@ -101,12 +110,18 @@ def locus_figure(
     cli = _find_cli_or_raise()
 
     argv = [
-        "methylartist", "locus",
-        "-i", str(interval),
-        "-b", str(bam_path),
-        "-o", "ignored.png",   # required by CLI; we'll intercept savefig anyway
-        "--motif", str(motif),
-        "--mods", str(mods),
+        "methylartist",
+        "locus",
+        "-i",
+        str(interval),
+        "-b",
+        str(bam_path),
+        "-o",
+        "ignored.png",  # required by CLI; we'll intercept savefig anyway
+        "--motif",
+        str(motif),
+        "--mods",
+        str(mods),
     ]
     if extra_cli:
         argv.extend([str(a) for a in extra_cli])
@@ -116,7 +131,9 @@ def locus_figure(
 
     captured = {"fig": None}
 
-    with _patch_fig_savefig(captured), _patch_argv(argv), _suppress_methylartist_warnings():
+    with _patch_fig_savefig(captured), _patch_argv(
+        argv
+    ), _suppress_methylartist_warnings():
         # Execute the installed CLI script as __main__
         runpy.run_path(cli, run_name="__main__")
 
@@ -135,7 +152,9 @@ def locus_figure(
                 for p in parts:
                     try:
                         x = float(p)
-                        ax.axvline(x, color="crimson", linestyle="--", linewidth=0.8, alpha=0.5)
+                        ax.axvline(
+                            x, color="crimson", linestyle="--", linewidth=0.8, alpha=0.5
+                        )
                     except Exception:
                         continue
             fig.tight_layout()
@@ -149,24 +168,29 @@ def locus_figure(
 def save_figure_pickle(fig: Figure, path: str) -> None:
     """Save a Matplotlib Figure object for later re-use (not portable across versions)."""
     import pickle
+
     with open(path, "wb") as f:
         pickle.dump(fig, f)
+
 
 def load_figure_pickle(path: str) -> Figure:
     """Reload a pickled Matplotlib Figure object."""
     import pickle
+
     with open(path, "rb") as f:
         return pickle.load(f)
+
 
 # --- Optional: portable-ish JSON via mpld3 (fidelity may vary) ---
 def save_figure_mpld3(fig: Figure, path: str) -> None:
     import mpld3
+
     with open(path, "w") as f:
         f.write(mpld3.fig_to_json(fig))
 
+
 def load_figure_mpld3(path: str) -> Figure:
     import mpld3
+
     with open(path, "r") as f:
         return mpld3.json_to_fig(f.read())
-
-

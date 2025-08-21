@@ -16,19 +16,21 @@ from .bed_conversion import bed_conversion_handler  # noqa: F401
 from .master_csv_manager import MasterCSVManager  # noqa: F401
 from .temp_utilities import merge_modkit_files  # noqa: F401
 from .methylation_wrapper import (
-    locus_figure, save_figure_pickle, load_figure_pickle,  # noqa: F401
+    locus_figure,
+    save_figure_pickle,
+    load_figure_pickle,  # noqa: F401
 )
 
 __all__ = [
-	"bam_preprocessing_handler",
-	"cnv_handler",
-	"mgmt_handler",
-	"fusion_handler",
-	"target_handler",
-	"sturgeon_handler",
-	"random_forest_handler",
-	"nanodx_handler",
-	"pannanodx_handler",
+    "bam_preprocessing_handler",
+    "cnv_handler",
+    "mgmt_handler",
+    "fusion_handler",
+    "target_handler",
+    "sturgeon_handler",
+    "random_forest_handler",
+    "nanodx_handler",
+    "pannanodx_handler",
     "bed_conversion_handler",
     "MasterCSVManager",
     "merge_modkit_files",
@@ -36,4 +38,3 @@ __all__ = [
     "save_figure_pickle",
     "load_figure_pickle",
 ]
-

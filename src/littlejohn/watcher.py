@@ -22,7 +22,7 @@ class FileChangeHandler(FileSystemEventHandler):
         verbose: bool = False,
     ) -> None:
         """Initialize the file change handler.
-        
+
         Args:
             patterns: List of file patterns to watch
             ignore_patterns: List of file patterns to ignore
@@ -38,10 +38,10 @@ class FileChangeHandler(FileSystemEventHandler):
 
     def _should_process_event(self, event: FileSystemEvent) -> bool:
         """Check if the event should be processed.
-        
+
         Args:
             event: The file system event
-            
+
         Returns:
             True if the event should be processed, False otherwise
         """
@@ -62,7 +62,7 @@ class FileChangeHandler(FileSystemEventHandler):
 
     def _debounce(self) -> bool:
         """Implement debouncing to prevent multiple rapid events.
-        
+
         Returns:
             True if the event should be processed, False if it should be debounced
         """
@@ -94,7 +94,7 @@ class FileChangeHandler(FileSystemEventHandler):
 
     def _handle_event(self, event_type: str, file_path: str) -> None:
         """Handle a file system event.
-        
+
         Args:
             event_type: Type of event (created, modified, deleted, moved)
             file_path: Path to the affected file
@@ -107,17 +107,17 @@ class FileChangeHandler(FileSystemEventHandler):
 
     def _run_command(self, file_path: str) -> None:
         """Run the specified command when a file changes.
-        
+
         Args:
             file_path: Path to the changed file
         """
         try:
             # Replace {file} placeholder with the actual file path
             cmd = self.command.replace("{file}", file_path)
-            
+
             if self.verbose:
                 print(f"Running command: {cmd}")
-            
+
             result = subprocess.run(
                 cmd,
                 shell=True,
@@ -125,12 +125,12 @@ class FileChangeHandler(FileSystemEventHandler):
                 text=True,
                 timeout=30,
             )
-            
+
             if result.stdout:
                 print(result.stdout)
             if result.stderr:
                 print(f"Error: {result.stderr}", file=os.sys.stderr)
-                
+
         except subprocess.TimeoutExpired:
             print(f"Command timed out: {self.command}", file=os.sys.stderr)
         except Exception as e:
@@ -151,7 +151,7 @@ class FileWatcher:
         show_progress: bool = True,
     ) -> None:
         """Initialize the file watcher.
-        
+
         Args:
             path: Path to watch
             recursive: Whether to watch directories recursively
@@ -168,7 +168,7 @@ class FileWatcher:
         self.command = command
         self.verbose = verbose
         self.show_progress = show_progress
-        
+
         self.observer = Observer()
         self.handler = FileChangeHandler(
             patterns=self.patterns,
@@ -181,14 +181,14 @@ class FileWatcher:
         """Process existing files that match the patterns."""
         if not self.command:
             return
-            
+
         if self.verbose:
             print(f"Processing existing files in: {self.path}")
             print(f"Patterns: {self.patterns}")
             print(f"Ignore patterns: {self.ignore_patterns}")
-        
+
         existing_files = []
-        
+
         # Find all existing files that match patterns
         for pattern in self.patterns:
             if pattern == "*":
@@ -206,7 +206,7 @@ class FileWatcher:
                     pattern_files = list(self.path.rglob(pattern))
                 else:
                     pattern_files = list(self.path.glob(pattern))
-            
+
             # Filter to only files (not directories) and apply ignore patterns
             for file_path in pattern_files:
                 if file_path.is_file():
@@ -216,26 +216,26 @@ class FileWatcher:
                         if file_path.match(ignore_pattern):
                             should_ignore = True
                             break
-                    
+
                     if not should_ignore:
                         existing_files.append(file_path)
-        
+
         # Remove duplicates and sort
         existing_files = sorted(set(existing_files))
-        
+
         if existing_files:
             if self.verbose:
                 print(f"Found {len(existing_files)} existing file(s) to process:")
                 for file_path in existing_files:
                     print(f"  - {file_path}")
                 print()
-            
+
             # Process each existing file with progress bar
             with tqdm(
                 total=len(existing_files),
                 desc="Processing existing files",
                 unit="file",
-                disable=not self.show_progress
+                disable=not self.show_progress,
             ) as pbar:
                 for file_path in existing_files:
                     if self.show_progress:
@@ -248,7 +248,7 @@ class FileWatcher:
 
     def start(self, process_existing: bool = True) -> None:
         """Start watching for file changes.
-        
+
         Args:
             process_existing: Whether to process existing files before starting to watch
         """
@@ -283,4 +283,4 @@ class FileWatcher:
         self.observer.stop()
         self.observer.join()
         if self.verbose:
-            print("File watcher stopped.") 
+            print("File watcher stopped.")

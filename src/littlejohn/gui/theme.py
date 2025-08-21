@@ -40,7 +40,7 @@ import asyncio
 import logging
 import subprocess
 import importlib.metadata
- 
+
 
 from nicegui import ui, app, events, core, run
 import nicegui.air
@@ -157,8 +157,6 @@ HEADER_HTML = (Path(__file__).parent / "static" / "header.html").read_text()
 STYLE_CSS = (Path(__file__).parent / "static" / "styles.css").read_text()
 
 
-
-
 @contextmanager
 def frame(navtitle: str, batphone=False, smalltitle=None):
     """
@@ -198,7 +196,7 @@ def frame(navtitle: str, batphone=False, smalltitle=None):
 
     # Create disclaimer dialog that appears on first visit
     async def show_disclaimer():
-        #await ui.context.client.connected()
+        # await ui.context.client.connected()
         if not app.storage.tab.get("disclaimer_acknowledged", False):
             with ui.dialog().props(
                 "persistent"
@@ -493,7 +491,7 @@ def workflow_page():
         smalltitle="Workflow",
     ):
         # Get versions for the diagram
-        #modkit_version = get_modkit_version()
+        # modkit_version = get_modkit_version()
         sturgeon_version = get_sturgeon_version()
         crossnn_version = get_crossnn_version()
         cnv_from_bam_version = get_cnv_from_bam_version()
@@ -678,11 +676,11 @@ def main():
     """
     )
     # Register some fonts that we might need later on (guarded)
-    #try:
+    # try:
     fonts_dir = Path(__file__).parent / "fonts"
     if fonts_dir.exists():
         app.add_static_files("/fonts", str(fonts_dir))
-    #except Exception:
+    # except Exception:
     #    pass
     ui.run(storage_secret="robin")
 
@@ -741,45 +739,49 @@ def debug_process_tree():
     """
     try:
         main_process = psutil.Process(os.getpid())
-        
+
         logging.debug("=== Process Tree Debug ===")
-        logging.debug(f"Main ROBIN process: {main_process.name()} (PID: {main_process.pid})")
+        logging.debug(
+            f"Main ROBIN process: {main_process.name()} (PID: {main_process.pid})"
+        )
         logging.debug(f"Command line: {' '.join(main_process.cmdline())}")
         logging.debug(f"Parent PID: {main_process.ppid()}")
-        
+
         # Get all processes in the system
         all_processes = []
-        for proc in psutil.process_iter(['pid', 'name', 'ppid', 'cmdline']):
+        for proc in psutil.process_iter(["pid", "name", "ppid", "cmdline"]):
             try:
                 all_processes.append(proc.info)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
-        
+
         # Find all processes that could be considered "children"
         potential_children = []
         for proc_info in all_processes:
-            pid = proc_info['pid']
-            ppid = proc_info['ppid']
-            
+            pid = proc_info["pid"]
+            ppid = proc_info["ppid"]
+
             # Check if this process is in our process tree
             if _is_in_process_tree(pid, main_process.pid, all_processes):
                 potential_children.append(proc_info)
-        
-        logging.debug(f"\nFound {len(potential_children)} processes in ROBIN's process tree:")
-        
+
+        logging.debug(
+            f"\nFound {len(potential_children)} processes in ROBIN's process tree:"
+        )
+
         for i, proc_info in enumerate(potential_children):
-            pid = proc_info['pid']
-            name = proc_info['name']
-            ppid = proc_info['ppid']
-            cmdline = ' '.join(proc_info['cmdline']) if proc_info['cmdline'] else 'N/A'
-            
+            pid = proc_info["pid"]
+            name = proc_info["name"]
+            ppid = proc_info["ppid"]
+            cmdline = " ".join(proc_info["cmdline"]) if proc_info["cmdline"] else "N/A"
+
             # Determine why this process is being counted
             reason = _explain_process_inclusion(proc_info, main_process.pid)
-            
+
             logging.debug(f"\n{i+1}. {name} (PID: {pid}, PPID: {ppid})")
             logging.debug(f"   Command: {cmdline}")
             logging.debug(f"   Reason: {reason}")
-            
+
             # Show memory usage if available
             try:
                 proc = psutil.Process(pid)
@@ -787,9 +789,9 @@ def debug_process_tree():
                 logging.debug(f"   Memory: {rss:.2f}GB RSS")
             except:
                 logging.debug(f"   Memory: <access denied>")
-        
+
         logging.debug("\n=== End Process Tree Debug ===")
-        
+
     except Exception as e:
         logging.debug(f"Process tree debug failed: {e}")
 
@@ -800,58 +802,58 @@ def _is_in_process_tree(target_pid, root_pid, all_processes):
     """
     if target_pid == root_pid:
         return True
-    
+
     # Find the process
     target_proc = None
     for proc_info in all_processes:
-        if proc_info['pid'] == target_pid:
+        if proc_info["pid"] == target_pid:
             target_proc = proc_info
             break
-    
+
     if not target_proc:
         return False
-    
+
     # Recursively check if parent is in the tree
-    return _is_in_process_tree(target_proc['ppid'], root_pid, all_processes)
+    return _is_in_process_tree(target_proc["ppid"], root_pid, all_processes)
 
 
 def _explain_process_inclusion(proc_info, main_pid):
     """
     Explain why a process is being included in our child process count.
     """
-    pid = proc_info['pid']
-    ppid = proc_info['ppid']
-    name = proc_info['name']
-    cmdline = proc_info['cmdline']
-    
+    pid = proc_info["pid"]
+    ppid = proc_info["ppid"]
+    name = proc_info["name"]
+    cmdline = proc_info["cmdline"]
+
     reasons = []
-    
+
     # Direct child
     if ppid == main_pid:
         reasons.append("Direct child of main ROBIN process")
-    
+
     # Python process with ROBIN in command line
-    if name in ['python', 'python3', 'python3.9', 'robin']:
-        if cmdline and any('robin' in arg.lower() for arg in cmdline):
+    if name in ["python", "python3", "python3.9", "robin"]:
+        if cmdline and any("robin" in arg.lower() for arg in cmdline):
             reasons.append("Python process with ROBIN in command line")
-    
+
     # Analysis tool
-    if name in ['modkit', 'matkit', 'sturgeon', 'R', 'Rscript', 'bedtools']:
+    if name in ["modkit", "matkit", "sturgeon", "R", "Rscript", "bedtools"]:
         reasons.append("Analysis tool spawned by ROBIN")
-    
+
     # Process in tree but not direct child
     if ppid != main_pid and ppid != 1:
         reasons.append("Process in ROBIN's process tree (indirect child)")
-    
+
     # Reparented process
     if ppid == 1:
         reasons.append("Reparented to init/systemd (orphaned process)")
-    
+
     # Shared library or dependency
-    if name in ['libc', 'libpython', 'libssl', 'libcrypto']:
+    if name in ["libc", "libpython", "libssl", "libcrypto"]:
         reasons.append("Shared library process")
-    
+
     if not reasons:
         reasons.append("Unknown reason - process in tree but unclear relationship")
-    
+
     return "; ".join(reasons)

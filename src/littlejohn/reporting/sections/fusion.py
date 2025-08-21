@@ -210,7 +210,11 @@ class FusionSection(ReportSection):
                     }
 
                 # Only store fusion details if we have complete information for both genes
-                if len(gene_info) == 2 and genes[0] in gene_info and genes[1] in gene_info:
+                if (
+                    len(gene_info) == 2
+                    and genes[0] in gene_info
+                    and genes[1] in gene_info
+                ):
                     fusion_details[gene_pair] = {
                         "chrom1": gene_info[genes[0]]["chrom"],
                         "chrom2": gene_info[genes[1]]["chrom"],
@@ -219,7 +223,9 @@ class FusionSection(ReportSection):
                         "supporting_reads": len(reads),
                     }
                 else:
-                    logger.warning(f"Incomplete gene information for fusion pair: {gene_pair}")
+                    logger.warning(
+                        f"Incomplete gene information for fusion pair: {gene_pair}"
+                    )
 
         # Add rows to table using Paragraph objects for wrappable text
         for gene_pair, details in fusion_details.items():

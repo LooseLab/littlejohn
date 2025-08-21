@@ -30,11 +30,15 @@ def launch_gui(
     global reference for update dispatching.
     """
     if ui is None:
-        raise ImportError("NiceGUI is not available. Please install it with: pip install nicegui")
+        raise ImportError(
+            "NiceGUI is not available. Please install it with: pip install nicegui"
+        )
 
     launcher = GUILauncher(host, port)
     # Normalize monitored directory to an absolute path to avoid CWD issues
-    abs_mon_dir = str(Path(monitored_directory).resolve()) if monitored_directory else ""
+    abs_mon_dir = (
+        str(Path(monitored_directory).resolve()) if monitored_directory else ""
+    )
     success = launcher.launch_gui(workflow_runner, workflow_steps, abs_mon_dir)
     if not success:
         raise RuntimeError("Failed to launch GUI")
@@ -44,6 +48,7 @@ def launch_gui(
 
     if show:
         import webbrowser  # local to avoid unnecessary import at module import time
+
         webbrowser.open(launcher.get_gui_url())
 
     return launcher
@@ -57,5 +62,3 @@ def send_gui_update(update_type: Any, data: Dict[str, Any], priority: int = 0) -
     launcher = get_gui_launcher()
     if launcher:
         launcher.send_update(update_type, data, priority)
-
-

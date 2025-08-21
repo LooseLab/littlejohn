@@ -22,7 +22,9 @@ from contextlib import contextmanager
 import tempfile
 
 # Suppress pkg_resources deprecation warnings from sorted_nearest
-warnings.filterwarnings("ignore", message="pkg_resources is deprecated", category=UserWarning)
+warnings.filterwarnings(
+    "ignore", message="pkg_resources is deprecated", category=UserWarning
+)
 
 try:
     import pyranges as pr
@@ -262,7 +264,11 @@ def merge_modkit_files(
                 if not os.path.exists(existing_file):
                     pl_df = pl.from_pandas(new_df)
                     # Atomic write: write to temp then replace
-                    fd, tmp_path = tempfile.mkstemp(prefix="lj_parquet_", suffix=".parquet", dir=os.path.dirname(output_file) or ".")
+                    fd, tmp_path = tempfile.mkstemp(
+                        prefix="lj_parquet_",
+                        suffix=".parquet",
+                        dir=os.path.dirname(output_file) or ".",
+                    )
                     os.close(fd)
                     try:
                         pl_df.write_parquet(tmp_path)
@@ -283,7 +289,11 @@ def merge_modkit_files(
                         "column_format": "optimized",  # Mark as optimized format
                     }
                     metadata_file = output_file.replace(".parquet", "_metadata.json")
-                    fdm, tmp_meta = tempfile.mkstemp(prefix="lj_meta_", suffix=".json", dir=os.path.dirname(metadata_file) or ".")
+                    fdm, tmp_meta = tempfile.mkstemp(
+                        prefix="lj_meta_",
+                        suffix=".json",
+                        dir=os.path.dirname(metadata_file) or ".",
+                    )
                     os.close(fdm)
                     try:
                         with open(tmp_meta, "w") as f:
@@ -316,14 +326,20 @@ def merge_modkit_files(
 
                 if is_old_format:
                     # Convert old format to new format by selecting only essential columns
-                    logging.info("Converting existing file from old format to optimized format")
+                    logging.info(
+                        "Converting existing file from old format to optimized format"
+                    )
                     existing_df = existing_df.select(essential_cols)
-                
+
                 # Ensure consistent data types and column order
                 for c in categorical_cols:
                     if c in existing_df.columns and c in pl_new_df.columns:
-                        existing_df = existing_df.with_columns(pl.col(c).cast(pl.Categorical))
-                        pl_new_df = pl_new_df.with_columns(pl.col(c).cast(pl.Categorical))
+                        existing_df = existing_df.with_columns(
+                            pl.col(c).cast(pl.Categorical)
+                        )
+                        pl_new_df = pl_new_df.with_columns(
+                            pl.col(c).cast(pl.Categorical)
+                        )
 
                 # Ensure columns are in the same order
                 pl_new_df = pl_new_df.select(existing_df.columns)
@@ -344,14 +360,21 @@ def merge_modkit_files(
                     pl.first("mod_code"),
                     pl.first("strand"),
                     pl.mean("percent_modified").alias("percent_modified"),
-                    *[pl.sum(c).alias(c) for c in ["valid_cov", "n_mod", "n_canonical"]],
+                    *[
+                        pl.sum(c).alias(c)
+                        for c in ["valid_cov", "n_mod", "n_canonical"]
+                    ],
                 ]
 
                 # Perform groupby and aggregation
                 grouped = combined.group_by(["chrom", "chromStart"]).agg(exprs)
 
                 # Atomic write: write to temp then replace
-                fd2, tmp_out = tempfile.mkstemp(prefix="lj_parquet_", suffix=".parquet", dir=os.path.dirname(output_file) or ".")
+                fd2, tmp_out = tempfile.mkstemp(
+                    prefix="lj_parquet_",
+                    suffix=".parquet",
+                    dir=os.path.dirname(output_file) or ".",
+                )
                 os.close(fd2)
                 try:
                     grouped.write_parquet(tmp_out)
@@ -372,7 +395,11 @@ def merge_modkit_files(
                     "column_format": "optimized",  # Mark as optimized format
                 }
                 metadata_file = output_file.replace(".parquet", "_metadata.json")
-                fd3, tmp_meta2 = tempfile.mkstemp(prefix="lj_meta_", suffix=".json", dir=os.path.dirname(metadata_file) or ".")
+                fd3, tmp_meta2 = tempfile.mkstemp(
+                    prefix="lj_meta_",
+                    suffix=".json",
+                    dir=os.path.dirname(metadata_file) or ".",
+                )
                 os.close(fd3)
                 try:
                     with open(tmp_meta2, "w") as f:
@@ -403,6 +430,4 @@ def merge_modkit_files(
                 os.remove(cache_path)
             except Exception as e:
                 logging.error(f"Error removing cache file: {str(e)}")
-        gc.collect() 
-
-
+        gc.collect()

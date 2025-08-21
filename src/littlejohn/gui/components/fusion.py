@@ -54,7 +54,9 @@ def _load_processed_pickle(file_path: Path) -> Optional[Dict[str, Any]]:
         # Expected keys: annotated_data (DataFrame), goodpairs (Series), gene_groups (list), candidate_count (int)
         return data if isinstance(data, dict) else None
     except Exception as e:
-        logging.exception(f"[Fusion] Failed to load processed fusion pickle: {file_path} - {e}")
+        logging.exception(
+            f"[Fusion] Failed to load processed fusion pickle: {file_path} - {e}"
+        )
         return None
 
 
@@ -80,14 +82,21 @@ def _make_fusion_table(container: Any, df: pd.DataFrame) -> Any:
             for col in table.columns:
                 col["sortable"] = True
             with table.add_slot("top-right"):
-                with ui.input(placeholder="Search").props("type=search").bind_value(table, "filter").add_slot("append"):
+                with ui.input(placeholder="Search").props("type=search").bind_value(
+                    table, "filter"
+                ).add_slot("append"):
                     ui.icon("search")
         except Exception:
             pass
         return table
 
 
-def _plot_gene_group(container: Any, gene_group: List[str], annotated_data: pd.DataFrame, goodpairs: pd.Series) -> None:
+def _plot_gene_group(
+    container: Any,
+    gene_group: List[str],
+    annotated_data: pd.DataFrame,
+    goodpairs: pd.Series,
+) -> None:
     """Simple plot for selected gene group using matplotlib via ui.pyplot.
 
     Shows read mapping start (mS) along x-axis and gene labels on y-axis, colored by the 'Color' assigned during preprocessing.
@@ -177,7 +186,11 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 # summary
                 try:
                     if "summary" in state and state["summary"].get("target_lbl"):
-                        state["summary"]["target_lbl"].text = f"Target fusion groups: {int(t.get('candidate_count', 0))}"
+                        state["summary"][
+                            "target_lbl"
+                        ].text = (
+                            f"Target fusion groups: {int(t.get('candidate_count', 0))}"
+                        )
                 except Exception:
                     pass
                 # table
@@ -185,7 +198,10 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     state["target"]["table_container"].clear()
                 except Exception:
                     pass
-                state["target"]["table"] = _make_fusion_table(state["target"]["table_container"], t.get("annotated_data", pd.DataFrame()))
+                state["target"]["table"] = _make_fusion_table(
+                    state["target"]["table_container"],
+                    t.get("annotated_data", pd.DataFrame()),
+                )
                 # plot area
                 try:
                     state["target"]["plot_container"].clear()
@@ -200,13 +216,20 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                                 on_change=lambda e, t=t: (
                                     state["target"]["card"].clear(),
                                     state["target"]["card"].classes("w-full"),
-                                    _plot_gene_group(state["target"]["card"], e.value, t.get("annotated_data"), t.get("goodpairs")),
+                                    _plot_gene_group(
+                                        state["target"]["card"],
+                                        e.value,
+                                        t.get("annotated_data"),
+                                        t.get("goodpairs"),
+                                    ),
                                 ),
                             ).classes("w-40")
                         with ui.row().classes("w-full"):
                             state["target"]["card"] = ui.card()
                             with state["target"]["card"]:
-                                ui.label("Select gene pair to see results.").tailwind("drop-shadow", "font-bold")
+                                ui.label("Select gene pair to see results.").tailwind(
+                                    "drop-shadow", "font-bold"
+                                )
 
             # Update genome-wide UI
             genome_mtime = genome_file.stat().st_mtime if genome_file.exists() else None
@@ -216,7 +239,9 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 # summary
                 try:
                     if "summary" in state and state["summary"].get("genome_lbl"):
-                        state["summary"]["genome_lbl"].text = f"Genome-wide fusion groups: {int(g.get('candidate_count', 0))}"
+                        state["summary"][
+                            "genome_lbl"
+                        ].text = f"Genome-wide fusion groups: {int(g.get('candidate_count', 0))}"
                 except Exception:
                     pass
                 # table
@@ -224,7 +249,10 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     state["genome"]["table_container"].clear()
                 except Exception:
                     pass
-                state["genome"]["table"] = _make_fusion_table(state["genome"]["table_container"], g.get("annotated_data", pd.DataFrame()))
+                state["genome"]["table"] = _make_fusion_table(
+                    state["genome"]["table_container"],
+                    g.get("annotated_data", pd.DataFrame()),
+                )
                 # plot area
                 try:
                     state["genome"]["plot_container"].clear()
@@ -239,13 +267,20 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                                 on_change=lambda e, g=g: (
                                     state["genome"]["card"].clear(),
                                     state["genome"]["card"].classes("w-full"),
-                                    _plot_gene_group(state["genome"]["card"], e.value, g.get("annotated_data"), g.get("goodpairs")),
+                                    _plot_gene_group(
+                                        state["genome"]["card"],
+                                        e.value,
+                                        g.get("annotated_data"),
+                                        g.get("goodpairs"),
+                                    ),
                                 ),
                             ).classes("w-40")
                         with ui.row().classes("w-full"):
                             state["genome"]["card"] = ui.card()
                             with state["genome"]["card"]:
-                                ui.label("Select gene pair to see results.").tailwind("drop-shadow", "font-bold")
+                                ui.label("Select gene pair to see results.").tailwind(
+                                    "drop-shadow", "font-bold"
+                                )
         except Exception as e:
             logging.exception(f"[Fusion] Refresh failed: {e}")
 
@@ -253,13 +288,17 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
     with ui.card().classes("w-full"):
         ui.label("🧪 Fusions").classes("text-lg font-semibold mb-2")
         # Summary row (counts)
-        with ui.row().classes('w-full items-center justify-between mb-2'):
-            with ui.column().classes('gap-1'):
-                ui.label('Fusion Analysis').classes('text-sm font-medium')
-            with ui.column().classes('gap-1 items-end'):
+        with ui.row().classes("w-full items-center justify-between mb-2"):
+            with ui.column().classes("gap-1"):
+                ui.label("Fusion Analysis").classes("text-sm font-medium")
+            with ui.column().classes("gap-1 items-end"):
                 state.setdefault("summary", {})
-                state["summary"]["target_lbl"] = ui.label('Target fusion groups: --').classes('text-sm text-gray-600')
-                state["summary"]["genome_lbl"] = ui.label('Genome-wide fusion groups: --').classes('text-sm text-gray-600')
+                state["summary"]["target_lbl"] = ui.label(
+                    "Target fusion groups: --"
+                ).classes("text-sm text-gray-600")
+                state["summary"]["genome_lbl"] = ui.label(
+                    "Genome-wide fusion groups: --"
+                ).classes("text-sm text-gray-600")
 
         # Target Panel
         ui.label("Target Panel").classes("text-base font-medium mt-1 mb-1")
@@ -276,14 +315,30 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
     try:
         # Prime summary values on first load
         try:
-            t0 = _load_processed_pickle((sample_dir / "fusion_candidates_master_processed.csv") if sample_dir else Path("/dev/null"))
-            g0 = _load_processed_pickle((sample_dir / "fusion_candidates_all_processed.csv") if sample_dir else Path("/dev/null"))
+            t0 = _load_processed_pickle(
+                (sample_dir / "fusion_candidates_master_processed.csv")
+                if sample_dir
+                else Path("/dev/null")
+            )
+            g0 = _load_processed_pickle(
+                (sample_dir / "fusion_candidates_all_processed.csv")
+                if sample_dir
+                else Path("/dev/null")
+            )
             if "summary" in state:
-                t_count0 = int(t0.get("candidate_count", 0)) if isinstance(t0, dict) else 0
-                g_count0 = int(g0.get("candidate_count", 0)) if isinstance(g0, dict) else 0
+                t_count0 = (
+                    int(t0.get("candidate_count", 0)) if isinstance(t0, dict) else 0
+                )
+                g_count0 = (
+                    int(g0.get("candidate_count", 0)) if isinstance(g0, dict) else 0
+                )
                 try:
-                    state["summary"]["target_lbl"].text = f"Target fusion groups: {t_count0}"
-                    state["summary"]["genome_lbl"].text = f"Genome-wide fusion groups: {g_count0}"
+                    state["summary"][
+                        "target_lbl"
+                    ].text = f"Target fusion groups: {t_count0}"
+                    state["summary"][
+                        "genome_lbl"
+                    ].text = f"Genome-wide fusion groups: {g_count0}"
                 except Exception:
                     pass
         except Exception:
@@ -292,5 +347,3 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
         ui.timer(10.0, refresh)
     except Exception:
         pass
-
-

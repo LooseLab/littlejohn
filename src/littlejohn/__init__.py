@@ -9,5 +9,5 @@ from . import analysis  # noqa: F401
 
 # Export key modules
 __all__ = [
-	"analysis",
+    "analysis",
 ]

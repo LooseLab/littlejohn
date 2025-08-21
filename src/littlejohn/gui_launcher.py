@@ -37,6 +37,7 @@ except ImportError:
 
 class UpdateType(Enum):
     """Types of updates that can be sent to the GUI."""
+
     WORKFLOW_STATUS = "workflow_status"
     JOB_UPDATE = "job_update"
     QUEUE_UPDATE = "queue_update"
@@ -49,6 +50,7 @@ class UpdateType(Enum):
 @dataclass
 class GUIUpdate:
     """A single update message for the GUI."""
+
     update_type: UpdateType
     timestamp: float
     data: Dict[str, Any]
@@ -57,7 +59,7 @@ class GUIUpdate:
 
 class GUILauncher:
     """Launcher for the LittleJohn workflow GUI using isolated threading with message queue."""
-    
+
     def __init__(self, host: str = "0.0.0.0", port: int = 8081):
         self.host = host
         self.port = port
@@ -66,14 +68,16 @@ class GUILauncher:
         self.workflow_runner = None
         self.workflow_steps = []
         self.monitored_directory = ""
-        
+
         # Message queue for non-blocking communication
         self.update_queue = queue.PriorityQueue()
         self.gui_ready = threading.Event()
         self.shutdown_event = threading.Event()
-        
+
         # GUI update thread
-        self.update_thread = None  # not used anymore; updates processed on UI thread via timer
+        self.update_thread = (
+            None  # not used anymore; updates processed on UI thread via timer
+        )
 
         # Debug counters
         self.total_updates_enqueued = 0
@@ -87,7 +91,7 @@ class GUILauncher:
 
         # Log ring buffer (last 1000 entries)
         self._log_buffer = deque(maxlen=1000)
-        
+
         # Cached samples data for persistence across navigation
         self._last_samples_rows: List[Dict[str, Any]] = []
         self._current_sample_id: Optional[str] = None
@@ -103,71 +107,81 @@ class GUILauncher:
         self._cnv_state: Dict[str, Dict[str, Any]] = {}
         # Cache last seen queue status so we can populate immediately on page creation
         self._last_queue_status: Dict[str, Any] = {}
-    
-    def launch_gui(self, workflow_runner: Any = None, workflow_steps: list = None, 
-                   monitored_directory: str = "") -> bool:
+
+    def launch_gui(
+        self,
+        workflow_runner: Any = None,
+        workflow_steps: list = None,
+        monitored_directory: str = "",
+    ) -> bool:
         """Launch the GUI in a completely isolated background thread."""
         if ui is None:
             logging.error("NiceGUI is not available")
             return False
-            
+
         self.workflow_runner = workflow_runner
         self.workflow_steps = workflow_steps or []
         # Store absolute monitored directory to avoid relative path issues
         try:
-            self.monitored_directory = str(Path(monitored_directory).resolve()) if monitored_directory else ""
+            self.monitored_directory = (
+                str(Path(monitored_directory).resolve()) if monitored_directory else ""
+            )
         except Exception:
             self.monitored_directory = monitored_directory
-        
+
         try:
             # Start GUI in completely isolated background thread
             self.gui_thread = threading.Thread(
-                target=self._run_gui_worker,
-                daemon=True,
-                name="LittleJohn-GUI-Thread"
+                target=self._run_gui_worker, daemon=True, name="LittleJohn-GUI-Thread"
             )
             self.gui_thread.start()
-            
+
             # NOTE: Update processing now happens inside the UI thread via ui.timer for thread-safety
-            
+
             # Wait a moment for GUI to start
             time.sleep(1)
-            
+
             # Check if thread is still running
             if self.gui_thread.is_alive():
                 self.is_running = True
-                logging.info(f"GUI launched successfully on http://{self.host}:{self.port}")
+                logging.info(
+                    f"GUI launched successfully on http://{self.host}:{self.port}"
+                )
                 return True
             else:
                 logging.error("GUI thread failed to start")
                 return False
-            
+
         except Exception as e:
             logging.error(f"Failed to launch GUI: {e}")
             return False
-    
-    def send_update(self, update_type: UpdateType, data: Dict[str, Any], priority: int = 0):
+
+    def send_update(
+        self, update_type: UpdateType, data: Dict[str, Any], priority: int = 0
+    ):
         """Send an update to the GUI without blocking the workflow."""
         try:
             update = GUIUpdate(
                 update_type=update_type,
                 timestamp=time.time(),
                 data=data,
-                priority=priority
+                priority=priority,
             )
-            
+
             # Use negative priority so higher priority updates come first.
             # Include a monotonically increasing sequence as a tiebreaker so
             # heap comparisons never fallback to comparing GUIUpdate objects.
             self._update_seq += 1
             self.update_queue.put((-priority, self._update_seq, update))
             self.total_updates_enqueued += 1
-            logging.info(f"[GUI] Enqueued update #{self.total_updates_enqueued}: {update.update_type.value}")
-            
+            logging.info(
+                f"[GUI] Enqueued update #{self.total_updates_enqueued}: {update.update_type.value}"
+            )
+
         except Exception as e:
             # Don't let update failures affect the workflow
             logging.debug(f"Failed to send GUI update: {e}")
-    
+
     def _drain_updates_on_ui(self):
         """Drain queued updates and apply them on the UI thread (called by ui.timer)."""
         if not self.gui_ready.is_set():
@@ -183,7 +197,9 @@ class GUILauncher:
                 self._handle_update(update)
                 self.total_updates_processed += 1
                 processed_any = True
-                logging.info(f"[GUI] Processed update #{self.total_updates_processed}: {update.update_type.value}")
+                logging.info(
+                    f"[GUI] Processed update #{self.total_updates_processed}: {update.update_type.value}"
+                )
         except Exception as e:
             logging.debug(f"[GUI] Error draining updates on UI: {e}")
         finally:
@@ -192,7 +208,7 @@ class GUILauncher:
                     ui.update()
                 except Exception:
                     pass
-    
+
     def _handle_update(self, update: GUIUpdate):
         """Handle a single update message."""
         try:
@@ -210,63 +226,73 @@ class GUILauncher:
                 self._update_errors(update.data)
             elif update.update_type == UpdateType.SAMPLES_UPDATE:
                 self._update_samples_table(update.data)
-                
+
         except Exception as e:
             logging.debug(f"Error handling GUI update: {e}")
-    
+
     def _update_workflow_status(self, data: Dict[str, Any]):
         """Update workflow status in the GUI."""
         try:
-            if hasattr(self, 'status_indicator') and hasattr(self, 'status_label'):
-                if data.get('is_running', False):
-                    self.status_indicator.classes('text-2xl text-green-400')
-                    self.status_label.set_text('Workflow Status: Running')
+            if hasattr(self, "status_indicator") and hasattr(self, "status_label"):
+                if data.get("is_running", False):
+                    self.status_indicator.classes("text-2xl text-green-400")
+                    self.status_label.set_text("Workflow Status: Running")
                     self._is_running = True
                 else:
-                    self.status_indicator.classes('text-2xl text-red-400')
-                    self.status_label.set_text('Workflow Status: Stopped')
+                    self.status_indicator.classes("text-2xl text-red-400")
+                    self.status_label.set_text("Workflow Status: Stopped")
                     self._is_running = False
-                    
+
                 # Update timing
-                if data.get('start_time'):
-                    self._start_time = float(data['start_time'])
-                    if hasattr(self, 'workflow_start_time'):
-                        start_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self._start_time))
-                        self.workflow_start_time.set_text(f'Started: {start_str}')
-                    
-                if hasattr(self, 'workflow_duration') and self._start_time:
+                if data.get("start_time"):
+                    self._start_time = float(data["start_time"])
+                    if hasattr(self, "workflow_start_time"):
+                        start_str = time.strftime(
+                            "%Y-%m-%d %H:%M:%S", time.localtime(self._start_time)
+                        )
+                        self.workflow_start_time.set_text(f"Started: {start_str}")
+
+                if hasattr(self, "workflow_duration") and self._start_time:
                     elapsed_seconds = int(time.time() - self._start_time)
-                    self.workflow_duration.set_text(f'Duration: {self._format_duration(elapsed_seconds)}')
-                    
+                    self.workflow_duration.set_text(
+                        f"Duration: {self._format_duration(elapsed_seconds)}"
+                    )
+
         except Exception as e:
             logging.debug(f"Error updating workflow status: {e}")
-    
+
     def _update_job_status(self, data: Dict[str, Any]):
         """Update job status in the GUI with search/sort/filter support."""
         try:
-            if hasattr(self, 'active_jobs_table'):
+            if hasattr(self, "active_jobs_table"):
                 # Build all rows
                 job_rows: List[Dict[str, Any]] = []
-                for job in data.get('active_jobs', []):
-                    job_rows.append({
-                        'job_id': str(job.get('job_id', ''))[:8],
-                        'job_type': job.get('job_type', ''),
-                        'filepath': Path(job.get('filepath', '')).name,
-                        'worker': job.get('worker_name', ''),
-                        'duration': self._format_duration(job.get('duration', 0)),
-                        'progress': f"{int(job.get('progress', 0) * 100)}%"
-                    })
+                for job in data.get("active_jobs", []):
+                    job_rows.append(
+                        {
+                            "job_id": str(job.get("job_id", ""))[:8],
+                            "job_type": job.get("job_type", ""),
+                            "filepath": Path(job.get("filepath", "")).name,
+                            "worker": job.get("worker_name", ""),
+                            "duration": self._format_duration(job.get("duration", 0)),
+                            "progress": f"{int(job.get('progress', 0) * 100)}%",
+                        }
+                    )
 
                 # Cache for filtering
                 self._active_jobs_all_rows = job_rows
 
                 # Update filter options dynamically
                 try:
-                    type_options = ['All'] + sorted({r.get('job_type', '') for r in job_rows if r.get('job_type')})
-                    worker_options = ['All'] + sorted({r.get('worker', '') for r in job_rows if r.get('worker')})
-                    if hasattr(self, 'active_jobs_type_filter'):
+                    type_options = ["All"] + sorted(
+                        {r.get("job_type", "") for r in job_rows if r.get("job_type")}
+                    )
+                    worker_options = ["All"] + sorted(
+                        {r.get("worker", "") for r in job_rows if r.get("worker")}
+                    )
+                    if hasattr(self, "active_jobs_type_filter"):
                         self.active_jobs_type_filter.set_options(type_options)
-                    if hasattr(self, 'active_jobs_worker_filter'):
+                    if hasattr(self, "active_jobs_worker_filter"):
                         self.active_jobs_worker_filter.set_options(worker_options)
                 except Exception:
                     pass
@@ -276,7 +302,7 @@ class GUILauncher:
 
         except Exception as e:
             logging.debug(f"Error updating job status: {e}")
-    
+
     def _update_queue_status(self, data: Dict[str, Any]):
         """Update queue status in the GUI."""
         try:
@@ -284,17 +310,17 @@ class GUILauncher:
             self._last_queue_status = data or {}
             # Emit a concise log line to the Live Logs pane for visibility
             try:
-                pr = data.get('preprocessing', {})
+                pr = data.get("preprocessing", {})
                 ar = {
-                    'mgmt': data.get('mgmt', {}),
-                    'cnv': data.get('cnv', {}),
-                    'target': data.get('target', {}),
-                    'fusion': data.get('fusion', {}),
+                    "mgmt": data.get("mgmt", {}),
+                    "cnv": data.get("cnv", {}),
+                    "target": data.get("target", {}),
+                    "fusion": data.get("fusion", {}),
                 }
-                an_running = sum(int(v.get('running', 0) or 0) for v in ar.values())
-                an_total = sum(int(v.get('total', 0) or 0) for v in ar.values())
-                cl = data.get('classification', {})
-                ot = data.get('other', {})
+                an_running = sum(int(v.get("running", 0) or 0) for v in ar.values())
+                an_total = sum(int(v.get("total", 0) or 0) for v in ar.values())
+                cl = data.get("classification", {})
+                ot = data.get("other", {})
                 msg = (
                     f"Queues | Pre:{pr.get('running',0)}/{pr.get('total',0)} "
                     f"| An:{an_running}/{an_total} "
@@ -302,113 +328,131 @@ class GUILauncher:
                     f"| Ot:{ot.get('running',0)}/{ot.get('total',0)}"
                 )
                 self._log_buffer.append(f"[queue] {msg}\n")
-                if hasattr(self, 'log_area'):
-                    self.log_area.set_value(''.join(self._log_buffer))
+                if hasattr(self, "log_area"):
+                    self.log_area.set_value("".join(self._log_buffer))
             except Exception:
                 pass
             # Update queue status displays
-            if hasattr(self, 'preprocessing_status'):
-                queue_data = data.get('preprocessing', {})
-                self.preprocessing_status.set_text(f"{queue_data.get('running', 0)}/{queue_data.get('total', 0)}")
-                
-            if hasattr(self, 'analysis_status'):
+            if hasattr(self, "preprocessing_status"):
+                queue_data = data.get("preprocessing", {})
+                self.preprocessing_status.set_text(
+                    f"{queue_data.get('running', 0)}/{queue_data.get('total', 0)}"
+                )
+
+            if hasattr(self, "analysis_status"):
                 # Combine analysis queues
-                analysis_running = sum(data.get(q, {}).get('running', 0) for q in ['mgmt', 'cnv', 'target', 'fusion'])
-                analysis_total = sum(data.get(q, {}).get('total', 0) for q in ['mgmt', 'cnv', 'target', 'fusion'])
+                analysis_running = sum(
+                    data.get(q, {}).get("running", 0)
+                    for q in ["mgmt", "cnv", "target", "fusion"]
+                )
+                analysis_total = sum(
+                    data.get(q, {}).get("total", 0)
+                    for q in ["mgmt", "cnv", "target", "fusion"]
+                )
                 self.analysis_status.set_text(f"{analysis_running}/{analysis_total}")
-                
-            if hasattr(self, 'classification_status'):
-                classification_data = data.get('classification', {})
-                self.classification_status.set_text(f"{classification_data.get('running', 0)}/{classification_data.get('total', 0)}")
-                
-            if hasattr(self, 'other_status'):
-                other_data = data.get('other', {})
-                self.other_status.set_text(f"{other_data.get('running', 0)}/{other_data.get('total', 0)}")
-                
+
+            if hasattr(self, "classification_status"):
+                classification_data = data.get("classification", {})
+                self.classification_status.set_text(
+                    f"{classification_data.get('running', 0)}/{classification_data.get('total', 0)}"
+                )
+
+            if hasattr(self, "other_status"):
+                other_data = data.get("other", {})
+                self.other_status.set_text(
+                    f"{other_data.get('running', 0)}/{other_data.get('total', 0)}"
+                )
+
         except Exception as e:
             logging.debug(f"Error updating queue status: {e}")
 
     def _apply_active_jobs_filters_and_update(self) -> None:
         """Apply dropdown filters and current search to the Active Jobs table."""
         try:
-            all_rows = getattr(self, '_active_jobs_all_rows', [])
-            if not hasattr(self, 'active_jobs_table'):
+            all_rows = getattr(self, "_active_jobs_all_rows", [])
+            if not hasattr(self, "active_jobs_table"):
                 return
-            selected_type = 'All'
-            selected_worker = 'All'
+            selected_type = "All"
+            selected_worker = "All"
             try:
-                if hasattr(self, 'active_jobs_type_filter'):
-                    selected_type = self.active_jobs_type_filter.value or 'All'
-                if hasattr(self, 'active_jobs_worker_filter'):
-                    selected_worker = self.active_jobs_worker_filter.value or 'All'
+                if hasattr(self, "active_jobs_type_filter"):
+                    selected_type = self.active_jobs_type_filter.value or "All"
+                if hasattr(self, "active_jobs_worker_filter"):
+                    selected_worker = self.active_jobs_worker_filter.value or "All"
             except Exception:
                 pass
+
             def _keep(row: Dict[str, Any]) -> bool:
-                if selected_type != 'All' and row.get('job_type') != selected_type:
+                if selected_type != "All" and row.get("job_type") != selected_type:
                     return False
-                if selected_worker != 'All' and row.get('worker') != selected_worker:
+                if selected_worker != "All" and row.get("worker") != selected_worker:
                     return False
                 return True
+
             filtered = [r for r in all_rows if _keep(r)]
             self.active_jobs_table.rows = filtered
             self.active_jobs_table.update()
         except Exception:
             pass
-    
+
     def _update_logs(self, data: Dict[str, Any]):
         """Update logs in the GUI."""
         try:
-            if hasattr(self, 'log_area'):
-                log_message = data.get('message', '')
-                log_level = data.get('level', 'INFO')
-                timestamp = time.strftime('%H:%M:%S')
-                
-                new_line = f'[{timestamp}] {log_level}: {log_message}\n'
+            if hasattr(self, "log_area"):
+                log_message = data.get("message", "")
+                log_level = data.get("level", "INFO")
+                timestamp = time.strftime("%H:%M:%S")
+
+                new_line = f"[{timestamp}] {log_level}: {log_message}\n"
                 self._log_buffer.append(new_line)
-                self.log_area.set_value(''.join(self._log_buffer))
-                
+                self.log_area.set_value("".join(self._log_buffer))
+
         except Exception as e:
             logging.debug(f"Error updating logs: {e}")
-    
+
     def _update_progress(self, data: Dict[str, Any]):
         """Update progress in the GUI."""
         try:
-            if hasattr(self, 'progress_bar') and hasattr(self, 'progress_label'):
-                progress = data.get('progress', 0.0)
-                
+            if hasattr(self, "progress_bar") and hasattr(self, "progress_label"):
+                progress = data.get("progress", 0.0)
+
                 pct = max(0.0, min(100.0, round(progress * 100.0, 1)))
-                
+
                 self.progress_bar.set_value(round(progress, 2))
                 # Drop .0 for integers like 81.0 -> 81
                 pct_str = f"{pct:.1f}" if pct % 1 else f"{int(pct)}"
-                self.progress_label.set_text(f'{pct_str}% Complete')
+                self.progress_label.set_text(f"{pct_str}% Complete")
                 # Optional counts
-                if hasattr(self, 'completed_count') and 'completed' in data:
-                    self.completed_count.set_text(str(data['completed']))
-                if hasattr(self, 'failed_count') and 'failed' in data:
-                    self.failed_count.set_text(str(data['failed']))
-                if hasattr(self, 'total_count') and 'total' in data:
-                    self.total_count.set_text(str(data['total']))
-                
+                if hasattr(self, "completed_count") and "completed" in data:
+                    self.completed_count.set_text(str(data["completed"]))
+                if hasattr(self, "failed_count") and "failed" in data:
+                    self.failed_count.set_text(str(data["failed"]))
+                if hasattr(self, "total_count") and "total" in data:
+                    self.total_count.set_text(str(data["total"]))
+
         except Exception as e:
             logging.debug(f"Error updating progress: {e}")
-    
+
     def _update_errors(self, data: Dict[str, Any]):
         """Update error information in the GUI."""
         try:
             # Update error counts if available
-            if hasattr(self, 'preprocessing_errors'):
-                self.preprocessing_errors.set_text(str(data.get('preprocessing_errors', 0)))
-                
-            if hasattr(self, 'analysis_errors'):
-                self.analysis_errors.set_text(str(data.get('analysis_errors', 0)))
-                
-            if hasattr(self, 'classification_errors'):
-                self.classification_errors.set_text(str(data.get('classification_errors', 0)))
-                
+            if hasattr(self, "preprocessing_errors"):
+                self.preprocessing_errors.set_text(
+                    str(data.get("preprocessing_errors", 0))
+                )
+
+            if hasattr(self, "analysis_errors"):
+                self.analysis_errors.set_text(str(data.get("analysis_errors", 0)))
+
+            if hasattr(self, "classification_errors"):
+                self.classification_errors.set_text(
+                    str(data.get("classification_errors", 0))
+                )
+
         except Exception as e:
             logging.debug(f"Error updating error information: {e}")
-    
+
     def _format_duration(self, seconds):
         """Format duration in seconds to human readable format."""
         if seconds < 60:
@@ -420,43 +464,47 @@ class GUILauncher:
             hours = seconds // 3600
             minutes = (seconds % 3600) // 60
             return f"{hours}h {minutes}m"
-    
+
     def _run_gui_worker(self):
         """Run the GUI in a completely isolated thread."""
         try:
             # Set thread name for identification
             threading.current_thread().name = "LittleJohn-GUI-Thread"
-            
+
             # Create the main workflow monitor page
-            @ui.page('/')
+            @ui.page("/")
             def welcome_page():
                 """Welcome page at root route."""
                 self._create_welcome_page()
-            
+
             # Create the workflow monitoring page
-            @ui.page('/littlejohn')
+            @ui.page("/littlejohn")
             def workflow_monitor():
                 """Workflow monitoring page under /littlejohn route."""
                 self._create_workflow_monitor()
-            
+
             # Create the samples overview page
-            @ui.page('/live_data')
+            @ui.page("/live_data")
             def samples_overview():
                 """Samples overview page showing all tracked samples."""
                 self._create_samples_overview()
-            
+
             # Create individual sample detail pages
-            @ui.page('/live_data/{sample_id}')
+            @ui.page("/live_data/{sample_id}")
             def sample_detail(sample_id: str):
                 """Individual sample detail page."""
                 self._create_sample_detail_page(sample_id)
-            
+
             # Enable global update processing regardless of which page is open
             try:
                 self.gui_ready.set()
                 ui.timer(0.3, self._drain_updates_on_ui, active=True)
                 # Seed pre-existing samples shortly after startup, then poll for new ones
-                ui.timer(0.5, lambda: self._scan_and_seed_samples(preexisting=True), once=True)
+                ui.timer(
+                    0.5,
+                    lambda: self._scan_and_seed_samples(preexisting=True),
+                    once=True,
+                )
                 ui.timer(3.0, self._scan_for_new_samples, active=True)
             except Exception:
                 pass
@@ -478,20 +526,21 @@ class GUILauncher:
                     logging.debug(f"Fonts directory not found: {fonts_dir}")
             except Exception as e:
                 logging.debug(f"Could not register fonts static dir: {e}")
-            
+
             # Start the GUI
             ui.run(
                 host=self.host,
                 port=self.port,
                 show=False,
                 reload=False,
-                storage_secret="robin"
+                storage_secret="robin",
             )
         except Exception as e:
             print(f"❌ GUI worker error: {e}")
             import traceback
+
             traceback.print_exc()
-    
+
     def _create_welcome_page(self):
         """Create the welcome page."""
         # Background and main container
@@ -521,46 +570,76 @@ class GUILauncher:
                     ).tailwind(
                         "drop-shadow", "font-bold"
                     )
-                    
+
                     # Description card
-                    with ui.card().classes('w-full bg-white shadow-lg'):
-                        with ui.column().classes('p-6'):
-                            ui.label('What is R.O.B.I.N?').classes('text-xl font-semibold mb-4')
-                            ui.label('ROBIN is a comprehensive bioinformatics workflow system designed for processing and analyzing BAM files. It provides automated preprocessing, multiple analysis pipelines, and real-time monitoring capabilities. It now encorporates Little John to help with the heavy lifting.').classes('text-gray-700 mb-4')
-                            
-                            with ui.row().classes('w-full justify-center gap-8 mt-6'):
-                                ui.link('�� View All Samples', '/live_data').classes('bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-8 py-4 rounded-lg shadow-lg transition-colors')
-                                ui.link('📊 Open Workflow Monitor', '/littlejohn').classes('bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-8 py-4 rounded-lg shadow-lg transition-colors')
-                                
+                    with ui.card().classes("w-full bg-white shadow-lg"):
+                        with ui.column().classes("p-6"):
+                            ui.label("What is R.O.B.I.N?").classes(
+                                "text-xl font-semibold mb-4"
+                            )
+                            ui.label(
+                                "ROBIN is a comprehensive bioinformatics workflow system designed for processing and analyzing BAM files. It provides automated preprocessing, multiple analysis pipelines, and real-time monitoring capabilities. It now encorporates Little John to help with the heavy lifting."
+                            ).classes("text-gray-700 mb-4")
+
+                            with ui.row().classes("w-full justify-center gap-8 mt-6"):
+                                ui.link("�� View All Samples", "/live_data").classes(
+                                    "bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-8 py-4 rounded-lg shadow-lg transition-colors"
+                                )
+                                ui.link(
+                                    "📊 Open Workflow Monitor", "/littlejohn"
+                                ).classes(
+                                    "bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-8 py-4 rounded-lg shadow-lg transition-colors"
+                                )
+
                                 # Placeholder buttons for future functionality
-                                ui.button('🚀 Launch New Workflow', on_click=lambda: self._launch_workflow_button_clicked()).classes('bg-green-600 hover:bg-green-700 text-white text-lg font-semibold px-8 py-4 rounded-lg shadow-lg transition-colors')
-                                ui.button('📋 View Documentation', on_click=lambda: self._view_docs_button_clicked()).classes('bg-purple-600 hover:bg-purple-700 text-white text-lg font-semibold px-8 py-4 rounded-lg shadow-lg transition-colors')
-                            
-                            with ui.row().classes('w-full justify-center gap-8 mt-6'):
-                                with ui.column().classes('text-center'):
-                                    ui.label('🔬').classes('text-3xl mb-2')
-                                    ui.label('Preprocessing').classes('text-sm font-medium text-gray-600')
-                                with ui.column().classes('text-center'):
-                                    ui.label('🧬').classes('text-3xl mb-2')
-                                    ui.label('Methylation Classification').classes('text-sm font-medium text-gray-600')
-                                with ui.column().classes('text-center'):
-                                    ui.label('🧬').classes('text-3xl mb-2')
-                                    ui.label('MGMT Analysis').classes('text-sm font-medium text-gray-600')
-                                with ui.column().classes('text-center'):
-                                    ui.label('📊').classes('text-3xl mb-2')
-                                    ui.label('CNV Detection').classes('text-sm font-medium text-gray-600')
-                                with ui.column().classes('text-center'):
-                                    ui.label('🎯').classes('text-3xl mb-2')
-                                    ui.label('Target Analysis').classes('text-sm font-medium text-gray-600')
-                                with ui.column().classes('text-center'):
-                                    ui.label('🔗').classes('text-3xl mb-2')
-                                    ui.label('Fusion Detection').classes('text-sm font-medium text-gray-600')
-                    
+                                ui.button(
+                                    "🚀 Launch New Workflow",
+                                    on_click=lambda: self._launch_workflow_button_clicked(),
+                                ).classes(
+                                    "bg-green-600 hover:bg-green-700 text-white text-lg font-semibold px-8 py-4 rounded-lg shadow-lg transition-colors"
+                                )
+                                ui.button(
+                                    "📋 View Documentation",
+                                    on_click=lambda: self._view_docs_button_clicked(),
+                                ).classes(
+                                    "bg-purple-600 hover:bg-purple-700 text-white text-lg font-semibold px-8 py-4 rounded-lg shadow-lg transition-colors"
+                                )
+
+                            with ui.row().classes("w-full justify-center gap-8 mt-6"):
+                                with ui.column().classes("text-center"):
+                                    ui.label("🔬").classes("text-3xl mb-2")
+                                    ui.label("Preprocessing").classes(
+                                        "text-sm font-medium text-gray-600"
+                                    )
+                                with ui.column().classes("text-center"):
+                                    ui.label("🧬").classes("text-3xl mb-2")
+                                    ui.label("Methylation Classification").classes(
+                                        "text-sm font-medium text-gray-600"
+                                    )
+                                with ui.column().classes("text-center"):
+                                    ui.label("🧬").classes("text-3xl mb-2")
+                                    ui.label("MGMT Analysis").classes(
+                                        "text-sm font-medium text-gray-600"
+                                    )
+                                with ui.column().classes("text-center"):
+                                    ui.label("📊").classes("text-3xl mb-2")
+                                    ui.label("CNV Detection").classes(
+                                        "text-sm font-medium text-gray-600"
+                                    )
+                                with ui.column().classes("text-center"):
+                                    ui.label("🎯").classes("text-3xl mb-2")
+                                    ui.label("Target Analysis").classes(
+                                        "text-sm font-medium text-gray-600"
+                                    )
+                                with ui.column().classes("text-center"):
+                                    ui.label("🔗").classes("text-3xl mb-2")
+                                    ui.label("Fusion Detection").classes(
+                                        "text-sm font-medium text-gray-600"
+                                    )
+
                     # Action buttons
-                    
-                    
-                    
-            #ToDo: Reimplement this.
+
+            # ToDo: Reimplement this.
             """
             with ui.row().classes("w-full no-wrap"):
                 with ui.column().classes("w-1/4"):
@@ -613,8 +692,7 @@ class GUILauncher:
                             "No telemetry instance available for map display"
                         )
             """
-            
-    
+
     def _create_samples_overview(self):
         """Create the samples overview page showing all tracked samples."""
         # Page title and navigation
@@ -623,77 +701,164 @@ class GUILauncher:
             smalltitle="Samples",
             batphone=False,
         ):
-            with ui.row().classes('w-full bg-blue-600 text-white p-4 items-center justify-between'):
-                with ui.row().classes('items-center'):
-                    ui.label('🧬 Sample Tracking Overview').classes('text-2xl font-bold')
-                    ui.label('All samples processed by LittleJohn').classes('text-sm ml-4 opacity-80')
-                
+            with ui.row().classes(
+                "w-full bg-blue-600 text-white p-4 items-center justify-between"
+            ):
+                with ui.row().classes("items-center"):
+                    ui.label("🧬 Sample Tracking Overview").classes(
+                        "text-2xl font-bold"
+                    )
+                    ui.label("All samples processed by LittleJohn").classes(
+                        "text-sm ml-4 opacity-80"
+                    )
+
                 # Navigation links
-                with ui.row().classes('gap-4'):
-                    ui.link('🏠 Welcome', '/').classes('text-white hover:text-blue-200 text-sm')
-                    ui.link('📊 Workflow Monitor', '/littlejohn').classes('text-white hover:text-blue-200 text-sm')
-                    ui.label('📋 Sample Overview').classes('text-white text-sm font-semibold')
-            
+                with ui.row().classes("gap-4"):
+                    ui.link("🏠 Welcome", "/").classes(
+                        "text-white hover:text-blue-200 text-sm"
+                    )
+                    ui.link("📊 Workflow Monitor", "/littlejohn").classes(
+                        "text-white hover:text-blue-200 text-sm"
+                    )
+                    ui.label("📋 Sample Overview").classes(
+                        "text-white text-sm font-semibold"
+                    )
+
             # Main content area
-            with ui.column().classes('w-full p-4 gap-4'):
+            with ui.column().classes("w-full p-4 gap-4"):
                 # Sample statistics
-                with ui.card().classes('w-full bg-gradient-to-r from-blue-50 to-indigo-50'):
-                    ui.label('📊 Sample Statistics').classes('text-lg font-semibold mb-4 text-blue-800')
-                    
+                with ui.card().classes(
+                    "w-full bg-gradient-to-r from-blue-50 to-indigo-50"
+                ):
+                    ui.label("📊 Sample Statistics").classes(
+                        "text-lg font-semibold mb-4 text-blue-800"
+                    )
+
                     # SIMPLIFIED: Show basic info without workflow_state access
-                    ui.label('Sample statistics will be available once the workflow is running.').classes('text-sm text-gray-600')
-                
+                    ui.label(
+                        "Sample statistics will be available once the workflow is running."
+                    ).classes("text-sm text-gray-600")
+
                 # Samples table
-                with ui.card().classes('w-full'):
-                    ui.label('📋 All Tracked Samples').classes('text-lg font-semibold mb-4')
+                with ui.card().classes("w-full"):
+                    ui.label("📋 All Tracked Samples").classes(
+                        "text-lg font-semibold mb-4"
+                    )
                     # Filters & actions row
-                    with ui.row().classes('items-center gap-2 mb-2'):
+                    with ui.row().classes("items-center gap-2 mb-2"):
                         self.view_sample_button = ui.button(
-                            'View',
-                            on_click=lambda: ui.navigate.to(f"/live_data/{self._selected_sample_id}") if self._selected_sample_id else ui.notify('Select a sample first', type='warning')
-                        ).props('color=primary')
+                            "View",
+                            on_click=lambda: (
+                                ui.navigate.to(f"/live_data/{self._selected_sample_id}")
+                                if self._selected_sample_id
+                                else ui.notify("Select a sample first", type="warning")
+                            ),
+                        ).props("color=primary")
                         self.view_sample_button.disable()
 
                         # Initialize filters model
-                        self._samples_filters = getattr(self, '_samples_filters', None) or {'query': '', 'origin': 'All'}
+                        self._samples_filters = getattr(
+                            self, "_samples_filters", None
+                        ) or {"query": "", "origin": "All"}
 
                         # Global search box
-                        self.samples_search = ui.input(placeholder='Search…').props('clearable dense').on(
-                            'update:model-value',
-                            lambda e: self._set_samples_query((e.args or '') if isinstance(e.args, str) else str(e.args or ''))
-                        ).classes('ml-auto')
+                        self.samples_search = (
+                            ui.input(placeholder="Search…")
+                            .props("clearable dense")
+                            .on(
+                                "update:model-value",
+                                lambda e: self._set_samples_query(
+                                    (e.args or "")
+                                    if isinstance(e.args, str)
+                                    else str(e.args or "")
+                                ),
+                            )
+                            .classes("ml-auto")
+                        )
 
                         # Origin filter
-                        self.origin_filter = ui.select(
-                            options=['All', 'Live', 'Pre-existing'],
-                            value=self._samples_filters.get('origin', 'All'),
-                            label='Origin'
-                        ).props('dense clearable').on(
-                            'update:model-value',
-                            lambda e: self._set_samples_origin_filter((e.args or 'All') if isinstance(e.args, str) else str(e.args or 'All'))
+                        self.origin_filter = (
+                            ui.select(
+                                options=["All", "Live", "Pre-existing"],
+                                value=self._samples_filters.get("origin", "All"),
+                                label="Origin",
+                            )
+                            .props("dense clearable")
+                            .on(
+                                "update:model-value",
+                                lambda e: self._set_samples_origin_filter(
+                                    (e.args or "All")
+                                    if isinstance(e.args, str)
+                                    else str(e.args or "All")
+                                ),
+                            )
                         )
 
                     # Create a placeholder table that will be updated later
-                    self.samples_table = ui.table(
-                        columns=[
-                            {'name': 'sample_id', 'label': 'Sample ID', 'field': 'sample_id', 'sortable': True},
-                            {'name': 'origin', 'label': 'Origin', 'field': 'origin', 'sortable': True},
-                            {'name': 'active_jobs', 'label': 'Active', 'field': 'active_jobs', 'sortable': True},
-                            {'name': 'total_jobs', 'label': 'Total', 'field': 'total_jobs', 'sortable': True},
-                            {'name': 'completed_jobs', 'label': 'Completed', 'field': 'completed_jobs', 'sortable': True},
-                            {'name': 'failed_jobs', 'label': 'Failed', 'field': 'failed_jobs', 'sortable': True},
-                            {'name': 'job_types', 'label': 'Job Types', 'field': 'job_types', 'sortable': True},
-                            {'name': 'last_seen', 'label': 'Last Activity', 'field': 'last_seen', 'sortable': True}
-                        ],
-                        rows=[],
-                        row_key='sample_id',
-                        selection='single',
-                        pagination=20
-                    ).props('rows-per-page-options=[10,20,50,0]').classes('w-full')
+                    self.samples_table = (
+                        ui.table(
+                            columns=[
+                                {
+                                    "name": "sample_id",
+                                    "label": "Sample ID",
+                                    "field": "sample_id",
+                                    "sortable": True,
+                                },
+                                {
+                                    "name": "origin",
+                                    "label": "Origin",
+                                    "field": "origin",
+                                    "sortable": True,
+                                },
+                                {
+                                    "name": "active_jobs",
+                                    "label": "Active",
+                                    "field": "active_jobs",
+                                    "sortable": True,
+                                },
+                                {
+                                    "name": "total_jobs",
+                                    "label": "Total",
+                                    "field": "total_jobs",
+                                    "sortable": True,
+                                },
+                                {
+                                    "name": "completed_jobs",
+                                    "label": "Completed",
+                                    "field": "completed_jobs",
+                                    "sortable": True,
+                                },
+                                {
+                                    "name": "failed_jobs",
+                                    "label": "Failed",
+                                    "field": "failed_jobs",
+                                    "sortable": True,
+                                },
+                                {
+                                    "name": "job_types",
+                                    "label": "Job Types",
+                                    "field": "job_types",
+                                    "sortable": True,
+                                },
+                                {
+                                    "name": "last_seen",
+                                    "label": "Last Activity",
+                                    "field": "last_seen",
+                                    "sortable": True,
+                                },
+                            ],
+                            rows=[],
+                            row_key="sample_id",
+                            selection="single",
+                            pagination=20,
+                        )
+                        .props("rows-per-page-options=[10,20,50,0]")
+                        .classes("w-full")
+                    )
 
                     # Selection handler to enable the external View button
                     try:
-                        self.samples_table.on('selection', self._on_sample_selected)
+                        self.samples_table.on("selection", self._on_sample_selected)
                     except Exception:
                         pass
 
@@ -703,7 +868,9 @@ class GUILauncher:
                             self._apply_samples_table_filters()
                             # Auto-select if only one sample
                             if len(self.samples_table.rows or []) == 1:
-                                self._selected_sample_id = (self.samples_table.rows or [])[0].get('sample_id')
+                                self._selected_sample_id = (
+                                    self.samples_table.rows or []
+                                )[0].get("sample_id")
                                 self.view_sample_button.enable()
                         except Exception:
                             pass
@@ -711,31 +878,43 @@ class GUILauncher:
     def _update_samples_table(self, data: Dict[str, Any]):
         """Update the samples overview table with new data."""
         try:
-            if not hasattr(self, 'samples_table'):
+            if not hasattr(self, "samples_table"):
                 return
-            samples = data.get('samples', [])
+            samples = data.get("samples", [])
             # Deduplicate by sample_id taking the newest last_seen
             by_id: Dict[str, Dict[str, Any]] = {}
             for s in samples:
-                sid = s.get('sample_id', '') or 'unknown'
-                last_seen = float(s.get('last_seen', time.time()))
+                sid = s.get("sample_id", "") or "unknown"
+                last_seen = float(s.get("last_seen", time.time()))
                 existing = by_id.get(sid)
-                if not existing or last_seen >= existing.get('_last_seen_raw', 0):
+                if not existing or last_seen >= existing.get("_last_seen_raw", 0):
                     by_id[sid] = {
-                        'sample_id': sid,
-                        'origin': 'Pre-existing' if sid in self._preexisting_sample_ids else 'Live',
-                        'active_jobs': s.get('active_jobs', 0),
-                        'total_jobs': s.get('total_jobs', 0),
-                        'completed_jobs': s.get('completed_jobs', 0),
-                        'failed_jobs': s.get('failed_jobs', 0),
-                        'job_types': ','.join(sorted(set(s.get('job_types', [])))) if isinstance(s.get('job_types', []), list) else str(s.get('job_types', '')),
-                        'last_seen': time.strftime('%H:%M:%S', time.localtime(last_seen)),
-                        'actions': 'View',
-                        '_last_seen_raw': last_seen,
+                        "sample_id": sid,
+                        "origin": (
+                            "Pre-existing"
+                            if sid in self._preexisting_sample_ids
+                            else "Live"
+                        ),
+                        "active_jobs": s.get("active_jobs", 0),
+                        "total_jobs": s.get("total_jobs", 0),
+                        "completed_jobs": s.get("completed_jobs", 0),
+                        "failed_jobs": s.get("failed_jobs", 0),
+                        "job_types": (
+                            ",".join(sorted(set(s.get("job_types", []))))
+                            if isinstance(s.get("job_types", []), list)
+                            else str(s.get("job_types", ""))
+                        ),
+                        "last_seen": time.strftime(
+                            "%H:%M:%S", time.localtime(last_seen)
+                        ),
+                        "actions": "View",
+                        "_last_seen_raw": last_seen,
                     }
 
             # Merge with preexisting scans if any
-            existing_rows_by_id = {r['sample_id']: r for r in (self._last_samples_rows or [])}
+            existing_rows_by_id = {
+                r["sample_id"]: r for r in (self._last_samples_rows or [])
+            }
             for sid, row in by_id.items():
                 existing_rows_by_id[sid] = row
             rows = list(existing_rows_by_id.values())
@@ -743,18 +922,28 @@ class GUILauncher:
             self._last_samples_rows = rows
             self._apply_samples_table_filters()
             # Update known IDs from unfiltered cache
-            self._known_sample_ids = {r.get('sample_id') for r in (self._last_samples_rows or []) if r.get('sample_id') and r.get('sample_id') != 'unknown'}
+            self._known_sample_ids = {
+                r.get("sample_id")
+                for r in (self._last_samples_rows or [])
+                if r.get("sample_id") and r.get("sample_id") != "unknown"
+            }
             # Track currently most active/recent sample
             visible_rows = self.samples_table.rows or []
             if visible_rows:
-                rows_sorted = sorted(visible_rows, key=lambda r: (r.get('active_jobs', 0), r.get('_last_seen_raw', 0)), reverse=True)
-                self._current_sample_id = rows_sorted[0].get('sample_id')
+                rows_sorted = sorted(
+                    visible_rows,
+                    key=lambda r: (r.get("active_jobs", 0), r.get("_last_seen_raw", 0)),
+                    reverse=True,
+                )
+                self._current_sample_id = rows_sorted[0].get("sample_id")
             # Update external button state
-            if self._selected_sample_id and any(r.get('sample_id') == self._selected_sample_id for r in visible_rows):
+            if self._selected_sample_id and any(
+                r.get("sample_id") == self._selected_sample_id for r in visible_rows
+            ):
                 self.view_sample_button.enable()
             elif visible_rows:
                 if len(visible_rows) == 1:
-                    self._selected_sample_id = visible_rows[0].get('sample_id')
+                    self._selected_sample_id = visible_rows[0].get("sample_id")
                     self.view_sample_button.enable()
                 else:
                     self.view_sample_button.disable()
@@ -768,12 +957,17 @@ class GUILauncher:
         try:
             # NiceGUI passes {'rows': [selected_rows...]}
             rows = None
-            if hasattr(event, 'args') and isinstance(event.args, dict):
-                rows = event.args.get('rows')
+            if hasattr(event, "args") and isinstance(event.args, dict):
+                rows = event.args.get("rows")
             elif isinstance(event, dict):
-                rows = event.get('rows')
-            if rows and isinstance(rows, list) and len(rows) > 0 and isinstance(rows[0], dict):
-                self._selected_sample_id = rows[0].get('sample_id')
+                rows = event.get("rows")
+            if (
+                rows
+                and isinstance(rows, list)
+                and len(rows) > 0
+                and isinstance(rows[0], dict)
+            ):
+                self._selected_sample_id = rows[0].get("sample_id")
                 if self._selected_sample_id:
                     self.view_sample_button.enable()
                 else:
@@ -782,55 +976,64 @@ class GUILauncher:
             pass
 
     # -------- Samples table helpers: search, filter, sort --------
-    def _normalize_rows_for_display(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _normalize_rows_for_display(
+        self, rows: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
         normalized: List[Dict[str, Any]] = []
         for r in rows or []:
-            sid = r.get('sample_id')
-            if not sid or sid == 'unknown':
+            sid = r.get("sample_id")
+            if not sid or sid == "unknown":
                 continue
-            jt = r.get('job_types')
+            jt = r.get("job_types")
             if isinstance(jt, set):
                 r = dict(r)
-                r['job_types'] = ','.join(sorted(jt))
+                r["job_types"] = ",".join(sorted(jt))
             normalized.append(r)
         return normalized
 
     def _set_samples_query(self, query: str) -> None:
         try:
-            self._samples_filters['query'] = (query or '').strip().lower()
+            self._samples_filters["query"] = (query or "").strip().lower()
             self._apply_samples_table_filters()
         except Exception:
             pass
 
     def _set_samples_origin_filter(self, origin_value: str) -> None:
         try:
-            self._samples_filters['origin'] = origin_value or 'All'
+            self._samples_filters["origin"] = origin_value or "All"
             self._apply_samples_table_filters()
         except Exception:
             pass
 
     def _apply_samples_table_filters(self) -> None:
         try:
-            base_rows = getattr(self, '_last_samples_rows', []) or []
+            base_rows = getattr(self, "_last_samples_rows", []) or []
             rows = self._normalize_rows_for_display(base_rows)
 
             # Origin filter
-            origin = (self._samples_filters or {}).get('origin', 'All')
-            if origin and origin != 'All':
-                rows = [r for r in rows if (r.get('origin') == origin)]
+            origin = (self._samples_filters or {}).get("origin", "All")
+            if origin and origin != "All":
+                rows = [r for r in rows if (r.get("origin") == origin)]
 
             # Global query filter
-            q = (self._samples_filters or {}).get('query', '')
+            q = (self._samples_filters or {}).get("query", "")
             if q:
                 ql = q.lower()
+
                 def match_any(r: Dict[str, Any]) -> bool:
                     return any(
-                        (str(r.get(k, '')).lower().find(ql) >= 0)
-                        for k in ['sample_id', 'origin', 'job_types', 'last_seen']
+                        (str(r.get(k, "")).lower().find(ql) >= 0)
+                        for k in ["sample_id", "origin", "job_types", "last_seen"]
                     ) or any(
                         (str(r.get(k, 0)).lower().find(ql) >= 0)
-                        for k in ['active_jobs', 'total_jobs', 'completed_jobs', 'failed_jobs']
+                        for k in [
+                            "active_jobs",
+                            "total_jobs",
+                            "completed_jobs",
+                            "failed_jobs",
+                        ]
                     )
+
                 rows = [r for r in rows if match_any(r)]
 
             self.samples_table.rows = rows
@@ -847,27 +1050,39 @@ class GUILauncher:
         ):
             # Guard: unknown sample -> show message and back button; also redirect
             if self._known_sample_ids and sample_id not in self._known_sample_ids:
-                with ui.column().classes('w-full items-center justify-center p-8'):
-                    ui.label(f'Unknown sample: {sample_id}').classes('text-xl font-semibold text-red-600')
-                    ui.label('This sample ID has not been seen yet in the current session.').classes('text-sm text-gray-600')
-                    ui.button('Back to Samples', on_click=lambda: ui.navigate.to('/live_data')).props('color=primary')
+                with ui.column().classes("w-full items-center justify-center p-8"):
+                    ui.label(f"Unknown sample: {sample_id}").classes(
+                        "text-xl font-semibold text-red-600"
+                    )
+                    ui.label(
+                        "This sample ID has not been seen yet in the current session."
+                    ).classes("text-sm text-gray-600")
+                    ui.button(
+                        "Back to Samples", on_click=lambda: ui.navigate.to("/live_data")
+                    ).props("color=primary")
                 # Soft redirect after short delay
                 try:
-                    ui.timer(1.5, lambda: ui.navigate.to('/live_data'), once=True)
+                    ui.timer(1.5, lambda: ui.navigate.to("/live_data"), once=True)
                 except Exception:
                     pass
                 return
 
-            sample_dir = Path(self.monitored_directory) / sample_id if self.monitored_directory else None
+            sample_dir = (
+                Path(self.monitored_directory) / sample_id
+                if self.monitored_directory
+                else None
+            )
 
             # Page title and navigation
-            with ui.row().classes(): #'w-full bg-blue-600 text-white p-4 items-center justify-between'):
-                with ui.row().classes('items-center'):
-                    ui.label(f'{sample_id}').classes('text-2xl font-bold')
-                    ui.label('Detailed sample information.').classes('text-sm ml-4 opacity-80')
-                with ui.row().classes('gap-4'):
-                    #ui.link('📋 Sample Overview', '/live_data').classes('text-white hover:text-blue-200 text-sm')
-                    #ui.link('📊 Workflow Monitor', '/littlejohn').classes('text-white hover:text-blue-200 text-sm')
+            with ui.row().classes():  #'w-full bg-blue-600 text-white p-4 items-center justify-between'):
+                with ui.row().classes("items-center"):
+                    ui.label(f"{sample_id}").classes("text-2xl font-bold")
+                    ui.label("Detailed sample information.").classes(
+                        "text-sm ml-4 opacity-80"
+                    )
+                with ui.row().classes("gap-4"):
+                    # ui.link('📋 Sample Overview', '/live_data').classes('text-white hover:text-blue-200 text-sm')
+                    # ui.link('📊 Workflow Monitor', '/littlejohn').classes('text-white hover:text-blue-200 text-sm')
                     # Report generation (confirmation dialog + download)
                     async def confirm_report_generation():
                         """Show a confirmation dialog before generating the report."""
@@ -878,7 +1093,9 @@ class GUILauncher:
                         state = {"type": "detailed"}
 
                         with ui.dialog() as dialog, ui.card().classes("w-96 p-4"):
-                            ui.label("Generate Report").classes("text-h6 font-bold mb-4")
+                            ui.label("Generate Report").classes(
+                                "text-h6 font-bold mb-4"
+                            )
 
                             # Report type selector
                             with ui.column().classes("mb-4"):
@@ -892,17 +1109,27 @@ class GUILauncher:
                             # Disclaimer section
                             with ui.column().classes("mb-4"):
                                 ui.label("Disclaimer").classes("font-bold mb-2")
-                                formatted_text = EXTENDED_DISCLAIMER_TEXT.replace("\n\n", "<br><br>").replace("\n", " ")
-                                ui.label(formatted_text).classes("text-sm text-gray-600 mb-4")
+                                formatted_text = EXTENDED_DISCLAIMER_TEXT.replace(
+                                    "\n\n", "<br><br>"
+                                ).replace("\n", " ")
+                                ui.label(formatted_text).classes(
+                                    "text-sm text-gray-600 mb-4"
+                                )
 
-                            ui.label("Are you sure you want to generate a report?").classes("mb-4")
+                            ui.label(
+                                "Are you sure you want to generate a report?"
+                            ).classes("mb-4")
 
                             # Buttons
                             with ui.row().classes("justify-end gap-2"):
-                                ui.button("No", on_click=lambda: dialog.submit(("No", None))).props("flat")
+                                ui.button(
+                                    "No", on_click=lambda: dialog.submit(("No", None))
+                                ).props("flat")
                                 ui.button(
                                     "Yes",
-                                    on_click=lambda: dialog.submit(("Yes", state["type"]))
+                                    on_click=lambda: dialog.submit(
+                                        ("Yes", state["type"])
+                                    ),
                                 ).props("color=primary")
 
                         dialog_result = await dialog
@@ -917,25 +1144,34 @@ class GUILauncher:
                         try:
                             # Import here to avoid global dependency if GUI isn't used
                             from nicegui import run as ng_run  # type: ignore
+
                             if not sample_dir or not sample_dir.exists():
-                                ui.notify("Output directory not available for this sample", type='warning')
+                                ui.notify(
+                                    "Output directory not available for this sample",
+                                    type="warning",
+                                )
                                 return
                             ui.notify("Generating report…")
                             filename = f"{sample_id}_run_report.pdf"
                             pdf_path = os.path.join(str(sample_dir), filename)
                             os.makedirs(str(sample_dir), exist_ok=True)
-                            pdf_file = await ng_run.io_bound(create_pdf, pdf_path, str(sample_dir), report_type)
+                            pdf_file = await ng_run.io_bound(
+                                create_pdf, pdf_path, str(sample_dir), report_type
+                            )
                             ui.download(pdf_file)
                             ui.notify("Report downloaded")
                         except Exception as e:
-                            ui.notify(f"Report generation failed: {e}", type='error')                    
+                            ui.notify(f"Report generation failed: {e}", type="error")
 
-                    ui.button('Generate Report', on_click=confirm_report_generation).classes('text-sm font-semibold px-3 py-1 rounded')
-                
-            with ui.column().classes('w-full p-4 gap-4'):
+                    ui.button(
+                        "Generate Report", on_click=confirm_report_generation
+                    ).classes("text-sm font-semibold px-3 py-1 rounded")
+
+            with ui.column().classes("w-full p-4 gap-4"):
                 # Classification section (refactored component)
                 try:
                     from .gui.components.classification import add_classification_section  # type: ignore
+
                     add_classification_section(sample_dir)
                 except Exception as e:
                     logging.exception(f"[GUI] Classification section failed: {e}")
@@ -943,13 +1179,15 @@ class GUILauncher:
                 # Coverage section (refactored component)
                 try:
                     from .gui.components.coverage import add_coverage_section  # type: ignore
+
                     add_coverage_section(self, sample_dir)
                 except Exception:
                     pass
-                
+
                 # MGMT section (refactored component)
                 try:
                     from .gui.components.mgmt import add_mgmt_section  # type: ignore
+
                     add_mgmt_section(self, sample_dir)
                 except Exception as e:
                     logging.exception(f"[GUI] MGMT section failed: {e}")
@@ -957,54 +1195,89 @@ class GUILauncher:
                 # CNV section (refactored component)
                 try:
                     from .gui.components.cnv import add_cnv_section  # type: ignore
+
                     # Pass launcher for shared state access (launcher._cnv_state)
                     add_cnv_section(self, sample_dir)
                 except Exception as e:
                     logging.exception(f"[GUI] CNV section failed: {e}")
-                
+
                 # Fusion section (target and genome-wide; excludes full SV UI)
                 try:
                     from .gui.components.fusion import add_fusion_section  # type: ignore
+
                     add_fusion_section(self, sample_dir)
                 except Exception as e:
                     logging.exception(f"[GUI] Fusion section failed: {e}")
-                
+
                 # Files in output directory
-                with ui.card().classes('w-full'):
-                    ui.label('📁 Output Files').classes('text-lg font-semibold mb-2')
-                    with ui.row().classes('items-center gap-3 mb-2'):
-                        files_search = ui.input('Search files…').props('borderless dense clearable')
+                with ui.card().classes("w-full"):
+                    ui.label("📁 Output Files").classes("text-lg font-semibold mb-2")
+                    with ui.row().classes("items-center gap-3 mb-2"):
+                        files_search = ui.input("Search files…").props(
+                            "borderless dense clearable"
+                        )
                     files_table = ui.table(
                         columns=[
-                            {'name': 'name', 'label': 'File', 'field': 'name', 'sortable': True},
-                            {'name': 'size', 'label': 'Size (bytes)', 'field': 'size', 'sortable': True},
-                            {'name': 'mtime', 'label': 'Last Modified', 'field': 'mtime', 'sortable': True},
+                            {
+                                "name": "name",
+                                "label": "File",
+                                "field": "name",
+                                "sortable": True,
+                            },
+                            {
+                                "name": "size",
+                                "label": "Size (bytes)",
+                                "field": "size",
+                                "sortable": True,
+                            },
+                            {
+                                "name": "mtime",
+                                "label": "Last Modified",
+                                "field": "mtime",
+                                "sortable": True,
+                            },
                         ],
                         rows=[],
-                        pagination=20
-                    ).classes('w-full')
+                        pagination=20,
+                    ).classes("w-full")
                     try:
-                        files_table.props('multi-sort rows-per-page-options="[10,20,50,0]"')
-                        files_search.bind_value(files_table, 'filter')
+                        files_table.props(
+                            'multi-sort rows-per-page-options="[10,20,50,0]"'
+                        )
+                        files_search.bind_value(files_table, "filter")
                     except Exception:
                         pass
 
                 # master.csv summary
-                with ui.card().classes('w-full'):
-                    ui.label('📊 master.csv Summary').classes('text-lg font-semibold mb-2')
-                    with ui.row().classes('items-center gap-3 mb-2'):
-                        summary_search = ui.input('Search fields…').props('borderless dense clearable')
+                with ui.card().classes("w-full"):
+                    ui.label("📊 master.csv Summary").classes(
+                        "text-lg font-semibold mb-2"
+                    )
+                    with ui.row().classes("items-center gap-3 mb-2"):
+                        summary_search = ui.input("Search fields…").props(
+                            "borderless dense clearable"
+                        )
                     summary_table = ui.table(
                         columns=[
-                            {'name': 'key', 'label': 'Field', 'field': 'key', 'sortable': True},
-                            {'name': 'value', 'label': 'Value', 'field': 'value', 'sortable': True},
+                            {
+                                "name": "key",
+                                "label": "Field",
+                                "field": "key",
+                                "sortable": True,
+                            },
+                            {
+                                "name": "value",
+                                "label": "Value",
+                                "field": "value",
+                                "sortable": True,
+                            },
                         ],
                         rows=[],
-                        pagination=0
-                    ).classes('w-full')
+                        pagination=0,
+                    ).classes("w-full")
                     try:
-                        summary_table.props('multi-sort')
-                        summary_search.bind_value(summary_table, 'filter')
+                        summary_table.props("multi-sort")
+                        summary_search.bind_value(summary_table, "filter")
                     except Exception:
                         pass
 
@@ -1018,11 +1291,16 @@ class GUILauncher:
                             if f.is_file():
                                 try:
                                     stat = f.stat()
-                                    rows.append({
-                                        'name': f.name,
-                                        'size': stat.st_size,
-                                        'mtime': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(stat.st_mtime)),
-                                    })
+                                    rows.append(
+                                        {
+                                            "name": f.name,
+                                            "size": stat.st_size,
+                                            "mtime": time.strftime(
+                                                "%Y-%m-%d %H:%M:%S",
+                                                time.localtime(stat.st_mtime),
+                                            ),
+                                        }
+                                    )
                                 except Exception:
                                     continue
                     files_table.rows = rows
@@ -1033,28 +1311,42 @@ class GUILauncher:
                 # Refresh master.csv summary
                 try:
                     if sample_dir:
-                        csv_path = sample_dir / 'master.csv'
+                        csv_path = sample_dir / "master.csv"
                         if csv_path.exists():
-                            with csv_path.open('r', newline='') as fh:
+                            with csv_path.open("r", newline="") as fh:
                                 reader = csv.DictReader(fh)
                                 first_row = next(reader, None)
                             if first_row:
                                 preferred_keys = [
-                                    'counter_bam_passed', 'counter_bam_failed', 'counter_bases_count',
-                                    'counter_mapped_count', 'counter_unmapped_count',
-                                    'run_info_run_time', 'run_info_device', 'run_info_model', 'run_info_flow_cell',
-                                    'bam_tracking_counter', 'bam_tracking_total_files',
+                                    "counter_bam_passed",
+                                    "counter_bam_failed",
+                                    "counter_bases_count",
+                                    "counter_mapped_count",
+                                    "counter_unmapped_count",
+                                    "run_info_run_time",
+                                    "run_info_device",
+                                    "run_info_model",
+                                    "run_info_flow_cell",
+                                    "bam_tracking_counter",
+                                    "bam_tracking_total_files",
                                 ]
                                 rows2 = []
                                 for k in preferred_keys:
                                     if k in first_row:
-                                        rows2.append({'key': k, 'value': first_row.get(k, '')})
+                                        rows2.append(
+                                            {"key": k, "value": first_row.get(k, "")}
+                                        )
                                 if not rows2:
-                                    rows2 = [{'key': k, 'value': v} for k, v in first_row.items()]
+                                    rows2 = [
+                                        {"key": k, "value": v}
+                                        for k, v in first_row.items()
+                                    ]
                                 summary_table.rows = rows2
                                 summary_table.update()
                         else:
-                            summary_table.rows = [{'key': 'Status', 'value': 'master.csv not found'}]
+                            summary_table.rows = [
+                                {"key": "Status", "value": "master.csv not found"}
+                            ]
                             summary_table.update()
                 except Exception:
                     # Avoid breaking the UI; skip on CSV parse errors
@@ -1062,7 +1354,6 @@ class GUILauncher:
 
             ui.timer(2.0, _refresh_sample_detail, active=True)
 
-    
     def _create_workflow_monitor(self):
         """Create the main workflow monitoring page."""
         with theme.frame(
@@ -1071,74 +1362,124 @@ class GUILauncher:
             batphone=False,
         ):
             # Page title and navigation
-            with ui.row().classes('w-full bg-blue-600 text-white p-4 items-center justify-between'):
-                with ui.row().classes('items-center'):
-                    ui.label('📊 LittleJohn Workflow Monitor').classes('text-2xl font-bold')
-                    ui.label('Real-time workflow monitoring and control').classes('text-sm ml-4 opacity-80')
-                
+            with ui.row().classes(
+                "w-full bg-blue-600 text-white p-4 items-center justify-between"
+            ):
+                with ui.row().classes("items-center"):
+                    ui.label("📊 LittleJohn Workflow Monitor").classes(
+                        "text-2xl font-bold"
+                    )
+                    ui.label("Real-time workflow monitoring and control").classes(
+                        "text-sm ml-4 opacity-80"
+                    )
+
                 # Navigation links
-                with ui.row().classes('gap-4'):
-                    ui.link('🏠 Welcome', '/').classes('text-white hover:text-blue-200 text-sm')
-                    ui.link('📋 Sample Overview', '/live_data').classes('text-white hover:text-blue-200 text-sm')
-                    ui.label('📊 Workflow Monitor').classes('text-white text-sm font-semibold')
-            
+                with ui.row().classes("gap-4"):
+                    ui.link("🏠 Welcome", "/").classes(
+                        "text-white hover:text-blue-200 text-sm"
+                    )
+                    ui.link("📋 Sample Overview", "/live_data").classes(
+                        "text-white hover:text-blue-200 text-sm"
+                    )
+                    ui.label("📊 Workflow Monitor").classes(
+                        "text-white text-sm font-semibold"
+                    )
+
             # Main content area
-            with ui.column().classes('w-full p-4 gap-4'):
+            with ui.column().classes("w-full p-4 gap-4"):
                 # Workflow Status Overview
-                with ui.card().classes('w-full bg-gradient-to-r from-blue-50 to-indigo-50'):
-                    ui.label('🚀 Workflow Status Overview').classes('text-lg font-semibold mb-4 text-blue-800')
-                    
+                with ui.card().classes(
+                    "w-full bg-gradient-to-r from-blue-50 to-indigo-50"
+                ):
+                    ui.label("🚀 Workflow Status Overview").classes(
+                        "text-lg font-semibold mb-4 text-blue-800"
+                    )
+
                     # Status indicator
-                    with ui.row().classes('w-full items-center gap-4'):
-                        self.status_indicator = ui.label('🟢').classes('text-2xl')
-                        self.status_label = ui.label('Workflow Status: Running').classes('text-sm font-medium text-green-600')
-                    
+                    with ui.row().classes("w-full items-center gap-4"):
+                        self.status_indicator = ui.label("🟢").classes("text-2xl")
+                        self.status_label = ui.label(
+                            "Workflow Status: Running"
+                        ).classes("text-sm font-medium text-green-600")
+
                     # Timing information
-                    with ui.row().classes('w-full gap-8 mt-4'):
-                        self.workflow_start_time = ui.label('Started: --').classes('text-sm text-gray-600')
-                        self.workflow_duration = ui.label('Duration: --').classes('text-sm text-gray-600')
-                    
+                    with ui.row().classes("w-full gap-8 mt-4"):
+                        self.workflow_start_time = ui.label("Started: --").classes(
+                            "text-sm text-gray-600"
+                        )
+                        self.workflow_duration = ui.label("Duration: --").classes(
+                            "text-sm text-gray-600"
+                        )
+
                     # Progress bar (hide internal float value text; use external formatted label below)
-                    self.progress_bar = ui.linear_progress(0.0).classes('w-full mt-4').style('color: transparent')
-                    self.progress_label = ui.label('0% Complete').classes('text-sm text-center text-gray-600')
+                    self.progress_bar = (
+                        ui.linear_progress(0.0)
+                        .classes("w-full mt-4")
+                        .style("color: transparent")
+                    )
+                    self.progress_label = ui.label("0% Complete").classes(
+                        "text-sm text-center text-gray-600"
+                    )
 
                     # Counts summary
-                    with ui.row().classes('w-full gap-6 mt-2'):
-                        with ui.row().classes('items-center gap-2'):
-                            ui.label('Completed:').classes('text-xs text-gray-600')
-                            self.completed_count = ui.label('0').classes('text-xs font-semibold')
-                        with ui.row().classes('items-center gap-2'):
-                            ui.label('Failed:').classes('text-xs text-gray-600')
-                            self.failed_count = ui.label('0').classes('text-xs font-semibold')
-                        with ui.row().classes('items-center gap-2'):
-                            ui.label('Total:').classes('text-xs text-gray-600')
-                            self.total_count = ui.label('0').classes('text-xs font-semibold')
-                
+                    with ui.row().classes("w-full gap-6 mt-2"):
+                        with ui.row().classes("items-center gap-2"):
+                            ui.label("Completed:").classes("text-xs text-gray-600")
+                            self.completed_count = ui.label("0").classes(
+                                "text-xs font-semibold"
+                            )
+                        with ui.row().classes("items-center gap-2"):
+                            ui.label("Failed:").classes("text-xs text-gray-600")
+                            self.failed_count = ui.label("0").classes(
+                                "text-xs font-semibold"
+                            )
+                        with ui.row().classes("items-center gap-2"):
+                            ui.label("Total:").classes("text-xs text-gray-600")
+                            self.total_count = ui.label("0").classes(
+                                "text-xs font-semibold"
+                            )
+
                 # Queue Status
-                with ui.card().classes('w-full'):
-                    ui.label('📋 Queue Status').classes('text-lg font-semibold mb-4')
-                    
+                with ui.card().classes("w-full"):
+                    ui.label("📋 Queue Status").classes("text-lg font-semibold mb-4")
+
                     # Queue status grid
-                    with ui.grid(columns=4).classes('w-full gap-4'):
+                    with ui.grid(columns=4).classes("w-full gap-4"):
                         # Preprocessing
-                        with ui.card().classes('bg-green-50 p-4'):
-                            ui.label('🔬 Preprocessing').classes('text-sm font-medium text-green-800')
-                            self.preprocessing_status = ui.label('0/0').classes('text-2xl font-bold text-green-600')
-                        
+                        with ui.card().classes("bg-green-50 p-4"):
+                            ui.label("🔬 Preprocessing").classes(
+                                "text-sm font-medium text-green-800"
+                            )
+                            self.preprocessing_status = ui.label("0/0").classes(
+                                "text-2xl font-bold text-green-600"
+                            )
+
                         # Analysis
-                        with ui.card().classes('bg-blue-50 p-4'):
-                            ui.label('🧬 Analysis').classes('text-sm font-medium text-blue-800')
-                            self.analysis_status = ui.label('0/0').classes('text-2xl font-bold text-blue-600')
-                        
+                        with ui.card().classes("bg-blue-50 p-4"):
+                            ui.label("🧬 Analysis").classes(
+                                "text-sm font-medium text-blue-800"
+                            )
+                            self.analysis_status = ui.label("0/0").classes(
+                                "text-2xl font-bold text-blue-600"
+                            )
+
                         # Classification
-                        with ui.card().classes('bg-purple-50 p-4'):
-                            ui.label('🎯 Classification').classes('text-sm font-medium text-purple-800')
-                            self.classification_status = ui.label('0/0').classes('text-2xl font-bold text-purple-800')
-                        
+                        with ui.card().classes("bg-purple-50 p-4"):
+                            ui.label("🎯 Classification").classes(
+                                "text-sm font-medium text-purple-800"
+                            )
+                            self.classification_status = ui.label("0/0").classes(
+                                "text-2xl font-bold text-purple-800"
+                            )
+
                         # Other
-                        with ui.card().classes('bg-gray-50 p-4'):
-                            ui.label('⚙️ Other').classes('text-sm font-medium text-gray-800')
-                            self.other_status = ui.label('0/0').classes('text-2xl font-bold text-gray-600')
+                        with ui.card().classes("bg-gray-50 p-4"):
+                            ui.label("⚙️ Other").classes(
+                                "text-sm font-medium text-gray-800"
+                            )
+                            self.other_status = ui.label("0/0").classes(
+                                "text-2xl font-bold text-gray-600"
+                            )
 
                     # If we have a cached queue status from before the page was created, apply it now
                     try:
@@ -1146,103 +1487,191 @@ class GUILauncher:
                             self._update_queue_status(self._last_queue_status)
                     except Exception:
                         pass
-                
+
                 # Active Jobs
-                with ui.card().classes('w-full'):
-                    ui.label('⚡ Active Jobs').classes('text-lg font-semibold mb-4')
-                    
-                    with ui.row().classes('items-center gap-3 mb-2'):
-                        self.active_jobs_search = ui.input('Search…').props('borderless dense clearable')
-                        self.active_jobs_type_filter = ui.select(options=['All'], value='All', label='Type').props('dense clearable').classes('w-40')
-                        self.active_jobs_worker_filter = ui.select(options=['All'], value='All', label='Worker').props('dense clearable').classes('w-40')
+                with ui.card().classes("w-full"):
+                    ui.label("⚡ Active Jobs").classes("text-lg font-semibold mb-4")
+
+                    with ui.row().classes("items-center gap-3 mb-2"):
+                        self.active_jobs_search = ui.input("Search…").props(
+                            "borderless dense clearable"
+                        )
+                        self.active_jobs_type_filter = (
+                            ui.select(options=["All"], value="All", label="Type")
+                            .props("dense clearable")
+                            .classes("w-40")
+                        )
+                        self.active_jobs_worker_filter = (
+                            ui.select(options=["All"], value="All", label="Worker")
+                            .props("dense clearable")
+                            .classes("w-40")
+                        )
 
                     # Active jobs table
                     self.active_jobs_table = ui.table(
                         columns=[
-                            {'name': 'job_id', 'label': 'Job ID', 'field': 'job_id', 'sortable': True},
-                            {'name': 'job_type', 'label': 'Type', 'field': 'job_type', 'sortable': True},
-                            {'name': 'filepath', 'label': 'File', 'field': 'filepath', 'sortable': True},
-                            {'name': 'worker', 'label': 'Worker', 'field': 'worker', 'sortable': True},
-                            {'name': 'duration', 'label': 'Duration', 'field': 'duration', 'sortable': True},
-                            {'name': 'progress', 'label': 'Progress', 'field': 'progress', 'sortable': True}
+                            {
+                                "name": "job_id",
+                                "label": "Job ID",
+                                "field": "job_id",
+                                "sortable": True,
+                            },
+                            {
+                                "name": "job_type",
+                                "label": "Type",
+                                "field": "job_type",
+                                "sortable": True,
+                            },
+                            {
+                                "name": "filepath",
+                                "label": "File",
+                                "field": "filepath",
+                                "sortable": True,
+                            },
+                            {
+                                "name": "worker",
+                                "label": "Worker",
+                                "field": "worker",
+                                "sortable": True,
+                            },
+                            {
+                                "name": "duration",
+                                "label": "Duration",
+                                "field": "duration",
+                                "sortable": True,
+                            },
+                            {
+                                "name": "progress",
+                                "label": "Progress",
+                                "field": "progress",
+                                "sortable": True,
+                            },
                         ],
                         rows=[],
-                        pagination=10
-                    ).classes('w-full')
+                        pagination=10,
+                    ).classes("w-full")
                     try:
-                        self.active_jobs_table.props('multi-sort rows-per-page-options="[10,20,50,0]"')
-                        self.active_jobs_search.bind_value(self.active_jobs_table, 'filter')
+                        self.active_jobs_table.props(
+                            'multi-sort rows-per-page-options="[10,20,50,0]"'
+                        )
+                        self.active_jobs_search.bind_value(
+                            self.active_jobs_table, "filter"
+                        )
                     except Exception:
                         pass
                     try:
+
                         def _on_active_jobs_filter_change(_=None):
                             self._apply_active_jobs_filters_and_update()
-                        self.active_jobs_type_filter.on('update:model-value', _on_active_jobs_filter_change)
-                        self.active_jobs_worker_filter.on('update:model-value', _on_active_jobs_filter_change)
+
+                        self.active_jobs_type_filter.on(
+                            "update:model-value", _on_active_jobs_filter_change
+                        )
+                        self.active_jobs_worker_filter.on(
+                            "update:model-value", _on_active_jobs_filter_change
+                        )
                     except Exception:
                         pass
-                    
+
                     # Placeholder for when no jobs are active
-                    ui.label('No active jobs at the moment.').classes('text-sm text-gray-500 mt-2')
-                
+                    ui.label("No active jobs at the moment.").classes(
+                        "text-sm text-gray-500 mt-2"
+                    )
+
                 # Live Logs
-                with ui.card().classes('w-full'):
-                    ui.label('📝 Live Logs').classes('text-lg font-semibold mb-4')
-                    
+                with ui.card().classes("w-full"):
+                    ui.label("📝 Live Logs").classes("text-lg font-semibold mb-4")
+
                     # Log controls
-                    with ui.row().classes('w-full justify-between items-center mb-2'):
-                        with ui.row().classes('gap-2'):
-                            ui.button('Clear', on_click=self._clear_logs).classes('bg-gray-500 hover:bg-gray-600 text-white text-xs')
-                            ui.button('Export', on_click=lambda: self._export_logs()).classes('bg-blue-500 hover:bg-blue-600 text-white text-xs')
-                    
+                    with ui.row().classes("w-full justify-between items-center mb-2"):
+                        with ui.row().classes("gap-2"):
+                            ui.button("Clear", on_click=self._clear_logs).classes(
+                                "bg-gray-500 hover:bg-gray-600 text-white text-xs"
+                            )
+                            ui.button(
+                                "Export", on_click=lambda: self._export_logs()
+                            ).classes(
+                                "bg-blue-500 hover:bg-blue-600 text-white text-xs"
+                            )
+
                     # Log area
-                    self.log_area = ui.textarea('Workflow logs will appear here...').classes('w-full h-40').props('readonly')
-                
+                    self.log_area = (
+                        ui.textarea("Workflow logs will appear here...")
+                        .classes("w-full h-40")
+                        .props("readonly")
+                    )
+
                 # Configuration
-                with ui.card().classes('w-full'):
-                    ui.label('⚙️ Workflow Configuration').classes('text-lg font-semibold mb-4')
-                    
+                with ui.card().classes("w-full"):
+                    ui.label("⚙️ Workflow Configuration").classes(
+                        "text-lg font-semibold mb-4"
+                    )
+
                     # Configuration details
-                    with ui.grid(columns=2).classes('w-full gap-4'):
+                    with ui.grid(columns=2).classes("w-full gap-4"):
                         with ui.column():
-                            ui.label('Monitored Directory:').classes('text-sm font-medium')
-                            ui.label(self.monitored_directory or 'Not specified').classes('text-sm text-gray-600')
-                            
-                            ui.label('Workflow Steps:').classes('text-sm font-medium mt-2')
-                            ui.label(', '.join(self.workflow_steps) if self.workflow_steps else 'Not specified').classes('text-sm text-gray-600')
-                        
+                            ui.label("Monitored Directory:").classes(
+                                "text-sm font-medium"
+                            )
+                            ui.label(
+                                self.monitored_directory or "Not specified"
+                            ).classes("text-sm text-gray-600")
+
+                            ui.label("Workflow Steps:").classes(
+                                "text-sm font-medium mt-2"
+                            )
+                            ui.label(
+                                ", ".join(self.workflow_steps)
+                                if self.workflow_steps
+                                else "Not specified"
+                            ).classes("text-sm text-gray-600")
+
                         with ui.column():
-                            ui.label('Log Level:').classes('text-sm font-medium')
-                            ui.label('--').classes('text-sm text-gray-600')
-                            
-                            ui.label('Analysis Workers:').classes('text-sm font-medium mt-2')
-                            ui.label('--').classes('text-sm text-gray-600')
-                
+                            ui.label("Log Level:").classes("text-sm font-medium")
+                            ui.label("--").classes("text-sm text-gray-600")
+
+                            ui.label("Analysis Workers:").classes(
+                                "text-sm font-medium mt-2"
+                            )
+                            ui.label("--").classes("text-sm text-gray-600")
+
                 # Error Summary & Troubleshooting
-                with ui.card().classes('w-full'):
-                    ui.label('⚠️ Error Summary & Troubleshooting').classes('text-lg font-semibold mb-2')
-                    
+                with ui.card().classes("w-full"):
+                    ui.label("⚠️ Error Summary & Troubleshooting").classes(
+                        "text-lg font-semibold mb-2"
+                    )
+
                     # Error counts by type
-                    with ui.row().classes('w-full justify-between'):
-                        with ui.column().classes('text-center'):
-                            self.preprocessing_errors = ui.label('0').classes('text-xl font-bold text-red-600')
-                            ui.label('Preprocessing').classes('text-xs text-gray-600')
-                        with ui.column().classes('text-center'):
-                            self.analysis_errors = ui.label('0').classes('text-xl font-bold text-red-600')
-                            ui.label('Analysis').classes('text-xs text-gray-600')
-                        with ui.column().classes('text-center'):
-                            self.classification_errors = ui.label('0').classes('text-xl font-bold text-red-600')
-                            ui.label('Classification').classes('text-xs text-gray-600')
-                    
+                    with ui.row().classes("w-full justify-between"):
+                        with ui.column().classes("text-center"):
+                            self.preprocessing_errors = ui.label("0").classes(
+                                "text-xl font-bold text-red-600"
+                            )
+                            ui.label("Preprocessing").classes("text-xs text-gray-600")
+                        with ui.column().classes("text-center"):
+                            self.analysis_errors = ui.label("0").classes(
+                                "text-xl font-bold text-red-600"
+                            )
+                            ui.label("Analysis").classes("text-xs text-gray-600")
+                        with ui.column().classes("text-center"):
+                            self.classification_errors = ui.label("0").classes(
+                                "text-xl font-bold text-red-600"
+                            )
+                            ui.label("Classification").classes("text-xs text-gray-600")
+
                     # Common error messages
                     ui.separator()
-                    ui.label('Recent Errors').classes('text-sm font-medium mt-2')
-                    self.error_summary_label = ui.label('No errors detected').classes('text-xs text-gray-600')
-                
+                    ui.label("Recent Errors").classes("text-sm font-medium mt-2")
+                    self.error_summary_label = ui.label("No errors detected").classes(
+                        "text-xs text-gray-600"
+                    )
+
                 # Footer
-                with ui.row().classes('w-full bg-gray-200 p-2 justify-center'):
-                    ui.label('LittleJohn Workflow Monitor - Running').classes('text-sm text-gray-600')
-                
+                with ui.row().classes("w-full bg-gray-200 p-2 justify-center"):
+                    ui.label("LittleJohn Workflow Monitor - Running").classes(
+                        "text-sm text-gray-600"
+                    )
+
                 # Signal that GUI is ready to receive updates
                 self.gui_ready.set()
                 logging.info("[GUI] UI created and ready to receive updates")
@@ -1252,30 +1681,32 @@ class GUILauncher:
                 ui.timer(1.0, lambda: self._refresh_duration(), active=True)
 
     def _refresh_duration(self):
-        if self._is_running and self._start_time and hasattr(self, 'workflow_duration'):
+        if self._is_running and self._start_time and hasattr(self, "workflow_duration"):
             try:
                 elapsed_seconds = int(time.time() - self._start_time)
-                self.workflow_duration.set_text(f'Duration: {self._format_duration(elapsed_seconds)}')
+                self.workflow_duration.set_text(
+                    f"Duration: {self._format_duration(elapsed_seconds)}"
+                )
             except Exception:
                 pass
-    
+
     def _export_logs(self):
         """Export logs to a file."""
         try:
             # Simple log export functionality
-            log_content = ''.join(self._log_buffer)
+            log_content = "".join(self._log_buffer)
             if log_content:
                 # Create a simple download
-                ui.download(log_content, 'workflow_logs.txt')
+                ui.download(log_content, "workflow_logs.txt")
             else:
-                ui.notify('No logs to export', type='warning')
+                ui.notify("No logs to export", type="warning")
         except Exception as e:
-            ui.notify(f'Export failed: {e}', type='error')
+            ui.notify(f"Export failed: {e}", type="error")
 
     def _clear_logs(self):
         try:
             self._log_buffer.clear()
-            self.log_area.set_value('')
+            self.log_area.set_value("")
         except Exception:
             pass
 
@@ -1288,38 +1719,46 @@ class GUILauncher:
             for sample_dir in base.iterdir():
                 if not sample_dir.is_dir():
                     continue
-                master = sample_dir / 'master.csv'
+                master = sample_dir / "master.csv"
                 if master.exists():
                     sid = sample_dir.name
                     if preexisting:
                         self._preexisting_sample_ids.add(sid)
                     # Determine last_seen from file mtime
                     last_seen = master.stat().st_mtime
-                    rows.append({
-                        'sample_id': sid,
-                        'origin': 'Pre-existing' if sid in self._preexisting_sample_ids else 'Live',
-                        'active_jobs': 0,
-                        'total_jobs': 0,
-                        'completed_jobs': 0,
-                        'failed_jobs': 0,
-                        'job_types': '',
-                        'last_seen': time.strftime('%H:%M:%S', time.localtime(last_seen)),
-                        '_last_seen_raw': last_seen,
-                    })
+                    rows.append(
+                        {
+                            "sample_id": sid,
+                            "origin": (
+                                "Pre-existing"
+                                if sid in self._preexisting_sample_ids
+                                else "Live"
+                            ),
+                            "active_jobs": 0,
+                            "total_jobs": 0,
+                            "completed_jobs": 0,
+                            "failed_jobs": 0,
+                            "job_types": "",
+                            "last_seen": time.strftime(
+                                "%H:%M:%S", time.localtime(last_seen)
+                            ),
+                            "_last_seen_raw": last_seen,
+                        }
+                    )
             if rows:
                 # Merge with any current rows and update table
-                existing = {r['sample_id']: r for r in (self._last_samples_rows or [])}
+                existing = {r["sample_id"]: r for r in (self._last_samples_rows or [])}
                 for r in rows:
-                    existing[r['sample_id']] = r
+                    existing[r["sample_id"]] = r
                 merged = list(existing.values())
-                if hasattr(self, 'samples_table'):
+                if hasattr(self, "samples_table"):
                     try:
                         self.samples_table.rows = merged
                         self.samples_table.update()
                     except Exception:
                         pass
                 self._last_samples_rows = merged
-                self._known_sample_ids = {r['sample_id'] for r in merged}
+                self._known_sample_ids = {r["sample_id"] for r in merged}
             if preexisting:
                 self._preexisting_scanned = True
         except Exception:
@@ -1333,12 +1772,16 @@ class GUILauncher:
             # Prepare mappings for efficient lookups and updates
             new_rows: List[Dict[str, Any]] = []
             updated_rows: List[Dict[str, Any]] = []
-            existing_by_id: Dict[str, Dict[str, Any]] = {r.get('sample_id'): r for r in (self._last_samples_rows or []) if r.get('sample_id')}
+            existing_by_id: Dict[str, Dict[str, Any]] = {
+                r.get("sample_id"): r
+                for r in (self._last_samples_rows or [])
+                if r.get("sample_id")
+            }
             for sample_dir in base.iterdir():
                 if not sample_dir.is_dir():
                     continue
                 sid = sample_dir.name
-                master = sample_dir / 'master.csv'
+                master = sample_dir / "master.csv"
                 if master.exists():
                     try:
                         last_seen = master.stat().st_mtime
@@ -1350,84 +1793,106 @@ class GUILauncher:
                     existing_row = existing_by_id.get(sid)
                     if existing_row is None:
                         # New sample discovered → mark as Live
-                        new_rows.append({
-                            'sample_id': sid,
-                            'origin': 'Live',
-                            'active_jobs': 0,
-                            'total_jobs': 0,
-                            'completed_jobs': 0,
-                            'failed_jobs': 0,
-                            'job_types': '',
-                            'last_seen': time.strftime('%H:%M:%S', time.localtime(last_seen)),
-                            '_last_seen_raw': last_seen,
-                        })
+                        new_rows.append(
+                            {
+                                "sample_id": sid,
+                                "origin": "Live",
+                                "active_jobs": 0,
+                                "total_jobs": 0,
+                                "completed_jobs": 0,
+                                "failed_jobs": 0,
+                                "job_types": "",
+                                "last_seen": time.strftime(
+                                    "%H:%M:%S", time.localtime(last_seen)
+                                ),
+                                "_last_seen_raw": last_seen,
+                            }
+                        )
                     else:
                         # Existing sample: if master.csv has a newer mtime, update and flip to Live
-                        prev_seen = existing_row.get('_last_seen_raw') or 0
+                        prev_seen = existing_row.get("_last_seen_raw") or 0
                         if last_seen > prev_seen:
                             updated = dict(existing_row)
-                            updated['last_seen'] = time.strftime('%H:%M:%S', time.localtime(last_seen))
-                            updated['_last_seen_raw'] = last_seen
-                            updated['origin'] = 'Live'
+                            updated["last_seen"] = time.strftime(
+                                "%H:%M:%S", time.localtime(last_seen)
+                            )
+                            updated["_last_seen_raw"] = last_seen
+                            updated["origin"] = "Live"
                             updated_rows.append(updated)
 
             if new_rows or updated_rows:
-                merged_map: Dict[str, Dict[str, Any]] = {r['sample_id']: r for r in (self._last_samples_rows or [])}
+                merged_map: Dict[str, Dict[str, Any]] = {
+                    r["sample_id"]: r for r in (self._last_samples_rows or [])
+                }
                 for r in new_rows:
-                    merged_map[r['sample_id']] = r
+                    merged_map[r["sample_id"]] = r
                 for r in updated_rows:
-                    merged_map[r['sample_id']] = r
+                    merged_map[r["sample_id"]] = r
                 merged = list(merged_map.values())
-                if hasattr(self, 'samples_table'):
+                if hasattr(self, "samples_table"):
                     try:
                         self.samples_table.rows = merged
                         self.samples_table.update()
                     except Exception:
                         pass
                 self._last_samples_rows = merged
-                self._known_sample_ids = {r['sample_id'] for r in merged}
+                self._known_sample_ids = {r["sample_id"] for r in merged}
         except Exception:
             pass
-    
+
     def _launch_workflow_button_clicked(self):
         """Handle launch workflow button click."""
-        ui.notify('Launch workflow functionality not implemented yet', type='info')
-    
+        ui.notify("Launch workflow functionality not implemented yet", type="info")
+
     def _view_docs_button_clicked(self):
         """Handle view documentation button click."""
-        ui.notify('Documentation not available yet', type='info')
-    
+        ui.notify("Documentation not available yet", type="info")
+
     def stop_gui(self):
         """Stop the GUI thread."""
         self.is_running = False
         # Note: NiceGUI doesn't have a clean shutdown method
         # The thread will terminate when the main process ends
         logging.info("GUI shutdown requested")
-    
+
     def is_gui_running(self) -> bool:
         """Check if the GUI thread is running."""
         return self.is_running and self.gui_thread and self.gui_thread.is_alive()
-    
+
     def get_gui_url(self) -> str:
         """Get the URL where the GUI is running."""
         return f"http://{self.host}:{self.port}"
 
 
-def launch_gui(host = "0.0.0.0",port: int = 8081, show: bool = False, 
-               workflow_runner: Any = None, workflow_steps: list = None, 
-               monitored_directory: str = "") -> GUILauncher:
+def launch_gui(
+    host="0.0.0.0",
+    port: int = 8081,
+    show: bool = False,
+    workflow_runner: Any = None,
+    workflow_steps: list = None,
+    monitored_directory: str = "",
+) -> GUILauncher:
     """Legacy launch function (kept for backward compatibility).
 
     Internally delegates to the refactored launcher in `littlejohn.gui.app`.
     """
     from .gui.app import launch_gui as _launch  # type: ignore
-    return _launch(host=host, port=port, show=show, workflow_runner=workflow_runner, workflow_steps=workflow_steps, monitored_directory=monitored_directory)
+
+    return _launch(
+        host=host,
+        port=port,
+        show=show,
+        workflow_runner=workflow_runner,
+        workflow_steps=workflow_steps,
+        monitored_directory=monitored_directory,
+    )
 
 
 def get_gui_launcher() -> Optional[GUILauncher]:
     """Compatibility shim that delegates to littlejohn.gui.app.get_gui_launcher."""
     try:
         from .gui.app import get_gui_launcher as _get  # type: ignore
+
         return _get()
     except Exception:
         return None
@@ -1437,6 +1902,7 @@ def send_gui_update(update_type: UpdateType, data: Dict[str, Any], priority: int
     """Compatibility shim that delegates to littlejohn.gui.app.send_gui_update."""
     try:
         from .gui.app import send_gui_update as _send  # type: ignore
+
         _send(update_type, data, priority)
     except Exception:
         logging.info("[GUI] No GUI launcher available for update (update dropped)")
