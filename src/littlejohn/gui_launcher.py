@@ -890,6 +890,13 @@ class GUILauncher:
                 except Exception as e:
                     logging.exception(f"[GUI] CNV section failed: {e}")
                 
+                # Fusion section (target and genome-wide; excludes full SV UI)
+                try:
+                    from .gui.components.fusion import add_fusion_section  # type: ignore
+                    add_fusion_section(self, sample_dir)
+                except Exception as e:
+                    logging.exception(f"[GUI] Fusion section failed: {e}")
+                
                 # Files in output directory
                 with ui.card().classes('w-full'):
                     ui.label('📁 Output Files').classes('text-lg font-semibold mb-2')
@@ -1251,34 +1258,54 @@ class GUILauncher:
             base = Path(self.monitored_directory) if self.monitored_directory else None
             if not base or not base.exists():
                 return
+            # Prepare mappings for efficient lookups and updates
             new_rows: List[Dict[str, Any]] = []
+            updated_rows: List[Dict[str, Any]] = []
+            existing_by_id: Dict[str, Dict[str, Any]] = {r.get('sample_id'): r for r in (self._last_samples_rows or []) if r.get('sample_id')}
             for sample_dir in base.iterdir():
                 if not sample_dir.is_dir():
                     continue
                 sid = sample_dir.name
-                if self._preexisting_scanned and sid in self._preexisting_sample_ids:
-                    continue
-                if any(r.get('sample_id') == sid for r in (self._last_samples_rows or [])):
-                    continue
                 master = sample_dir / 'master.csv'
                 if master.exists():
-                    last_seen = master.stat().st_mtime
-                    new_rows.append({
-                        'sample_id': sid,
-                        'origin': 'Live',
-                        'active_jobs': 0,
-                        'total_jobs': 0,
-                        'completed_jobs': 0,
-                        'failed_jobs': 0,
-                        'job_types': '',
-                        'last_seen': time.strftime('%H:%M:%S', time.localtime(last_seen)),
-                        '_last_seen_raw': last_seen,
-                    })
-            if new_rows:
-                existing = {r['sample_id']: r for r in (self._last_samples_rows or [])}
+                    try:
+                        last_seen = master.stat().st_mtime
+                    except Exception:
+                        last_seen = None
+                    if last_seen is None:
+                        continue
+
+                    existing_row = existing_by_id.get(sid)
+                    if existing_row is None:
+                        # New sample discovered → mark as Live
+                        new_rows.append({
+                            'sample_id': sid,
+                            'origin': 'Live',
+                            'active_jobs': 0,
+                            'total_jobs': 0,
+                            'completed_jobs': 0,
+                            'failed_jobs': 0,
+                            'job_types': '',
+                            'last_seen': time.strftime('%H:%M:%S', time.localtime(last_seen)),
+                            '_last_seen_raw': last_seen,
+                        })
+                    else:
+                        # Existing sample: if master.csv has a newer mtime, update and flip to Live
+                        prev_seen = existing_row.get('_last_seen_raw') or 0
+                        if last_seen > prev_seen:
+                            updated = dict(existing_row)
+                            updated['last_seen'] = time.strftime('%H:%M:%S', time.localtime(last_seen))
+                            updated['_last_seen_raw'] = last_seen
+                            updated['origin'] = 'Live'
+                            updated_rows.append(updated)
+
+            if new_rows or updated_rows:
+                merged_map: Dict[str, Dict[str, Any]] = {r['sample_id']: r for r in (self._last_samples_rows or [])}
                 for r in new_rows:
-                    existing[r['sample_id']] = r
-                merged = list(existing.values())
+                    merged_map[r['sample_id']] = r
+                for r in updated_rows:
+                    merged_map[r['sample_id']] = r
+                merged = list(merged_map.values())
                 if hasattr(self, 'samples_table'):
                     try:
                         self.samples_table.rows = merged

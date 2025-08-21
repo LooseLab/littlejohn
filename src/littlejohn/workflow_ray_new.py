@@ -164,7 +164,7 @@ QUEUE_TO_TYPES: Dict[str, Set[str]] = {
     "target": {"target"},
     "fusion": {"fusion"},
     "classification": {"sturgeon", "nanodx", "pannanodx"},
-    "slow": {"random_forest", "sleep", "echo"},
+    "slow": {"random_forest"},
 }
 
 TRIGGERS: Dict[str, List[str]] = {
@@ -193,20 +193,17 @@ CLASSIFICATION_TYPES: Set[str] = {"sturgeon", "nanodx", "pannanodx", "random_for
 
 RESOURCE_HINTS: Dict[str, Dict[str, Any]] = {
     # Tune these to your cluster
-    "preprocessing": {"num_cpus": 2},
-    "bed_conversion": {"num_cpus": 2},
-    "mgmt": {"num_cpus": 2},
-    "cnv": {"num_cpus": 2},
-    "target": {"num_cpus": 2},
-    "fusion": {"num_cpus": 2},
+    "preprocessing": {"num_cpus": 1},
+    "bed_conversion": {"num_cpus": 1},
+    "mgmt": {"num_cpus": 1},
+    "cnv": {"num_cpus": 1},
+    "target": {"num_cpus": 1},
+    "fusion": {"num_cpus": 1},
     # Classifiers do not require GPU by default (CPU-only)
     "sturgeon": {"num_cpus": 1},
     "nanodx": {"num_cpus": 1},
     "pannanodx": {"num_cpus": 1},
     "random_forest": {"num_cpus": 1},
-    # test utilities
-    "sleep": {"num_cpus": 0.1},
-    "echo": {"num_cpus": 0.1},
 }
 
 # ---------- Utilities ----------
@@ -287,27 +284,7 @@ def _wrap_real_handler(py_handler: Optional[Callable[[Job], None]], job_type: st
     return _impl
 
 # Build remote versions with no fixed options; Pool will apply .options(**RESOURCE_HINTS[job_type])
-@ray.remote
-def echo_handler(job: Job) -> WorkflowContext:
-    try:
-        _configure_logging(global_level=GLOBAL_LOG_LEVEL)
-    except Exception:
-        pass
-    time.sleep(0.1)
-    job.context.add_metadata("echo_processed", True)
-    job.context.add_result("echo", "echo_result")
-    return job.context
-
-@ray.remote
-def sleep_handler(job: Job, seconds: float = 1.0) -> WorkflowContext:
-    try:
-        _configure_logging(global_level=GLOBAL_LOG_LEVEL)
-    except Exception:
-        pass
-    time.sleep(seconds)
-    job.context.add_metadata("sleep_processed", True)
-    job.context.add_result("sleep", f"slept_{seconds}s")
-    return job.context
+ 
 
 # Real wrappers
 preprocessing_handler_remote = ray.remote(_wrap_real_handler(_preprocessing_handler, "preprocessing"))
@@ -345,7 +322,7 @@ class TypeProcessor:
 
 @ray.remote
 class Coordinator:
-    def __init__(self, analysis_workers: int = 1):
+    def __init__(self, analysis_workers: int = 1, preset: Optional[str] = None):
         # dedup maps
         self.pending: Dict[Tuple[str, str], int] = {}
         self.running: Dict[Tuple[str, str], int] = {}
@@ -386,6 +363,13 @@ class Coordinator:
         self.samples_by_id: Dict[str, Dict[str, Any]] = {}
         # defer setup/registration to async setup()
 
+        # Preset controls how processing actors are created and their concurrency
+        # None -> legacy per-type actors; otherwise use grouped Pool actors
+        self.preset: Optional[str] = preset
+        self.using_pools: bool = False
+        # Keep references to any CPU limiter actors
+        self._cpu_limiters: List[Any] = []
+
     # ----- handler registration API -----
     async def register_handler(self, job_type: str, remote_func) -> None:
         opts = RESOURCE_HINTS.get(job_type, {})
@@ -395,8 +379,7 @@ class Coordinator:
 
     async def setup(self) -> None:
         """Async setup to register default handlers and start drain loop."""
-        # register default handlers (can be re-registered later)
-        # we store (remote_func_handle, resource_options)
+        # remote function handles (job_type -> remote function)
         registrations = [
             ("preprocessing", preprocessing_handler_remote),
             ("bed_conversion", bed_conversion_handler_remote),
@@ -408,21 +391,110 @@ class Coordinator:
             ("nanodx", nanodx_handler_remote),
             ("pannanodx", pannanodx_handler_remote),
             ("random_forest", random_forest_handler_remote),
-            ("sleep", sleep_handler),
-            ("echo", echo_handler),
         ]
-        for jt, rf in registrations:
-            opts = RESOURCE_HINTS.get(jt, {})
-            # Set actor concurrency via .options on the actor itself
-            max_conc = 1
-            if jt in {"mgmt", "cnv", "target", "fusion"}:
-                max_conc = max(1, int(self.analysis_workers))
-            name = f"typeproc_{jt}"
+
+        preset = (self.preset or "").lower().strip()
+        if preset in {"p2i", "standard"}:
+            # Optionally reserve CPUs to cap global availability
             try:
-                proc = TypeProcessor.options(name=name, max_concurrency=max_conc).remote(jt, rf, opts)
+                total_cpus = float((ray.cluster_resources() or {}).get("CPU", 0))
             except Exception:
-                proc = TypeProcessor.options(max_concurrency=max_conc).remote(jt, rf, opts)
-            self.processors[jt] = proc
+                total_cpus = 0.0
+            desired_cap = 2.0 if preset == "p2i" else 4.0
+            reserve = max(0.0, total_cpus - desired_cap)
+            try:
+                if reserve >= 1.0:
+                    # Reserve floor(reserve) CPUs via a dummy actor
+                    reserve_int = int(reserve)
+                    @ray.remote
+                    class _CpuLimiter:
+                        async def ping(self):
+                            return True
+                    try:
+                        limiter = _CpuLimiter.options(num_cpus=reserve_int).remote()
+                    except Exception:
+                        limiter = _CpuLimiter.remote()
+                    # Keep reference so it's not GC'd
+                    self._cpu_limiters.append(limiter)
+            except Exception:
+                pass
+
+            # Grouped Pool actors
+            groups = {
+                "prep": ["preprocessing", "bed_conversion"],
+                "analysis": ["mgmt", "cnv", "target", "fusion"],
+                "classif": ["sturgeon", "nanodx", "pannanodx"],
+                "rf": ["random_forest"],
+            }
+            # Determine concurrency per pool based on preset
+            def pool_parallel(name: str) -> int:
+                if preset == "p2i":
+                    # Concurrency 1 everywhere
+                    return 1
+                # standard preset
+                if name == "analysis":
+                    return max(1, int(self.analysis_workers))
+                return 1
+
+            # Create pools and register handlers
+            pools: Dict[str, Any] = {}
+            for pool_name, job_types in groups.items():
+                par = pool_parallel(pool_name)
+                actor_name = f"pool_{pool_name}"
+                try:
+                    pool = Pool.options(name=actor_name, max_concurrency=max(1, int(par)), num_cpus=0).remote(pool_name, par)
+                except Exception:
+                    try:
+                        # Some Ray versions don't allow num_cpus=0; use a tiny fractional CPU to avoid reservation deadlock
+                        pool = Pool.options(name=actor_name, max_concurrency=max(1, int(par)), num_cpus=0.001).remote(pool_name, par)
+                    except Exception:
+                        pool = Pool.options(max_concurrency=max(1, int(par))).remote(pool_name, par)
+                pools[pool_name] = pool
+                # Wire coordinator callback
+                try:
+                    # Fire-and-forget to avoid blocking if actor cannot start immediately
+                    pool.set_coordinator_name.remote("littlejohn_coordinator")
+                except Exception:
+                    pass
+                # Register handlers on the pool and map processors
+                for jt, rf in registrations:
+                    if jt in job_types:
+                        opts = RESOURCE_HINTS.get(jt, {})
+                        try:
+                            await pool.register_handler.remote(jt, rf, opts)
+                        except Exception:
+                            pass
+                        self.processors[jt] = pool
+            self.using_pools = True
+        elif preset == "high":
+            # High-performance: per-type actors (legacy model), actors reserve 1 CPU by default
+            for jt, rf in registrations:
+                opts = RESOURCE_HINTS.get(jt, {})
+                max_conc = 1
+                if jt in {"mgmt", "cnv", "target", "fusion"}:
+                    max_conc = max(1, int(self.analysis_workers))
+                name = f"typeproc_{jt}"
+                try:
+                    proc = TypeProcessor.options(name=name, max_concurrency=max_conc).remote(jt, rf, opts)
+                except Exception:
+                    proc = TypeProcessor.options(max_concurrency=max_conc).remote(jt, rf, opts)
+                self.processors[jt] = proc
+            self.using_pools = False
+        else:
+            # Legacy: one TypeProcessor per job type
+            for jt, rf in registrations:
+                opts = RESOURCE_HINTS.get(jt, {})
+                # Set actor concurrency via .options on the actor itself
+                max_conc = 1
+                if jt in {"mgmt", "cnv", "target", "fusion"}:
+                    max_conc = max(1, int(self.analysis_workers))
+                name = f"typeproc_{jt}"
+                try:
+                    proc = TypeProcessor.options(name=name, max_concurrency=max_conc).remote(jt, rf, opts)
+                except Exception:
+                    proc = TypeProcessor.options(max_concurrency=max_conc).remote(jt, rf, opts)
+                self.processors[jt] = proc
+            self.using_pools = False
         # start drain loop to observe completions
         try:
             asyncio.create_task(self._drain_loop())
@@ -502,11 +574,29 @@ class Coordinator:
                     ent['last_seen'] = time.time()
             except Exception:
                 pass
-            ref = proc.process.remote(job)
-            self._inflight[ref] = job
+            if getattr(self, 'using_pools', False):
+                try:
+                    proc.enqueue.remote(job)
+                except Exception:
+                    pass
+            else:
+                ref = proc.process.remote(job)
+                self._inflight[ref] = job
             self.inflight_by_type[job.job_type] = inflight_for_type + 1
 
     async def _on_finish(self, job: Job, ok: bool, ctx: WorkflowContext, err: Optional[str]):
+        # capture start info for duration logging, then update dedup maps
+        active_info = self.active.pop(job.job_id, None)
+        start_time = None
+        queue_name = None
+        filepath = None
+        try:
+            if isinstance(active_info, dict):
+                start_time = active_info.get("start_time")
+                queue_name = active_info.get("queue")
+                filepath = active_info.get("filepath")
+        except Exception:
+            pass
         # update dedup maps
         if job.job_type in DEDUP_TYPES:
             key = (job.context.get_sample_id(), job.job_type)
@@ -514,14 +604,47 @@ class Coordinator:
             if self.running[key] == 0:
                 self.running.pop(key, None)
 
-        # update active & stats
-        self.active.pop(job.job_id, None)
+        # update stats
         # Detect deliberate skip (large BAM)
         is_skipped = False
         try:
             is_skipped = (job.job_type == "preprocessing") and bool(ctx.metadata.get("skip_downstream", False))
         except Exception:
             is_skipped = False
+        status = "completed" if (ok and not is_skipped) else ("skipped" if is_skipped else "failed")
+
+        # Append per-job duration entry
+        try:
+            end_time = time.time()
+            duration = (end_time - float(start_time)) if start_time else None
+            sample_id = None
+            try:
+                sample_id = ctx.get_sample_id() if hasattr(ctx, 'get_sample_id') else 'unknown'
+            except Exception:
+                sample_id = 'unknown'
+            work_dir = None
+            try:
+                work_dir = ctx.metadata.get("work_dir") or job.context.metadata.get("work_dir")
+            except Exception:
+                work_dir = None
+            out_path = os.path.join(work_dir, "job_durations.csv") if work_dir else "job_durations.csv"
+            try:
+                parent = os.path.dirname(out_path)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+            except Exception:
+                pass
+            new_file = not os.path.exists(out_path)
+            with open(out_path, "a", encoding="utf-8") as fh:
+                if new_file:
+                    fh.write("timestamp_iso,sample_id,job_id,job_type,queue,filepath,duration_seconds,status,error\n")
+                ts_iso = time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime(end_time))
+                dur_str = f"{duration:.3f}" if isinstance(duration, (int, float)) else ""
+                fp = filepath or (ctx.filepath if hasattr(ctx, 'filepath') else '')
+                err_short = (err or "").replace("\n", " ").replace(",", " ")[:500]
+                fh.write(f"{ts_iso},{sample_id},{job.job_id},{job.job_type},{queue_name or ''},{os.path.basename(fp)},{dur_str},{status},{err_short}\n")
+        except Exception:
+            pass
         if ok:
             if not is_skipped:
                 self.completed.append(job.job_id)
@@ -549,8 +672,14 @@ class Coordinator:
                         # submit directly and mark pending
                         proc = self.processors.get(t)
                         if proc is not None:
-                            ref = proc.process.remote(j)
-                            self._inflight[ref] = j
+                            if getattr(self, 'using_pools', False):
+                                try:
+                                    proc.enqueue.remote(j)
+                                except Exception:
+                                    pass
+                            else:
+                                ref = proc.process.remote(j)
+                                self._inflight[ref] = j
                             self.classif_pending_by_type[t] = self.classif_pending_by_type.get(t, 0) + 1
                             # Record submission for totals used by GUI
                             try:
@@ -711,8 +840,14 @@ class Coordinator:
                     self.waiting_by_type_global.pop(jt, None)
                 proc_g = self.processors.get(jt)
                 if proc_g is not None:
-                    ref_g = proc_g.process.remote(nxt_job_g)
-                    self._inflight[ref_g] = nxt_job_g
+                    if getattr(self, 'using_pools', False):
+                        try:
+                            proc_g.enqueue.remote(nxt_job_g)
+                        except Exception:
+                            pass
+                    else:
+                        ref_g = proc_g.process.remote(nxt_job_g)
+                        self._inflight[ref_g] = nxt_job_g
                     self.inflight_by_type[jt] = int(self.inflight_by_type.get(jt, 0)) + 1
                     self.submitted_by_type[jt] = self.submitted_by_type.get(jt, 0) + 1
                     self.total_enqueued += 1
@@ -760,8 +895,14 @@ class Coordinator:
                 self.classif_waiting_by_type[job.job_type] = None
                 proc3 = self.processors.get(job.job_type)
                 if proc3 is not None:
-                    ref3 = proc3.process.remote(nxt)
-                    self._inflight[ref3] = nxt
+                    if getattr(self, 'using_pools', False):
+                        try:
+                            proc3.enqueue.remote(nxt)
+                        except Exception:
+                            pass
+                    else:
+                        ref3 = proc3.process.remote(nxt)
+                        self._inflight[ref3] = nxt
                     # Record submission for totals used by GUI
                     try:
                         self.submitted_by_type[job.job_type] = self.submitted_by_type.get(job.job_type, 0) + 1
@@ -974,6 +1115,10 @@ class Pool:
 
         asyncio.create_task(_wait(ref))
 
+    # Adapter so callers using TypeProcessor-style .process() keep working
+    async def process(self, job: Job):
+        return await self.enqueue(job)
+
 # ---------- Classifier & Runner ----------
 
 def default_file_classifier(filepath: str, plan: List[str]) -> List[Job]:
@@ -1182,7 +1327,7 @@ class RayFileWatcher(FileSystemEventHandler):
             self._flush_if_needed(force=True)
 
 
-async def run(plan: List[str], paths: List[str], analysis_workers: int = 1, process_existing: bool = True, monitor: bool = True, watch: bool = False, patterns: Optional[List[str]] = None, ignore_patterns: Optional[List[str]] = None, recursive: bool = True, work_dir: Optional[str] = None, log_level: str = "INFO"):
+async def run(plan: List[str], paths: List[str], analysis_workers: int = 1, process_existing: bool = True, monitor: bool = True, watch: bool = False, patterns: Optional[List[str]] = None, ignore_patterns: Optional[List[str]] = None, recursive: bool = True, work_dir: Optional[str] = None, log_level: str = "INFO", preset: Optional[str] = None):
     global GLOBAL_LOG_LEVEL
     GLOBAL_LOG_LEVEL = (log_level or "INFO").upper()
     # Ensure any previous coordinator is terminated to avoid stale-code actors
@@ -1195,7 +1340,10 @@ async def run(plan: List[str], paths: List[str], analysis_workers: int = 1, proc
     except Exception:
         pass
     # Start a fresh coordinator (not detached)
-    coord = Coordinator.options(name="littlejohn_coordinator").remote(analysis_workers=analysis_workers)
+    try:
+        coord = Coordinator.options(name="littlejohn_coordinator", num_cpus=0).remote(analysis_workers=analysis_workers, preset=preset)
+    except Exception:
+        coord = Coordinator.options(name="littlejohn_coordinator").remote(analysis_workers=analysis_workers, preset=preset)
     # run async setup without blocking the event loop
     try:
         await coord.setup.remote()
@@ -1368,11 +1516,21 @@ def parse_args():
     p.add_argument("--ignore", action="append", default=None, help="Glob patterns to ignore (repeatable)")
     p.add_argument("--no-recursive", action="store_true", help="Disable recursive directory watching")
     p.add_argument("--ray-address", default=None, help="Ray cluster address (None = local)")
+    p.add_argument("--preset", default=None, choices=["p2i", "standard", "high"], help="Execution preset controlling actor grouping and concurrency")
     return p.parse_args()
 
 if __name__ == "__main__":
     args = parse_args()
-    ray.init(address=args.ray_address)
+    try:
+        # Expose dashboard on all interfaces when supported
+        ray.init(
+            address=args.ray_address,
+            include_dashboard=True,
+            dashboard_host=os.environ.get("RAY_DASHBOARD_HOST", "0.0.0.0"),
+        )
+    except TypeError:
+        # Older Ray versions may not support dashboard args
+        ray.init(address=args.ray_address)
 
     if not args.plan:
         # default example
@@ -1394,6 +1552,7 @@ if __name__ == "__main__":
             patterns=args.patterns,
             ignore_patterns=args.ignore,
             recursive=not args.no_recursive,
+            preset=args.preset,
         ))
     except KeyboardInterrupt:
         pass

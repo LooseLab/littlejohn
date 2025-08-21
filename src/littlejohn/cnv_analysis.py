@@ -131,70 +131,70 @@ def run_cnv_analysis_subprocess(
     Returns:
         Dictionary with analysis results or None if failed
     """
-    try:
+    #try:
         # Ensure temp directory exists
-        os.makedirs(temp_dir, exist_ok=True)
-        
-        # In multi-sample mode we can avoid writing per-sample copy_numbers
-        copy_numbers_path = None
-        
-        # Determine reference CNV dict path: if provided a path, use it; otherwise serialize dict
-        if isinstance(ref_cnv_dict, str) and os.path.exists(ref_cnv_dict):
-            ref_cnv_dict_path = ref_cnv_dict
-        else:
-            ref_cnv_dict_path = os.path.join(temp_dir, 'ref_cnv_dict.pkl')
-            with open(ref_cnv_dict_path, 'wb') as f:
-                pickle.dump(ref_cnv_dict, f)
-        
-        # Get path to the subprocess script
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        subprocess_script = os.path.join(script_dir, 'cnv_subprocess.py')
-        
-        # Run the subprocess
-        cmd = [
-            sys.executable,  # Use the same Python interpreter
-            subprocess_script,
-            '--bam-path', bam_path,
-            # Prefer multi-sample update_cnv_dict with sample id to avoid extra serialization
-            '--update-cnv-dict-path', update_cnv_dict_path if update_cnv_dict_path else os.path.join(temp_dir, 'update_cnv_dict.pkl'),
-            '--sample-id', sample_id if sample_id else 'unknown',
-            '--ref-cnv-dict-path', ref_cnv_dict_path,
-            '--output-dir', temp_dir,
-            '--threads', str(threads),
-            '--mapq-filter', str(mapq_filter)
-        ]
-        
-        logger.debug(f"Running CNV analysis in subprocess: {' '.join(cmd)}")
-        
-        # Run subprocess with timeout (removed cwd=temp_dir to fix path issues)
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=3600,  # 1 hour timeout
-        )
-        
-        if result.returncode != 0:
-            logger.error(f"Subprocess failed with return code {result.returncode}")
-            logger.error(f"stdout: {result.stdout}")
-            logger.error(f"stderr: {result.stderr}")
-            return None
-        
-        # Load results
-        results_path = os.path.join(temp_dir, 'cnv_analysis_results.pkl')
-        if os.path.exists(results_path):
-            with open(results_path, 'rb') as f:
-                return pickle.load(f)
-        else:
-            logger.error("Results file not found")
-            return None
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    # In multi-sample mode we can avoid writing per-sample copy_numbers
+    copy_numbers_path = None
+    
+    # Determine reference CNV dict path: if provided a path, use it; otherwise serialize dict
+    if isinstance(ref_cnv_dict, str) and os.path.exists(ref_cnv_dict):
+        ref_cnv_dict_path = ref_cnv_dict
+    else:
+        ref_cnv_dict_path = os.path.join(temp_dir, 'ref_cnv_dict.pkl')
+        with open(ref_cnv_dict_path, 'wb') as f:
+            pickle.dump(ref_cnv_dict, f)
+    
+    # Get path to the subprocess script
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    subprocess_script = os.path.join(script_dir, 'cnv_subprocess.py')
+    
+    # Run the subprocess
+    cmd = [
+        sys.executable,  # Use the same Python interpreter
+        subprocess_script,
+        '--bam-path', bam_path,
+        # Prefer multi-sample update_cnv_dict with sample id to avoid extra serialization
+        '--update-cnv-dict-path', update_cnv_dict_path if update_cnv_dict_path else os.path.join(temp_dir, 'update_cnv_dict.pkl'),
+        '--sample-id', sample_id if sample_id else 'unknown',
+        '--ref-cnv-dict-path', ref_cnv_dict_path,
+        '--output-dir', temp_dir,
+        '--threads', str(threads),
+        '--mapq-filter', str(mapq_filter)
+    ]
+    
+    logger.debug(f"Running CNV analysis in subprocess: {' '.join(cmd)}")
+    
+    # Run subprocess with timeout (removed cwd=temp_dir to fix path issues)
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=3600,  # 1 hour timeout
+    )
+    
+    if result.returncode != 0:
+        logger.error(f"Subprocess failed with return code {result.returncode}")
+        logger.error(f"stdout: {result.stdout}")
+        logger.error(f"stderr: {result.stderr}")
+        return None
+    
+    # Load results
+    results_path = os.path.join(temp_dir, 'cnv_analysis_results.pkl')
+    if os.path.exists(results_path):
+        with open(results_path, 'rb') as f:
+            return pickle.load(f)
+    else:
+        logger.error("Results file not found")
+        return None
             
-    except subprocess.TimeoutExpired:
-        logger.error("CNV analysis subprocess timed out")
-        return None
-    except Exception as e:
-        logger.error(f"Error running CNV analysis subprocess: {e}")
-        return None
+    #except subprocess.TimeoutExpired:
+    #    logger.error("CNV analysis subprocess timed out")
+    #    return None
+    #except Exception as e:
+    #    logger.error(f"Error running CNV analysis subprocess: {e}")
+    #    return None
 
 @dataclass
 class CNVMetadata:
@@ -893,60 +893,60 @@ def cnv_handler(job, work_dir=None):
     # Get job-specific logger
     logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
     
-    try:
-        bam_path = job.context.filepath
-        
-        logger.info(f"Starting CNV analysis for: {os.path.basename(bam_path)}")
-        
-        # Get metadata from preprocessing
-        bam_metadata = job.context.metadata.get('bam_metadata', {})
-        
-        # Create BamMetadata object for compatibility
-        from littlejohn.bam_preprocessor import BamMetadata
-        metadata = BamMetadata(
-            file_path=bam_path,
-            file_size=job.context.metadata.get('file_size', 0),
-            creation_time=job.context.metadata.get('creation_time', time.time()),
-            extracted_data=bam_metadata
-        )
-        
-        # Determine work directory
-        if work_dir is None:
-            # Default to BAM file directory
-            work_dir = os.path.dirname(bam_path)
-        else:
-            # Use specified work directory, create if it doesn't exist
-            os.makedirs(work_dir, exist_ok=True)
-            logger.debug(f"Using specified work directory: {work_dir}")
-        
-        # Process the BAM file
-        result = process_single_bam(bam_path, metadata, work_dir, logger)
-        
-        # Store results in job context
-        job.context.add_metadata('cnv_analysis', result)
-        
-        if result.get('error_message'):
-            job.context.add_error('cnv_analysis', result['error_message'])
-            logger.error(f"CNV analysis failed: {result['error_message']}")
-        else:
-            job.context.add_result('cnv_analysis', {
-                'status': 'success',
-                'sample_id': result.get('sample_id', 'unknown'),
-                'analysis_time': result.get('analysis_timestamp', 0),
-                'sex_estimate': result.get('sex_estimate', 'Unknown'),
-                'breakpoints_count': len(result.get('breakpoints', [])),
-                'processing_steps': result.get('processing_steps', []),
-                'cnv_data_path': result.get('cnv_data_path', ''),
-                'analysis_counter': result.get('analysis_counter', 0)
-            })
-            logger.info(f"CNV analysis complete for {os.path.basename(bam_path)}")
-            logger.info(f"Sample ID: {result.get('sample_id', 'unknown')}")
-            logger.info(f"Sex Estimate: {result.get('sex_estimate', 'Unknown')}")
-            logger.info(f"Breakpoints: {len(result.get('breakpoints', []))}")
-            logger.info(f"Analysis Counter: {result.get('analysis_counter', 0)}")
-            logger.debug(f"Processing steps: {', '.join(result.get('processing_steps', []))}")
-            logger.debug(f"Output directory: {os.path.dirname(result.get('cnv_data_path', ''))}")
+    #try:
+    bam_path = job.context.filepath
+    
+    logger.info(f"Starting CNV analysis for: {os.path.basename(bam_path)}")
+    
+    # Get metadata from preprocessing
+    bam_metadata = job.context.metadata.get('bam_metadata', {})
+    
+    # Create BamMetadata object for compatibility
+    from littlejohn.bam_preprocessor import BamMetadata
+    metadata = BamMetadata(
+        file_path=bam_path,
+        file_size=job.context.metadata.get('file_size', 0),
+        creation_time=job.context.metadata.get('creation_time', time.time()),
+        extracted_data=bam_metadata
+    )
+    
+    # Determine work directory
+    if work_dir is None:
+        # Default to BAM file directory
+        work_dir = os.path.dirname(bam_path)
+    else:
+        # Use specified work directory, create if it doesn't exist
+        os.makedirs(work_dir, exist_ok=True)
+        logger.debug(f"Using specified work directory: {work_dir}")
+    
+    # Process the BAM file
+    result = process_single_bam(bam_path, metadata, work_dir, logger)
+    
+    # Store results in job context
+    job.context.add_metadata('cnv_analysis', result)
+    
+    if result.get('error_message'):
+        job.context.add_error('cnv_analysis', result['error_message'])
+        logger.error(f"CNV analysis failed: {result['error_message']}")
+    else:
+        job.context.add_result('cnv_analysis', {
+            'status': 'success',
+            'sample_id': result.get('sample_id', 'unknown'),
+            'analysis_time': result.get('analysis_timestamp', 0),
+            'sex_estimate': result.get('sex_estimate', 'Unknown'),
+            'breakpoints_count': len(result.get('breakpoints', [])),
+            'processing_steps': result.get('processing_steps', []),
+            'cnv_data_path': result.get('cnv_data_path', ''),
+            'analysis_counter': result.get('analysis_counter', 0)
+        })
+        logger.info(f"CNV analysis complete for {os.path.basename(bam_path)}")
+        logger.info(f"Sample ID: {result.get('sample_id', 'unknown')}")
+        logger.info(f"Sex Estimate: {result.get('sex_estimate', 'Unknown')}")
+        logger.info(f"Breakpoints: {len(result.get('breakpoints', []))}")
+        logger.info(f"Analysis Counter: {result.get('analysis_counter', 0)}")
+        logger.debug(f"Processing steps: {', '.join(result.get('processing_steps', []))}")
+        logger.debug(f"Output directory: {os.path.dirname(result.get('cnv_data_path', ''))}")
             
-    except Exception as e:
-        job.context.add_error('cnv_analysis', str(e))
-        logger.error(f"Error in CNV analysis for {job.context.filepath}: {e}") 
+    #except Exception as e:
+    #    job.context.add_error('cnv_analysis', str(e))
+    #    logger.error(f"Error in CNV analysis for {job.context.filepath}: {e}") 

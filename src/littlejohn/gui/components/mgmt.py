@@ -14,9 +14,6 @@ except ImportError:  # pragma: no cover
 
 def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
     """Build the MGMT section and attach refresh timer. Uses launcher._mgmt_state."""
-    print("--------------------------------")
-    print("Adding MGMT section")
-    print("--------------------------------")
     with ui.card().classes('w-full'):
         mgmt_exp = ui.expansion('MGMT', icon='science').classes('w-full')
         with mgmt_exp:
@@ -187,7 +184,6 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                 'bed_path': str(bed_path) if bed_path.exists() else '', 'bed_mtime': bed_path.stat().st_mtime if bed_path.exists() else 0,
             }
         except Exception as e:
-            print(e)
             raise Exception(f"Failed to refresh MGMT section: {e}")
 
     ui.timer(30.0, _refresh_mgmt, active=True)
