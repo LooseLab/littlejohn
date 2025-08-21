@@ -740,17 +740,14 @@ class GUILauncher:
                     ui.label("📋 All Tracked Samples").classes(
                         "text-lg font-semibold mb-4"
                     )
-                    # Filters & actions row
+                    # Filters row
                     with ui.row().classes("items-center gap-2 mb-2"):
-                        self.view_sample_button = ui.button(
-                            "View",
-                            on_click=lambda: (
-                                ui.navigate.to(f"/live_data/{self._selected_sample_id}")
-                                if self._selected_sample_id
-                                else ui.notify("Select a sample first", type="warning")
-                            ),
+                        # Export selected reports button
+                        self.export_reports_button = ui.button(
+                            "Export Reports",
+                            on_click=lambda: None,
                         ).props("color=primary")
-                        self.view_sample_button.disable()
+                        self.export_reports_button.disable()
 
                         # Initialize filters model
                         self._samples_filters = getattr(
@@ -842,19 +839,114 @@ class GUILauncher:
                                     "field": "last_seen",
                                     "sortable": True,
                                 },
+                                {
+                                    "name": "actions",
+                                    "label": "Actions",
+                                    "field": "actions",
+                                },
                             ],
                             rows=[],
                             row_key="sample_id",
-                            selection="single",
+                            selection="multiple",
                             pagination=20,
                         )
                         .props("rows-per-page-options=[10,20,50,0]")
                         .classes("w-full")
                     )
 
-                    # Selection handler to enable the external View button
+                    # Per-row action button to view sample
                     try:
-                        self.samples_table.on("selection", self._on_sample_selected)
+                        self.samples_table.add_slot(
+                            "body-cell-actions",
+                            """
+<q-td key=\"actions\" :props=\"props\">
+  <q-btn color=\"primary\" size=\"sm\" label=\"View\"
+         @click=\"$parent.$emit('action', props.row.sample_id)\" />
+</q-td>
+""",
+                        )
+                    except Exception:
+                        pass
+
+                    # Handle action emitted from table slot
+                    try:
+                        self.samples_table.on(
+                            "action",
+                            lambda e: ui.navigate.to(f"/live_data/{e.args}")
+                            if isinstance(getattr(e, "args", None), str)
+                            else ui.notify("Invalid button payload", type="warning"),
+                        )
+                    except Exception:
+                        pass
+
+                    # Track multi-selection for batch export
+                    try:
+                        self._selected_sample_ids = set()
+
+                        def _on_selection(event):
+                            try:
+                                rows = None
+                                if hasattr(event, "args") and isinstance(event.args, dict):
+                                    rows = event.args.get("rows")
+                                elif isinstance(event, dict):
+                                    rows = event.get("rows")
+                                ids = set()
+                                if rows and isinstance(rows, list):
+                                    for r in rows:
+                                        if isinstance(r, dict) and r.get("sample_id"):
+                                            ids.add(r.get("sample_id"))
+                                self._selected_sample_ids = ids
+                                if ids:
+                                    self.export_reports_button.enable()
+                                else:
+                                    self.export_reports_button.disable()
+                            except Exception:
+                                pass
+
+                        self.samples_table.on("selection", _on_selection)
+                    except Exception:
+                        pass
+
+                    # Batch export selected reports
+                    try:
+                        async def _export_selected_reports():
+                            try:
+                                selected = list(getattr(self, "_selected_sample_ids", set()) or [])
+                                if not selected:
+                                    ui.notify("No samples selected", type="warning")
+                                    return
+                                try:
+                                    from nicegui import run as ng_run  # type: ignore
+                                except Exception:
+                                    ng_run = None  # type: ignore
+                                for sid in selected:
+                                    try:
+                                        sample_dir = (
+                                            Path(self.monitored_directory) / sid
+                                            if self.monitored_directory
+                                            else None
+                                        )
+                                        if not sample_dir or not sample_dir.exists():
+                                            ui.notify(f"Missing output for {sid}", type="warning")
+                                            continue
+                                        filename = f"{sid}_run_report.pdf"
+                                        pdf_path = os.path.join(str(sample_dir), filename)
+                                        os.makedirs(str(sample_dir), exist_ok=True)
+                                        if ng_run is not None:
+                                            pdf_file = await ng_run.io_bound(
+                                                create_pdf, pdf_path, str(sample_dir), "detailed"
+                                            )
+                                        else:
+                                            pdf_file = create_pdf(pdf_path, str(sample_dir), "detailed")
+                                        ui.download(pdf_file)
+                                    except Exception as e:
+                                        ui.notify(f"Export failed for {sid}: {e}", type="error")
+                                ui.notify("Export complete")
+                            except Exception:
+                                pass
+
+                        # Wire the button now that handler exists
+                        self.export_reports_button.on_click(_export_selected_reports)
                     except Exception:
                         pass
 
@@ -862,12 +954,7 @@ class GUILauncher:
                     if self._last_samples_rows:
                         try:
                             self._apply_samples_table_filters()
-                            # Auto-select if only one sample
-                            if len(self.samples_table.rows or []) == 1:
-                                self._selected_sample_id = (
-                                    self.samples_table.rows or []
-                                )[0].get("sample_id")
-                                self.view_sample_button.enable()
+                            # No selection behavior needed; per-row buttons handle navigation
                         except Exception:
                             pass
 
@@ -923,7 +1010,7 @@ class GUILauncher:
                 for r in (self._last_samples_rows or [])
                 if r.get("sample_id") and r.get("sample_id") != "unknown"
             }
-            # Track currently most active/recent sample
+            # Track currently most active/recent sample (for convenience elsewhere)
             visible_rows = self.samples_table.rows or []
             if visible_rows:
                 rows_sorted = sorted(
@@ -932,44 +1019,9 @@ class GUILauncher:
                     reverse=True,
                 )
                 self._current_sample_id = rows_sorted[0].get("sample_id")
-            # Update external button state
-            if self._selected_sample_id and any(
-                r.get("sample_id") == self._selected_sample_id for r in visible_rows
-            ):
-                self.view_sample_button.enable()
-            elif visible_rows:
-                if len(visible_rows) == 1:
-                    self._selected_sample_id = visible_rows[0].get("sample_id")
-                    self.view_sample_button.enable()
-                else:
-                    self.view_sample_button.disable()
-            else:
-                self._selected_sample_id = None
-                self.view_sample_button.disable()
         except Exception as e:
             logging.debug(f"Error updating samples table: {e}")
 
-    def _on_sample_selected(self, event) -> None:
-        try:
-            # NiceGUI passes {'rows': [selected_rows...]}
-            rows = None
-            if hasattr(event, "args") and isinstance(event.args, dict):
-                rows = event.args.get("rows")
-            elif isinstance(event, dict):
-                rows = event.get("rows")
-            if (
-                rows
-                and isinstance(rows, list)
-                and len(rows) > 0
-                and isinstance(rows[0], dict)
-            ):
-                self._selected_sample_id = rows[0].get("sample_id")
-                if self._selected_sample_id:
-                    self.view_sample_button.enable()
-                else:
-                    self.view_sample_button.disable()
-        except Exception:
-            pass
 
     # -------- Samples table helpers: search, filter, sort --------
     def _normalize_rows_for_display(
