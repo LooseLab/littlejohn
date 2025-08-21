@@ -95,7 +95,7 @@ def _setup_file_paths(target_panel: str = "rCNS2") -> Tuple[str, str]:
     """Setup file paths for gene data."""
     # Try to import robin resources to get the correct path
     try:
-        from robin import resources
+        from littlejohn import resources
 
         resources_dir = os.path.dirname(resources.__file__)
 

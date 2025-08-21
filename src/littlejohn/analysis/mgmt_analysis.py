@@ -204,7 +204,7 @@ def run_matkit(
 
         # Use matkit from robin package
         try:
-            from robin.utils import run_matkit as run_matkit_util
+            from littlejohn.analysis.utilities.matkit import run_matkit as run_matkit_util
 
             temp_bed_file = os.path.join(sample_dir, f"temp_mgmt_{file_number}.bed")
             temp_files.append(temp_bed_file)

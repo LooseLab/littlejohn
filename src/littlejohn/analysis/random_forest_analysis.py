@@ -39,12 +39,12 @@ import pandas as pd
 
 # Import robin utilities
 try:
-    from robin.utilities.merge_bedmethyl import (
+    from littlejohn.analysis.utilities.merge_bedmethyl import (
         collapse_bedmethyl,
         load_minimal_modkit_data,
         reconstruct_full_bedmethyl_data,
     )
-    from robin import resources, models, submodules
+    from robin import submodules
 
     HVPATH = os.path.join(
         os.path.dirname(os.path.abspath(submodules.__file__)), "hv_rapidCNS2"

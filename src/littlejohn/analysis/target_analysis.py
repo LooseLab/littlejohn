@@ -102,7 +102,7 @@ def json_serializable(obj):
 
 # Import robin resources for BED files
 try:
-    from robin import resources
+    from littlejohn import resources
 except ImportError:
     resources = None
 

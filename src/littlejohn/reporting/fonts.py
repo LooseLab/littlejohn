@@ -7,7 +7,7 @@ This module handles font registration for the PDF report generation.
 import os
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfbase import pdfmetrics
-from robin import fonts
+from littlejohn.gui import fonts
 
 
 def register_fonts(fonts_dir):

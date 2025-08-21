@@ -5,7 +5,7 @@ This module is the entry point for generating the PDF report.
 """
 
 import os
-from robin.reporting.report import create_pdf
+from littlejohn.reporting.report import create_pdf
 
 if __name__ == "__main__":
     output_dir = (

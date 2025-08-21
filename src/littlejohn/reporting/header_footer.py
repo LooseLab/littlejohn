@@ -9,11 +9,11 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import inch
 from datetime import datetime
 import os
-from robin import images
+from littlejohn.gui import images
 from reportlab.lib import colors
 from PIL import Image as PILImage
 
-from robin.__about__ import __version__
+from littlejohn.__init__ import __version__
 
 VERSION = __version__
 

@@ -954,6 +954,20 @@ def workflow(
                 )
             except KeyboardInterrupt:
                 print("Stopping workflow...")
+                # Attempt to shutdown GUI server if running
+                try:
+                    from littlejohn.gui.app import get_gui_launcher as _get  # type: ignore
+
+                    gl = _get()
+                    if gl is not None:
+                        try:
+                            from nicegui import app as ng_app  # type: ignore
+
+                            ng_app.shutdown()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
             return
 
         # Create workflow runner
@@ -1114,6 +1128,20 @@ def workflow(
                 runner.manager.stop(timeout=DEFAULT_TIMEOUT)
             except Exception as e:
                 click.echo(f"Warning: Error during shutdown: {e}", err=True)
+        # Attempt to shutdown GUI server if running
+        try:
+            from littlejohn.gui.app import get_gui_launcher as _get  # type: ignore
+
+            gl = _get()
+            if gl is not None:
+                try:
+                    from nicegui import app as ng_app  # type: ignore
+
+                    ng_app.shutdown()
+                except Exception:
+                    pass
+        except Exception:
+            pass
         click.echo("\nWorkflow stopped by user")
     except click.BadParameter as e:
         click.echo(f"Parameter error: {e}", err=True)

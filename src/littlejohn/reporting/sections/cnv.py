@@ -17,13 +17,11 @@ from reportlab.lib.styles import ParagraphStyle
 from ..sections.base import ReportSection
 from ..plotting import create_CNV_plot, create_CNV_plot_per_chromosome
 from robin.subpages.CNVObjectClass import (
-    Result,
-    CNVAnalysis,
-    CNV_Difference,
-    moving_average,
-    # iterate_bam_bin,
+    CNVAnalysis
 )
-from robin import resources
+from littlejohn.analysis.cnv_analysis import Result, moving_average,CNV_Difference
+
+from littlejohn import resources
 
 logger = logging.getLogger(__name__)
 

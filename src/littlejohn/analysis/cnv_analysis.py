@@ -92,7 +92,7 @@ from scipy.ndimage import uniform_filter1d
 
 import ruptures as rpt
 from littlejohn.logging_config import get_job_logger
-import robin.resources as resources
+import littlejohn.resources as resources
 
 os.environ["CI"] = "1"
 
@@ -207,6 +207,14 @@ def run_cnv_analysis_subprocess(
     #    return None
 
 
+class Result:
+    """
+    A class to store CNV results.
+    """
+
+    def __init__(self, cnv_dict: dict) -> None:
+        self.cnv = cnv_dict
+
 @dataclass
 class CNVMetadata:
     """Container for CNV analysis metadata and results"""
@@ -256,6 +264,14 @@ def run_ruptures(
         (cp * bin_width - bin_width, cp * bin_width + bin_width)
         for cp in ruptures_result
     ]
+    
+class CNV_Difference:
+    """
+    A class to store CNV difference data.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        self.cnv = {}
 
 
 def moving_average(data: np.ndarray, n: int = 3) -> np.ndarray:

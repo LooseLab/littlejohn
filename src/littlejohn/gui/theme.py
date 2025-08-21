@@ -48,8 +48,8 @@ import nicegui.air
 from pathlib import Path
 
 from littlejohn.gui import images
-from robin import __about__
-from robin.core.state import state
+from littlejohn import __about__
+
 
 import os
 import psutil
@@ -422,9 +422,6 @@ async def cleanup_and_exit():
     shutdown_dialog.open()
     logging.info("Shutdown dialog opened")
 
-    # Set shutdown event
-    state.shutdown_event = True
-    logging.info("Shutdown event set")
 
     # Wait a moment to ensure the dialog is visible
     await asyncio.sleep(1.0)
@@ -436,11 +433,6 @@ async def cleanup_and_exit():
     logging.info(
         "Here we need to do some very graceful shutdown to make sure we don't leave any threads running and we don't leave any files open."
     )
-
-    # Wait for cleanup to complete
-    while state.shutdown_event and state.get_running_process_count() > 0:
-        await asyncio.sleep(3.0)
-    logging.info("Cleanup wait complete")
 
     # Close the shutdown dialog
     shutdown_dialog.close()

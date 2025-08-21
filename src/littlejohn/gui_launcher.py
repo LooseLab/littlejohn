@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from enum import Enum
 import os
 
-from littlejohn.gui import theme
+from littlejohn.gui import theme, images
 
 from littlejohn.reporting.report import create_pdf
 from littlejohn.reporting.sections.disclaimer_text import EXTENDED_DISCLAIMER_TEXT
@@ -523,13 +523,25 @@ class GUILauncher:
             except Exception as e:
                 logging.debug(f"Could not register fonts static dir: {e}")
 
+
+            try:
+                iconfile = os.path.join(
+                    os.path.dirname(os.path.abspath(images.__file__)), "favicon.ico"
+                )
+                if not os.path.exists(iconfile):
+                    logging.warning(f"Favicon file not found: {iconfile}")
+            except Exception as e:
+                logging.error(f"Error locating favicon: {str(e)}")
+                iconfile = None
             # Start the GUI
             ui.run(
                 host=self.host,
                 port=self.port,
                 show=False,
                 reload=False,
+                title="ROBIN",
                 storage_secret="robin",
+                favicon=iconfile,
             )
         except Exception as e:
             print(f"❌ GUI worker error: {e}")
@@ -909,7 +921,7 @@ class GUILauncher:
 
                     # Batch export selected reports
                     try:
-                        async def _export_selected_reports():
+                        async def _export_selected_reports(report_type: str = "detailed"):
                             try:
                                 selected = list(getattr(self, "_selected_sample_ids", set()) or [])
                                 if not selected:
@@ -934,10 +946,10 @@ class GUILauncher:
                                         os.makedirs(str(sample_dir), exist_ok=True)
                                         if ng_run is not None:
                                             pdf_file = await ng_run.io_bound(
-                                                create_pdf, pdf_path, str(sample_dir), "detailed"
+                                                create_pdf, pdf_path, str(sample_dir), report_type
                                             )
                                         else:
-                                            pdf_file = create_pdf(pdf_path, str(sample_dir), "detailed")
+                                            pdf_file = create_pdf(pdf_path, str(sample_dir), report_type)
                                         ui.download(pdf_file)
                                     except Exception as e:
                                         ui.notify(f"Export failed for {sid}: {e}", type="error")
@@ -945,8 +957,55 @@ class GUILauncher:
                             except Exception:
                                 pass
 
-                        # Wire the button now that handler exists
-                        self.export_reports_button.on_click(_export_selected_reports)
+                        async def _confirm_bulk_export():
+                            # Ensure there is at least one selection before opening
+                            if not getattr(self, "_selected_sample_ids", None):
+                                ui.notify("No samples selected", type="warning")
+                                return
+
+                            report_types = {
+                                "summary": "Summary Only",
+                                "detailed": "Detailed",
+                            }
+                            state = {"type": "detailed"}
+
+                            with ui.dialog() as dialog, ui.card().classes("w-96 p-4"):
+                                ui.label("Generate Report").classes("text-h6 font-bold mb-4")
+
+                                # Report type selector
+                                with ui.column().classes("mb-4"):
+                                    ui.label("Report Type").classes("font-bold mb-2")
+                                    ui.toggle(
+                                        report_types,
+                                        value="detailed",
+                                        on_change=lambda e: state.update({"type": e.value}),
+                                    )
+
+                                # Disclaimer section (match single-report dialog)
+                                with ui.column().classes("mb-4"):
+                                    ui.label("Disclaimer").classes("font-bold mb-2")
+                                    formatted_text = EXTENDED_DISCLAIMER_TEXT.replace("\n\n", "<br><br>").replace("\n", " ")
+                                    ui.label(formatted_text).classes("text-sm text-gray-600 mb-4")
+
+                                ui.label("Are you sure you want to generate a report?").classes("mb-4")
+
+                                # Buttons
+                                with ui.row().classes("justify-end gap-2"):
+                                    ui.button("Cancel", on_click=lambda: dialog.submit(("No", None))).props("flat")
+                                    ui.button(
+                                        "Export",
+                                        on_click=lambda: dialog.submit(("Yes", state["type"])),
+                                    ).props("color=primary")
+
+                            dialog_result = await dialog
+                            if dialog_result is None:
+                                return
+                            result, report_type = dialog_result
+                            if result == "Yes" and report_type in ("summary", "detailed"):
+                                await _export_selected_reports(report_type)
+
+                        # Wire the button now that handlers exist
+                        self.export_reports_button.on_click(_confirm_bulk_export)
                     except Exception:
                         pass
 
