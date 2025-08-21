@@ -788,7 +788,7 @@ def debug_process_tree():
                 rss = proc.memory_info().rss / (1024 * 1024 * 1024)
                 logging.debug(f"   Memory: {rss:.2f}GB RSS")
             except:
-                logging.debug(f"   Memory: <access denied>")
+                logging.debug("   Memory: <access denied>")
 
         logging.debug("\n=== End Process Tree Debug ===")
 

@@ -21,7 +21,6 @@ import itertools
 import logging
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional
-from pathlib import Path
 
 # Import robin utilities
 try:
@@ -87,7 +86,7 @@ class BedConversionAnalysis:
 
         # Use logger for initialization
         self.logger = _LOGGER
-        self.logger.info(f"BAM to parquet conversion analysis initialized")
+        self.logger.info("BAM to parquet conversion analysis initialized")
         self.logger.debug(f"Work directory: {self.work_dir}")
         self.logger.debug(f"CPGs master file: {self.cpgs_master_file}")
         self.logger.debug(f"Threads: {self.threads}")
@@ -163,7 +162,7 @@ class BedConversionAnalysis:
             bed_result.processing_steps.append("directory_created")
 
             # Step 3: Process BAM file with matkit
-            logger.info(f"Converting BAM to parquet using matkit...")
+            logger.info("Converting BAM to parquet using matkit...")
 
             # Create output path specific to this sample
             parquet_path = os.path.join(

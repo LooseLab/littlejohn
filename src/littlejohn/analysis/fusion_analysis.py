@@ -13,19 +13,13 @@ Key improvements:
 """
 
 import os
-import sys
 import tempfile
 import logging
 import time
-import pickle
-import gc
 import json
-import random
-import networkx as nx
-from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple, Set
-from dataclasses import dataclass, field
-from collections import Counter, defaultdict
+from dataclasses import dataclass
+from collections import defaultdict
 import numpy as np
 import pandas as pd
 import pysam
@@ -587,7 +581,7 @@ def _load_existing_fusion_results(
         try:
             with open(metadata_path, "r") as f:
                 existing_metadata = json.load(f)
-            logging.info(f"Loaded existing fusion metadata")
+            logging.info("Loaded existing fusion metadata")
         except Exception as e:
             logging.warning(f"Error loading existing fusion metadata: {e}")
 

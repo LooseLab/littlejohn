@@ -72,16 +72,12 @@ import os
 import tempfile
 import logging
 import time
-import pickle
 import gc
 import json
-import asyncio
 import subprocess
 import shutil
-from pathlib import Path
-from typing import Dict, Any, Optional, List, Tuple
-from dataclasses import dataclass, field
-from collections import Counter
+from typing import Dict, Any, Optional, List
+from dataclasses import dataclass
 from io import StringIO
 import numpy as np
 import pandas as pd
@@ -264,7 +260,7 @@ def run_bedmerge(newcovdf, cov_df_main, bedcovdf, bedcov_df_main):
     """
     logger = logging.getLogger("littlejohn.target")
 
-    logger.info(f"Starting coverage merge:")
+    logger.info("Starting coverage merge:")
     logger.info(
         f"  New genome coverage: {len(newcovdf) if newcovdf is not None else 0} regions"
     )
@@ -392,7 +388,7 @@ class TargetAnalysis:
         self.reference = self.config.get("reference", None)
         self.snp_calling = self.config.get("snp_calling", False)
 
-        logger.info(f"Target Analysis initialized")
+        logger.info("Target Analysis initialized")
 
     def _find_target_bed(self) -> str:
         """Find the target BED file from robin resources"""
@@ -524,7 +520,7 @@ class TargetAnalysis:
                 logger.info(f"Created temporary directory: {temp_dir}")
 
                 # Step 6: Extract coverage data using get_covdfs
-                logger.info(f"Extracting coverage data...")
+                logger.info("Extracting coverage data...")
                 newcovdf, bedcovdf = get_covdfs(file_path)
 
                 if newcovdf is None or bedcovdf is None:
@@ -548,7 +544,7 @@ class TargetAnalysis:
                 )
 
                 # Step 7: Extract target regions using bedtools
-                logger.info(f"Extracting target regions using bedtools...")
+                logger.info("Extracting target regions using bedtools...")
                 tempbamfile = tempfile.NamedTemporaryFile(
                     dir=sample_output_dir, suffix=".bam"
                 )
@@ -624,7 +620,7 @@ class TargetAnalysis:
                 )
                 logger.info(f"Coverage data shape: {updated_covdf.shape}")
                 logger.info(f"Coverage columns: {list(updated_covdf.columns)}")
-                logger.info(f"Sample coverage data:")
+                logger.info("Sample coverage data:")
                 logger.info(
                     f"  First few rows: {updated_covdf.head(3).to_dict('records')}"
                 )
@@ -769,7 +765,7 @@ class TargetAnalysis:
                 target_result.processing_steps.append("threshold_analysis_complete")
 
                 # Step 13: Perform target analysis
-                logger.info(f"Performing target analysis...")
+                logger.info("Performing target analysis...")
                 analysis_results = self._perform_target_analysis(
                     file_path, temp_dir, metadata, newcovdf, bedcovdf
                 )
@@ -777,7 +773,7 @@ class TargetAnalysis:
                 target_result.processing_steps.append("analysis_completed")
 
                 # Step 14: Generate output files
-                logger.info(f"Generating output files...")
+                logger.info("Generating output files...")
                 output_files = self._generate_output_files(
                     sample_output_dir,
                     analysis_counter,
@@ -946,7 +942,7 @@ class TargetAnalysis:
             # - target_coverage.csv (calculated target coverage)
 
             logger.info(
-                f"No additional output files needed - data accumulated in CSV files"
+                "No additional output files needed - data accumulated in CSV files"
             )
             return output_files
 

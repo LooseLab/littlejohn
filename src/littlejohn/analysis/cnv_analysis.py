@@ -80,10 +80,8 @@ import pickle
 import gc
 import subprocess
 import sys
-from pathlib import Path
-from typing import Dict, Any, Optional, List, Tuple
-from dataclasses import dataclass, field
-from collections import Counter
+from typing import Dict, Optional, List, Tuple
+from dataclasses import dataclass
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import multiprocessing as mp
@@ -418,7 +416,7 @@ def detect_breakpoints_from_cnv(cnv_data: Dict, bin_width: int, logger) -> List[
     breakpoints = []
 
     try:
-        logger.debug(f"Detecting breakpoints in CNV data")
+        logger.debug("Detecting breakpoints in CNV data")
 
         # Use parallel processing for large datasets
         if len(cnv_data) > 5:  # Only parallelize if we have many chromosomes
@@ -483,7 +481,7 @@ def calculate_chromosome_stats_from_cnv(cnv_data: Dict, logger) -> Dict:
     stats = {}
 
     try:
-        logger.debug(f"Calculating chromosome statistics")
+        logger.debug("Calculating chromosome statistics")
 
         for chrom, data in cnv_data.items():
             if len(data) == 0:
@@ -800,7 +798,7 @@ def process_single_bam(bam_path, metadata, work_dir, logger):
                     with open(update_cnv_dict_path, "rb") as f:
                         update_cnv_dict = pickle.load(f)
                     logger.debug(
-                        f"Loaded accumulated copy numbers from previous iterations"
+                        "Loaded accumulated copy numbers from previous iterations"
                     )
                     if sample_id in update_cnv_dict:
                         copy_numbers = update_cnv_dict[sample_id]
@@ -825,7 +823,7 @@ def process_single_bam(bam_path, metadata, work_dir, logger):
         else:
             copy_numbers = {}
             update_cnv_dict = {}
-            logger.debug(f"No previous copy numbers found, starting fresh")
+            logger.debug("No previous copy numbers found, starting fresh")
 
         # Compute existing reference CNV dict path (avoid re-serializing; pass path)
         ref_cnv_path = os.path.join(
@@ -834,7 +832,7 @@ def process_single_bam(bam_path, metadata, work_dir, logger):
         )
 
         # Process BAM file with cnv_from_bam using subprocess
-        logger.debug(f"Processing BAM file with cnv_from_bam (subprocess)")
+        logger.debug("Processing BAM file with cnv_from_bam (subprocess)")
         try:
             # Run CNV analysis in subprocess
             subprocess_result = run_cnv_analysis_subprocess(
@@ -871,7 +869,7 @@ def process_single_bam(bam_path, metadata, work_dir, logger):
             update_cnv_dict[sample_id] = updated_copy_numbers
 
             analysis_result["processing_steps"].append("cnv_data_extracted")
-            logger.debug(f"CNV data extracted successfully")
+            logger.debug("CNV data extracted successfully")
             logger.debug(
                 f"Bin width: {r_bin:,}, Variance: {r_var:.6f}, Genome length: {genome_length:,}"
             )
@@ -883,7 +881,7 @@ def process_single_bam(bam_path, metadata, work_dir, logger):
             return analysis_result
 
         # Calculate normalized CNV data (difference between sample and reference)
-        logger.debug(f"Calculating normalized CNV data")
+        logger.debug("Calculating normalized CNV data")
         result3_cnv = {}
         for key in r_cnv.keys():
             if key != "chrM" and key in r2_cnv:

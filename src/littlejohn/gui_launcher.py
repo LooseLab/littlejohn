@@ -12,9 +12,6 @@ import logging
 import queue
 from collections import deque
 import csv
-import natsort
-import numpy as np
-import pandas as pd
 from typing import Optional, Dict, Any, List
 from pathlib import Path
 from dataclasses import dataclass
@@ -22,7 +19,6 @@ from enum import Enum
 import os
 
 from littlejohn.gui import theme
-from littlejohn.gui import images
 
 from littlejohn.reporting.report import create_pdf
 from littlejohn.reporting.sections.disclaimer_text import EXTENDED_DISCLAIMER_TEXT
@@ -1357,7 +1353,7 @@ class GUILauncher:
     def _create_workflow_monitor(self):
         """Create the main workflow monitoring page."""
         with theme.frame(
-            f"R.O.B.I.N - LittleJohn Workflow Monitor",
+            "R.O.B.I.N - LittleJohn Workflow Monitor",
             smalltitle="Samples",
             batphone=False,
         ):

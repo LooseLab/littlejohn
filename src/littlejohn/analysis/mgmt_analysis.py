@@ -25,7 +25,6 @@ import pysam
 import logging
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional
-from pathlib import Path
 from littlejohn.logging_config import get_job_logger
 
 # Try to find HV path from robin module, fallback to common locations
@@ -193,7 +192,7 @@ def run_matkit(
 
     logger = logging.getLogger("littlejohn.mgmt")
     try:
-        logger.info(f"Running matkit for methylation analysis")
+        logger.info("Running matkit for methylation analysis")
 
         # Sort and index the BAM file
         sorted_bam = os.path.join(sample_dir, f"mgmt_sorted_{file_number}.bam")
@@ -240,7 +239,7 @@ def run_matkit(
             else:
                 logger.warning(f"R script not found at {r_script_path}")
 
-            logger.info(f"Matkit processing completed")
+            logger.info("Matkit processing completed")
             return True
 
         except ImportError:
@@ -432,7 +431,7 @@ def process_bam_file(
 
             if result.returncode == 0:
                 mgmt_result.processing_steps.append("visualization")
-                logger.info(f"Visualization complete")
+                logger.info("Visualization complete")
             else:
                 logger.error(f"Methylartist visualization failed: {result.stderr}")
 
@@ -453,7 +452,7 @@ def process_bam_file(
             # Use the proper run_matkit function with robin package
             if run_matkit(work_dir, mgmt_bam_output, hv_path, sample_dir, file_number):
                 mgmt_result.processing_steps.append("matkit_analysis")
-                logger.info(f"Matkit analysis complete")
+                logger.info("Matkit analysis complete")
             else:
                 logger.warning("Matkit analysis failed or robin package not available")
 

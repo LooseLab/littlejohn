@@ -319,7 +319,7 @@ class NanodxAnalysis:
             if load_modkit_data is None:
                 raise ImportError("load_modkit_data function not available")
 
-            logger.info(f"Loading modkit data from parquet...")
+            logger.info("Loading modkit data from parquet...")
             merged_modkit_df = load_modkit_data(parquet_path)
             nanodx_result.processing_steps.append("modkit_data_loaded")
 
@@ -327,12 +327,12 @@ class NanodxAnalysis:
             if collapse_minimal_bedmethyl is None:
                 raise ImportError("collapse_minimal_bedmethyl function not available")
 
-            logger.info(f"Collapsing minimal bedmethyl data...")
+            logger.info("Collapsing minimal bedmethyl data...")
             nanodx_df = collapse_minimal_bedmethyl(merged_modkit_df)
             nanodx_result.processing_steps.append("bedmethyl_collapsed")
 
             # Step 4: Merge with CPGs data
-            logger.info(f"Merging with CPGs data...")
+            logger.info("Merging with CPGs data...")
             test_df = pd.merge(
                 nanodx_df,
                 self.cpgs,
@@ -346,13 +346,13 @@ class NanodxAnalysis:
             nanodx_result.processing_steps.append("cpgs_merged")
 
             # Step 5: Apply methylation call thresholds
-            logger.info(f"Applying methylation call thresholds...")
+            logger.info("Applying methylation call thresholds...")
             test_df.loc[test_df["methylation_call"] < 60, "methylation_call"] = -1
             test_df.loc[test_df["methylation_call"] >= 60, "methylation_call"] = 1
             nanodx_result.processing_steps.append("thresholds_applied")
 
             # Step 6: Run classification
-            logger.info(f"Running neural network classification...")
+            logger.info("Running neural network classification...")
             predictions, class_labels, n_features = _direct_classification(
                 self.modelfile, test_df
             )
@@ -363,14 +363,14 @@ class NanodxAnalysis:
             nanodx_result.processing_steps.append("classification_complete")
 
             # Step 7: Create results DataFrame
-            logger.info(f"Creating results DataFrame...")
+            logger.info("Creating results DataFrame...")
             nanoDX_df = pd.DataFrame({"class": class_labels, "score": predictions})
             nanoDX_save = nanoDX_df.set_index("class").T
             nanoDX_save["number_probes"] = n_features
             nanoDX_save["timestamp"] = start_time * 1000  # Convert to milliseconds
 
             # Step 8: Save results
-            logger.info(f"Saving results...")
+            logger.info("Saving results...")
             sample_dir = os.path.join(self.work_dir, sample_id)
             os.makedirs(sample_dir, exist_ok=True)
 

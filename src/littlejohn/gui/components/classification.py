@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Any, Dict, List
 import csv
 
-import pandas as pd
 
 try:
     from nicegui import ui

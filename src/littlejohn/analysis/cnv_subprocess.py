@@ -10,7 +10,6 @@ import json
 import pickle
 import logging
 import argparse
-from pathlib import Path
 
 # Import cnv_from_bam only in this subprocess
 import cnv_from_bam

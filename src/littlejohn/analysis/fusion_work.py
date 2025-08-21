@@ -10,9 +10,9 @@ import os
 import random
 import logging
 from pathlib import Path
-from collections import Counter, defaultdict
+from collections import defaultdict
 from typing import Dict, Any, Optional, List, Tuple, Set
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # Third-party imports
 import numpy as np
@@ -448,7 +448,6 @@ def process_bam_for_fusions(
         return target_candidates, genome_wide_candidates
 
     except Exception as e:
-        import traceback
 
         print(
             f"\n\n\\nfrom django.utils.translation import ungettextError processing BAM file for fusions: {str(e)}\n\n\n"

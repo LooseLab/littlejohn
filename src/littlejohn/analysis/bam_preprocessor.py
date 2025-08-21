@@ -620,7 +620,7 @@ def bam_preprocessing_handler(job):
                     "status": "skipped",
                     "reason": "too_many_reads",
                     "read_count": total_reads,
-                    "message": f"Deliberately not processed (>50,000 reads)",
+                    "message": "Deliberately not processed (>50,000 reads)",
                 },
             )
             # CLI warning (logger goes to CLI) with filename
@@ -780,13 +780,13 @@ def bam_preprocessing_handler(job):
             unmapped_reads = extracted_data.get("unmapped_reads", 0)
 
             # Log sample ID extraction details at debug level
-            logger.debug(f"Sample ID extraction details:")
+            logger.debug("Sample ID extraction details:")
             logger.debug(f"  - Extracted sample_id: {sample_id}")
             logger.debug(f"  - Filename: {os.path.basename(bam_path)}")
             logger.debug(f"  - Full path: {bam_path}")
 
             # Log comprehensive metadata at debug level
-            logger.debug(f"BAM File Metadata:")
+            logger.debug("BAM File Metadata:")
             logger.debug(f"File path: {metadata.file_path}")
             logger.debug(f"File size: {metadata.file_size:,} bytes")
             logger.debug(f"Creation time: {time.ctime(metadata.creation_time)}")
@@ -812,7 +812,7 @@ def bam_preprocessing_handler(job):
                 logger.debug(f"Run time: {time_of_run}")
 
             # Log detailed statistics - use cached values
-            logger.debug(f"Read Statistics:")
+            logger.debug("Read Statistics:")
             logger.debug(f"Mapped reads: {mapped_reads:,}")
             logger.debug(f"Unmapped reads: {unmapped_reads:,}")
             logger.debug(f"Total reads: {mapped_reads + unmapped_reads:,}")
@@ -877,7 +877,7 @@ def bam_preprocessing_handler(job):
                 logger.debug(
                     f"MGMT reads: {mgmt_read_count:,} reads spanning MGMT promoter region"
                 )
-                logger.debug(f"MGMT region: chr10:129466536-129467536")
+                logger.debug("MGMT region: chr10:129466536-129467536")
             else:
                 logger.debug("No MGMT reads found")
 

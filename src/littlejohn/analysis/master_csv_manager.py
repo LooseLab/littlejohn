@@ -8,7 +8,7 @@ for each sample, tracking comprehensive metadata across multiple BAM files.
 
 import os
 import pandas as pd
-from typing import Dict, Any, List
+from typing import Dict, Any
 from dataclasses import dataclass
 import logging
 

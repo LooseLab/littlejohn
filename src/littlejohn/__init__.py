@@ -1,8 +1,8 @@
-"""LittleJohn - A Python CLI tool with file watching capabilities."""
+"""ROBIN and LittleJohn - A Python CLI tool with file watching capabilities."""
 
 __version__ = "0.1.1"
-__author__ = "Your Name"
-__email__ = "your.email@example.com"
+__author__ = "Matt Loose"
+__email__ = "matt.loose@nottingham.ac.uk"
 
 # Import analysis modules via consolidated analysis package
 from . import analysis  # noqa: F401

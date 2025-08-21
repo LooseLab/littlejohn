@@ -34,10 +34,8 @@ import logging
 import shutil
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List
-from pathlib import Path
 
 import pandas as pd
-import numpy as np
 
 # Import robin utilities
 try:
@@ -216,7 +214,7 @@ class RandomForestAnalysis:
 
         # Use logger for initialization
         logger = logging.getLogger("littlejohn.random_forest")
-        logger.info(f"Random Forest Analysis initialized")
+        logger.info("Random Forest Analysis initialized")
         logger.debug(f"Work directory: {self.work_dir}")
         logger.debug(f"Threads: {self.threads}")
         logger.debug(f"Show errors: {self.showerrors}")
@@ -260,17 +258,17 @@ class RandomForestAnalysis:
             random_forest_result.processing_steps.append("file_validation")
 
             # Step 2: Load modkit data from parquet
-            logger.info(f"Loading modkit data from parquet...")
+            logger.info("Loading modkit data from parquet...")
             merged_modkit_df = load_modkit_data(parquet_path)
             random_forest_result.processing_steps.append("modkit_data_loaded")
 
             # Step 3: Reconstruct full bedmethyl data for RandomForest
-            logger.info(f"Reconstructing full bedmethyl data...")
+            logger.info("Reconstructing full bedmethyl data...")
             full_modkit_df = reconstruct_full_bedmethyl_data(merged_modkit_df)
             random_forest_result.processing_steps.append("bedmethyl_reconstructed")
 
             # Step 4: Collapse bedmethyl data
-            logger.info(f"Collapsing bedmethyl data...")
+            logger.info("Collapsing bedmethyl data...")
             forest_dx = collapse_bedmethyl(full_modkit_df)
             merged_modkit_df = forest_dx
             random_forest_result.processing_steps.append("bedmethyl_collapsed")

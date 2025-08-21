@@ -396,35 +396,35 @@ class WorkflowManager:
                 self.job_handlers_analysis[job_type] = handler
             else:
                 raise ValueError(
-                    f"Cannot register 'analysis' queue handler in separate analysis queues mode"
+                    "Cannot register 'analysis' queue handler in separate analysis queues mode"
                 )
         elif queue_type == "mgmt":
             if self.use_separate_analysis_queues:
                 self.job_handlers_mgmt[job_type] = handler
             else:
                 raise ValueError(
-                    f"Cannot register 'mgmt' queue handler in legacy analysis queue mode"
+                    "Cannot register 'mgmt' queue handler in legacy analysis queue mode"
                 )
         elif queue_type == "cnv":
             if self.use_separate_analysis_queues:
                 self.job_handlers_cnv[job_type] = handler
             else:
                 raise ValueError(
-                    f"Cannot register 'cnv' queue handler in legacy analysis queue mode"
+                    "Cannot register 'cnv' queue handler in legacy analysis queue mode"
                 )
         elif queue_type == "target":
             if self.use_separate_analysis_queues:
                 self.job_handlers_target[job_type] = handler
             else:
                 raise ValueError(
-                    f"Cannot register 'target' queue handler in legacy analysis queue mode"
+                    "Cannot register 'target' queue handler in legacy analysis queue mode"
                 )
         elif queue_type == "fusion":
             if self.use_separate_analysis_queues:
                 self.job_handlers_fusion[job_type] = handler
             else:
                 raise ValueError(
-                    f"Cannot register 'fusion' queue handler in legacy analysis queue mode"
+                    "Cannot register 'fusion' queue handler in legacy analysis queue mode"
                 )
         elif queue_type == "classification":
             self.job_handlers_classification[job_type] = handler
@@ -561,35 +561,35 @@ class WorkflowManager:
                     self.analysis_queue.put(job)
                 else:
                     raise ValueError(
-                        f"Cannot enqueue to 'analysis' queue in separate analysis queues mode"
+                        "Cannot enqueue to 'analysis' queue in separate analysis queues mode"
                     )
             elif queue_type == "mgmt":
                 if self.use_separate_analysis_queues:
                     self.mgmt_queue.put(job)
                 else:
                     raise ValueError(
-                        f"Cannot enqueue to 'mgmt' queue in legacy analysis queue mode"
+                        "Cannot enqueue to 'mgmt' queue in legacy analysis queue mode"
                     )
             elif queue_type == "cnv":
                 if self.use_separate_analysis_queues:
                     self.cnv_queue.put(job)
                 else:
                     raise ValueError(
-                        f"Cannot enqueue to 'cnv' queue in legacy analysis queue mode"
+                        "Cannot enqueue to 'cnv' queue in legacy analysis queue mode"
                     )
             elif queue_type == "target":
                 if self.use_separate_analysis_queues:
                     self.target_queue.put(job)
                 else:
                     raise ValueError(
-                        f"Cannot enqueue to 'target' queue in legacy analysis queue mode"
+                        "Cannot enqueue to 'target' queue in legacy analysis queue mode"
                     )
             elif queue_type == "fusion":
                 if self.use_separate_analysis_queues:
                     self.fusion_queue.put(job)
                 else:
                     raise ValueError(
-                        f"Cannot enqueue to 'fusion' queue in legacy analysis queue mode"
+                        "Cannot enqueue to 'fusion' queue in legacy analysis queue mode"
                     )
             elif queue_type == "classification":
                 self.classification_queue.put(job)
@@ -1582,20 +1582,7 @@ class WorkflowRunner:
             "slow": slow_pbar,
         }
 
-        # Track job type completion counts
-        job_type_completion = {
-            "preprocessing": 0,
-            "bed_conversion": 0,
-            "mgmt": 0,
-            "cnv": 0,
-            "target": 0,
-            "fusion": 0,
-            "classification": 0,
-            "slow": 0,
-        }
-
-        last_stats = None
-
+        
         try:
             while self.manager.is_running():
                 stats = self.manager.get_stats()

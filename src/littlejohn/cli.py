@@ -31,8 +31,7 @@ from typing import Optional, List, Dict, Tuple, Any
 
 import click
 
-from littlejohn.watcher import FileWatcher
-from littlejohn.workflow_simple import WorkflowRunner, default_file_classifier, Job
+from littlejohn.workflow_simple import default_file_classifier, Job
 from littlejohn.analysis.bam_preprocessor import bam_preprocessing_handler
 from littlejohn.analysis.mgmt_analysis import mgmt_handler
 from littlejohn.analysis.cnv_analysis import cnv_handler
@@ -44,10 +43,6 @@ from littlejohn.analysis.target_analysis import target_handler
 from littlejohn.analysis.fusion_analysis import fusion_handler
 from littlejohn.logging_config import (
     configure_logging,
-    set_debug_level,
-    set_info_level,
-    set_warning_level,
-    set_error_level,
 )
 
 
@@ -65,7 +60,7 @@ VALID_JOB_TYPES = {
     "pannanodx",
     "random_forest",
 }
-DEFAULT_LOG_LEVEL = "INFO"
+DEFAULT_LOG_LEVEL = "ERROR"
 DEFAULT_ANALYSIS_WORKERS = 1
 DEFAULT_TIMEOUT = 5.0
 
@@ -86,6 +81,10 @@ QUEUE_MAPPING = {
 # Jobs that require bed_conversion as a dependency
 JOBS_REQUIRING_BED_CONVERSION = {"sturgeon", "nanodx", "pannanodx", "random_forest"}
 
+from littlejohn.reporting.sections.disclaimer_text import EXTENDED_DISCLAIMER_TEXT
+# Disclaimer text for user acknowledgment
+DISCLAIMER_TEXT = EXTENDED_DISCLAIMER_TEXT
+
 # Handler configurations
 HANDLER_CONFIGS = [
     # (queue_type, job_type, handler_func, legacy_queue_type, needs_work_dir)
@@ -102,6 +101,31 @@ HANDLER_CONFIGS = [
 ]
 
 
+def _get_user_acknowledgment() -> bool:
+    """Display a disclaimer and require explicit user acknowledgment.
+
+    Returns:
+        bool: True if the user types 'I agree' exactly, otherwise False.
+    """
+    click.echo("\nDISCLAIMER:")
+    click.echo(DISCLAIMER_TEXT)
+    click.echo("\nTo proceed, please type 'I agree' (exactly as shown):")
+    try:
+        response = input().strip()
+    except (KeyboardInterrupt, EOFError):
+        click.echo("\nAcknowledgment interrupted. Exiting.", err=True)
+        return False
+
+    if response == "I agree":
+        return True
+
+    click.echo(
+        "Incorrect acknowledgment. Please run the command again and type 'I agree' to acknowledge.",
+        err=True,
+    )
+    return False
+
+
 @click.group()
 @click.version_option()
 def main() -> None:
@@ -112,6 +136,9 @@ def main() -> None:
 @main.command()
 def list_job_types() -> None:
     """List all available job types organized by queue category."""
+    if not _get_user_acknowledgment():
+        sys.exit(1)
+
     job_types = {
         "preprocessing": ["preprocessing - Extract metadata from BAM files"],
         "bed_conversion": ["bed_conversion - Convert BAM files to BED format"],
@@ -277,23 +304,56 @@ def _create_ray_workflow_runner(
     preprocessing_workers: int = 1,
     bed_workers: int = 1,
 ) -> Any:
-    """Create and configure Ray-based workflow runner."""
+    """Create and configure Ray-based workflow runner (Ray Core)."""
     try:
-        from littlejohn.workflow_ray import RayWorkflowRunner
+        # Prefer Ray Core implementation
+        import asyncio
+        from littlejohn import workflow_ray as wrn
 
-        runner = RayWorkflowRunner(
-            verbose=verbose,
-            analysis_workers=analysis_workers,
-            use_separate_analysis_queues=not legacy_analysis_queue,
-            log_level=log_level,
-            preprocessing_workers=preprocessing_workers,
-            bed_workers=bed_workers,
-        )
-        click.echo("Using Ray-based distributed computing workflow")
-        return runner
+        class _RayCoreWrapper:
+            def __init__(self):
+                self.manager = type("_DummyManager", (), {"get_priority_info": lambda _self: {}})()
+
+            def register_handler(self, *args, **kwargs):
+                # Handlers are wired inside workflow_ray; keep API parity
+                return None
+
+            def register_command_handler(self, *args, **kwargs):
+                return None
+
+            def run_workflow(
+                self,
+                path: Path,
+                workflow_steps: List[str],
+                no_process_existing: bool,
+                no_progress: bool,
+                no_watch: bool,
+                log_level_local: str,
+                analysis_workers_local: int,
+                preset: Optional[str] = None,
+            ) -> None:
+                asyncio.run(
+                    wrn.run(
+                        plan=workflow_steps,
+                        paths=[str(path)],
+                        analysis_workers=analysis_workers_local,
+                        process_existing=not no_process_existing,
+                        monitor=not no_progress,
+                        watch=(not no_watch),
+                        patterns=["*.bam"],
+                        ignore_patterns=None,
+                        recursive=True,
+                        work_dir=None,
+                        log_level=log_level_local,
+                        preset=preset,
+                    )
+                )
+
+        click.echo("Using Ray Core distributed workflow (workflow_ray)")
+        return _RayCoreWrapper()
     except ImportError as e:
         click.echo(
-            f"Warning: Ray not available ({e}). Falling back to threading-based workflow.",
+            f"Warning: Ray Core not available ({e}). Falling back to threading-based workflow.",
             err=True,
         )
         return None
@@ -593,11 +653,11 @@ def _display_workflow_config(
 
     # Display Ray configuration if enabled
     if use_ray:
-        click.echo(f"Distributed computing: Ray (experimental)")
+        click.echo("Distributed computing: Ray (experimental)")
         if ray_num_cpus:
             click.echo(f"  - Ray CPUs: {ray_num_cpus}")
         else:
-            click.echo(f"  - Ray CPUs: auto-detect")
+            click.echo("  - Ray CPUs: auto-detect")
         click.echo(
             f"  - Analysis workers per type: {analysis_workers} (distributed across Ray cluster)"
         )
@@ -608,23 +668,23 @@ def _display_workflow_config(
             click.echo(f"  - Queue priorities: {list(queue_priority)}")
         else:
             click.echo(
-                f"  - Queue priorities: using defaults (preprocessing=10, bed_conversion=9, analysis=5, classification=3, slow=1)"
+                "  - Queue priorities: using defaults (preprocessing=10, bed_conversion=9, analysis=5, classification=3, slow=1)"
             )
     else:
-        click.echo(f"Distributed computing: Disabled (using threading)")
-        click.echo(f"Worker configuration:")
+        click.echo("Distributed computing: Disabled (using threading)")
+        click.echo("Worker configuration:")
         if legacy_analysis_queue:
             click.echo(
-                f"  - Analysis queue mode: Legacy (single queue for all analysis types)"
+                "  - Analysis queue mode: Legacy (single queue for all analysis types)"
             )
             click.echo(f"  - Analysis workers: {analysis_workers}")
         else:
-            click.echo(f"  - Analysis queue mode: Separate queues per analysis type")
+            click.echo("  - Analysis queue mode: Separate queues per analysis type")
             click.echo(
                 f"  - Analysis workers per type: {analysis_workers} (MGMT, CNV, Target, Fusion each get {analysis_workers} workers)"
             )
 
-        click.echo(f"  - Other queues: 1 worker each (fixed)")
+        click.echo("  - Other queues: 1 worker each (fixed)")
 
     click.echo("Press Ctrl+C to stop")
     click.echo("Running The Workflow!")
@@ -704,14 +764,14 @@ def _display_workflow_config(
     help="Use legacy single analysis queue instead of separate queues per analysis type",
 )
 @click.option(
-    "--use-ray",
-    is_flag=True,
-    help="Use Ray for distributed computing (experimental). This will distribute jobs across multiple CPU cores and potentially multiple machines for improved performance.",
+    "--use-ray/--no-use-ray",
+    default=True,
+    help="Enable Ray distributed computing (default: on). Disable with --no-use-ray.",
 )
 @click.option(
     "--use-ray-core",
     is_flag=True,
-    help="Use the new Ray Core engine from workflow_ray_new.py instead of the legacy Ray runner.",
+    help="Deprecated: Ray Core is now the default when --use-ray is provided.",
 )
 @click.option(
     "--ray-num-cpus",
@@ -735,9 +795,9 @@ def _display_workflow_config(
     help="Do not watch directories for new files (default: watch enabled).",
 )
 @click.option(
-    "--with-gui",
-    is_flag=True,
-    help="Launch a NiceGUI interface with vertical tabs and splitter for workflow monitoring.",
+    "--with-gui/--no-gui",
+    default=True,
+    help="Launch NiceGUI workflow monitor (default: on). Disable with --no-gui.",
 )
 @click.option(
     "--gui-host",
@@ -755,8 +815,8 @@ def _display_workflow_config(
 @click.option(
     "--preset",
     type=click.Choice(["p2i", "standard", "high"]),
-    default=None,
-    help="Execution preset for Ray Core (--use-ray-core): 'p2i' (2 CPUs cap, 4 grouped actors, concurrency 1), 'standard' (4 CPUs cap, grouped actors, analysis uses analysis_workers), 'high' (per-job-type actors). Only used when --use-ray-core is specified.",
+    default="standard",
+    help="Execution preset for Ray Core: 'p2i' (2 CPUs cap, 4 grouped actors, concurrency 1), 'standard' (default; 4 CPUs cap, grouped actors, analysis uses analysis_workers), 'high' (per-job-type actors).",
 )
 def workflow(
     path: Path,
@@ -786,6 +846,10 @@ def workflow(
 ) -> None:
     """Run various operations on BAM files in a directory. Preprocessing is automatically included as the first step."""
     try:
+        # Require user acknowledgment before proceeding
+        if not _get_user_acknowledgment():
+            sys.exit(1)
+
         # Validate input parameters
         _validate_inputs(path, workflow, analysis_workers, ray_num_cpus)
 
@@ -818,11 +882,11 @@ def workflow(
 
         # If using Ray and CPU count specified, initialize Ray BEFORE creating runner
         # so the runner respects the requested CPU resources
-        if (use_ray or use_ray_core) and ray_num_cpus is not None:
+        if use_ray and ray_num_cpus is not None:
             _initialize_ray(ray_num_cpus)
 
-        # New Ray Core engine path (bypass legacy runner)
-        if use_ray_core:
+        # Ray Core engine path (default when --use-ray is used)
+        if use_ray:
             # Ensure Ray is initialized if CPUs not specified
             try:
                 import ray
@@ -870,7 +934,7 @@ def workflow(
             # Run Ray Core implementation
             try:
                 import asyncio
-                from littlejohn import workflow_ray_new as wrn
+                from littlejohn import workflow_ray as wrn
 
                 asyncio.run(
                     wrn.run(

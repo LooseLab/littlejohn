@@ -19,7 +19,6 @@ import time
 import logging
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List
-from pathlib import Path
 from littlejohn.logging_config import get_job_logger
 from robin.subpages.Sturgeon_object import sturgeon_bam_background_work
 
@@ -52,7 +51,7 @@ class SturgeonAnalysis:
 
         # Use logger for initialization
         logger = logging.getLogger("littlejohn.sturgeon")
-        logger.info(f"Sturgeon Analysis initialized")
+        logger.info("Sturgeon Analysis initialized")
         logger.debug(f"Work directory: {self.work_dir}")
 
     def process_parquet_file(
@@ -91,7 +90,7 @@ class SturgeonAnalysis:
             sturgeon_result.processing_steps.append("directory_created")
 
             # Step 3: Run Sturgeon analysis
-            logger.info(f"Running Sturgeon analysis...")
+            logger.info("Running Sturgeon analysis...")
 
             # Get reference genome and probes file
             reference_genome = "hg38"
@@ -145,7 +144,7 @@ class SturgeonAnalysis:
             sturgeon_bam_background_work(
                 parquet_path, output_dir, str(probes_file), current_time
             )
-            logger.debug(f"Sturgeon analysis completed successfully")
+            logger.debug("Sturgeon analysis completed successfully")
 
         except Exception as e:
             logger.error(f"Sturgeon analysis failed: {e}")
