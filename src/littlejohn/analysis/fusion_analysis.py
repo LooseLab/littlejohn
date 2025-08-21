@@ -670,7 +670,7 @@ def _perform_fusion_analysis(
     Returns:
         Dictionary with analysis results
     """
-    from littlejohn.fusion_work import process_bam_file
+    from littlejohn.analysis.fusion_work import process_bam_file
     
     fusion_metadata.processing_steps.append("analysis_started")
     results = process_bam_file(file_path, temp_dir, metadata, fusion_metadata, target_panel,has_supplementary,supplementary_read_ids)
@@ -743,7 +743,7 @@ def process_single_file(file_path: str, metadata: Dict[str, Any], work_dir: str,
             )
             
             # Generate output files
-            from littlejohn.fusion_work import _generate_output_files
+            from littlejohn.analysis.fusion_work import _generate_output_files
             output_files = _generate_output_files(
                 sample_id, analysis_results, fusion_metadata, work_dir
             )

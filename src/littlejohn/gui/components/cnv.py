@@ -72,6 +72,25 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             ],
         }).classes('w-full h-72')
 
+        # Cytoband analysis table (updated when a single chromosome is selected)
+        ui.label('CNV Cytoband Analysis').classes('text-md font-semibold mt-4')
+        cyto_summary = ui.label('Select a chromosome to view cytoband events').classes('text-gray-600 mb-1')
+        cyto_columns = [
+            {'name': 'chrom', 'label': 'Chr', 'field': 'chrom', 'sortable': True},
+            {'name': 'region', 'label': 'Region', 'field': 'region', 'sortable': True},
+            {'name': 'start_mb', 'label': 'Start (Mb)', 'field': 'start_mb', 'sortable': True, 'align': 'right'},
+            {'name': 'end_mb', 'label': 'End (Mb)', 'field': 'end_mb', 'sortable': True, 'align': 'right'},
+            {'name': 'length_mb', 'label': 'Length (Mb)', 'field': 'length_mb', 'sortable': True, 'align': 'right'},
+            {'name': 'mean_cnv', 'label': 'Mean CNV', 'field': 'mean_cnv', 'sortable': True, 'align': 'right'},
+            {'name': 'state', 'label': 'State', 'field': 'state', 'sortable': True, 'align': 'center'},
+            {'name': 'genes', 'label': 'Genes', 'field': 'genes'},
+        ]
+        cyto_table = ui.table(columns=cyto_columns, rows=[], pagination=20).classes('w-full')
+        try:
+            cyto_table.props('multi-sort rows-per-page-options="[10,20,50,0]"')
+        except Exception:
+            pass
+
     # Adaptive thinning helpers
     MAX_POINTS_PER_CHART = 2000
 
@@ -242,6 +261,262 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             except Exception:
                 continue
         return pd.DataFrame(columns=['chrom','start','end','gene'])
+
+    def _sex_label(xy_val: Any) -> str:
+        try:
+            s = str(xy_val).strip().upper()
+            if s in ('MALE', 'XY'):
+                return 'Male'
+            if s in ('FEMALE', 'XX'):
+                return 'Female'
+        except Exception:
+            pass
+        return 'Unknown'
+
+    def _analyze_cytoband_cnv(cnv_data: Dict[str, np.ndarray], chromosome: str, bin_width: int, sex_estimate: str) -> pd.DataFrame:
+        try:
+            import numpy as _np
+            import pandas as _pd
+            logger = logging.getLogger(__name__)
+            if not cnv_data or chromosome not in cnv_data:
+                return _pd.DataFrame()
+            if bin_width > 10_000_000:
+                return _pd.DataFrame()
+
+            cyto_df = _load_cytobands_df()
+            chromosome_cytobands = cyto_df[cyto_df['chrom'] == chromosome].copy()
+            if chromosome_cytobands.empty:
+                return _pd.DataFrame()
+
+            # Centromere mask
+            centro = _load_centromere_regions()
+            mask = _np.ones(len(cnv_data[chromosome]), dtype=bool)
+            cent_regions = centro.get(chromosome, [])
+            if cent_regions:
+                # Combine all annotated centromere/satellite spans
+                for s_bp, e_bp, _nm in cent_regions:
+                    s_bin = max(0, int(s_bp // bin_width))
+                    e_bin = min(len(mask), int(e_bp // bin_width))
+                    if e_bin > s_bin:
+                        mask[s_bin:e_bin] = False
+            chr_cnv = _np.asarray(cnv_data[chromosome])
+            chr_cnv = chr_cnv[mask] if mask.any() else _np.asarray(cnv_data[chromosome])
+
+            # Chromosome-wide stats
+            chr_mean = float(_np.mean(chr_cnv)) if chr_cnv.size else 0.0
+            chr_std = float(_np.std(chr_cnv)) if chr_cnv.size else 1.0
+
+            # Autosomal distribution for whole-chrom thresholds
+            chrom_means: List[float] = []
+            for ck, arr in cnv_data.items():
+                if ck.startswith('chr') and ck[3:].isdigit():
+                    a = _np.asarray(arr)
+                    if a.size:
+                        chrom_means.append(float(_np.mean(a)))
+            means_mean = float(_np.mean(chrom_means)) if chrom_means else 0.0
+            means_std = float(_np.std(chrom_means)) if chrom_means else 1.0
+
+            # Thresholds
+            sex_lbl = sex_estimate
+            if chromosome.startswith('chr') and chromosome[3:].isdigit():
+                gain_threshold = means_mean + (1.0 * means_std)
+                loss_threshold = means_mean - (1.0 * means_std)
+                cyto_gain_th = chr_mean + (1.0 * chr_std)
+                cyto_loss_th = chr_mean - (1.0 * chr_std)
+            elif chromosome == 'chrX':
+                gain_threshold = means_mean + (1.0 * means_std)
+                loss_threshold = means_mean - (1.0 * means_std)
+                cyto_gain_th = chr_mean + (1.0 * chr_std)
+                cyto_loss_th = chr_mean - (1.0 * chr_std)
+            else:  # chrY
+                if sex_lbl in ('Male', 'XY'):
+                    gain_threshold = means_mean + (1.0 * means_std)
+                    loss_threshold = means_mean - (1.0 * means_std)
+                    cyto_gain_th = chr_mean + (1.0 * chr_std)
+                    cyto_loss_th = chr_mean - (1.0 * chr_std)
+                else:
+                    gain_threshold = means_mean + (1.2 * means_std)
+                    loss_threshold = means_mean - (1.2 * means_std)
+                    cyto_gain_th = chr_mean + (1.2 * chr_std)
+                    cyto_loss_th = chr_mean - (1.2 * chr_std)
+
+            # Whole chromosome event detection
+            bins_above_gain = float((_np.asarray(cnv_data[chromosome]) > gain_threshold).sum()) / max(1, len(cnv_data[chromosome]))
+            bins_below_loss = float((_np.asarray(cnv_data[chromosome]) < loss_threshold).sum()) / max(1, len(cnv_data[chromosome]))
+            min_prop = 0.7
+            whole_chr_event = False
+            whole_chr_state = 'NORMAL'
+            if bins_above_gain > min_prop:
+                whole_chr_event = True
+                whole_chr_state = 'GAIN'
+            elif bins_below_loss > min_prop:
+                whole_chr_event = True
+                whole_chr_state = 'LOSS'
+
+            merged_rows: List[dict] = []
+            if whole_chr_event:
+                gene_df = _load_gene_bed()
+                genes_in_chr = gene_df[gene_df['chrom'] == chromosome]['gene'].astype(str).tolist()
+                merged_rows.append({
+                    'chrom': chromosome,
+                    'start_pos': int(chromosome_cytobands['start'].min()),
+                    'end_pos': int(chromosome_cytobands['end'].max()),
+                    'name': f"{chromosome} WHOLE CHROMOSOME {whole_chr_state}",
+                    'mean_cnv': chr_mean,
+                    'cnv_state': whole_chr_state,
+                    'length': int(chromosome_cytobands['end'].max()) - int(chromosome_cytobands['start'].min()),
+                    'genes': genes_in_chr,
+                })
+
+            # Group contiguous cytobands by state
+            current_group = None
+            vals = _np.asarray(cnv_data[chromosome])
+            for _, band in chromosome_cytobands.iterrows():
+                s_bp = int(band['start']); e_bp = int(band['end'])
+                s_bin = max(0, s_bp // bin_width); e_bin = min(len(vals)-1, max(0, e_bp // bin_width))
+                region = vals[s_bin:e_bin+1] if len(vals) and e_bin >= s_bin else _np.array([])
+                mean_val = float(_np.mean(region)) if region.size else 0.0
+                if whole_chr_event:
+                    if whole_chr_state == 'GAIN':
+                        state = 'LOSS' if mean_val < (chr_mean - 2.0*chr_std) else 'NORMAL'
+                    else:
+                        state = 'GAIN' if mean_val > (chr_mean + 2.0*chr_std) else 'NORMAL'
+                else:
+                    state = 'GAIN' if mean_val > cyto_gain_th else ('LOSS' if mean_val < cyto_loss_th else 'NORMAL')
+
+                if current_group is None:
+                    current_group = {
+                        'chrom': chromosome,
+                        'start_pos': s_bp,
+                        'end_pos': e_bp,
+                        'bands': [str(band['name'])],
+                        'mean_vals': [mean_val],
+                        'cnv_state': state,
+                    }
+                elif state == current_group['cnv_state']:
+                    current_group['end_pos'] = e_bp
+                    current_group['bands'].append(str(band['name']))
+                    current_group['mean_vals'].append(mean_val)
+                else:
+                    # finalize
+                    mean_cnv = float(_np.mean(current_group['mean_vals'])) if current_group['mean_vals'] else 0.0
+                    row = {
+                        'chrom': current_group['chrom'],
+                        'start_pos': int(current_group['start_pos']),
+                        'end_pos': int(current_group['end_pos']),
+                        'name': f"{current_group['chrom']} {current_group['bands'][0]}-{current_group['bands'][-1]}",
+                        'mean_cnv': mean_cnv,
+                        'cnv_state': current_group['cnv_state'],
+                        'length': int(current_group['end_pos']) - int(current_group['start_pos']),
+                    }
+                    if row['cnv_state'] in ('GAIN','LOSS','HIGH_GAIN','DEEP_LOSS'):
+                        gene_df = _load_gene_bed()
+                        genes = gene_df[(gene_df['chrom'] == row['chrom']) & (gene_df['start'] <= row['end_pos']) & (gene_df['end'] >= row['start_pos'])]['gene'].astype(str).tolist()
+                        row['genes'] = genes
+                    merged_rows.append(row)
+                    # start new group
+                    current_group = {
+                        'chrom': chromosome,
+                        'start_pos': s_bp,
+                        'end_pos': e_bp,
+                        'bands': [str(band['name'])],
+                        'mean_vals': [mean_val],
+                        'cnv_state': state,
+                    }
+            # finalize last
+            if current_group is not None:
+                mean_cnv = float(_np.mean(current_group['mean_vals'])) if current_group['mean_vals'] else 0.0
+                row = {
+                    'chrom': current_group['chrom'],
+                    'start_pos': int(current_group['start_pos']),
+                    'end_pos': int(current_group['end_pos']),
+                    'name': f"{current_group['chrom']} {current_group['bands'][0]}-{current_group['bands'][-1]}",
+                    'mean_cnv': mean_cnv,
+                    'cnv_state': current_group['cnv_state'],
+                    'length': int(current_group['end_pos']) - int(current_group['start_pos']),
+                }
+                if row['cnv_state'] in ('GAIN','LOSS','HIGH_GAIN','DEEP_LOSS'):
+                    gene_df = _load_gene_bed()
+                    genes = gene_df[(gene_df['chrom'] == row['chrom']) & (gene_df['start'] <= row['end_pos']) & (gene_df['end'] >= row['start_pos'])]['gene'].astype(str).tolist()
+                    row['genes'] = genes
+                merged_rows.append(row)
+
+            df = _pd.DataFrame(merged_rows)
+            if not df.empty:
+                df = df.sort_values('start_pos')
+            return df
+        except Exception:
+            return pd.DataFrame()
+
+    def _get_cytoband_cnv_summary(cnv_data: Dict[str, np.ndarray], chromosome: str, bin_width: int, sex_estimate: str) -> str:
+        try:
+            df = _analyze_cytoband_cnv(cnv_data, chromosome, bin_width, sex_estimate)
+            if df.empty:
+                return 'No significant CNV changes detected'
+            gains = df[df['cnv_state'] == 'GAIN']
+            losses = df[df['cnv_state'] == 'LOSS']
+            parts: List[str] = []
+            if not gains.empty:
+                parts.append('Gains: ' + ', '.join(f"{r['name']} ({r['mean_cnv']:.2f})" for _, r in gains.iterrows()))
+            if not losses.empty:
+                parts.append('Losses: ' + ', '.join(f"{r['name']} ({r['mean_cnv']:.2f})" for _, r in losses.iterrows()))
+            return '\n'.join(parts) if parts else 'No significant CNV changes detected'
+        except Exception:
+            return 'No CNV data available'
+
+    def _compute_all_cytoband_df(cnv_data: Dict[str, np.ndarray], bin_width: int, sex_estimate: str) -> pd.DataFrame:
+        try:
+            frames: List[pd.DataFrame] = []
+            for chrom in natsort.natsorted(cnv_data.keys()):
+                if chrom == 'chrM' or not isinstance(chrom, str) or not chrom.startswith('chr'):
+                    continue
+                # restrict to autosomes and sex chromosomes
+                tail = chrom[3:]
+                if not (tail.isdigit() or tail in ('X','Y')):
+                    continue
+                df = _analyze_cytoband_cnv(cnv_data, chrom, bin_width, sex_estimate)
+                if not df.empty:
+                    frames.append(df)
+            if frames:
+                out = pd.concat(frames, ignore_index=True)
+                if not out.empty:
+                    # Natural chromosome sort: chr1..chr22, chrX, chrY
+                    def _rank(label: Any) -> int:
+                        try:
+                            s = str(label)
+                            if s.startswith('chr'):
+                                s = s[3:]
+                            mapping = {'X': 23, 'Y': 24, 'M': 25}
+                            return int(s) if s.isdigit() else mapping.get(s, 1000)
+                        except Exception:
+                            return 1000
+                    out['_chrom_rank'] = out['chrom'].map(_rank)
+                    out = out.sort_values(['_chrom_rank','start_pos']).drop(columns=['_chrom_rank'])
+                return out
+            return pd.DataFrame()
+        except Exception:
+            return pd.DataFrame()
+
+    def _build_cyto_rows(df: pd.DataFrame) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        try:
+            if df is None or df.empty:
+                return rows
+            for _, r in df.iterrows():
+                if r.get('cnv_state') in ('GAIN','LOSS','HIGH_GAIN','DEEP_LOSS'):
+                    rows.append({
+                        'chrom': str(r['chrom']).replace('chr',''),
+                        'region': str(r['name']).replace(f"{r['chrom']} ", ''),
+                        'start_mb': f"{float(r['start_pos'])/1e6:.2f}",
+                        'end_mb': f"{float(r['end_pos'])/1e6:.2f}",
+                        'length_mb': f"{float(r['length'])/1e6:.2f}",
+                        'mean_cnv': f"{float(r['mean_cnv']):.3f}",
+                        'state': str(r['cnv_state']),
+                        'genes': ', '.join(r.get('genes', []) if isinstance(r.get('genes'), list) else [])
+                    })
+        except Exception:
+            return rows
+        return rows
 
     def _render_cnv_from_state(state: Dict[str, Any]) -> None:
         try:
@@ -536,6 +811,51 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 cnv_diff.options['series'] = series_diff + keep
                 _thin_chart_series(cnv_diff, MAX_POINTS_PER_CHART)
                 cnv_diff.update()
+
+            # Cytoband CNV table update (whole-genome table with per-chromosome subsetting)
+            try:
+                selected = state.get('selected_chrom', 'All')
+                binw = state.get('cnv_dict', {}).get('bin_width', 1_000_000)
+                sex_lbl = _sex_label(state.get('xy'))
+                # Prefer difference map (CNV3) for calling; fall back to absolute
+                if isinstance(cnv3_map, dict):
+                    data = cnv3_map
+                    source = 'cnv3'
+                else:
+                    data = cnv_map if isinstance(cnv_map, dict) else None
+                    source = 'cnv'
+                if data and binw:
+                    cache_key = f"{source}:{state.get(source+'_m')}:{int(binw)}:{sex_lbl}"
+                    if state.get('cyto_cache_key') != cache_key:
+                        df_all = _compute_all_cytoband_df(data, int(binw), sex_lbl)
+                        state['cyto_df_all'] = df_all
+                        state['cyto_cache_key'] = cache_key
+                    df_all = state.get('cyto_df_all')
+                    if isinstance(df_all, pd.DataFrame) and not df_all.empty:
+                        if selected and selected != 'All':
+                            df_show = df_all[df_all['chrom'] == selected]
+                        else:
+                            df_show = df_all
+                        cyto_table.rows = _build_cyto_rows(df_show)
+                        try:
+                            cyto_table.update()
+                        except Exception:
+                            pass
+                        if selected and selected != 'All':
+                            cyto_summary.set_text(_get_cytoband_cnv_summary(data, selected, int(binw), sex_lbl))
+                        else:
+                            cyto_summary.set_text(f"Whole genome cytoband events: {len(cyto_table.rows)}")
+                    else:
+                        cyto_table.rows = []
+                        try:
+                            cyto_table.update()
+                        except Exception:
+                            pass
+                        cyto_summary.set_text('No significant CNV changes detected')
+                else:
+                    cyto_summary.set_text('CNV data not available')
+            except Exception:
+                pass
         except Exception:
             pass
 

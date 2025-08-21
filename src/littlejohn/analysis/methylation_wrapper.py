@@ -2,7 +2,9 @@
 import sys
 import shutil
 import runpy
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr
+import os
+import io
 from matplotlib.figure import Figure
 from typing import List, Optional, Dict, Any
 
@@ -27,6 +29,24 @@ def _patch_argv(argv):
         yield
     finally:
         sys.argv = old
+
+@contextmanager
+def _suppress_methylartist_warnings():
+    """Temporarily suppress WARNING-level logs and stderr noise from methylartist."""
+    import logging
+    previous_disable = logging.root.manager.disable
+    # Disable WARNING and below (keeps ERROR/CRITICAL visible)
+    logging.disable(logging.WARNING)
+    devnull = open(os.devnull, "w")
+    try:
+        with redirect_stderr(devnull):
+            yield
+    finally:
+        logging.disable(previous_disable)
+        try:
+            devnull.close()
+        except Exception:
+            pass
 
 def _find_cli_or_raise() -> str:
     cli = shutil.which("methylartist")
@@ -96,7 +116,7 @@ def locus_figure(
 
     captured = {"fig": None}
 
-    with _patch_fig_savefig(captured), _patch_argv(argv):
+    with _patch_fig_savefig(captured), _patch_argv(argv), _suppress_methylartist_warnings():
         # Execute the installed CLI script as __main__
         runpy.run_path(cli, run_name="__main__")
 
@@ -148,3 +168,5 @@ def load_figure_mpld3(path: str) -> Figure:
     import mpld3
     with open(path, "r") as f:
         return mpld3.json_to_fig(f.read())
+
+

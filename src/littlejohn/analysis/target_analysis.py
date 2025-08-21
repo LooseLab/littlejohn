@@ -43,7 +43,7 @@ Example Usage
 -----------
 .. code-block:: python
 
-    from littlejohn.target_analysis import TargetAnalysis
+    from littlejohn.analysis.target_analysis import TargetAnalysis
 
     # Initialize analysis
     target_analysis = TargetAnalysis(

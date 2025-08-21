@@ -190,3 +190,5 @@ class MasterCSVManager:
         """Save data to CSV file"""
         df = pd.DataFrame([data])
         df.to_csv(csv_path, index=False)
+
+

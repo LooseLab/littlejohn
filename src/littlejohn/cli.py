@@ -33,15 +33,15 @@ import click
 
 from littlejohn.watcher import FileWatcher
 from littlejohn.workflow_simple import WorkflowRunner, default_file_classifier, Job
-from littlejohn.bam_preprocessor import bam_preprocessing_handler
-from littlejohn.mgmt_analysis import mgmt_handler
-from littlejohn.cnv_analysis import cnv_handler
-from littlejohn.bed_conversion import bed_conversion_handler
-from littlejohn.sturgeon_analysis import sturgeon_handler
-from littlejohn.nanodx_analysis import nanodx_handler, pannanodx_handler
-from littlejohn.random_forest_analysis import random_forest_handler
-from littlejohn.target_analysis import target_handler
-from littlejohn.fusion_analysis import fusion_handler
+from littlejohn.analysis.bam_preprocessor import bam_preprocessing_handler
+from littlejohn.analysis.mgmt_analysis import mgmt_handler
+from littlejohn.analysis.cnv_analysis import cnv_handler
+from littlejohn.analysis.bed_conversion import bed_conversion_handler
+from littlejohn.analysis.sturgeon_analysis import sturgeon_handler
+from littlejohn.analysis.nanodx_analysis import nanodx_handler, pannanodx_handler
+from littlejohn.analysis.random_forest_analysis import random_forest_handler
+from littlejohn.analysis.target_analysis import target_handler
+from littlejohn.analysis.fusion_analysis import fusion_handler
 from littlejohn.logging_config import configure_logging, set_debug_level, set_info_level, set_warning_level, set_error_level
 
 

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pysam
 from dateutil import parser
-from littlejohn.master_csv_manager import MasterCSVManager
+from littlejohn.analysis.master_csv_manager import MasterCSVManager
 from littlejohn.logging_config import get_job_logger
 
 

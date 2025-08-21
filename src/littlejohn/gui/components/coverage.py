@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 import natsort
 import numpy as np
 import pandas as pd
+import logging
 
 try:
     from nicegui import ui
@@ -20,19 +21,19 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
     This mirrors the existing inline implementation but lives in a reusable module.
     """
     with ui.card().classes('w-full'):
-        # Summary row (quality + metrics)
-        with ui.card().classes('w-full'):
-            ui.label('🧫 Coverage').classes('text-lg font-semibold mb-2')
-            with ui.row().classes('w-full items-center justify-between mb-2'):
-                with ui.column().classes('gap-1'):
-                    ui.label('Coverage Analysis').classes('text-sm font-medium')
-                    with ui.row().classes('items-center gap-2'):
-                        cov_quality_label = ui.label('Quality: --').classes('text-gray-600 font-medium')
-                        cov_quality_badge = ui.label('--x').classes('px-2 py-1 rounded bg-gray-100 text-gray-600')
-                with ui.column().classes('gap-1 items-end'):
-                    cov_global_lbl = ui.label('Global Estimated Coverage: --x').classes('text-sm text-gray-600')
-                    cov_target_lbl = ui.label('Targets Estimated Coverage: --x').classes('text-sm text-gray-600')
-                    cov_enrich_lbl = ui.label('Estimated enrichment: --x').classes('text-sm text-gray-600')
+        ui.label('🧫 Coverage').classes('text-lg font-semibold mb-2')
+        # Summary row (quality + metrics)       
+        with ui.row().classes('w-full items-center justify-between mb-2'):
+            with ui.column().classes('gap-1'):
+                ui.label('Coverage Analysis').classes('text-sm font-medium')
+                with ui.row().classes('items-center gap-2'):
+                    cov_quality_label = ui.label('Quality: --').classes('text-gray-600 font-medium')
+                    cov_quality_badge = ui.label('--x').classes('px-2 py-1 rounded bg-gray-100 text-gray-600')
+            with ui.column().classes('gap-1 items-end'):
+                cov_global_lbl = ui.label('Global Estimated Coverage: --x').classes('text-sm text-gray-600')
+                cov_target_lbl = ui.label('Targets Estimated Coverage: --x').classes('text-sm text-gray-600')
+                cov_enrich_lbl = ui.label('Estimated enrichment: --x').classes('text-sm text-gray-600')
+        with ui.card().classes('w-full'):             
             with ui.grid(columns=2).classes('w-full gap-4'):
                 # Per Chromosome Coverage (bar)
                 echart_chr_cov = ui.echart({
@@ -117,6 +118,28 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
     """)
 
     # Helpers
+    def _log_notify(message: str, level: str = 'warning', notify: bool = False) -> None:
+        try:
+            # Python logging
+            log_func = getattr(logging, level, logging.warning)
+            log_func(f"[coverage] {message}")
+            # Append to GUI log buffer if available
+            try:
+                launcher._log_buffer.append(f"[coverage] {message}\n")  # type: ignore[attr-defined]
+                if hasattr(launcher, 'log_area') and launcher.log_area is not None:  # type: ignore[attr-defined]
+                    launcher.log_area.set_value(''.join(launcher._log_buffer))  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            # User notification (optional)
+            if notify and ui is not None:
+                n_type = 'warning' if level in {'warning', 'debug', 'info'} else 'error'
+                try:
+                    ui.notify(message, type=n_type)
+                except Exception:
+                    pass
+        except Exception:
+            # Never let logging itself break the UI
+            pass
     def _update_chr_cov(cov_df: pd.DataFrame) -> None:
         try:
             def chr_key(label: str) -> int:
@@ -141,8 +164,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 'data': [float(v) for v in temp_df['meandepth'].tolist()]
             }]
             echart_chr_cov.update()
-        except Exception:
-            pass
+        except Exception as e:
+            _log_notify(f"Chromosome coverage update failed: {e}", level='warning', notify=False)
 
     def _update_target_cov(cov_df: pd.DataFrame, bed_df: pd.DataFrame) -> None:
         try:
@@ -171,8 +194,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 {'type': 'scatter', 'name': 'On Target', 'symbolSize': 8, 'data': [float(v) for v in grouped['meandepth'].fillna(0).tolist()]},
             ]
             echart_target_cov.update()
-        except Exception:
-            pass
+        except Exception as e:
+            _log_notify(f"Target vs Off-target coverage update failed: {e}", level='warning', notify=False)
 
     def _update_boxplot(bed_df: pd.DataFrame) -> None:
         try:
@@ -218,16 +241,16 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             target_boxplot.options['dataset'][3]['source'] = glob_rows
             target_boxplot.options['xAxis']['data'] = chroms
             target_boxplot.update()
-        except Exception:
-            pass
+        except Exception as e:
+            _log_notify(f"Target boxplot update failed: {e}", level='warning', notify=False)
 
     def _update_time(npy_path: Path) -> None:
         try:
             arr = np.load(npy_path)
             echart_time.options['series'][0]['data'] = arr.tolist()
             echart_time.update()
-        except Exception:
-            pass
+        except Exception as e:
+            _log_notify(f"Coverage-over-time update failed: {e}", level='warning', notify=False)
 
     def _update_target_table(df: pd.DataFrame) -> None:
         try:
@@ -239,12 +262,13 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             rows = dfx[['chrom','startpos','endpos','name','coverage']].to_dict(orient='records')
             target_cov_table.rows = rows
             target_cov_table.update()
-        except Exception:
-            pass
+        except Exception as e:
+            _log_notify(f"Target table update failed: {e}", level='warning', notify=False)
 
     def _refresh_coverage() -> None:
         try:
             if not sample_dir or not sample_dir.exists():
+                _log_notify(f"Sample directory not found: {sample_dir}", level='warning', notify=True)
                 return
             key = str(sample_dir)
             state = launcher._coverage_state.get(key, {})
@@ -254,41 +278,54 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             cov_time = sample_dir / 'coverage_time_chart.npy'
             if cov_main.exists():
                 m = cov_main.stat().st_mtime
-                if state.get('cov_main_mtime') != m:
+                if state.get('cov_main_mtime') != m or 'cov_df' not in state:
                     try:
                         cov_df = pd.read_csv(cov_main)
+                        # Backfill meandepth if missing
+                        if 'meandepth' not in cov_df.columns and {'covbases', 'endpos'}.issubset(set(cov_df.columns)):
+                            cov_df = cov_df.copy()
+                            with np.errstate(divide='ignore', invalid='ignore'):
+                                cov_df['meandepth'] = (cov_df['covbases'] / cov_df['endpos'].replace(0, np.nan)).fillna(0)
                         _update_chr_cov(cov_df)
                         state['cov_df'] = cov_df
-                    except Exception:
-                        pass
-                    state['cov_main_mtime'] = m
+                        state['cov_main_mtime'] = m  # only set on success
+                    except Exception as e:
+                        _log_notify(f"Failed to read coverage_main.csv: {e}", level='error', notify=True)
+            else:
+                _log_notify("coverage_main.csv not found", level='debug', notify=False)
             if bed_cov.exists():
                 m = bed_cov.stat().st_mtime
-                if state.get('bed_cov_mtime') != m:
+                if state.get('bed_cov_mtime') != m or 'bed_df' not in state:
                     try:
                         bed_df = pd.read_csv(bed_cov)
                         state['bed_df'] = bed_df
-                    except Exception:
-                        bed_df = None
-                    if bed_df is not None:
                         _update_boxplot(bed_df)
-                    if state.get('cov_df') is not None and bed_df is not None:
-                        _update_target_cov(state['cov_df'], bed_df)
-                    state['bed_cov_mtime'] = m
+                        if state.get('cov_df') is not None:
+                            _update_target_cov(state['cov_df'], bed_df)
+                        state['bed_cov_mtime'] = m  # only set on success
+                    except Exception as e:
+                        _log_notify(f"Failed to read bed_coverage_main.csv: {e}", level='error', notify=True)
+            else:
+                _log_notify("bed_coverage_main.csv not found", level='debug', notify=False)
             if target_cov.exists():
                 m = target_cov.stat().st_mtime
                 if state.get('target_cov_mtime') != m:
                     try:
                         tdf = pd.read_csv(target_cov)
                         _update_target_table(tdf)
-                    except Exception:
-                        pass
-                    state['target_cov_mtime'] = m
+                        state['target_cov_mtime'] = m  # only set on success
+                    except Exception as e:
+                        _log_notify(f"Failed to read target_coverage.csv: {e}", level='error', notify=True)
+            else:
+                _log_notify("target_coverage.csv not found", level='debug', notify=False)
             if cov_time.exists():
                 m = cov_time.stat().st_mtime
                 if state.get('cov_time_mtime') != m:
-                    _update_time(cov_time)
-                    state['cov_time_mtime'] = m
+                    try:
+                        _update_time(cov_time)
+                        state['cov_time_mtime'] = m
+                    except Exception as e:
+                        _log_notify(f"Failed to load coverage_time_chart.npy: {e}", level='warning', notify=False)
             # Summary
             try:
                 global_cov = None
@@ -328,12 +365,17 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     cov_target_lbl.set_text(f'Targets Estimated Coverage: {target_cov_v:.2f}x')
                 if enrich_v is not None:
                     cov_enrich_lbl.set_text(f'Estimated enrichment: {enrich_v:.2f}x')
-            except Exception:
-                pass
+            except Exception as e:
+                _log_notify(f"Coverage summary update failed: {e}", level='warning', notify=False)
             launcher._coverage_state[key] = state
-        except Exception:
-            pass
+        except Exception as e:
+            _log_notify(f"Unexpected coverage refresh error: {e}", level='error', notify=True)
 
+    # Trigger an immediate refresh on page load, then continue with periodic refreshes
+    try:
+        ui.timer(0.5, _refresh_coverage, once=True)
+    except Exception:
+        pass
     ui.timer(30.0, _refresh_coverage, active=True)
 
 

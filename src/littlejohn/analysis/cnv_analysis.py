@@ -43,7 +43,7 @@ Example Usage
 -----------
 .. code-block:: python
 
-    from littlejohn.cnv_analysis import CNVAnalysis
+    from littlejohn.analysis.cnv_analysis import CNVAnalysis
 
     # Initialize analysis
     cnv_analysis = CNVAnalysis(
@@ -902,7 +902,7 @@ def cnv_handler(job, work_dir=None):
     bam_metadata = job.context.metadata.get('bam_metadata', {})
     
     # Create BamMetadata object for compatibility
-    from littlejohn.bam_preprocessor import BamMetadata
+    from littlejohn.analysis.bam_preprocessor import BamMetadata
     metadata = BamMetadata(
         file_path=bam_path,
         file_size=job.context.metadata.get('file_size', 0),

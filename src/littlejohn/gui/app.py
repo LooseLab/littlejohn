@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Optional, Dict
+from pathlib import Path
 
 try:
     from nicegui import ui
@@ -32,7 +33,9 @@ def launch_gui(
         raise ImportError("NiceGUI is not available. Please install it with: pip install nicegui")
 
     launcher = GUILauncher(host, port)
-    success = launcher.launch_gui(workflow_runner, workflow_steps, monitored_directory)
+    # Normalize monitored directory to an absolute path to avoid CWD issues
+    abs_mon_dir = str(Path(monitored_directory).resolve()) if monitored_directory else ""
+    success = launcher.launch_gui(workflow_runner, workflow_steps, abs_mon_dir)
     if not success:
         raise RuntimeError("Failed to launch GUI")
 

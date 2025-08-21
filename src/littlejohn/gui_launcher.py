@@ -113,7 +113,11 @@ class GUILauncher:
             
         self.workflow_runner = workflow_runner
         self.workflow_steps = workflow_steps or []
-        self.monitored_directory = monitored_directory
+        # Store absolute monitored directory to avoid relative path issues
+        try:
+            self.monitored_directory = str(Path(monitored_directory).resolve()) if monitored_directory else ""
+        except Exception:
+            self.monitored_directory = monitored_directory
         
         try:
             # Start GUI in completely isolated background thread

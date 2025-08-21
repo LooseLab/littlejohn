@@ -14,61 +14,62 @@ except ImportError:  # pragma: no cover
 
 def add_classification_section(sample_dir: Path) -> None:
     """Build the Classification section (Sturgeon, NanoDX, PanNanoDX, RF)."""
-    ui.label('🧪 Classification').classes('text-lg font-semibold mb-2')
-    tool_to_file = {
-        'Sturgeon': {'file': 'sturgeon_scores.csv', 'mode': 'fraction'},
-        'NanoDX': {'file': 'NanoDX_scores.csv', 'mode': 'fraction'},
-        'PanNanoDX': {'file': 'PanNanoDX_scores.csv', 'mode': 'fraction'},
-        'Random Forest': {'file': 'random_forest_scores.csv', 'mode': 'percent'},
-    }
-    charts: Dict[str, Dict[str, Any]] = {}
-    for tool_name, cfg in tool_to_file.items():
-        exp = ui.expansion(tool_name, icon='analytics').classes('w-full')
-        with exp:
-            summary_labels = None
-            if tool_name == 'Sturgeon':
-                with ui.card().classes('w-full bg-gradient-to-r from-blue-50 to-indigo-50 mb-2 p-2'):
-                    with ui.row().classes('gap-6 items-center'):
-                        st_class = ui.label('Sturgeon classification: Unknown').classes('text-sm font-semibold text-blue-800')
-                        st_conf = ui.label('Confidence: --%').classes('text-sm text-gray-700')
-                        st_probes = ui.label('Probes: --').classes('text-sm text-gray-700')
-                    summary_labels = {'class': st_class, 'conf': st_conf, 'probes': st_probes}
-            elif tool_name in ('NanoDX', 'PanNanoDX'):
-                with ui.card().classes('w-full bg-gradient-to-r from-blue-50 to-indigo-50 mb-2 p-2'):
-                    with ui.row().classes('gap-6 items-center'):
-                        ndx_class = ui.label(f'{tool_name} classification: Unknown').classes('text-sm font-semibold text-blue-800')
-                        ndx_conf = ui.label('Confidence: --%').classes('text-sm text-gray-700')
-                        ndx_feats = ui.label('Probes: --').classes('text-sm text-gray-700')
-                    summary_labels = {'class': ndx_class, 'conf': ndx_conf, 'probes': ndx_feats}
-            elif tool_name == 'Random Forest':
-                with ui.card().classes('w-full bg-gradient-to-r from-blue-50 to-indigo-50 mb-2 p-2'):
-                    with ui.row().classes('gap-6 items-center'):
-                        rf_class = ui.label('Forest classification: Unknown').classes('text-sm font-semibold text-blue-800')
-                        rf_conf = ui.label('Confidence: --%').classes('text-sm text-gray-700')
-                        rf_feats = ui.label('Features: --').classes('text-sm text-gray-700')
-                    summary_labels = {'class': rf_class, 'conf': rf_conf, 'probes': rf_feats}
-            ui.label(f'{tool_name} current classification').classes('text-sm text-gray-700')
-            bar = ui.echart({
-                'backgroundColor': 'transparent',
-                'title': {'text': f'{tool_name} (Top classes)', 'left': 'center', 'top': 10, 'textStyle': {'fontSize': 16, 'color': '#000'}},
-                'tooltip': {'trigger': 'axis', 'axisPointer': {'type': 'shadow'}, 'formatter': '{b}: {c}%'},
-                'grid': {'left': '5%', 'right': '5%', 'bottom': '5%', 'top': '25%', 'containLabel': True},
-                'xAxis': {'type': 'value', 'min': 0, 'max': 100, 'interval': 20, 'axisLabel': {'formatter': '{value}%'}},
-                'yAxis': {'type': 'category', 'inverse': True, 'data': []},
-                'series': [{'type': 'bar', 'data': [], 'barMaxWidth': '60%', 'itemStyle': {'color': '#007AFF', 'borderRadius': [0, 4, 4, 0]}, 'label': {'show': True, 'position': 'right', 'formatter': '{c}%'}}],
-            }).classes('w-full h-60')
-            ui.label(f'{tool_name} confidence over time').classes('text-sm text-gray-700 mt-2')
-            ts = ui.echart({
-                'backgroundColor': 'transparent',
-                'title': {'text': f'{tool_name} (time series)', 'left': 'center', 'top': 5, 'textStyle': {'fontSize': 16, 'color': '#000'}},
-                'tooltip': {'trigger': 'axis'},
-                'legend': {'type': 'scroll', 'top': 45},
-                'grid': {'left': '5%', 'right': '5%', 'bottom': '5%', 'top': '30%', 'containLabel': True},
-                'xAxis': {'type': 'time'},
-                'yAxis': {'type': 'value', 'min': 0, 'max': 100, 'axisLabel': {'formatter': '{value}%'}, 'splitLine': {'show': True, 'lineStyle': {'type': 'dashed', 'color': '#E0E0E0'}}},
-                'series': [],
-            }).classes('w-full h-64')
-            charts[tool_name] = {'bar': bar, 'ts': ts, 'file': cfg['file'], 'mode': cfg['mode'], 'summary': summary_labels, 'expansion': exp, 'last_mtime': None}
+    with ui.card().classes('w-full'):
+        ui.label('🧪 Classification').classes('text-lg font-semibold mb-2')
+        tool_to_file = {
+            'Sturgeon': {'file': 'sturgeon_scores.csv', 'mode': 'fraction'},
+            'NanoDX': {'file': 'NanoDX_scores.csv', 'mode': 'fraction'},
+            'PanNanoDX': {'file': 'PanNanoDX_scores.csv', 'mode': 'fraction'},
+            'Random Forest': {'file': 'random_forest_scores.csv', 'mode': 'percent'},
+        }
+        charts: Dict[str, Dict[str, Any]] = {}
+        for tool_name, cfg in tool_to_file.items():
+            exp = ui.expansion(tool_name, icon='analytics').classes('w-full')
+            with exp:
+                summary_labels = None
+                if tool_name == 'Sturgeon':
+                    with ui.card().classes('w-full bg-gradient-to-r from-blue-50 to-indigo-50 mb-2 p-2'):
+                        with ui.row().classes('gap-6 items-center'):
+                            st_class = ui.label('Sturgeon classification: Unknown').classes('text-sm font-semibold text-blue-800')
+                            st_conf = ui.label('Confidence: --%').classes('text-sm text-gray-700')
+                            st_probes = ui.label('Probes: --').classes('text-sm text-gray-700')
+                        summary_labels = {'class': st_class, 'conf': st_conf, 'probes': st_probes}
+                elif tool_name in ('NanoDX', 'PanNanoDX'):
+                    with ui.card().classes('w-full bg-gradient-to-r from-blue-50 to-indigo-50 mb-2 p-2'):
+                        with ui.row().classes('gap-6 items-center'):
+                            ndx_class = ui.label(f'{tool_name} classification: Unknown').classes('text-sm font-semibold text-blue-800')
+                            ndx_conf = ui.label('Confidence: --%').classes('text-sm text-gray-700')
+                            ndx_feats = ui.label('Probes: --').classes('text-sm text-gray-700')
+                        summary_labels = {'class': ndx_class, 'conf': ndx_conf, 'probes': ndx_feats}
+                elif tool_name == 'Random Forest':
+                    with ui.card().classes('w-full bg-gradient-to-r from-blue-50 to-indigo-50 mb-2 p-2'):
+                        with ui.row().classes('gap-6 items-center'):
+                            rf_class = ui.label('Forest classification: Unknown').classes('text-sm font-semibold text-blue-800')
+                            rf_conf = ui.label('Confidence: --%').classes('text-sm text-gray-700')
+                            rf_feats = ui.label('Features: --').classes('text-sm text-gray-700')
+                        summary_labels = {'class': rf_class, 'conf': rf_conf, 'probes': rf_feats}
+                ui.label(f'{tool_name} current classification').classes('text-sm text-gray-700')
+                bar = ui.echart({
+                    'backgroundColor': 'transparent',
+                    'title': {'text': f'{tool_name} (Top classes)', 'left': 'center', 'top': 10, 'textStyle': {'fontSize': 16, 'color': '#000'}},
+                    'tooltip': {'trigger': 'axis', 'axisPointer': {'type': 'shadow'}, 'formatter': '{b}: {c}%'},
+                    'grid': {'left': '5%', 'right': '5%', 'bottom': '5%', 'top': '25%', 'containLabel': True},
+                    'xAxis': {'type': 'value', 'min': 0, 'max': 100, 'interval': 20, 'axisLabel': {'formatter': '{value}%'}},
+                    'yAxis': {'type': 'category', 'inverse': True, 'data': []},
+                    'series': [{'type': 'bar', 'data': [], 'barMaxWidth': '60%', 'itemStyle': {'color': '#007AFF', 'borderRadius': [0, 4, 4, 0]}, 'label': {'show': True, 'position': 'right', 'formatter': '{c}%'}}],
+                }).classes('w-full h-80')
+                ui.label(f'{tool_name} confidence over time').classes('text-sm text-gray-700 mt-2')
+                ts = ui.echart({
+                    'backgroundColor': 'transparent',
+                    'title': {'text': f'{tool_name} (time series)', 'left': 'center', 'top': 5, 'textStyle': {'fontSize': 16, 'color': '#000'}},
+                    'tooltip': {'trigger': 'axis'},
+                    'legend': {'type': 'scroll', 'top': 45},
+                    'grid': {'left': '5%', 'right': '5%', 'bottom': '5%', 'top': '30%', 'containLabel': True},
+                    'xAxis': {'type': 'time'},
+                    'yAxis': {'type': 'value', 'min': 0, 'max': 100, 'axisLabel': {'formatter': '{value}%'}, 'splitLine': {'show': True, 'lineStyle': {'type': 'dashed', 'color': '#E0E0E0'}}},
+                    'series': [],
+                }).classes('w-full h-64')
+                charts[tool_name] = {'bar': bar, 'ts': ts, 'file': cfg['file'], 'mode': cfg['mode'], 'summary': summary_labels, 'expansion': exp, 'last_mtime': None}
 
     def _read_scores_csv(csv_path: Path, mode: str):
         try:

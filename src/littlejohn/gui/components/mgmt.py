@@ -161,7 +161,7 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
             
             bam_path = sample_dir / f"mgmt_sorted.bam"
             if bam_path.exists():
-                from littlejohn.methylation_wrapper import locus_figure, save_figure_pickle, load_figure_pickle
+                from littlejohn.analysis.methylation_wrapper import locus_figure, save_figure_pickle, load_figure_pickle
 
                 fig = locus_figure(
                     interval="chr10:129466536-129467536",

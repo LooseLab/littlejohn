@@ -49,52 +49,52 @@ except Exception as e:
 
 #Import handlers
 try:
-    from littlejohn.bam_preprocessor import bam_preprocessing_handler as _preprocessing_handler
+    from littlejohn.analysis.bam_preprocessor import bam_preprocessing_handler as _preprocessing_handler
 except Exception:
     _preprocessing_handler = None
 
 try:
-    from littlejohn.bed_conversion import bed_conversion_handler as _bed_conversion_handler
+    from littlejohn.analysis.bed_conversion import bed_conversion_handler as _bed_conversion_handler
 except Exception:
     _bed_conversion_handler = None
 
 try:
-    from littlejohn.mgmt_analysis import mgmt_handler as _mgmt_handler
+    from littlejohn.analysis.mgmt_analysis import mgmt_handler as _mgmt_handler
 except Exception:
     _mgmt_handler = None
 
 try:
-    from littlejohn.cnv_analysis import cnv_handler as _cnv_handler
+    from littlejohn.analysis.cnv_analysis import cnv_handler as _cnv_handler
 except Exception:
     _cnv_handler = None
 
 try:
-    from littlejohn.target_analysis import target_handler as _target_handler
+    from littlejohn.analysis.target_analysis import target_handler as _target_handler
 except Exception:
     _target_handler = None
 
 try:
-    from littlejohn.fusion_analysis import fusion_handler as _fusion_handler
+    from littlejohn.analysis.fusion_analysis import fusion_handler as _fusion_handler
 except Exception:
     _fusion_handler = None
 
 try:
-    from littlejohn.sturgeon_analysis import sturgeon_handler as _sturgeon_handler
+    from littlejohn.analysis.sturgeon_analysis import sturgeon_handler as _sturgeon_handler
 except Exception:
     _sturgeon_handler = None
 
 try:
-    from littlejohn.nanodx_analysis import nanodx_handler as _nanodx_handler
+    from littlejohn.analysis.nanodx_analysis import nanodx_handler as _nanodx_handler
 except Exception:
     _nanodx_handler = None
 
 try:
-    from littlejohn.nanodx_analysis import pannanodx_handler as _pannanodx_handler
+    from littlejohn.analysis.nanodx_analysis import pannanodx_handler as _pannanodx_handler
 except Exception:
     _pannanodx_handler = None
 
 try:
-    from littlejohn.random_forest_analysis import random_forest_handler as _random_forest_handler
+    from littlejohn.analysis.random_forest_analysis import random_forest_handler as _random_forest_handler
 except Exception:
     _random_forest_handler = None
 
