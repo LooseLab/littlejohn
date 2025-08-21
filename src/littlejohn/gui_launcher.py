@@ -929,13 +929,6 @@ class GUILauncher:
                     ui.button('Generate Report', on_click=confirm_report_generation).classes('text-sm font-semibold px-3 py-1 rounded')
                 
             with ui.column().classes('w-full p-4 gap-4'):
-                # Coverage section (refactored component)
-                try:
-                    from .gui.components.coverage import add_coverage_section  # type: ignore
-                    add_coverage_section(self, sample_dir)
-                except Exception:
-                    pass
-
                 # Classification section (refactored component)
                 try:
                     from .gui.components.classification import add_classification_section  # type: ignore
@@ -943,6 +936,13 @@ class GUILauncher:
                 except Exception as e:
                     logging.exception(f"[GUI] Classification section failed: {e}")
 
+                # Coverage section (refactored component)
+                try:
+                    from .gui.components.coverage import add_coverage_section  # type: ignore
+                    add_coverage_section(self, sample_dir)
+                except Exception:
+                    pass
+                
                 # MGMT section (refactored component)
                 try:
                     from .gui.components.mgmt import add_mgmt_section  # type: ignore
