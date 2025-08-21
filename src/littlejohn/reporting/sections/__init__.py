@@ -4,24 +4,9 @@ Report Sections Package
 This package contains the individual sections that make up the ROBIN report.
 """
 
-from .base import ReportSection
-from .classification import ClassificationSection
-from .cnv import CNVSection
-from .fusion import FusionSection
-from .coverage import CoverageSection
-from .mgmt import MGMTSection
-from .run_data import RunDataSection
-from .disclaimer import DisclaimerSection
-from .variants import VariantsSection
+# IMPORTANT: Avoid importing heavy submodules at package import time to prevent
+# side effects (e.g., matplotlib backend initialization) that can interfere with
+# signal handling (Ctrl-C) in CLI/GUI contexts. Import submodules explicitly
+# where needed, e.g., `from .classification import ClassificationSection`.
 
-__all__ = [
-    "ReportSection",
-    "ClassificationSection",
-    "CNVSection",
-    "FusionSection",
-    "CoverageSection",
-    "MGMTSection",
-    "RunDataSection",
-    "DisclaimerSection",
-    "VariantsSection",
-]
+__all__ = []

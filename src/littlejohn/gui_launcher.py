@@ -23,6 +23,11 @@ import os
 
 from littlejohn.gui import theme
 from littlejohn.gui import images
+
+from littlejohn.reporting.report import create_pdf
+from littlejohn.reporting.sections.disclaimer_text import EXTENDED_DISCLAIMER_TEXT
+
+
 try:
     from nicegui import ui, app
 except ImportError:
@@ -852,14 +857,77 @@ class GUILauncher:
             sample_dir = Path(self.monitored_directory) / sample_id if self.monitored_directory else None
 
             # Page title and navigation
-            with ui.row().classes('w-full bg-blue-600 text-white p-4 items-center justify-between'):
+            with ui.row().classes(): #'w-full bg-blue-600 text-white p-4 items-center justify-between'):
                 with ui.row().classes('items-center'):
-                    ui.label(f'🧬 Sample: {sample_id}').classes('text-2xl font-bold')
-                    ui.label('Detailed sample information and job history').classes('text-sm ml-4 opacity-80')
+                    ui.label(f'{sample_id}').classes('text-2xl font-bold')
+                    ui.label('Detailed sample information.').classes('text-sm ml-4 opacity-80')
                 with ui.row().classes('gap-4'):
-                    ui.link('📋 Sample Overview', '/live_data').classes('text-white hover:text-blue-200 text-sm')
-                    ui.link('📊 Workflow Monitor', '/littlejohn').classes('text-white hover:text-blue-200 text-sm')
+                    #ui.link('📋 Sample Overview', '/live_data').classes('text-white hover:text-blue-200 text-sm')
+                    #ui.link('📊 Workflow Monitor', '/littlejohn').classes('text-white hover:text-blue-200 text-sm')
+                    # Report generation (confirmation dialog + download)
+                    async def confirm_report_generation():
+                        """Show a confirmation dialog before generating the report."""
+                        report_types = {
+                            "summary": "Summary Only",
+                            "detailed": "Detailed",
+                        }
+                        state = {"type": "detailed"}
 
+                        with ui.dialog() as dialog, ui.card().classes("w-96 p-4"):
+                            ui.label("Generate Report").classes("text-h6 font-bold mb-4")
+
+                            # Report type selector
+                            with ui.column().classes("mb-4"):
+                                ui.label("Report Type").classes("font-bold mb-2")
+                                ui.toggle(
+                                    report_types,
+                                    value="detailed",
+                                    on_change=lambda e: state.update({"type": e.value}),
+                                )
+
+                            # Disclaimer section
+                            with ui.column().classes("mb-4"):
+                                ui.label("Disclaimer").classes("font-bold mb-2")
+                                formatted_text = EXTENDED_DISCLAIMER_TEXT.replace("\n\n", "<br><br>").replace("\n", " ")
+                                ui.label(formatted_text).classes("text-sm text-gray-600 mb-4")
+
+                            ui.label("Are you sure you want to generate a report?").classes("mb-4")
+
+                            # Buttons
+                            with ui.row().classes("justify-end gap-2"):
+                                ui.button("No", on_click=lambda: dialog.submit(("No", None))).props("flat")
+                                ui.button(
+                                    "Yes",
+                                    on_click=lambda: dialog.submit(("Yes", state["type"]))
+                                ).props("color=primary")
+
+                        dialog_result = await dialog
+                        if dialog_result is None:
+                            return
+                        result, report_type = dialog_result
+                        if result == "Yes":
+                            await download_report(report_type)
+
+                    async def download_report(report_type: str = "detailed"):
+                        """Generate and download the report for this sample."""
+                        try:
+                            # Import here to avoid global dependency if GUI isn't used
+                            from nicegui import run as ng_run  # type: ignore
+                            if not sample_dir or not sample_dir.exists():
+                                ui.notify("Output directory not available for this sample", type='warning')
+                                return
+                            ui.notify("Generating report…")
+                            filename = f"{sample_id}_run_report.pdf"
+                            pdf_path = os.path.join(str(sample_dir), filename)
+                            os.makedirs(str(sample_dir), exist_ok=True)
+                            pdf_file = await ng_run.io_bound(create_pdf, pdf_path, str(sample_dir), report_type)
+                            ui.download(pdf_file)
+                            ui.notify("Report downloaded")
+                        except Exception as e:
+                            ui.notify(f"Report generation failed: {e}", type='error')                    
+
+                    ui.button('Generate Report', on_click=confirm_report_generation).classes('text-sm font-semibold px-3 py-1 rounded')
+                
             with ui.column().classes('w-full p-4 gap-4'):
                 # Coverage section (refactored component)
                 try:

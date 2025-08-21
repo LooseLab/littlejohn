@@ -13,10 +13,9 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import inch
 from ..sections.base import ReportSection
 import logging
-import matplotlib.pyplot as plt
 import matplotlib
-
-matplotlib.use("Agg")
+matplotlib.use("Agg")  # ensure non-interactive backend before importing pyplot
+import matplotlib.pyplot as plt
 import io
 
 logger = logging.getLogger(__name__)
