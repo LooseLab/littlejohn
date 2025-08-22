@@ -5,7 +5,19 @@ Helper functions to sort and merge bedmethyl files.
 import pandas as pd
 import csv
 import logging
-from typing import List, Dict
+from typing import List, Dict, Optional
+import os
+import gc
+from copy import deepcopy
+import numpy as np
+
+import sturgeon
+
+# Sturgeon-related imports (must be installed)
+from sturgeon.utils import validate_model_file, get_model_path, read_probes_file
+from sturgeon.prediction import bed_to_numpy
+
+#from sturgeon.utils import read_probes_file, map_methyl_calls_to_probes_chr
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -28,6 +40,29 @@ def configure_logging(level: int = logging.INFO) -> None:
         )
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
+
+def load_modkit_data(parquet_path):
+    """
+    Load minimal bedmethyl data for RandomForest analysis.
+
+    This function loads only the essential columns needed for RandomForest classification:
+    - chrom: Chromosome name
+    - chromStart: Start position
+    - percent_modified: Primary methylation data
+    - mod_code: Modification code
+    - strand: Strand information
+
+    Args:
+        parquet_path (str): Path to the parquet file containing bedmethyl data
+
+    Returns:
+        pd.DataFrame: DataFrame with minimal columns, sorted by chrom and chromStart
+    """
+    if load_minimal_modkit_data is None:
+        raise ImportError(
+            "load_minimal_modkit_data function not available from robin package"
+        )
+    return load_minimal_modkit_data(parquet_path)
 
 
 def load_minimal_modkit_data(parquet_path):
@@ -147,6 +182,240 @@ def load_minimal_modkit_data(parquet_path):
         f"Loaded minimal bedmethyl data with {len(df)} rows and {len(df.columns)} columns"
     )
     return df.sort_values(by=["chrom", "chromStart"])
+
+
+def modkit_pileup_file_to_bed(
+    input_data,  # Accepts either a DataFrame or file path
+    output_file: str,
+    probes_file: str,
+    margin: Optional[int] = 25,
+    neg_threshold: Optional[float] = 0.3,
+    pos_threshold: Optional[float] = 0.7,
+    fivemc_code: str = "C",
+) -> pd.DataFrame:
+    """Processes a modkit pileup file or DataFrame and maps methylation data to probes."""
+
+    # Initialize variables to None for cleanup
+    modkit_df = None
+    probes_df = None
+    probes_methyl_df = None
+    calls_per_probe = None
+    temp_file = None
+    result_df = None
+
+    try:
+        # Check if input_data is a file path or a DataFrame
+        if isinstance(input_data, str):
+            # Read from file
+            modkit_df = pd.read_csv(input_data, delim_whitespace=True, header=None)
+        elif isinstance(input_data, pd.DataFrame):
+            # Use DataFrame directly
+            modkit_df = input_data.copy()
+        else:
+            raise ValueError(
+                "input_data must be either a file path (str) or a DataFrame"
+            )
+
+        # For minimal data, we expect only the essential columns
+        if isinstance(input_data, pd.DataFrame) and len(modkit_df.columns) == 5:
+            # Minimal data format - columns should already be named correctly
+            expected_columns = [
+                "chrom",
+                "chromStart",
+                "percent_modified",
+                "mod_code",
+                "strand",
+            ]
+            if list(modkit_df.columns) == expected_columns:
+                # Data is already in minimal format, just filter by mod_code
+                modkit_df = modkit_df[modkit_df["mod_code"] == fivemc_code]
+            else:
+                # Assign column names for minimal data
+                modkit_df.columns = expected_columns
+                modkit_df = modkit_df[modkit_df["mod_code"] == fivemc_code]
+        else:
+            # Full data format - use original logic
+            # Define column names
+            column_names = [
+                "chrom",
+                "chromStart",
+                "chromEnd",
+                "mod_code",
+                "score_bed",
+                "strand",
+                "thickStart",
+                "thickEnd",
+                "color",
+                "valid_cov",
+                "percent_modified",
+                "n_mod",
+                "n_canonical",
+                "n_othermod",
+                "n_delete",
+                "n_fail",
+                "n_diff",
+                "n_nocall",
+            ]
+
+            # Validate number of columns
+            if modkit_df.shape[1] != len(column_names):
+                raise AssertionError(
+                    f"Invalid modkit pileup file. Expected {len(column_names)} columns, got {modkit_df.shape[1]}."
+                )
+
+            # Assign column names
+            modkit_df.columns = column_names
+
+            # Filter by modification code
+            modkit_df = modkit_df[modkit_df["mod_code"] == fivemc_code]
+
+            # Drop unnecessary columns
+            modkit_df.drop(
+                columns=[
+                    "mod_code",
+                    "thickStart",
+                    "thickEnd",
+                    "color",
+                    "valid_cov",
+                    "n_mod",
+                    "n_canonical",
+                    "n_othermod",
+                    "n_delete",
+                    "n_fail",
+                    "n_diff",
+                    "n_nocall",
+                ],
+                inplace=True,
+            )
+
+        # Rename and normalize score column
+        modkit_df = modkit_df.rename(
+            columns={
+                "chrom": "chr",
+                "chromStart": "reference_pos",
+                "percent_modified": "score",
+            }
+        )
+        modkit_df["score"] /= 100  # Convert from percentage to decimal fraction
+
+        # Remove invalid positions
+        modkit_df = modkit_df[
+            (modkit_df["reference_pos"] != -1) & (modkit_df["chr"] != ".")
+        ]
+
+        # Load probes file
+        probes_df = read_probes_file(probes_file)
+
+        # Ensure chromosome names match
+        probes_df["chr"] = probes_df["chr"].astype(str)  # Make sure probes are strings
+        modkit_df["chr"] = (
+            modkit_df["chr"].astype(str).str.replace("^chr", "", regex=True)
+        )  # Remove "chr" prefix
+
+        # Print to verify
+        # print("Normalized Chromosomes in probes:", np.unique(probes_df['chr']))
+        # print("Normalized Chromosomes in modkit:", np.unique(modkit_df['chr']))
+
+        # Copy probes data for methylation processing
+        probes_methyl_df = deepcopy(probes_df)
+
+        # Get unique chromosomes
+        chromosomes = np.unique(probes_df["chr"].astype(str))
+
+        # Initialize methylation count columns
+        probes_methyl_df["methylation_calls"] = 0
+        probes_methyl_df["unmethylation_calls"] = 0
+        probes_methyl_df["total_calls"] = 0
+
+        # Process each chromosome
+        calls_per_probe = []
+        for chrom in chromosomes:
+            chrom_str = str(chrom)  # Ensure correct format
+
+            # Efficient filtering
+            probe_mask = probes_methyl_df["chr"] == chrom_str
+            methyl_mask = modkit_df["chr"] == chrom_str
+
+            if probe_mask.sum() == 0 or methyl_mask.sum() == 0:
+                continue  # Skip if no relevant data
+
+            calls_per_probe_chr = map_methyl_calls_to_probes_chr(
+                probes_df=probes_methyl_df.loc[probe_mask].copy(),
+                methyl_calls_per_read=modkit_df.loc[methyl_mask].copy(),
+                margin=margin,
+                neg_threshold=neg_threshold,
+                pos_threshold=pos_threshold,
+            )
+
+            calls_per_probe.append(calls_per_probe_chr)
+
+            calls = calls_per_probe_chr["total_calls"].sum()
+            logging.debug(
+                f"Found {calls} methylation array sites on chromosome {chrom_str}"
+            )
+
+        # Ensure we have data before concatenation
+        if not calls_per_probe:
+            logging.warning("No methylation data found matching the probes.")
+            return pd.DataFrame()
+
+        # Merge all results efficiently
+        calls_per_probe = pd.concat(calls_per_probe, ignore_index=True)
+
+        # Save intermediate output
+        temp_file = output_file + ".tmp"
+        calls_per_probe.to_csv(temp_file, header=True, index=False, sep="\t")
+
+        # Rename columns for the final output format
+        calls_per_probe.rename(
+            columns={
+                "chr": "chrom",
+                "start": "chromStart",
+                "end": "chromEnd",
+                "ID_REF": "probe_id",
+                "methylation_calls": "methylation_call",
+            },
+            inplace=True,
+        )
+
+        # Filter out rows with zero total_calls
+        calls_per_probe = calls_per_probe[calls_per_probe["total_calls"] > 0]
+
+        # Select final output columns
+        calls_per_probe = calls_per_probe[
+            ["chrom", "chromStart", "chromEnd", "methylation_call", "probe_id"]
+        ]
+
+        # Save final processed file
+        calls_per_probe.to_csv(output_file, header=True, index=False, sep="\t")
+
+        # Store result for return
+        result_df = calls_per_probe.copy()
+
+    finally:
+        # Clean up large DataFrames that are no longer needed
+        if modkit_df is not None:
+            del modkit_df
+        if probes_df is not None:
+            del probes_df
+        if probes_methyl_df is not None:
+            del probes_methyl_df
+        if calls_per_probe is not None:
+            del calls_per_probe
+
+        # Clean up temporary file
+        if temp_file is not None:
+            try:
+                if os.path.exists(temp_file):
+                    os.unlink(temp_file)
+                    logging.debug(f"Cleaned up temporary file: {temp_file}")
+            except OSError as e:
+                logging.warning(f"Failed to clean up temporary file {temp_file}: {e}")
+
+        # Force garbage collection
+        gc.collect()
+
+    return result_df
 
 
 def save_bedmethyl(result_df: pd.DataFrame, output_file: str) -> None:
@@ -576,3 +845,54 @@ if __name__ == "__main__":
         logger.info("Bedmethyl processing completed successfully.")
     except Exception as e:
         logger.error(f"An error occurred during bedmethyl processing: {e}")
+
+def map_methyl_calls_to_probes_chr(
+    probes_df: pd.DataFrame,
+    methyl_calls_per_read: pd.DataFrame,
+    margin: int,
+    neg_threshold: float,
+    pos_threshold: float,
+) -> pd.DataFrame:
+    """Maps calls per read to probe locations in a chromosome using NumPy for performance."""
+
+    # Convert Pandas DataFrames to NumPy arrays for performance
+    probes_start = probes_df["start"].to_numpy()
+    methyl_pos = methyl_calls_per_read["reference_pos"].to_numpy()
+    scores = methyl_calls_per_read["score"].to_numpy()
+
+    # Define search ranges
+    starts = probes_start - margin
+    ends = starts + 2 * margin + 1
+
+    # Vectorized binary search
+    s = np.searchsorted(methyl_pos, starts, side="left")
+    n = np.searchsorted(methyl_pos, ends, side="right")
+
+    # Filter where matches exist
+    valid_idx = s != n
+    s, n, valid_idx = s[valid_idx], n[valid_idx], np.nonzero(valid_idx)[0]
+
+    # Initialize call counters
+    methylation_calls = np.zeros(len(probes_df), dtype=int)
+    unmethylation_calls = np.zeros(len(probes_df), dtype=int)
+
+    # Vectorized processing
+    for idx, (ss, nn) in enumerate(zip(s, n)):
+        current_scores = scores[ss:nn]
+        bin_scores = np.zeros_like(current_scores)
+        bin_scores[current_scores > pos_threshold] = 1
+        bin_scores[current_scores < neg_threshold] = -1
+
+        if len(bin_scores[bin_scores != 0]) > 0:
+            final_score = int(np.median(bin_scores[bin_scores != 0]))
+            if final_score == 1:
+                methylation_calls[valid_idx[idx]] += 1
+            elif final_score == -1:
+                unmethylation_calls[valid_idx[idx]] += 1
+
+    # Assign back to DataFrame
+    probes_df["methylation_calls"] = methylation_calls
+    probes_df["unmethylation_calls"] = unmethylation_calls
+    probes_df["total_calls"] = methylation_calls + unmethylation_calls
+
+    return probes_df

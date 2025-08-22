@@ -28,9 +28,9 @@ try:
     import pysam
     from alive_progress import alive_bar
     from tqdm import tqdm
-    from robin.utilities.ReadBam import ReadBam
-    from robin.utilities.mnp_flex import APIClient as MnpFlexClient
-    from robin import resources
+    from littlejohn.analysis.utilities.ReadBam import ReadBam
+    from littlejohn.analysis.utilities.mnp_flex import APIClient as MnpFlexClient
+    from littlejohn import resources
 except ImportError as e:
     logging.warning(f"Some dependencies not available: {e}")
 

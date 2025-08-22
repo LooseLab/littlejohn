@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import io
 import matplotlib.font_manager as fm
 import os
-from robin import fonts
+from littlejohn.gui import fonts
 
 import natsort
 

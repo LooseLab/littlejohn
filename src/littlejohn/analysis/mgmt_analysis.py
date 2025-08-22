@@ -27,15 +27,15 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional
 from littlejohn.logging_config import get_job_logger
 
-# Try to find HV path from robin module, fallback to common locations
+# Try to find HV path from littlejohn package, fallback to common locations
 try:
     HVPATH = os.path.join(
-        os.path.dirname(os.path.abspath(__import__("robin").__file__)),
+        os.path.dirname(os.path.abspath(__import__("littlejohn").__file__)),
         "submodules",
         "hv_rapidCNS2",
     )
 except ImportError:
-    # Fallback paths if robin module is not available
+    # Fallback if littlejohn package is not importable
     HVPATH = None
 
 
@@ -98,7 +98,7 @@ def _find_mgmt_bed(work_dir: str) -> str:
 
 
 def _find_hv_path(work_dir: str) -> str:
-    """Find the HV rapidCNS2 path from robin module"""
+    """Find the HV rapidCNS2 path from littlejohn package"""
     # Use the already defined HVPATH constant if available
     if HVPATH and os.path.exists(HVPATH):
         return HVPATH
@@ -115,7 +115,7 @@ def _find_hv_path(work_dir: str) -> str:
         )
     else:
         logger.warning(
-            f"Robin module not available, created basic HV structure at: {hv_path}"
+            f"LittleJohn package not available, created basic HV structure at: {hv_path}"
         )
     return hv_path
 

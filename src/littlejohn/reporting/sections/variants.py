@@ -13,7 +13,7 @@ from reportlab.platypus import Paragraph, Spacer, Table, TableStyle, PageBreak
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.colors import HexColor
 from ..sections.base import ReportSection
-from robin import resources
+from littlejohn import resources
 
 logger = logging.getLogger(__name__)
 

@@ -22,10 +22,10 @@ import logging
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional
 
-# Import robin utilities
+# Import LittleJohn utilities and resources
 try:
-    from robin.utils import run_matkit
-    from robin import resources
+    from littlejohn.analysis.utilities.matkit import run_matkit
+    from littlejohn import resources
 except ImportError:
     run_matkit = None
     resources = None
@@ -92,7 +92,7 @@ class BedConversionAnalysis:
         self.logger.debug(f"Threads: {self.threads}")
 
     def _find_cpgs_master_file(self) -> str:
-        """Find the CPGs master file from robin resources"""
+        """Find the CPGs master file from littlejohn resources"""
         global _CPGS_MASTER_FILE_CACHE
         if _CPGS_MASTER_FILE_CACHE is not None:
             return _CPGS_MASTER_FILE_CACHE

@@ -44,20 +44,27 @@ try:
         load_minimal_modkit_data,
         reconstruct_full_bedmethyl_data,
     )
-    from robin import submodules
-
-    HVPATH = os.path.join(
-        os.path.dirname(os.path.abspath(submodules.__file__)), "hv_rapidCNS2"
-    )
 except ImportError as e:
     logging.warning(f"Some robin dependencies not available: {e}")
     collapse_bedmethyl = None
     load_minimal_modkit_data = None
     reconstruct_full_bedmethyl_data = None
-    resources = None
-    models = None
-    submodules = None
-    HVPATH = None
+
+
+def _compute_hvpath() -> Optional[str]:
+    """Resolve the hv_rapidCNS2 path from this package's submodules.
+
+    Looks up: littlejohn/submodules/hv_rapidCNS2
+    Returns the path if it exists, else None.
+    """
+    base_dir = os.path.dirname(os.path.dirname(__file__))
+    candidate = os.path.join(base_dir, "submodules", "hv_rapidCNS2")
+    if os.path.exists(candidate):
+        return candidate
+    return None
+
+
+HVPATH = _compute_hvpath()
 
 from littlejohn.logging_config import get_job_logger
 

@@ -22,16 +22,14 @@ import numpy as np
 
 # Import robin utilities
 try:
-    from robin.utilities.merge_bedmethyl import (
-        load_minimal_modkit_data,
-        collapse_minimal_bedmethyl,
-    )
-    from robin.submodules.nanoDX.workflow.scripts.NN_model import NN_classifier
-    from robin import resources, models
-    from robin.subpages.NanoDX_object import load_modkit_data
+    from littlejohn.analysis.utilities.merge_bedmethyl import collapse_minimal_bedmethyl
+    from littlejohn.submodules.nanoDX.workflow.scripts.NN_model import NN_classifier
+    from littlejohn import resources
+    #ToDo: Resolve models into littlejohn
+    from robin import models
+    from littlejohn.analysis.utilities.merge_bedmethyl import load_modkit_data
 except ImportError as e:
     logging.warning(f"Some robin dependencies not available: {e}")
-    load_minimal_modkit_data = None
     collapse_minimal_bedmethyl = None
     NN_classifier = None
     resources = None

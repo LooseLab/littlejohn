@@ -20,8 +20,32 @@ import logging
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List
 from littlejohn.logging_config import get_job_logger
-from robin.subpages.Sturgeon_object import sturgeon_bam_background_work
+from littlejohn.analysis.utilities.merge_bedmethyl import load_modkit_data, modkit_pileup_file_to_bed
+import tempfile
+import gc
+import pandas as pd
+import numpy as np
 
+#from robin.subpages.Sturgeon_object import predict_sample_from_dataframe
+
+import sturgeon
+
+# Sturgeon-related imports (must be installed)
+from sturgeon.utils import validate_model_file, get_model_path, read_probes_file
+from sturgeon.prediction import bed_to_numpy
+
+import sys
+
+import zipfile
+import json
+import onnxruntime
+from sturgeon.utils import load_bed_file, softmax, merge_predictions
+from sturgeon.constants import METHYL_VALUE, UNMETHYL_VALUE, NOMEASURE_VALUE
+import gc
+
+from robin import models
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class SturgeonMetadata:
@@ -228,3 +252,392 @@ def sturgeon_handler(job, work_dir=None):
     except Exception as e:
         job.context.add_error("sturgeon_analysis", str(e))
         logger.error(f"Error in Sturgeon analysis for {job.context.filepath}: {e}")
+
+def sturgeon_bam_background_work(parquet_path, output_path, probes_file, currenttime):
+    # Initialize variables to None for cleanup
+    merged_modkit_df = None
+    result_df = None
+    diagnosis = None
+    mydf_to_save = None
+    sturgeon_df_store = None
+
+    try:
+        # if self.check_file_time(parquet_path):
+        # merged_modkit_df = await run.cpu_bound(
+        #    load_modkit_data, parquet_path
+        # )
+
+        merged_modkit_df = load_modkit_data(parquet_path)
+        with tempfile.NamedTemporaryFile(dir=output_path, delete=True) as temp_pileup:
+            result_df = modkit_pileup_file_to_bed(
+                merged_modkit_df,
+                temp_pileup.name,
+                probes_file,
+            )
+            diagnosis = predict_sample_from_dataframe(result_df)
+            mydf_to_save = diagnosis
+            mydf_to_save["timestamp"] = currenttime
+            
+            # if self.check_file_time(os.path.join(self.output, sampleID, "sturgeon_scores.csv")):
+            if os.path.exists(os.path.join(output_path, "sturgeon_scores.csv")):
+                sturgeon_df_store = pd.read_csv(
+                    os.path.join(os.path.join(output_path, "sturgeon_scores.csv")),
+                    index_col=0,
+                )
+            else:
+                sturgeon_df_store = pd.DataFrame()
+
+            # Exclude empty or all-NA entries before concatenation
+            if not mydf_to_save.dropna(how="all").empty:
+                # Create a copy for concatenation to avoid modifying original
+                mydf_indexed = mydf_to_save.set_index("timestamp")
+                sturgeon_df_store = pd.concat(
+                    [
+                        sturgeon_df_store,
+                        mydf_indexed,
+                    ]
+                )
+                sturgeon_df_store.to_csv(
+                    os.path.join(
+                        output_path,
+                        "sturgeon_scores.csv",
+                    )
+                )
+                # Clean up the indexed copy
+                del mydf_indexed
+
+    except Exception as e:
+        print(f"Error in process_bam (sturgeon): {e}")
+        logger.error(f"Error in process_bam (sturgeon): {e}")
+    finally:
+        # Comprehensive cleanup of all large DataFrames and variables
+        if merged_modkit_df is not None:
+            del merged_modkit_df
+        if result_df is not None:
+            del result_df
+        if diagnosis is not None:
+            del diagnosis
+        if mydf_to_save is not None:
+            del mydf_to_save
+        if sturgeon_df_store is not None:
+            del sturgeon_df_store
+
+        # Force garbage collection
+        gc.collect()
+        
+        
+def predict_sample_from_dataframe(
+    bed_df: pd.DataFrame,
+    # model_file: str,
+    # output_dir: str,
+    sample_name: str = "sample",
+    plot_results: bool = False,
+):
+    """
+    Runs `predict_sample` using a DataFrame instead of a BED file.
+
+    Parameters:
+        bed_df (pd.DataFrame): The BED file data as a DataFrame.
+        model_file (str): Path to the trained model file.
+        #output_dir (str): Directory to save results.
+        #sample_name (str): Name identifier for output files.
+        plot_results (bool): Whether to generate a plot.
+
+    Returns:
+        pd.DataFrame: The prediction results.
+    """
+    import subprocess
+    import json
+    import tempfile
+
+    # Alternative multiprocessing approach (uncomment to use):
+    """
+    import multiprocessing as mp
+    import pickle
+    
+    def run_prediction_worker(model_file, bed_file, result_queue):
+        try:
+            prediction_df = run_sturgeon_mem_free(model_file, bed_file)
+            result_queue.put(('success', prediction_df))
+        except Exception as e:
+            result_queue.put(('error', str(e)))
+    
+    # Save DataFrame as temporary file
+    with tempfile.NamedTemporaryFile(delete=True, suffix=".bed") as tmp_bed:
+        temp_bed_file = tmp_bed.name
+        bed_df.to_csv(temp_bed_file, sep="\t", index=False, header=True)
+        
+        # Create queue for results
+        result_queue = mp.Queue()
+        
+        # Start prediction process
+        process = mp.Process(
+            target=run_prediction_worker,
+            args=(modelfile, temp_bed_file, result_queue)
+        )
+        process.start()
+        process.join(timeout=300)  # 5 minute timeout
+        
+        if process.is_alive():
+            process.terminate()
+            process.join()
+            raise RuntimeError("Prediction timed out after 5 minutes")
+        
+        # Get results
+        status, result = result_queue.get()
+        if status == 'error':
+            raise RuntimeError(f"Prediction failed: {result}")
+        
+        return result
+    """
+
+    # Ensure output directory exists
+    # os.makedirs(output_dir, exist_ok=True)
+    modelfile = os.path.join(
+        os.path.dirname(os.path.abspath(models.__file__)), "general.zip"
+    )
+
+    # Validate and load model
+    model_path = get_model_path(modelfile)
+    if not validate_model_file(modelfile):
+        raise ValueError(f"Invalid model file: {modelfile}")
+
+    # Save DataFrame as a temporary BED file
+    with tempfile.NamedTemporaryFile(delete=True, suffix=".bed") as tmp_bed:
+        temp_bed_file = tmp_bed.name
+        bed_df.to_csv(temp_bed_file, sep="\t", index=False, header=True)
+
+        # Create a temporary output file for the prediction results
+        with tempfile.NamedTemporaryFile(delete=True, suffix=".json") as tmp_output:
+            output_file = tmp_output.name
+
+            # Run prediction in separate process
+            try:
+                # Get the path to this script
+                current_script = os.path.abspath(__file__)
+
+                # Run the prediction in a separate process
+                result = subprocess.run(
+                    [
+                        sys.executable,  # Use the same Python interpreter
+                        current_script,
+                        "predict",  # Command to run prediction
+                        "--model",
+                        modelfile,
+                        "--input",
+                        temp_bed_file,
+                        "--output",
+                        output_file,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=300,  # 5 minute timeout
+                )
+
+                if result.returncode != 0:
+                    raise RuntimeError(f"Prediction failed: {result.stderr}")
+
+                # Read the prediction results
+                with open(output_file, "r") as f:
+                    prediction_data = json.load(f)
+
+                # Convert back to DataFrame
+                prediction_df = pd.DataFrame(prediction_data)
+
+            except subprocess.TimeoutExpired:
+                raise RuntimeError("Prediction timed out after 5 minutes")
+            except Exception as e:
+                raise RuntimeError(f"Prediction failed: {str(e)}")
+
+        return prediction_df
+
+
+def model_forward(
+    x: np.ndarray, inference_session: onnxruntime.InferenceSession
+) -> np.ndarray:
+
+    # compute ONNX Runtime output prediction
+    ort_value = None
+    try:
+        ort_value = onnxruntime.OrtValue.ortvalue_from_numpy(x)
+        ort_inputs = {inference_session.get_inputs()[0].name: ort_value}
+        ort_outs = inference_session.run(["predictions"], ort_inputs)[0]
+        return ort_outs[0]
+    finally:
+        if ort_value is not None:
+            del ort_value
+
+
+
+def run_sturgeon_mem_free(model_file, bed_file):
+    # Initialize variables to None for cleanup
+    zipf = None
+    probes_df = None
+    decoding_dict = None
+    temperatures = None
+    so = None
+    inference_session = None
+    x = None
+    scores = None
+    calibrated_scores = None
+    calibrated_df = None
+    avg_scores = None
+    final_scores = None
+    prediction_df = None
+    arr = None
+    best_m = None
+
+    try:
+        zipf = zipfile.ZipFile(model_file, "r")
+
+        logging.debug("Loading probes information")
+        probes_df = pd.read_csv(
+            zipf.open("probes.csv"),
+            header=0,
+            index_col=None,
+        )
+
+        logging.debug("Loading the decoding dict")
+        decoding_dict = json.load(zipf.open("decoding.json"))
+
+        logging.debug("Loading calibration matrix")
+        try:
+            temperatures = np.load(zipf.open("calibration.npy"))
+            temperatures = temperatures.flatten()
+        except KeyError:
+            logging.debug("No calibration matrix in zip file")
+            temperatures = None
+
+        logging.info("Starting inference session")
+        so = onnxruntime.SessionOptions()
+        so.inter_op_num_threads = 1
+
+        inference_session = onnxruntime.InferenceSession(
+            zipf.read("model.onnx"),
+            providers=["CPUExecutionProvider"],
+            sess_options=so,
+        )
+        requires_calibration = False
+        if temperatures is not None:
+            requires_calibration = True
+
+        logging.info("Loading bed file: {}".format(bed_file))
+        x = bed_to_numpy(bed_df=load_bed_file(bed_file), probes_df=probes_df)
+        scores = model_forward(x, inference_session)
+
+        calibrated_scores = np.empty_like(scores)
+        for i in range(scores.shape[0]):
+            if requires_calibration:
+                calibrated_scores[i, :] = np.exp(
+                    softmax(scores[i, :] / temperatures[i])
+                )
+            else:
+                calibrated_scores[i, :] = np.exp(softmax(scores[i, :]))
+
+        calibrated_df = dict()
+        for k, v in decoding_dict.items():
+            calibrated_df[v] = calibrated_scores[:, int(k)]
+        calibrated_df = pd.DataFrame(calibrated_df)
+
+        n = np.sum(x != NOMEASURE_VALUE)
+
+        avg_scores = {
+            "number_probes": [n],
+        }
+
+        final_scores = list()
+        arr = np.array(calibrated_df[calibrated_df.columns])
+        best_m = np.where(arr == np.max(arr))[0]
+        if len(best_m) > 0:
+            best_m = best_m[0]
+        for colname in calibrated_df.columns:
+            score = np.array(calibrated_df[colname])[best_m].item()
+            avg_scores[colname] = [score]
+            final_scores.append(score)
+        final_scores = np.array(final_scores)
+
+        prediction_df = pd.DataFrame(avg_scores, index=[0])
+
+    finally:
+        # Proper ONNX cleanup
+        if inference_session is not None:
+            try:
+                inference_session.set_providers([])
+                del inference_session
+            except:
+                pass
+
+        # Comprehensive cleanup of all variables
+        if so is not None:
+            del so
+        if probes_df is not None:
+            del probes_df
+        if decoding_dict is not None:
+            del decoding_dict
+        if temperatures is not None:
+            del temperatures
+        if x is not None:
+            del x
+        if scores is not None:
+            del scores
+        if calibrated_scores is not None:
+            del calibrated_scores
+        if calibrated_df is not None:
+            del calibrated_df
+        if arr is not None:
+            del arr
+        if best_m is not None:
+            del best_m
+        if final_scores is not None:
+            del final_scores
+        if avg_scores is not None:
+            del avg_scores
+        if zipf is not None:
+            zipf.close()
+
+        # Force ONNX runtime cleanup
+        try:
+            import onnxruntime as ort
+
+            # Clear any cached memory by getting device info
+            ort.get_device()
+        except:
+            pass
+
+        # Force garbage collection
+        gc.collect()
+
+    return prediction_df
+
+if __name__ in {"__main__", "__mp_main__"}:
+    import argparse
+
+    # Check if this is a prediction subprocess call
+    if len(sys.argv) > 1 and sys.argv[1] == "predict":
+        # This is a subprocess call for prediction
+        parser = argparse.ArgumentParser(description="Sturgeon prediction subprocess")
+        parser.add_argument("command", help="Command to run")
+        parser.add_argument("--model", required=True, help="Path to model file")
+        parser.add_argument("--input", required=True, help="Path to input BED file")
+        parser.add_argument("--output", required=True, help="Path to output JSON file")
+
+        args = parser.parse_args()
+
+        if args.command == "predict":
+            try:
+                # Run the prediction
+                prediction_df = run_sturgeon_mem_free(args.model, args.input)
+
+                # Convert DataFrame to JSON and save
+                prediction_data = prediction_df.to_dict("records")
+                with open(args.output, "w") as f:
+                    json.dump(prediction_data, f)
+
+                sys.exit(0)
+            except Exception as e:
+                print(f"Prediction error: {str(e)}", file=sys.stderr)
+                sys.exit(1)
+    else:
+        # This is the main GUI launch
+        print("GUI launched by auto-reload function.")
+        mainrun()
