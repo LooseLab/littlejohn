@@ -43,7 +43,7 @@ from sturgeon.utils import load_bed_file, softmax, merge_predictions
 from sturgeon.constants import METHYL_VALUE, UNMETHYL_VALUE, NOMEASURE_VALUE
 import gc
 
-from robin import models
+from littlejohn import models
 
 logger = logging.getLogger(__name__)
 

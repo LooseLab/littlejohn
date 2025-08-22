@@ -26,7 +26,7 @@ try:
     from littlejohn.submodules.nanoDX.workflow.scripts.NN_model import NN_classifier
     from littlejohn import resources
     #ToDo: Resolve models into littlejohn
-    from robin import models
+    from littlejohn import models
     from littlejohn.analysis.utilities.merge_bedmethyl import load_modkit_data
 except ImportError as e:
     logging.warning(f"Some robin dependencies not available: {e}")
