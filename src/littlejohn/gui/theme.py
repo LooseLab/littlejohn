@@ -313,14 +313,18 @@ def frame(navtitle: str, batphone=False, smalltitle=None):
                     with ui.button(icon="menu"):
                         with ui.menu() as menu:
                             ui.menu_item("Home", lambda: ui.navigate.to("/"))
-                            ui.menu_item("Live Data", lambda: ui.navigate.to("/live"))
+                            ui.menu_item("View Samples", lambda: ui.navigate.to("/live_data"))
                             ui.menu_item(
-                                "Browse Historic Data",
-                                lambda: ui.navigate.to("/browse"),
+                                "Activity Monitor",
+                                lambda: ui.navigate.to("/littlejohn"),
                             )
                             ui.menu_item(
                                 "Workflow",
                                 lambda: ui.navigate.to("/workflow"),
+                            )
+                            ui.menu_item(
+                                "Documentation",
+                                lambda: ui.navigate.to("https://looselab.github.io/ROBIN/"),
                             )
                             ui.separator()
                             ui.switch("Allow Remote Access").classes(

@@ -103,6 +103,15 @@ class MasterCSVManager:
             "run_info_flow_cell": "",
             "bam_tracking_counter": 0,
             "bam_tracking_total_files": 0,
+            # Samples overview (persisted GUI table aggregates)
+            "samples_overview_active_jobs": 0,
+            "samples_overview_total_jobs": 0,
+            "samples_overview_completed_jobs": 0,
+            "samples_overview_failed_jobs": 0,
+            # Comma-separated unique job types seen for the sample
+            "samples_overview_job_types": "",
+            # Unix epoch seconds for last activity used by GUI
+            "samples_overview_last_seen": 0.0,
         }
 
     def _update_pass_counters(
@@ -204,3 +213,77 @@ class MasterCSVManager:
         """Save data to CSV file"""
         df = pd.DataFrame([data])
         df.to_csv(csv_path, index=False)
+
+    # ---------------------------------------------------------------------
+    # Public helpers for GUI/workflow to persist overview stats
+    # ---------------------------------------------------------------------
+    def update_sample_overview(self, sample_id: str, overview: Dict[str, Any]) -> None:
+        """
+        Persist high-level per-sample overview stats used by the GUI table.
+
+        Expected keys in ``overview`` (all optional, defaults applied when missing):
+          - active_jobs: int
+          - total_jobs: int
+          - completed_jobs: int
+          - failed_jobs: int
+          - job_types: Iterable[str] | str (stored as comma-separated unique list)
+          - last_seen: float | int (unix epoch seconds)
+        """
+        try:
+            sample_dir = os.path.join(self.work_dir, sample_id)
+            os.makedirs(sample_dir, exist_ok=True)
+            master_csv_path = os.path.join(sample_dir, "master.csv")
+
+            existing_data = self._load_existing_data(master_csv_path)
+
+            # Update numeric counters
+            existing_data["samples_overview_active_jobs"] = int(
+                overview.get("active_jobs", existing_data.get("samples_overview_active_jobs", 0))
+            )
+            existing_data["samples_overview_total_jobs"] = int(
+                overview.get("total_jobs", existing_data.get("samples_overview_total_jobs", 0))
+            )
+            existing_data["samples_overview_completed_jobs"] = int(
+                overview.get("completed_jobs", existing_data.get("samples_overview_completed_jobs", 0))
+            )
+            existing_data["samples_overview_failed_jobs"] = int(
+                overview.get("failed_jobs", existing_data.get("samples_overview_failed_jobs", 0))
+            )
+
+            # Job types: normalize to comma-separated sorted unique values
+            jt_value = overview.get("job_types")
+            if isinstance(jt_value, str):
+                new_types = {t.strip() for t in jt_value.split(",") if t.strip()}
+            elif jt_value is None:
+                new_types = set()
+            else:
+                try:
+                    new_types = {str(t).strip() for t in jt_value if str(t).strip()}
+                except Exception:
+                    new_types = set()
+
+            if existing_data.get("samples_overview_job_types"):
+                old_types = {
+                    t.strip()
+                    for t in str(existing_data.get("samples_overview_job_types", "")).split(",")
+                    if t.strip()
+                }
+            else:
+                old_types = set()
+            all_types = sorted(old_types.union(new_types))
+            existing_data["samples_overview_job_types"] = ",".join(all_types)
+
+            # Last seen timestamp
+            try:
+                last_seen = float(overview.get("last_seen"))
+            except Exception:
+                last_seen = float(existing_data.get("samples_overview_last_seen", 0.0))
+            existing_data["samples_overview_last_seen"] = last_seen
+
+            # Save
+            self._save_to_csv(existing_data, master_csv_path)
+            logger = logging.getLogger("littlejohn.master_csv")
+            logger.debug(f"Updated samples overview in master.csv for sample {sample_id}")
+        except Exception as e:
+            logger = logging.getLogger("littlejohn.master_csv")
+            logger.warning(f"Failed to update samples overview for {sample_id}: {e}")

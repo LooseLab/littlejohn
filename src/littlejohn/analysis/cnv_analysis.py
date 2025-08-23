@@ -82,7 +82,6 @@ import subprocess
 import sys
 from typing import Dict, Optional, List, Tuple
 from dataclasses import dataclass
-from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import multiprocessing as mp
 
@@ -92,7 +91,7 @@ from scipy.ndimage import uniform_filter1d
 
 import ruptures as rpt
 from littlejohn.logging_config import get_job_logger
-import littlejohn.resources as resources
+import robin.resources as resources
 
 os.environ["CI"] = "1"
 
@@ -176,18 +175,33 @@ def run_cnv_analysis_subprocess(
 
     logger.debug(f"Running CNV analysis in subprocess: {' '.join(cmd)}")
 
-    # Run subprocess with timeout (removed cwd=temp_dir to fix path issues)
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=3600,  # 1 hour timeout
-    )
+    # Run subprocess with stdout/stderr redirected to files to avoid capture overhead
+    stdout_log_path = os.path.join(temp_dir, "cnv_subprocess.stdout.log")
+    stderr_log_path = os.path.join(temp_dir, "cnv_subprocess.stderr.log")
+    with open(stdout_log_path, "w") as _out, open(stderr_log_path, "w") as _err:
+        result = subprocess.run(
+            cmd,
+            stdout=_out,
+            stderr=_err,
+            timeout=3600,  # 1 hour timeout
+        )
 
     if result.returncode != 0:
         logger.error(f"Subprocess failed with return code {result.returncode}")
-        logger.error(f"stdout: {result.stdout}")
-        logger.error(f"stderr: {result.stderr}")
+        try:
+            with open(stdout_log_path, "r") as f:
+                stdout_content = f.read()
+            if stdout_content.strip():
+                logger.error(f"subprocess stdout:\n{stdout_content}")
+        except Exception:
+            pass
+        try:
+            with open(stderr_log_path, "r") as f:
+                stderr_content = f.read()
+            if stderr_content.strip():
+                logger.error(f"subprocess stderr:\n{stderr_content}")
+        except Exception:
+            pass
         return None
 
     # Load results
@@ -521,7 +535,6 @@ def calculate_chromosome_stats_from_cnv(cnv_data: Dict, logger) -> Dict:
         return {}
 
 
-@lru_cache(maxsize=128)
 def load_analysis_counter(sample_id: str, work_dir: str, logger) -> int:
     """Load the analysis counter for a sample from disk with caching"""
     counter_file = os.path.join(work_dir, sample_id, "cnv_analysis_counter.txt")

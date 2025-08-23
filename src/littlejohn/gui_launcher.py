@@ -12,6 +12,7 @@ import logging
 import queue
 from collections import deque
 import csv
+from littlejohn.analysis.master_csv_manager import MasterCSVManager
 from typing import Optional, Dict, Any, List
 from pathlib import Path
 from dataclasses import dataclass
@@ -19,6 +20,8 @@ from enum import Enum
 import os
 
 from littlejohn.gui import theme, images
+
+from littlejohn.gui.components.news_feed import NewsFeed
 
 from littlejohn.reporting.report import create_pdf
 from littlejohn.reporting.sections.disclaimer_text import EXTENDED_DISCLAIMER_TEXT
@@ -70,6 +73,7 @@ class GUILauncher:
         self.gui_ready = threading.Event()
         self.shutdown_event = threading.Event()
 
+        self.news_feed = None
         # GUI update thread
         self.update_thread = (
             None  # not used anymore; updates processed on UI thread via timer
@@ -606,12 +610,17 @@ class GUILauncher:
                                 ).classes(
                                     "bg-green-600 hover:bg-green-700 text-white text-lg font-semibold px-8 py-4 rounded-lg shadow-lg transition-colors"
                                 )
-                                ui.button(
-                                    "📋 View Documentation",
-                                    on_click=lambda: self._view_docs_button_clicked(),
-                                ).classes(
-                                    "bg-purple-600 hover:bg-purple-700 text-white text-lg font-semibold px-8 py-4 rounded-lg shadow-lg transition-colors"
+                                ui.link("📋 View Documentation", "https://looselab.github.io/ROBIN/").classes(
+                                    "bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-8 py-4 rounded-lg shadow-lg transition-colors"
                                 )
+                                
+                            with ui.column().classes("w-full justify-center gap-8 mt-6"):
+                                # Initialize news feed only if it hasn't been initialized yet
+                                if self.news_feed is None:
+                                    self.news_feed = NewsFeed()
+                                    self.news_feed.start_update_timer()
+                                # Create the news element
+                                self.news_feed.create_news_element()
 
                             with ui.row().classes("w-full justify-center gap-8 mt-6"):
                                 with ui.column().classes("text-center"):
@@ -709,29 +718,6 @@ class GUILauncher:
             smalltitle="Samples",
             batphone=False,
         ):
-            with ui.row().classes(
-                "w-full bg-blue-600 text-white p-4 items-center justify-between"
-            ):
-                with ui.row().classes("items-center"):
-                    ui.label("🧬 Sample Tracking Overview").classes(
-                        "text-2xl font-bold"
-                    )
-                    ui.label("All samples processed by LittleJohn").classes(
-                        "text-sm ml-4 opacity-80"
-                    )
-
-                # Navigation links
-                with ui.row().classes("gap-4"):
-                    ui.link("🏠 Welcome", "/").classes(
-                        "text-white hover:text-blue-200 text-sm"
-                    )
-                    ui.link("📊 Workflow Monitor", "/littlejohn").classes(
-                        "text-white hover:text-blue-200 text-sm"
-                    )
-                    ui.label("📋 Sample Overview").classes(
-                        "text-white text-sm font-semibold"
-                    )
-
             # Main content area
             with ui.column().classes("w-full p-4 gap-4"):
                 # Sample statistics
@@ -754,12 +740,6 @@ class GUILauncher:
                     )
                     # Filters row
                     with ui.row().classes("items-center gap-2 mb-2"):
-                        # Export selected reports button
-                        self.export_reports_button = ui.button(
-                            "Export Reports",
-                            on_click=lambda: None,
-                        ).props("color=primary")
-                        self.export_reports_button.disable()
 
                         # Initialize filters model
                         self._samples_filters = getattr(
@@ -784,7 +764,7 @@ class GUILauncher:
                         # Origin filter
                         self.origin_filter = (
                             ui.select(
-                                options=["All", "Live", "Pre-existing"],
+                                options=["All", "Live", "Pre-existing", "Complete"],
                                 value=self._samples_filters.get("origin", "All"),
                                 label="Origin",
                             )
@@ -804,6 +784,11 @@ class GUILauncher:
                         ui.table(
                             columns=[
                                 {
+                                    "name": "actions",
+                                    "label": "Actions",
+                                    "field": "actions",
+                                },
+                                {
                                     "name": "sample_id",
                                     "label": "Sample ID",
                                     "field": "sample_id",
@@ -813,6 +798,24 @@ class GUILauncher:
                                     "name": "origin",
                                     "label": "Origin",
                                     "field": "origin",
+                                    "sortable": True,
+                                },
+                                {
+                                    "name": "run_start",
+                                    "label": "Run Start",
+                                    "field": "run_start",
+                                    "sortable": True,
+                                },
+                                {
+                                    "name": "device",
+                                    "label": "Device",
+                                    "field": "device",
+                                    "sortable": True,
+                                },
+                                {
+                                    "name": "flowcell",
+                                    "label": "Flowcell",
+                                    "field": "flowcell",
                                     "sortable": True,
                                 },
                                 {
@@ -852,14 +855,13 @@ class GUILauncher:
                                     "sortable": True,
                                 },
                                 {
-                                    "name": "actions",
-                                    "label": "Actions",
-                                    "field": "actions",
+                                    "name": "export",
+                                    "label": "Export",
+                                    "field": "export",
                                 },
                             ],
                             rows=[],
                             row_key="sample_id",
-                            selection="multiple",
                             pagination=20,
                         )
                         .props("rows-per-page-options=[10,20,50,0]")
@@ -880,6 +882,21 @@ class GUILauncher:
                     except Exception:
                         pass
 
+                    # Add export checkbox as rightmost column
+                    try:
+                        self.samples_table.add_slot(
+                            "body-cell-export",
+                            """
+<q-td key=\"export\" :props=\"props\">
+  <q-checkbox size=\"sm\"
+              :model-value=\"props.row.export === true\"
+              @update:model-value=\"$parent.$emit('export-toggled', { id: props.row.sample_id, value: $event })\" />
+</q-td>
+""",
+                        )
+                    except Exception:
+                        pass
+
                     # Handle action emitted from table slot
                     try:
                         self.samples_table.on(
@@ -891,33 +908,51 @@ class GUILauncher:
                     except Exception:
                         pass
 
-                    # Track multi-selection for batch export
+                    # Track multi-selection for batch export via custom checkbox column
                     try:
                         self._selected_sample_ids = set()
 
-                        def _on_selection(event):
+                        def _on_export_toggled(event):
                             try:
-                                rows = None
-                                if hasattr(event, "args") and isinstance(event.args, dict):
-                                    rows = event.args.get("rows")
+                                payload = None
+                                if hasattr(event, "args"):
+                                    payload = getattr(event, "args", None)
                                 elif isinstance(event, dict):
-                                    rows = event.get("rows")
-                                ids = set()
-                                if rows and isinstance(rows, list):
-                                    for r in rows:
-                                        if isinstance(r, dict) and r.get("sample_id"):
-                                            ids.add(r.get("sample_id"))
-                                self._selected_sample_ids = ids
-                                if ids:
-                                    self.export_reports_button.enable()
-                                else:
-                                    self.export_reports_button.disable()
+                                    payload = event
+                                if isinstance(payload, dict):
+                                    sid = payload.get("id")
+                                    val = bool(payload.get("value"))
+                                    if sid:
+                                        if val:
+                                            self._selected_sample_ids.add(sid)
+                                        else:
+                                            self._selected_sample_ids.discard(sid)
+                                        # reflect state back into rows
+                                        try:
+                                            for r in (self.samples_table.rows or []):
+                                                if r.get("sample_id") == sid:
+                                                    r["export"] = sid in self._selected_sample_ids
+                                            self.samples_table.update()
+                                        except Exception:
+                                            pass
+                                        if self._selected_sample_ids:
+                                            self.export_reports_button.enable()
+                                        else:
+                                            self.export_reports_button.disable()
                             except Exception:
                                 pass
 
-                        self.samples_table.on("selection", _on_selection)
+                        self.samples_table.on("export-toggled", _on_export_toggled)
                     except Exception:
                         pass
+
+                    # Export selected reports button moved to the right of the table
+                    with ui.row().classes("w-full justify-end mt-2"):
+                        self.export_reports_button = ui.button(
+                            "Export Reports",
+                            on_click=lambda: None,
+                        ).props("color=primary")
+                        self.export_reports_button.disable()
 
                     # Batch export selected reports
                     try:
@@ -1030,13 +1065,24 @@ class GUILauncher:
                 last_seen = float(s.get("last_seen", time.time()))
                 existing = by_id.get(sid)
                 if not existing or last_seen >= existing.get("_last_seen_raw", 0):
+                    origin_value = (
+                        "Pre-existing"
+                        if sid in self._preexisting_sample_ids
+                        else "Live"
+                    )
+                    # Flip Live samples to Complete if inactive for 60 minutes
+                    try:
+                        if origin_value == "Live" and (time.time() - last_seen) >= 3600:
+                            origin_value = "Complete"
+                    except Exception:
+                        pass
                     by_id[sid] = {
                         "sample_id": sid,
-                        "origin": (
-                            "Pre-existing"
-                            if sid in self._preexisting_sample_ids
-                            else "Live"
-                        ),
+                        "origin": origin_value,
+                        # Persisted run info will be patched in below from master.csv
+                        "run_start": "",
+                        "device": "",
+                        "flowcell": "",
                         "active_jobs": s.get("active_jobs", 0),
                         "total_jobs": s.get("total_jobs", 0),
                         "completed_jobs": s.get("completed_jobs", 0),
@@ -1052,6 +1098,43 @@ class GUILauncher:
                         "actions": "View",
                         "_last_seen_raw": last_seen,
                     }
+
+            # Patch from master.csv and persist the new overview values for later reload
+            try:
+                base = Path(self.monitored_directory) if self.monitored_directory else None
+                manager = (
+                    MasterCSVManager(str(base)) if base and base.exists() else None
+                )
+            except Exception:
+                base, manager = None, None
+
+            for sid, row in by_id.items():
+                try:
+                    # Persist overview numbers to master.csv so we can restore later
+                    if manager is not None:
+                        persist_payload = {
+                            "active_jobs": int(row.get("active_jobs", 0)),
+                            "total_jobs": int(row.get("total_jobs", 0)),
+                            "completed_jobs": int(row.get("completed_jobs", 0)),
+                            "failed_jobs": int(row.get("failed_jobs", 0)),
+                            "job_types": row.get("job_types", ""),
+                            "last_seen": float(row.get("_last_seen_raw", time.time())),
+                        }
+                        manager.update_sample_overview(sid, persist_payload)
+
+                    # Read run info from master.csv to display in table
+                    if base is not None:
+                        csv_path = base / sid / "master.csv"
+                        if csv_path.exists():
+                            with csv_path.open("r", newline="") as fh:
+                                reader = csv.DictReader(fh)
+                                first_row = next(reader, None)
+                            if first_row:
+                                row["run_start"] = first_row.get("run_info_run_time", "")
+                                row["device"] = first_row.get("run_info_device", "")
+                                row["flowcell"] = first_row.get("run_info_flow_cell", "")
+                except Exception:
+                    pass
 
             # Merge with preexisting scans if any
             existing_rows_by_id = {
@@ -1117,7 +1200,16 @@ class GUILauncher:
             base_rows = getattr(self, "_last_samples_rows", []) or []
             rows = self._normalize_rows_for_display(base_rows)
 
-            # Origin filter
+            # Origin filter, compute dynamic 'Complete' for display if needed
+            now_ts = time.time()
+            for r in rows:
+                try:
+                    if r.get("origin") == "Live":
+                        last_raw = float(r.get("_last_seen_raw", 0))
+                        if last_raw and (now_ts - last_raw) >= 3600:
+                            r["origin"] = "Complete"
+                except Exception:
+                    pass
             origin = (self._samples_filters or {}).get("origin", "All")
             if origin and origin != "All":
                 rows = [r for r in rows if (r.get("origin") == origin)]
@@ -1142,6 +1234,17 @@ class GUILauncher:
                     )
 
                 rows = [r for r in rows if match_any(r)]
+
+            # annotate export selection state per row for rightmost checkbox column
+            try:
+                selected = getattr(self, "_selected_sample_ids", set()) or set()
+            except Exception:
+                selected = set()
+            for r in rows:
+                try:
+                    r["export"] = r.get("sample_id") in selected
+                except Exception:
+                    r["export"] = False
 
             self.samples_table.rows = rows
             self.samples_table.update()
@@ -1179,6 +1282,20 @@ class GUILauncher:
                 if self.monitored_directory
                 else None
             )
+
+            # Debug visibility: entering sample page and directory availability
+            try:
+                ui.notify(f"Opening sample {sample_id}", type="info")
+            except Exception:
+                pass
+            if not sample_dir or not sample_dir.exists():
+                try:
+                    ui.notify(
+                        f"Sample output directory not found for {sample_id}",
+                        type="warning",
+                    )
+                except Exception:
+                    pass
 
             # Page title and navigation
             with ui.row().classes():  #'w-full bg-blue-600 text-white p-4 items-center justify-between'):
@@ -1270,9 +1387,10 @@ class GUILauncher:
                         except Exception as e:
                             ui.notify(f"Report generation failed: {e}", type="error")
 
-                    ui.button(
-                        "Generate Report", on_click=confirm_report_generation
-                    ).classes("text-sm font-semibold px-3 py-1 rounded")
+                    with ui.row().classes("w-full justify-end"):
+                        ui.button(
+                            "Generate Report", on_click=confirm_report_generation
+                        ).classes("text-sm font-semibold px-3 py-1 rounded")
 
             with ui.column().classes("w-full p-4 gap-4"):
                 # Classification section (refactored component)
@@ -1282,14 +1400,21 @@ class GUILauncher:
                     add_classification_section(sample_dir)
                 except Exception as e:
                     logging.exception(f"[GUI] Classification section failed: {e}")
+                    try:
+                        ui.notify(f"Classification section failed: {e}", type="warning")
+                    except Exception:
+                        pass
 
                 # Coverage section (refactored component)
                 try:
                     from .gui.components.coverage import add_coverage_section  # type: ignore
 
                     add_coverage_section(self, sample_dir)
-                except Exception:
-                    pass
+                except Exception as e:
+                    try:
+                        ui.notify(f"Coverage section failed: {e}", type="warning")
+                    except Exception:
+                        pass
 
                 # MGMT section (refactored component)
                 try:
@@ -1298,6 +1423,10 @@ class GUILauncher:
                     add_mgmt_section(self, sample_dir)
                 except Exception as e:
                     logging.exception(f"[GUI] MGMT section failed: {e}")
+                    try:
+                        ui.notify(f"MGMT section failed: {e}", type="warning")
+                    except Exception:
+                        pass
 
                 # CNV section (refactored component)
                 try:
@@ -1307,6 +1436,10 @@ class GUILauncher:
                     add_cnv_section(self, sample_dir)
                 except Exception as e:
                     logging.exception(f"[GUI] CNV section failed: {e}")
+                    try:
+                        ui.notify(f"CNV section failed: {e}", type="warning")
+                    except Exception:
+                        pass
 
                 # Fusion section (target and genome-wide; excludes full SV UI)
                 try:
@@ -1315,6 +1448,10 @@ class GUILauncher:
                     add_fusion_section(self, sample_dir)
                 except Exception as e:
                     logging.exception(f"[GUI] Fusion section failed: {e}")
+                    try:
+                        ui.notify(f"Fusion section failed: {e}", type="warning")
+                    except Exception:
+                        pass
 
                 # Files in output directory
                 with ui.card().classes("w-full"):
@@ -1389,6 +1526,8 @@ class GUILauncher:
                         pass
 
             # Periodic refresher for files table and master.csv summary
+            _notify_state = {"files_error": False, "csv_error": False}
+
             def _refresh_sample_detail() -> None:
                 # Refresh files list
                 try:
@@ -1412,8 +1551,16 @@ class GUILauncher:
                                     continue
                     files_table.rows = rows
                     files_table.update()
-                except Exception:
-                    pass
+                except Exception as e:
+                    if not _notify_state["files_error"]:
+                        try:
+                            ui.notify(
+                                f"Failed to list output files for {sample_id}: {e}",
+                                type="warning",
+                            )
+                        except Exception:
+                            pass
+                        _notify_state["files_error"] = True
 
                 # Refresh master.csv summary
                 try:
@@ -1455,9 +1602,17 @@ class GUILauncher:
                                 {"key": "Status", "value": "master.csv not found"}
                             ]
                             summary_table.update()
-                except Exception:
-                    # Avoid breaking the UI; skip on CSV parse errors
-                    pass
+                except Exception as e:
+                    # Avoid breaking the UI; show one-time notification for visibility
+                    if not _notify_state["csv_error"]:
+                        try:
+                            ui.notify(
+                                f"Failed to read master.csv for {sample_id}: {e}",
+                                type="warning",
+                            )
+                        except Exception:
+                            pass
+                        _notify_state["csv_error"] = True
 
             ui.timer(2.0, _refresh_sample_detail, active=True)
 
@@ -1470,7 +1625,7 @@ class GUILauncher:
         ):
             # Page title and navigation
             with ui.row().classes(
-                "w-full bg-blue-600 text-white p-4 items-center justify-between"
+                "w-full p-4 items-center justify-between"
             ):
                 with ui.row().classes("items-center"):
                     ui.label("📊 LittleJohn Workflow Monitor").classes(
@@ -1480,17 +1635,6 @@ class GUILauncher:
                         "text-sm ml-4 opacity-80"
                     )
 
-                # Navigation links
-                with ui.row().classes("gap-4"):
-                    ui.link("🏠 Welcome", "/").classes(
-                        "text-white hover:text-blue-200 text-sm"
-                    )
-                    ui.link("📋 Sample Overview", "/live_data").classes(
-                        "text-white hover:text-blue-200 text-sm"
-                    )
-                    ui.label("📊 Workflow Monitor").classes(
-                        "text-white text-sm font-semibold"
-                    )
 
             # Main content area
             with ui.column().classes("w-full p-4 gap-4"):
@@ -1833,19 +1977,59 @@ class GUILauncher:
                         self._preexisting_sample_ids.add(sid)
                     # Determine last_seen from file mtime
                     last_seen = master.stat().st_mtime
+                    # Try to load persisted overview and run info
+                    run_start = ""
+                    device = ""
+                    flowcell = ""
+                    ov_active = 0
+                    ov_total = 0
+                    ov_completed = 0
+                    ov_failed = 0
+                    ov_job_types = ""
+                    try:
+                        with master.open("r", newline="") as fh:
+                            reader = csv.DictReader(fh)
+                            first_row = next(reader, None)
+                        if first_row:
+                            run_start = first_row.get("run_info_run_time", "")
+                            device = first_row.get("run_info_device", "")
+                            flowcell = first_row.get("run_info_flow_cell", "")
+                            # Use saved last_seen if present
+                            try:
+                                saved_last = float(first_row.get("samples_overview_last_seen", 0.0))
+                                if saved_last:
+                                    last_seen = saved_last
+                            except Exception:
+                                pass
+                            ov_active = int(first_row.get("samples_overview_active_jobs", 0) or 0)
+                            ov_total = int(first_row.get("samples_overview_total_jobs", 0) or 0)
+                            ov_completed = int(first_row.get("samples_overview_completed_jobs", 0) or 0)
+                            ov_failed = int(first_row.get("samples_overview_failed_jobs", 0) or 0)
+                            ov_job_types = str(first_row.get("samples_overview_job_types", "") or "")
+                    except Exception:
+                        pass
+                    origin_value = (
+                        "Pre-existing"
+                        if sid in self._preexisting_sample_ids
+                        else "Live"
+                    )
+                    try:
+                        if origin_value == "Live" and (time.time() - last_seen) >= 3600:
+                            origin_value = "Complete"
+                    except Exception:
+                        pass
                     rows.append(
                         {
                             "sample_id": sid,
-                            "origin": (
-                                "Pre-existing"
-                                if sid in self._preexisting_sample_ids
-                                else "Live"
-                            ),
-                            "active_jobs": 0,
-                            "total_jobs": 0,
-                            "completed_jobs": 0,
-                            "failed_jobs": 0,
-                            "job_types": "",
+                            "origin": origin_value,
+                            "run_start": run_start,
+                            "device": device,
+                            "flowcell": flowcell,
+                            "active_jobs": ov_active,
+                            "total_jobs": ov_total,
+                            "completed_jobs": ov_completed,
+                            "failed_jobs": ov_failed,
+                            "job_types": ov_job_types,
                             "last_seen": time.strftime(
                                 "%H:%M:%S", time.localtime(last_seen)
                             ),
@@ -1892,6 +2076,33 @@ class GUILauncher:
                 if master.exists():
                     try:
                         last_seen = master.stat().st_mtime
+                        # Load persisted overview and run info
+                        run_start = ""
+                        device = ""
+                        flowcell = ""
+                        ov_active = 0
+                        ov_total = 0
+                        ov_completed = 0
+                        ov_failed = 0
+                        ov_job_types = ""
+                        with master.open("r", newline="") as fh:
+                            reader = csv.DictReader(fh)
+                            first_row = next(reader, None)
+                        if first_row:
+                            run_start = first_row.get("run_info_run_time", "")
+                            device = first_row.get("run_info_device", "")
+                            flowcell = first_row.get("run_info_flow_cell", "")
+                            try:
+                                saved_last = float(first_row.get("samples_overview_last_seen", 0.0))
+                                if saved_last:
+                                    last_seen = saved_last
+                            except Exception:
+                                pass
+                            ov_active = int(first_row.get("samples_overview_active_jobs", 0) or 0)
+                            ov_total = int(first_row.get("samples_overview_total_jobs", 0) or 0)
+                            ov_completed = int(first_row.get("samples_overview_completed_jobs", 0) or 0)
+                            ov_failed = int(first_row.get("samples_overview_failed_jobs", 0) or 0)
+                            ov_job_types = str(first_row.get("samples_overview_job_types", "") or "")
                     except Exception:
                         last_seen = None
                     if last_seen is None:
@@ -1904,11 +2115,14 @@ class GUILauncher:
                             {
                                 "sample_id": sid,
                                 "origin": "Live",
-                                "active_jobs": 0,
-                                "total_jobs": 0,
-                                "completed_jobs": 0,
-                                "failed_jobs": 0,
-                                "job_types": "",
+                                "run_start": run_start,
+                                "device": device,
+                                "flowcell": flowcell,
+                                "active_jobs": ov_active,
+                                "total_jobs": ov_total,
+                                "completed_jobs": ov_completed,
+                                "failed_jobs": ov_failed,
+                                "job_types": ov_job_types,
                                 "last_seen": time.strftime(
                                     "%H:%M:%S", time.localtime(last_seen)
                                 ),
@@ -1920,11 +2134,28 @@ class GUILauncher:
                         prev_seen = existing_row.get("_last_seen_raw") or 0
                         if last_seen > prev_seen:
                             updated = dict(existing_row)
+                            # Preserve or refresh run info/overview from persisted values
+                            updated["run_start"] = run_start or existing_row.get("run_start", "")
+                            updated["device"] = device or existing_row.get("device", "")
+                            updated["flowcell"] = flowcell or existing_row.get("flowcell", "")
+                            if ov_job_types:
+                                updated["job_types"] = ov_job_types
+                            updated["active_jobs"] = ov_active
+                            updated["total_jobs"] = ov_total
+                            updated["completed_jobs"] = ov_completed
+                            updated["failed_jobs"] = ov_failed
                             updated["last_seen"] = time.strftime(
                                 "%H:%M:%S", time.localtime(last_seen)
                             )
                             updated["_last_seen_raw"] = last_seen
-                            updated["origin"] = "Live"
+                            # Determine origin based on inactivity threshold
+                            try:
+                                if (time.time() - last_seen) >= 3600:
+                                    updated["origin"] = "Complete"
+                                else:
+                                    updated["origin"] = "Live"
+                            except Exception:
+                                updated["origin"] = "Live"
                             updated_rows.append(updated)
 
             if new_rows or updated_rows:
@@ -1950,10 +2181,6 @@ class GUILauncher:
     def _launch_workflow_button_clicked(self):
         """Handle launch workflow button click."""
         ui.notify("Launch workflow functionality not implemented yet", type="info")
-
-    def _view_docs_button_clicked(self):
-        """Handle view documentation button click."""
-        ui.notify("Documentation not available yet", type="info")
 
     def stop_gui(self):
         """Stop the GUI thread."""

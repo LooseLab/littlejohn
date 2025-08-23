@@ -39,15 +39,16 @@ def run_cnv_analysis(
     Returns:
         Dictionary with analysis results
     """
-    print("CNV Subprocess started")
-    print(f"BAM path: {bam_path}")
-    print(f"Copy numbers path: {copy_numbers_path}")
-    print(f"Update CNV dict path: {update_cnv_dict_path}")
-    print(f"Sample ID: {sample_id}")
-    print(f"Ref CNV dict path: {ref_cnv_dict_path}")
-    print(f"Output dir: {output_dir}")
-    print(f"Threads: {threads}")
-    print(f"Mapq filter: {mapq_filter}")
+    if os.environ.get("LJ_CNV_SUBPROCESS_DEBUG") == "1":
+        print("CNV Subprocess started")
+        print(f"BAM path: {bam_path}")
+        print(f"Copy numbers path: {copy_numbers_path}")
+        print(f"Update CNV dict path: {update_cnv_dict_path}")
+        print(f"Sample ID: {sample_id}")
+        print(f"Ref CNV dict path: {ref_cnv_dict_path}")
+        print(f"Output dir: {output_dir}")
+        print(f"Threads: {threads}")
+        print(f"Mapq filter: {mapq_filter}")
 
     try:
         # Ensure output directory exists
@@ -174,14 +175,15 @@ def main():
 
     args = parser.parse_args()
 
-    # Print debug information
-    print(f"Subprocess working directory: {os.getcwd()}", file=sys.stderr)
-    print(f"BAM path: {args.bam_path}", file=sys.stderr)
-    print(f"Copy numbers path: {args.copy_numbers_path}", file=sys.stderr)
-    print(f"Update CNV dict path: {args.update_cnv_dict_path}", file=sys.stderr)
-    print(f"Sample ID: {args.sample_id}", file=sys.stderr)
-    print(f"Ref CNV dict path: {args.ref_cnv_dict_path}", file=sys.stderr)
-    print(f"Output dir: {args.output_dir}", file=sys.stderr)
+    # Print debug information only when enabled
+    if os.environ.get("LJ_CNV_SUBPROCESS_DEBUG") == "1":
+        print(f"Subprocess working directory: {os.getcwd()}", file=sys.stderr)
+        print(f"BAM path: {args.bam_path}", file=sys.stderr)
+        print(f"Copy numbers path: {args.copy_numbers_path}", file=sys.stderr)
+        print(f"Update CNV dict path: {args.update_cnv_dict_path}", file=sys.stderr)
+        print(f"Sample ID: {args.sample_id}", file=sys.stderr)
+        print(f"Ref CNV dict path: {args.ref_cnv_dict_path}", file=sys.stderr)
+        print(f"Output dir: {args.output_dir}", file=sys.stderr)
 
     # Check if required files exist
     if not os.path.exists(args.bam_path):
