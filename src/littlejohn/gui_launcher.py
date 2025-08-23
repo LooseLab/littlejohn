@@ -12,6 +12,7 @@ import logging
 import queue
 from collections import deque
 import csv
+from datetime import datetime
 from littlejohn.analysis.master_csv_manager import MasterCSVManager
 from typing import Optional, Dict, Any, List
 from pathlib import Path
@@ -753,9 +754,7 @@ class GUILauncher:
                             .on(
                                 "update:model-value",
                                 lambda e: self._set_samples_query(
-                                    (e.args or "")
-                                    if isinstance(e.args, str)
-                                    else str(e.args or "")
+                                    str(getattr(e, "value", "") or "")
                                 ),
                             )
                             .classes("ml-auto")
@@ -772,9 +771,7 @@ class GUILauncher:
                             .on(
                                 "update:model-value",
                                 lambda e: self._set_samples_origin_filter(
-                                    (e.args or "All")
-                                    if isinstance(e.args, str)
-                                    else str(e.args or "All")
+                                    e.args['label'] if e.args and isinstance(e.args, dict) and 'label' in e.args else "All"
                                 ),
                             )
                         )
@@ -956,7 +953,7 @@ class GUILauncher:
 
                     # Batch export selected reports
                     try:
-                        async def _export_selected_reports(report_type: str = "detailed"):
+                        async def _export_selected_reports(state: Dict[str, Any]):
                             try:
                                 selected = list(getattr(self, "_selected_sample_ids", set()) or [])
                                 if not selected:
@@ -979,13 +976,34 @@ class GUILauncher:
                                         filename = f"{sid}_run_report.pdf"
                                         pdf_path = os.path.join(str(sample_dir), filename)
                                         os.makedirs(str(sample_dir), exist_ok=True)
+                                        export_csv_dir = None
+                                        if bool(state.get("export_csv", False)):
+                                            export_csv_dir = os.path.join(str(sample_dir), "report_csv")
                                         if ng_run is not None:
                                             pdf_file = await ng_run.io_bound(
-                                                create_pdf, pdf_path, str(sample_dir), report_type
+                                                create_pdf,
+                                                pdf_path,
+                                                str(sample_dir),
+                                                state.get("type", "detailed"),
+                                                export_csv_dir=export_csv_dir,
+                                                export_xlsx=False,
+                                                export_zip=bool(state.get("export_csv", False)),
                                             )
                                         else:
-                                            pdf_file = create_pdf(pdf_path, str(sample_dir), report_type)
+                                            pdf_file = create_pdf(
+                                                pdf_path,
+                                                str(sample_dir),
+                                                state.get("type", "detailed"),
+                                                export_csv_dir=export_csv_dir,
+                                                export_xlsx=False,
+                                                export_zip=bool(state.get("export_csv", False)),
+                                            )
                                         ui.download(pdf_file)
+                                        # Also offer CSV ZIP if requested
+                                        if bool(state.get("export_csv", False)) and export_csv_dir:
+                                            zip_path = os.path.join(export_csv_dir, f"{sid}_report_data.zip")
+                                            if os.path.exists(zip_path):
+                                                ui.download(zip_path)
                                     except Exception as e:
                                         ui.notify(f"Export failed for {sid}: {e}", type="error")
                                 ui.notify("Export complete")
@@ -1002,7 +1020,7 @@ class GUILauncher:
                                 "summary": "Summary Only",
                                 "detailed": "Detailed",
                             }
-                            state = {"type": "detailed"}
+                            state: Dict[str, Any] = {"type": "detailed", "export_csv": False}
 
                             with ui.dialog() as dialog, ui.card().classes("w-96 p-4"):
                                 ui.label("Generate Report").classes("text-h6 font-bold mb-4")
@@ -1014,6 +1032,15 @@ class GUILauncher:
                                         report_types,
                                         value="detailed",
                                         on_change=lambda e: state.update({"type": e.value}),
+                                    )
+
+                                # Data export options
+                                with ui.column().classes("mb-4"):
+                                    ui.label("Include Data").classes("font-bold mb-2")
+                                    ui.checkbox(
+                                        "CSV data (ZIP)",
+                                        value=False,
+                                        on_change=lambda e: state.update({"export_csv": bool(e.value)}),
                                     )
 
                                 # Disclaimer section (match single-report dialog)
@@ -1029,15 +1056,15 @@ class GUILauncher:
                                     ui.button("Cancel", on_click=lambda: dialog.submit(("No", None))).props("flat")
                                     ui.button(
                                         "Export",
-                                        on_click=lambda: dialog.submit(("Yes", state["type"])),
+                                        on_click=lambda: dialog.submit(("Yes", state)),
                                     ).props("color=primary")
 
                             dialog_result = await dialog
                             if dialog_result is None:
                                 return
-                            result, report_type = dialog_result
-                            if result == "Yes" and report_type in ("summary", "detailed"):
-                                await _export_selected_reports(report_type)
+                            result, state_val = dialog_result
+                            if result == "Yes" and isinstance(state_val, dict):
+                                await _export_selected_reports(state_val)
 
                         # Wire the button now that handlers exist
                         self.export_reports_button.on_click(_confirm_bulk_export)
@@ -1130,7 +1157,9 @@ class GUILauncher:
                                 reader = csv.DictReader(fh)
                                 first_row = next(reader, None)
                             if first_row:
-                                row["run_start"] = first_row.get("run_info_run_time", "")
+                                row["run_start"] = self._format_timestamp_for_display(
+                                    first_row.get("run_info_run_time", "")
+                                )
                                 row["device"] = first_row.get("run_info_device", "")
                                 row["flowcell"] = first_row.get("run_info_flow_cell", "")
                 except Exception:
@@ -1166,6 +1195,30 @@ class GUILauncher:
 
 
     # -------- Samples table helpers: search, filter, sort --------
+    def _format_timestamp_for_display(self, value: Any) -> str:
+        """Convert timestamps (ISO 8601 or epoch) to 'YYYY-MM-DD HH:MM'."""
+        try:
+            if value is None:
+                return ""
+            if isinstance(value, (int, float)):
+                return datetime.fromtimestamp(float(value)).strftime("%Y-%m-%d %H:%M")
+            s = str(value).strip()
+            if not s:
+                return ""
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            try:
+                return datetime.fromisoformat(s).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                try:
+                    return datetime.fromtimestamp(float(s)).strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    return s
+        except Exception:
+            try:
+                return str(value)
+            except Exception:
+                return ""
     def _normalize_rows_for_display(
         self, rows: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
@@ -1210,6 +1263,7 @@ class GUILauncher:
                             r["origin"] = "Complete"
                 except Exception:
                     pass
+            
             origin = (self._samples_filters or {}).get("origin", "All")
             if origin and origin != "All":
                 rows = [r for r in rows if (r.get("origin") == origin)]
@@ -1298,13 +1352,13 @@ class GUILauncher:
                     pass
 
             # Page title and navigation
-            with ui.row().classes():  #'w-full bg-blue-600 text-white p-4 items-center justify-between'):
+            with ui.row().classes("w-full"):  #'w-full bg-blue-600 text-white p-4 items-center justify-between'):
                 with ui.row().classes("items-center"):
                     ui.label(f"{sample_id}").classes("text-2xl font-bold")
                     ui.label("Detailed sample information.").classes(
                         "text-sm ml-4 opacity-80"
                     )
-                with ui.row().classes("gap-4"):
+                with ui.row().classes("w-full"):
                     # ui.link('📋 Sample Overview', '/live_data').classes('text-white hover:text-blue-200 text-sm')
                     # ui.link('📊 Workflow Monitor', '/littlejohn').classes('text-white hover:text-blue-200 text-sm')
                     # Report generation (confirmation dialog + download)
@@ -1314,7 +1368,7 @@ class GUILauncher:
                             "summary": "Summary Only",
                             "detailed": "Detailed",
                         }
-                        state = {"type": "detailed"}
+                        state: Dict[str, Any] = {"type": "detailed", "export_csv": False}
 
                         with ui.dialog() as dialog, ui.card().classes("w-96 p-4"):
                             ui.label("Generate Report").classes(
@@ -1340,6 +1394,15 @@ class GUILauncher:
                                     "text-sm text-gray-600 mb-4"
                                 )
 
+                            # Data export options
+                            with ui.column().classes("mb-4"):
+                                ui.label("Include Data").classes("font-bold mb-2")
+                                ui.checkbox(
+                                    "CSV data (ZIP)",
+                                    value=False,
+                                    on_change=lambda e: state.update({"export_csv": bool(e.value)}),
+                                )
+
                             ui.label(
                                 "Are you sure you want to generate a report?"
                             ).classes("mb-4")
@@ -1351,19 +1414,17 @@ class GUILauncher:
                                 ).props("flat")
                                 ui.button(
                                     "Yes",
-                                    on_click=lambda: dialog.submit(
-                                        ("Yes", state["type"])
-                                    ),
+                                    on_click=lambda: dialog.submit(("Yes", state)),
                                 ).props("color=primary")
 
                         dialog_result = await dialog
                         if dialog_result is None:
                             return
-                        result, report_type = dialog_result
-                        if result == "Yes":
-                            await download_report(report_type)
+                        result, state_val = dialog_result
+                        if result == "Yes" and isinstance(state_val, dict):
+                            await download_report(state_val)
 
-                    async def download_report(report_type: str = "detailed"):
+                    async def download_report(state: Dict[str, Any]):
                         """Generate and download the report for this sample."""
                         try:
                             # Import here to avoid global dependency if GUI isn't used
@@ -1379,18 +1440,31 @@ class GUILauncher:
                             filename = f"{sample_id}_run_report.pdf"
                             pdf_path = os.path.join(str(sample_dir), filename)
                             os.makedirs(str(sample_dir), exist_ok=True)
+                            export_csv_dir = None
+                            if bool(state.get("export_csv", False)):
+                                export_csv_dir = os.path.join(str(sample_dir), "report_csv")
                             pdf_file = await ng_run.io_bound(
-                                create_pdf, pdf_path, str(sample_dir), report_type
+                                create_pdf,
+                                pdf_path,
+                                str(sample_dir),
+                                state.get("type", "detailed"),
+                                export_csv_dir=export_csv_dir,
+                                export_xlsx=False,
+                                export_zip=bool(state.get("export_csv", False)),
                             )
                             ui.download(pdf_file)
+                            # Also offer CSV ZIP if requested
+                            if bool(state.get("export_csv", False)) and export_csv_dir:
+                                zip_path = os.path.join(export_csv_dir, f"{sample_id}_report_data.zip")
+                                if os.path.exists(zip_path):
+                                    ui.download(zip_path)
                             ui.notify("Report downloaded")
                         except Exception as e:
                             ui.notify(f"Report generation failed: {e}", type="error")
 
-                    with ui.row().classes("w-full justify-end"):
-                        ui.button(
-                            "Generate Report", on_click=confirm_report_generation
-                        ).classes("text-sm font-semibold px-3 py-1 rounded")
+                    ui.button(
+                        "Generate Report", on_click=confirm_report_generation
+                    ).classes("object-right ml-auto text-sm font-semibold px-3 py-1 rounded")
 
             with ui.column().classes("w-full p-4 gap-4"):
                 # Classification section (refactored component)
@@ -2022,7 +2096,7 @@ class GUILauncher:
                         {
                             "sample_id": sid,
                             "origin": origin_value,
-                            "run_start": run_start,
+                            "run_start": self._format_timestamp_for_display(run_start),
                             "device": device,
                             "flowcell": flowcell,
                             "active_jobs": ov_active,
@@ -2135,7 +2209,10 @@ class GUILauncher:
                         if last_seen > prev_seen:
                             updated = dict(existing_row)
                             # Preserve or refresh run info/overview from persisted values
-                            updated["run_start"] = run_start or existing_row.get("run_start", "")
+                            formatted_run_start = (
+                                self._format_timestamp_for_display(run_start) if run_start else ""
+                            )
+                            updated["run_start"] = formatted_run_start or existing_row.get("run_start", "")
                             updated["device"] = device or existing_row.get("device", "")
                             updated["flowcell"] = flowcell or existing_row.get("flowcell", "")
                             if ov_job_types:

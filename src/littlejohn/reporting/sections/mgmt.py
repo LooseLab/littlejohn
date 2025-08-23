@@ -381,3 +381,21 @@ class MGMTSection(ReportSection):
                     "Error processing MGMT analysis data", self.styles.styles["Normal"]
                 )
             )
+
+        # Build export DataFrames
+        try:
+            summary_row = {
+                "Status": methylation_status,
+                "AveragePercent": float(methylation_average) if methylation_average is not None else None,
+                "PredictionScorePercent": float(prediction_score) if prediction_score is not None else None,
+                "ResultsFile": f"{last_seen}_mgmt.csv" if last_seen else None,
+                "PlotFile": f"{last_seen}_mgmt.png" if last_seen else None,
+                "CpGSitesFile": os.path.basename(specific_sites_file) if specific_sites_file else None,
+            }
+            self.export_frames["mgmt_summary"] = pd.DataFrame([summary_row])
+
+            if specific_sites_file and os.path.exists(specific_sites_file):
+                specific_sites = pd.read_csv(specific_sites_file)
+                self.export_frames["mgmt_cpg_sites"] = specific_sites
+        except Exception as ex:
+            logger.error("Error building MGMT export DataFrames: %s", str(ex), exc_info=True)

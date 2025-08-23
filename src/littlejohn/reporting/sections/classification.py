@@ -300,6 +300,26 @@ class ClassificationSection(ReportSection):
             summary_table = self.create_table(summary_data, repeat_rows=1)
             self.summary_elements.append(summary_table)
             self.elements.append(Spacer(1, 12))
+            # Export summary as DataFrame
+            try:
+                # Strip HTML tags from Status for CSV, keep plain text
+                def _strip_html(s):
+                    try:
+                        return str(s).replace("<font color=\"#059669\">", "").replace("<font color=\"#D97706\">", "").replace("<font color=\"#DC2626\">", "").replace("</font>", "")
+                    except Exception:
+                        return s
+                rows = []
+                for r in summary_data[1:]:
+                    rows.append({
+                        "Classifier": r[0],
+                        "PredictedClass": r[1],
+                        "ConfidencePercent": r[2],
+                        "Status": _strip_html(r[3]),
+                    })
+                from pandas import DataFrame as _DF
+                self.export_frames["classification_summary"] = _DF(rows)
+            except Exception:
+                pass
 
             # Add detailed results for each classifier
             self.elements.append(PageBreak())
@@ -358,6 +378,22 @@ class ClassificationSection(ReportSection):
                         )
                         self.elements.append(detailed_table)
                         self.elements.append(Spacer(1, 12))
+
+                        # Export top predictions for this classifier
+                        try:
+                            rows = []
+                            for class_name, score in top_predictions.items():
+                                confidence = score / 100.0 if name == "Random Forest" else score
+                                rows.append({
+                                    "Classifier": name,
+                                    "PredictedClass": class_name,
+                                    "ConfidencePercent": f"{confidence:.1%}",
+                                })
+                            key = f"classification_{name.lower().replace(' ', '_')}_top10"
+                            from pandas import DataFrame as _DF
+                            self.export_frames[key] = _DF(rows)
+                        except Exception:
+                            pass
 
                 except Exception as e:
                     logger.error(

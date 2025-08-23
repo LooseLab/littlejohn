@@ -324,6 +324,35 @@ class VariantsSection(ReportSection):
                     self.styles.styles["Normal"],
                 )
             )
+            # Build empty export frames for consistency
+            try:
+                import pandas as pd
+                self.export_frames["variants_detailed"] = pd.DataFrame(
+                    columns=[
+                        "Type",
+                        "Chr",
+                        "Position",
+                        "Gene",
+                        "Change",
+                        "Filter",
+                        "HGVS.c",
+                        "HGVS.p",
+                    ]
+                )
+                self.export_frames["variants_summary"] = pd.DataFrame(
+                    [
+                        {
+                            "PathogenicSNPs": 0,
+                            "PathogenicIndels": 0,
+                            "AffectedGenes": 0,
+                            "GenesList": "",
+                        }
+                    ]
+                )
+            except Exception as ex:
+                logger.error(
+                    "Error creating empty variant export frames: %s", str(ex), exc_info=True
+                )
             return
 
         # Add detailed section
@@ -469,5 +498,84 @@ class VariantsSection(ReportSection):
                 "Disease associations are derived from ClinVar's CLNDN field where available."
             )
             self.elements.append(Paragraph(note_text, note_style))
+
+        # Build export DataFrames for CSVs
+        try:
+            import pandas as pd
+
+            rows = []
+            for variant_list in [
+                self.variant_result.snp_data,
+                self.variant_result.indel_data,
+            ]:
+                rows.extend(variant_list)
+
+            if rows:
+                df = pd.DataFrame(rows)
+                if not df.empty:
+                    df["Change"] = df["reference"].astype(str) + ">" + df["alternate"].astype(str)
+                    detailed = df[[
+                        "type",
+                        "chromosome",
+                        "position",
+                        "gene",
+                        "Change",
+                        "filter",
+                        "hgvs_c",
+                        "hgvs_p",
+                    ]].rename(
+                        columns={
+                            "type": "Type",
+                            "chromosome": "Chr",
+                            "position": "Position",
+                            "gene": "Gene",
+                            "filter": "Filter",
+                            "hgvs_c": "HGVS.c",
+                            "hgvs_p": "HGVS.p",
+                        }
+                    )
+                else:
+                    detailed = pd.DataFrame(
+                        columns=[
+                            "Type",
+                            "Chr",
+                            "Position",
+                            "Gene",
+                            "Change",
+                            "Filter",
+                            "HGVS.c",
+                            "HGVS.p",
+                        ]
+                    )
+            else:
+                detailed = pd.DataFrame(
+                    columns=[
+                        "Type",
+                        "Chr",
+                        "Position",
+                        "Gene",
+                        "Change",
+                        "Filter",
+                        "HGVS.c",
+                        "HGVS.p",
+                    ]
+                )
+
+            self.export_frames["variants_detailed"] = detailed
+
+            self.export_frames["variants_summary"] = pd.DataFrame(
+                [
+                    {
+                        "PathogenicSNPs": len(self.variant_result.snp_data),
+                        "PathogenicIndels": len(self.variant_result.indel_data),
+                        "AffectedGenes": len(self.variant_result.affected_genes),
+                        "GenesList": ", ".join(sorted(self.variant_result.affected_genes)),
+                    }
+                ]
+            )
+        except Exception as ex:
+            logger.error(
+                "Error building variant export DataFrames: %s", str(ex), exc_info=True
+            )
 
         self.elements.append(PageBreak())

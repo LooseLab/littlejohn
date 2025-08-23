@@ -1363,6 +1363,94 @@ class CNVSection(ReportSection):
 
                     self.elements.append(detailed_table)
 
+                    # Build export DataFrames for CSVs
+                    try:
+                        # Whole chromosome events
+                        if summary_whole_chr_events or whole_chr_events:
+                            # whole_chr_events is already a list of lists
+                            df_whole = pd.DataFrame(
+                                whole_chr_events, columns=["Chr", "State", "Mean CNV"]
+                            )
+                            if not df_whole.empty:
+                                df_whole["Mean CNV"] = pd.to_numeric(
+                                    df_whole["Mean CNV"], errors="coerce"
+                                )
+                            self.export_frames[
+                                "cnv_whole_chromosome_events"
+                            ] = df_whole
+
+                        # Chromosome arm events
+                        if arm_events:
+                            df_arm = pd.DataFrame(
+                                arm_events,
+                                columns=[
+                                    "Chr",
+                                    "Arm",
+                                    "State",
+                                    "Mean CNV",
+                                    "Proportion Affected",
+                                ],
+                            )
+                            if not df_arm.empty:
+                                df_arm["Mean CNV"] = pd.to_numeric(
+                                    df_arm["Mean CNV"], errors="coerce"
+                                )
+                                # Convert percentage strings like "70%" to 0.7
+                                df_arm["Proportion Affected"] = (
+                                    df_arm["Proportion Affected"]
+                                    .astype(str)
+                                    .str.rstrip("%")
+                                )
+                                df_arm["Proportion Affected"] = pd.to_numeric(
+                                    df_arm["Proportion Affected"], errors="coerce"
+                                ) / 100.0
+                            self.export_frames["cnv_arm_events"] = df_arm
+
+                        # Gene-containing events
+                        if gene_containing_events:
+                            df_gene = pd.DataFrame(
+                                gene_containing_events,
+                                columns=["Chr", "Region", "State", "Mean CNV", "Genes"],
+                            )
+                            if not df_gene.empty:
+                                df_gene["Mean CNV"] = pd.to_numeric(
+                                    df_gene["Mean CNV"], errors="coerce"
+                                )
+                            self.export_frames[
+                                "cnv_gene_containing_events"
+                            ] = df_gene
+
+                        # Detailed CNV events
+                        if all_cnv_events:
+                            df_detail = pd.DataFrame(
+                                all_cnv_events,
+                                columns=[
+                                    "Chr",
+                                    "Region",
+                                    "Start (Mb)",
+                                    "End (Mb)",
+                                    "Length (Mb)",
+                                    "Mean CNV",
+                                    "State",
+                                    "Genes",
+                                ],
+                            )
+                            if not df_detail.empty:
+                                for col in [
+                                    "Start (Mb)",
+                                    "End (Mb)",
+                                    "Length (Mb)",
+                                    "Mean CNV",
+                                ]:
+                                    df_detail[col] = pd.to_numeric(
+                                        df_detail[col], errors="coerce"
+                                    )
+                            self.export_frames["cnv_detailed_events"] = df_detail
+                    except Exception as ex:
+                        logger.error(
+                            "Error building CNV export DataFrames: %s", str(ex), exc_info=True
+                        )
+
             except Exception as e:
                 logger.error(
                     "Error processing detailed CNV analysis: %s", str(e), exc_info=True

@@ -316,6 +316,28 @@ class CoverageSection(ReportSection):
             self.summary_elements.append(
                 Paragraph(" <br/> ".join(summary_text), self.styles.styles["Normal"])
             )
+            # Export coverage summary and tables
+            try:
+                import pandas as pd
+                self.export_frames["coverage_summary"] = pd.DataFrame([
+                    {
+                        "GlobalCoverageX": float(global_coverage),
+                        "TargetCoverageX": float(target_coverage),
+                        "Enrichment": float(enrichment),
+                    }
+                ])
+                if hasattr(self, "cov_df_main"):
+                    self.export_frames["coverage_chromosome"] = self.cov_df_main.copy()
+                if hasattr(self, "bedcov_df_main"):
+                    self.export_frames["coverage_targets_bed"] = self.bedcov_df_main.copy()
+                if hasattr(self, "target_coverage_df"):
+                    self.export_frames["coverage_targets"] = self.target_coverage_df.copy()
+                if hasattr(self, "distribution_data") and self.distribution_data:
+                    self.export_frames["coverage_distribution"] = pd.DataFrame([
+                        self.distribution_data
+                    ])
+            except Exception:
+                pass
         else:
             self.summary_elements.append(
                 Paragraph("No coverage data available", self.styles.styles["Normal"])

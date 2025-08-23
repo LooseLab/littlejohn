@@ -23,6 +23,8 @@ class ReportSection(ABC):
         self.styles = report.styles
         self.elements = []
         self.summary_elements = []
+        # DataFrames to export as CSVs (name -> DataFrame). Filled by concrete sections.
+        self.export_frames = {}
 
         # Define standard table styles
         self.MODERN_TABLE_STYLE = TableStyle(
@@ -175,6 +177,14 @@ class ReportSection(ABC):
             self.elements.append(Spacer(1, 2))
             self.elements.append(Paragraph(caption, self.styles.styles["Caption"]))
         self.elements.append(Spacer(1, 8))
+
+    def get_export_frames(self):
+        """Return a mapping of exportable DataFrames for this section.
+
+        Returns:
+            dict: Mapping of frame name to pandas.DataFrame
+        """
+        return self.export_frames
 
     def log_error(self, message, exception=None):
         """Log an error with consistent formatting.

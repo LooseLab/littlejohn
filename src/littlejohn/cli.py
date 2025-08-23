@@ -666,10 +666,6 @@ def _display_workflow_config(
         # Display priority configuration
         if queue_priority:
             click.echo(f"  - Queue priorities: {list(queue_priority)}")
-        else:
-            click.echo(
-                "  - Queue priorities: using defaults (preprocessing=10, bed_conversion=9, analysis=5, classification=3, slow=1)"
-            )
     else:
         click.echo("Distributed computing: Disabled (using threading)")
         click.echo("Worker configuration:")

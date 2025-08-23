@@ -5,6 +5,7 @@ This module contains the main report class that coordinates the generation of th
 """
 
 import os
+import json
 import logging
 import pandas as pd
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
@@ -107,7 +108,7 @@ class RobinReport:
             DisclaimerSection(self),
         ]
 
-    def generate_report(self, report_type="detailed"):
+    def generate_report(self, report_type="detailed", export_csv_dir=None, export_xlsx=False, export_zip=False):
         """Generate the complete PDF report.
 
         Args:
@@ -182,13 +183,100 @@ class RobinReport:
             )
 
             logger.info(f"PDF created: {self.filename}")
+
+            # Optionally export CSV/XLSX/ZIP
+            if export_csv_dir:
+                try:
+                    os.makedirs(export_csv_dir, exist_ok=True)
+                    manifest = {
+                        "sample_id": self.sample_id,
+                        "centre_id": self.centreID,
+                        "report_type": report_type,
+                        "files": [],
+                    }
+
+                    # Collect frames from sections
+                    for section in self.sections:
+                        frames = getattr(section, "get_export_frames", lambda: {})()
+                        for name, df in frames.items():
+                            safe_name = name.replace(" ", "_")
+                            csv_path = os.path.join(
+                                export_csv_dir,
+                                f"{self.sample_id}_{safe_name}.csv",
+                            )
+                            try:
+                                df.to_csv(csv_path, index=False)
+                                manifest["files"].append(
+                                    {
+                                        "name": name,
+                                        "path": csv_path,
+                                        "rows": int(df.shape[0]),
+                                        "cols": int(df.shape[1]) if df.shape else 0,
+                                    }
+                                )
+                            except Exception as ex:
+                                logger.error(
+                                    f"Error writing CSV for frame {name}: {str(ex)}",
+                                    exc_info=True,
+                                )
+
+                    # Write manifest
+                    manifest_path = os.path.join(
+                        export_csv_dir, f"{self.sample_id}_manifest.json"
+                    )
+                    with open(manifest_path, "w", encoding="utf-8") as fh:
+                        json.dump(manifest, fh, indent=2)
+
+                    # Optional XLSX workbook
+                    if export_xlsx:
+                        try:
+                            xlsx_path = os.path.join(
+                                export_csv_dir, f"{self.sample_id}_report_data.xlsx"
+                            )
+                            with pd.ExcelWriter(xlsx_path) as writer:
+                                for f in manifest["files"]:
+                                    # Reload to avoid potential dtype issues
+                                    try:
+                                        df = pd.read_csv(f["path"]) if f["path"].endswith(".csv") else None
+                                    except Exception:
+                                        df = None
+                                    if df is not None:
+                                        sheet_name = os.path.basename(f["path"]).replace(
+                                            f"{self.sample_id}_", ""
+                                        ).replace(".csv", "")[:31]
+                                        df.to_excel(writer, index=False, sheet_name=sheet_name)
+                            logger.info(f"XLSX written: {xlsx_path}")
+                        except Exception as ex:
+                            logger.error("Error writing XLSX: %s", str(ex), exc_info=True)
+
+                    # Optional ZIP archive
+                    if export_zip:
+                        try:
+                            import zipfile
+                            zip_path = os.path.join(
+                                export_csv_dir, f"{self.sample_id}_report_data.zip"
+                            )
+                            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                                for f in manifest["files"]:
+                                    if os.path.exists(f["path"]):
+                                        zf.write(f["path"], arcname=os.path.basename(f["path"]))
+                                if os.path.exists(manifest_path):
+                                    zf.write(manifest_path, arcname=os.path.basename(manifest_path))
+                            logger.info(f"ZIP written: {zip_path}")
+                        except Exception as ex:
+                            logger.error("Error writing ZIP: %s", str(ex), exc_info=True)
+                except Exception as ex:
+                    logger.error(
+                        "Error exporting CSV/XLSX/ZIP artifacts: %s", str(ex), exc_info=True
+                    )
+
             return self.filename
         except Exception as e:
             logger.error(f"Error generating report: {e}", exc_info=True)
             raise
 
 
-def create_pdf(filename, output, report_type="detailed"):
+def create_pdf(filename, output, report_type="detailed", export_csv_dir=None, export_xlsx=False, export_zip=False):
     """Create a PDF report from ROBIN analysis results.
 
     Args:
@@ -200,4 +288,9 @@ def create_pdf(filename, output, report_type="detailed"):
         Path to the generated PDF file
     """
     report = RobinReport(filename, output)
-    return report.generate_report(report_type=report_type)
+    return report.generate_report(
+        report_type=report_type,
+        export_csv_dir=export_csv_dir,
+        export_xlsx=export_xlsx,
+        export_zip=export_zip,
+    )

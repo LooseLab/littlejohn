@@ -21,6 +21,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
 
     Uses `launcher._cnv_state` for per-sample cache/state.
     Expects CNV.npy, CNV3.npy, CNV_dict.npy, XYestimate.pkl, cnv_data_array.npy in sample folder.
+    
+    Controls now trigger immediate refresh instead of waiting for timer updates.
     """
     with ui.card().classes("w-full"):
         ui.label("🧬 Copy Number Variation (CNV)").classes("text-lg font-semibold mb-2")
@@ -1365,6 +1367,14 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 return
             key = str(sample_dir)
             state = launcher._cnv_state.get(key, {})
+            
+            # Simple debouncing to prevent rapid successive calls
+            import time
+            current_time = time.time()
+            last_refresh = state.get("_last_refresh", 0)
+            if current_time - last_refresh < 0.1:  # 100ms debounce
+                return
+            state["_last_refresh"] = current_time
             # Sync state from UI controls in case events are not firing in this environment
             try:
                 ui_changed = False
@@ -1537,17 +1547,20 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                         chart.options["dataZoom"][0].pop("endValue", None)
             except Exception:
                 pass
-            _render_cnv_from_state(st)
+            # Trigger immediate refresh to update all UI elements
+            _refresh_cnv()
 
         def _on_scale(ev):
             st = launcher._cnv_state.setdefault(str(sample_dir), {})
             st["y_scale"] = _val(ev, "linear") or "linear"
-            _render_cnv_from_state(st)
+            # Trigger immediate refresh to update all UI elements
+            _refresh_cnv()
 
         def _on_bp(ev):
             st = launcher._cnv_state.setdefault(str(sample_dir), {})
             st["show_bp"] = _val(ev, "show") == "show"
-            _render_cnv_from_state(st)
+            # Trigger immediate refresh to update all UI elements
+            _refresh_cnv()
 
         def _on_color(ev):
             st = launcher._cnv_state.setdefault(str(sample_dir), {})
@@ -1561,7 +1574,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             else:
                 st["color_mode"] = "chromosome"
             logging.debug(f"CNV color mode -> {st['color_mode']} (raw={val})")
-            _render_cnv_from_state(st)
+            # Trigger immediate refresh to update all UI elements
+            _refresh_cnv()
 
         # Bind both native change and model-value updates for robustness
         cnv_chrom_select.on("change", _on_chrom)
@@ -1571,7 +1585,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
         def _on_gene(ev):
             st = launcher._cnv_state.setdefault(str(sample_dir), {})
             st["selected_gene"] = _val(ev, "All") or "All"
-            _render_cnv_from_state(st)
+            # Trigger immediate refresh to update all UI elements
+            _refresh_cnv()
 
         cnv_gene_select.on("change", _on_gene)
         cnv_gene_select.on("update:model-value", _on_gene)
