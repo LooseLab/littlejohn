@@ -5,10 +5,14 @@ from typing import Any, Dict, List
 
 import pandas as pd
 
+
+
 try:
     from nicegui import ui
 except ImportError:  # pragma: no cover
     ui = None
+
+from littlejohn.gui.theme import styled_table
 
 
 def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
@@ -33,7 +37,7 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
             mgmt_mpl = ui.matplotlib(figsize=(4, 3))
             ui.separator()
             ui.label("MGMT results (latest)").classes("text-sm text-gray-700 mt-2")
-            mgmt_results_table = ui.table(
+            _, mgmt_results_table = styled_table(
                 columns=[
                     {"name": "average", "label": "Average %", "field": "average"},
                     {"name": "pred", "label": "Prediction %", "field": "pred"},
@@ -41,12 +45,13 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                 ],
                 rows=[],
                 pagination=0,
-            ).classes("w-full")
+                class_size="table-xs",
+            )
             ui.separator()
             ui.label("MGMT CpG Site Methylation Data").classes(
                 "text-sm text-gray-700 mt-2"
             )
-            mgmt_sites_table = ui.table(
+            _, mgmt_sites_table = styled_table(
                 columns=[
                     {"name": "site", "label": "Site", "field": "site"},
                     {"name": "chr", "label": "Chr", "field": "chr"},
@@ -61,7 +66,8 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                 ],
                 rows=[],
                 pagination=0,
-            ).classes("w-full")
+                class_size="table-xs",
+            )
 
     def _extract_mgmt_specific_sites(bed_path: Path) -> List[Dict[str, Any]]:
         try:

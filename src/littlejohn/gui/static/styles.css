@@ -32,6 +32,27 @@ body {
   position: relative;
 }
 
+/* Compact table styling for NiceGUI/Quasar tables */
+.compact-table .q-table__container {
+  font-size: 12px;
+}
+.compact-table .q-table th,
+.compact-table .q-table td {
+  padding: 4px 8px;
+  line-height: 1.2;
+}
+.compact-table .q-table thead tr > th {
+  font-weight: 600;
+}
+.compact-table .q-table__separator,
+.compact-table .q-table__bottom {
+  min-height: 28px;
+  padding: 4px 6px;
+}
+.compact-table .q-field--dense {
+  font-size: 12px;
+}
+
 /* Add subtle paper-like shadows */
 html::before {
   content: '';

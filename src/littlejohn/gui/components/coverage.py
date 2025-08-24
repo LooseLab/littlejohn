@@ -13,6 +13,7 @@ try:
 except ImportError:  # pragma: no cover
     ui = None
 
+from littlejohn.gui.theme import styled_table
 
 def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
     """Build the Coverage UI section and attach refresh timers.
@@ -243,7 +244,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 target_search = ui.input("Search targets…").props(
                     "borderless dense clearable"
                 )
-            target_cov_table = ui.table(
+            _, target_cov_table = styled_table(
                 columns=[
                     {
                         "name": "chrom",
@@ -278,7 +279,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 ],
                 rows=[],
                 pagination=20,
-            ).classes("w-full h-80")
+                class_size="table-xs",
+            )
             try:
                 target_cov_table.props(
                     'multi-sort rows-per-page-options="[10,20,50,0]"'

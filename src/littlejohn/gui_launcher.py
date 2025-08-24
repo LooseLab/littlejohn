@@ -777,8 +777,8 @@ class GUILauncher:
                         )
 
                     # Create a placeholder table that will be updated later
-                    self.samples_table = (
-                        ui.table(
+                    from littlejohn.gui.theme import styled_table
+                    _samples_container, self.samples_table = styled_table(
                             columns=[
                                 {
                                     "name": "actions",
@@ -858,12 +858,14 @@ class GUILauncher:
                                 },
                             ],
                             rows=[],
-                            row_key="sample_id",
                             pagination=20,
+                            class_size="table-xs",
+                            row_key="sample_id",
                         )
-                        .props("rows-per-page-options=[10,20,50,0]")
-                        .classes("w-full")
-                    )
+                    try:
+                        self.samples_table.props("rows-per-page-options=[10,20,50,0]")
+                    except Exception:
+                        pass
 
                     # Per-row action button to view sample
                     try:
@@ -1467,6 +1469,18 @@ class GUILauncher:
                     ).classes("object-right ml-auto text-sm font-semibold px-3 py-1 rounded")
 
             with ui.column().classes("w-full p-4 gap-4"):
+                # Summary section (new component)
+                try:
+                    from .gui.components.summary import add_summary_section  # type: ignore
+
+                    add_summary_section(sample_dir, sample_id)
+                except Exception as e:
+                    logging.exception(f"[GUI] Summary section failed: {e}")
+                    try:
+                        ui.notify(f"Summary section failed: {e}", type="warning")
+                    except Exception:
+                        pass
+
                 # Classification section (refactored component)
                 try:
                     from .gui.components.classification import add_classification_section  # type: ignore
@@ -1534,7 +1548,8 @@ class GUILauncher:
                         files_search = ui.input("Search files…").props(
                             "borderless dense clearable"
                         )
-                    files_table = ui.table(
+                    from littlejohn.gui.theme import styled_table
+                    _files_container, files_table = styled_table(
                         columns=[
                             {
                                 "name": "name",
@@ -1557,7 +1572,8 @@ class GUILauncher:
                         ],
                         rows=[],
                         pagination=20,
-                    ).classes("w-full")
+                        class_size="table-xs",
+                    )
                     try:
                         files_table.props(
                             'multi-sort rows-per-page-options="[10,20,50,0]"'
@@ -1575,7 +1591,8 @@ class GUILauncher:
                         summary_search = ui.input("Search fields…").props(
                             "borderless dense clearable"
                         )
-                    summary_table = ui.table(
+                    from littlejohn.gui.theme import styled_table
+                    _summary_container, summary_table = styled_table(
                         columns=[
                             {
                                 "name": "key",
@@ -1592,7 +1609,8 @@ class GUILauncher:
                         ],
                         rows=[],
                         pagination=0,
-                    ).classes("w-full")
+                        class_size="table-xs",
+                    )
                     try:
                         summary_table.props("multi-sort")
                         summary_search.bind_value(summary_table, "filter")
@@ -1833,7 +1851,8 @@ class GUILauncher:
                         )
 
                     # Active jobs table
-                    self.active_jobs_table = ui.table(
+                    from littlejohn.gui.theme import styled_table
+                    _jobs_container, self.active_jobs_table = styled_table(
                         columns=[
                             {
                                 "name": "job_id",
@@ -1874,7 +1893,8 @@ class GUILauncher:
                         ],
                         rows=[],
                         pagination=10,
-                    ).classes("w-full")
+                        class_size="table-xs",
+                    )
                     try:
                         self.active_jobs_table.props(
                             'multi-sort rows-per-page-options="[10,20,50,0]"'

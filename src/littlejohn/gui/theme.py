@@ -69,6 +69,35 @@ def get_version_from_github():
     return remote_version_str
 
 
+def styled_table(*, columns, rows=None, pagination=20, class_size="table-xs", **kwargs):
+    """Create a NiceGUI table wrapped in an overflow container and DaisyUI-like classes.
+
+    Args:
+        columns: columns definition passed to ui.table
+        rows: initial rows
+        pagination: rows per page (0 disables)
+        class_size: table size class (e.g., "table-xs", "table-sm")
+        **kwargs: forwarded to ui.table
+
+    Returns:
+        Tuple of (container, table) where container is the overflow wrapper column and table is the ui.table instance.
+    """
+    # Outer overflow container to handle horizontal scroll on narrow screens
+    container = ui.column().classes("w-full overflow-x-auto compact-table")
+    with container:
+        table = ui.table(columns=columns, rows=rows or [], pagination=pagination, **kwargs)
+        try:
+            table.classes(replace=f"table w-full {class_size} text-xs")
+        except Exception:
+            table.classes(f"table w-full {class_size} text-xs")
+        # Use Quasar's dense mode and reduce visual chrome
+        try:
+            table.props("dense flat wrap-cells")
+        except Exception:
+            pass
+    return container, table
+
+
 async def check_version():
     """
     Check the current version against the remote version on GitHub.

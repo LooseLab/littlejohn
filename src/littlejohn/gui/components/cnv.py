@@ -15,6 +15,7 @@ try:
 except ImportError:  # pragma: no cover
     ui = None
 
+from littlejohn.gui.theme import styled_table
 
 def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
     """Build the CNV UI section and attach refresh timers.
@@ -204,8 +205,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             },
             {"name": "genes", "label": "Genes", "field": "genes"},
         ]
-        cyto_table = ui.table(columns=cyto_columns, rows=[], pagination=20).classes(
-            "w-full"
+        _, cyto_table = styled_table(
+            columns=cyto_columns, rows=[], pagination=20, class_size="table-xs"
         )
         try:
             cyto_table.props('multi-sort rows-per-page-options="[10,20,50,0]"')

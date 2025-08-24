@@ -17,12 +17,14 @@ import tempfile
 import logging
 import time
 import json
+import random
 from typing import Dict, Any, Optional, List, Tuple, Set
 from dataclasses import dataclass
 from collections import defaultdict
 import numpy as np
 import pandas as pd
 import pysam
+import networkx as nx
 from littlejohn.logging_config import get_job_logger
 
 
@@ -371,7 +373,7 @@ def _process_reads_for_fusions(
     df = pd.DataFrame(rows)
 
     # Apply quality filters (matching ROBIN implementation)
-    df = df[(df["mapping_quality"] > 40) & (df["mapping_span"] > 100)].reset_index(
+    df = df[(df["mapping_quality"] > 50) & (df["mapping_span"] > 150)].reset_index(
         drop=True
     )
 
@@ -415,6 +417,283 @@ def _optimize_fusion_dataframe(df: pd.DataFrame) -> pd.DataFrame:
                 df[col] = df[col].astype("category")
 
     return df
+
+
+def _annotate_results(result: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
+    """
+    Annotates the result DataFrame with tags and colors with memory optimization.
+
+    Memory optimizations:
+    - Use inplace operations where possible
+    - Combine groupby operations
+    - Use categorical dtypes
+    - Vectorize string operations
+    - Minimize DataFrame copies
+    """
+    # Use inplace operations to avoid unnecessary copies
+    result = result.copy()  # Only one copy needed
+
+    # Group by read_id and aggregate col4 (Gene) values efficiently
+    lookup = result.groupby("read_id", observed=True)["col4"].agg(
+        lambda x: ",".join(set(x))
+    )
+    result["tag"] = result["read_id"].map(lookup)
+
+    # Generate colors for each read_id group efficiently
+    colors = result.groupby("read_id", observed=True)["col4"].apply(
+        lambda x: _generate_random_color()
+    )
+    result["Color"] = result["read_id"].map(colors)
+
+    # Clean string data efficiently
+    result = result.apply(lambda x: x.strip() if isinstance(x, str) else x)
+
+    # Find good pairs (reads that map to more than 2 genes)
+    goodpairs = result.groupby("tag", observed=True)["read_id"].transform("nunique") > 2
+
+    return result, goodpairs
+
+
+def _generate_random_color() -> str:
+    """
+    Generates a random color for use in plotting.
+
+    Returns:
+        str: A random hex color code.
+    """
+    return "#{:06x}".format(random.randint(0, 0xFFFFFF))
+
+
+def get_gene_network(gene_pairs):
+    """
+    Build gene network from gene pairs with memory optimization.
+
+    Args:
+        gene_pairs: List of gene pairs
+
+    Returns:
+        List of connected components
+
+    Memory optimizations:
+    - Efficient graph construction
+    - Minimal intermediate data storage
+    """
+    G = nx.Graph()
+    for pair in gene_pairs:
+        G.add_edge(pair[0], pair[1])
+    connected_components = list(nx.connected_components(G))
+
+    # Free the graph immediately
+    del G
+
+    return [list(component) for component in connected_components]
+
+
+def collapse_ranges(df, max_distance):
+    """
+    Collapse ranges within a fixed distance with memory optimization.
+
+    Args:
+        df: DataFrame with ranges
+        max_distance: Maximum distance for collapsing
+
+    Returns:
+        DataFrame with collapsed ranges
+
+    Memory optimizations:
+    - Efficient iteration
+    - Minimal intermediate data storage
+    """
+    collapsed = []
+    current_range = None
+
+    for _, row in df.iterrows():
+        # Only unpack what we need
+        start, end = row["start"], row["end"]
+
+        if current_range is None:
+            current_range = row
+        else:
+            if start <= current_range["end"] + max_distance:
+                current_range["end"] = max(current_range["end"], end)
+            else:
+                collapsed.append(current_range)
+                current_range = row
+
+    if current_range is not None:
+        collapsed.append(current_range)
+
+    return pd.DataFrame(collapsed)
+
+
+def _get_reads(reads: pd.DataFrame) -> pd.DataFrame:
+    """
+    Get reads for a specific gene with memory optimization.
+
+    Args:
+        reads (pd.DataFrame): DataFrame with reads
+
+    Returns:
+        pd.DataFrame: DataFrame with reads
+
+    Memory optimizations:
+    - Efficient column operations
+    - Minimal data copying
+    - Immediate cleanup of intermediate data
+    """
+    df = reads.copy()  # Only one copy needed
+    df.columns = [
+        "chromosome",
+        "start",
+        "end",
+        "gene",
+        "chromosome2",
+        "start2",
+        "end2",
+        "id",
+        "quality",
+        "strand",
+        "read_start",
+        "read_end",
+        "secondary",
+        "supplementary",
+        "span",
+        "tag",
+        "color",
+    ]
+
+    # Add logging for start and end columns before conversion
+    logging.debug(
+        f"Converting start column to int. First few values: {df['start'].head()}"
+    )
+    logging.debug(f"Converting end column to int. First few values: {df['end'].head()}")
+
+    try:
+        df["start"] = df["start"].astype(int)
+        df["end"] = df["end"].astype(int)
+    except ValueError as e:
+        logging.error(f"Error converting start/end to int: {str(e)}")
+        logging.error(
+            f"Problematic values in start: {df[df['start'].apply(lambda x: not str(x).isdigit())]['start'].tolist()}"
+        )
+        logging.error(
+            f"Problematic values in end: {df[df['end'].apply(lambda x: not str(x).isdigit())]['end'].tolist()}"
+        )
+        raise
+
+    # Sort the DataFrame by chromosome, start, and end positions
+    df = df.sort_values(by=["chromosome", "start", "end"])
+
+    df = df.drop_duplicates(subset=["start2", "end2", "id"])
+
+    # Group by chromosome and collapse ranges within each group
+    # Use a more explicit approach to avoid the FutureWarning
+    result_list = []
+    for chromosome, group in df.groupby("chromosome", observed=True):
+        collapsed_group = collapse_ranges(group, 10000)
+        if not collapsed_group.empty:
+            collapsed_group["chromosome"] = chromosome
+            result_list.append(collapsed_group)
+
+    if result_list:
+        result = pd.concat(result_list, ignore_index=True)
+    else:
+        result = pd.DataFrame()
+
+    # Free the intermediate DataFrame
+    del df
+
+    return result
+
+
+def preprocess_fusion_data_standalone(
+    fusion_data: pd.DataFrame, output_file: str
+) -> None:
+    """
+    Standalone version of fusion data preprocessing for CPU-bound execution with memory optimization.
+
+    Args:
+        fusion_data: Raw fusion candidate data
+        output_file: Path to save processed data
+
+    Memory optimizations:
+    - Efficient data type optimization
+    - Minimal intermediate data storage
+    - Immediate cleanup of large DataFrames
+    """
+    try:
+        # Apply categorical data types for efficiency
+        fusion_data = fusion_data.astype(
+            {
+                "read_id": "category",
+                "col4": "category",  # Gene column
+                "reference_id": "category",  # Chromosome column
+                "strand": "category",
+            }
+        )
+
+        # Annotate results (this is the heavy lifting)
+        annotated_data, goodpairs = _annotate_results(fusion_data)
+
+        # Free the original data immediately
+        del fusion_data
+
+        # Create processed data structure for FusionVis
+        processed_data = {
+            "annotated_data": annotated_data,
+            "goodpairs": goodpairs,
+            "gene_pairs": [],
+            "gene_groups": [],
+            "candidate_count": 0,
+        }
+
+        # Process gene pairs and groups if we have good pairs
+        if not annotated_data.empty and goodpairs.any():
+            gene_pairs = (
+                annotated_data[goodpairs]
+                .sort_values(by="reference_start")["tag"]
+                .unique()
+                .tolist()
+            )
+            gene_pairs = [tuple(pair.split(",")) for pair in gene_pairs]
+            gene_groups_test = get_gene_network(gene_pairs)
+            gene_groups = []
+
+            for gene_group in gene_groups_test:
+                reads = _get_reads(
+                    annotated_data[goodpairs][
+                        annotated_data[goodpairs]["col4"].isin(gene_group)
+                    ]
+                )
+                if len(reads) > 1:
+                    gene_groups.append(gene_group)
+
+            processed_data.update(
+                {
+                    "gene_pairs": gene_pairs,
+                    "gene_groups": gene_groups,
+                    "candidate_count": len(gene_groups),
+                }
+            )
+
+        # Save processed data as pickle for efficient loading
+        import pickle
+
+        with open(output_file, "wb") as f:
+            pickle.dump(processed_data, f)
+
+        logging.info(f"Pre-processed fusion data saved to {output_file}")
+
+        # Free the processed data immediately
+        del processed_data
+
+    except Exception as e:
+        logging.error(f"Error pre-processing fusion data: {str(e)}")
+        logging.error("Exception details:", exc_info=True)
+    finally:
+        # Force garbage collection
+        import gc
+        gc.collect()
 
 
 def process_bam_for_fusions(
@@ -473,63 +752,54 @@ def _generate_output_files(
     fusion_metadata: FusionMetadata,
     work_dir: str,
 ) -> Dict[str, str]:
-    """
-    Generate output files for the analysis, merging with existing results if present.
-
-    Args:
-        sample_id: Sample ID
-        analysis_results: Analysis results
-        fusion_metadata: Fusion metadata object
-        work_dir: Working directory
-
-    Returns:
-        Dictionary mapping file type to file path
-    """
-    # Ensure work directory exists
-    os.makedirs(work_dir, exist_ok=True)
-
-    # Create sample-specific directory
-    sample_dir = _check_and_create_folder(work_dir, sample_id)
-
-    # Load existing results if they exist
-    existing_target, existing_genome_wide, existing_metadata = (
-        _load_existing_fusion_results(sample_dir, sample_id)
-    )
-
-    # Merge new results with existing results
-    merged_target = _merge_fusion_candidates(
-        analysis_results.get("target_candidates"), existing_target
-    )
-    merged_genome_wide = _merge_fusion_candidates(
-        analysis_results.get("genome_wide_candidates"), existing_genome_wide
-    )
-
-    # Merge metadata
-    merged_metadata = _merge_fusion_metadata(fusion_metadata, existing_metadata)
-
+    """Generate output files for fusion analysis."""
     output_files = {}
+    
+    # Process target panel candidates
+    if analysis_results["target_candidates"] is not None:
+        target_candidates = analysis_results["target_candidates"]
+        
+        if not target_candidates.empty:
+            # Filter for fusion candidates using the original logic
+            uniques = target_candidates["read_id"].duplicated(keep=False)
+            if uniques.any():
+                doubles = target_candidates[uniques]
+                counts = doubles.groupby("read_id", observed=True)["col4"].transform("nunique")
+                result = doubles[counts > 1]
+                
+                if not result.empty:
+                    # Save raw fusion candidates
+                    target_output = os.path.join(work_dir, sample_id, "fusion_candidates_master.csv")
+                    result.to_csv(target_output, index=False)
+                    output_files["fusion_candidates_master"] = target_output
+                    
+                    # Generate processed data for visualization
+                    processed_output = os.path.join(work_dir, sample_id, "fusion_candidates_master_processed.csv")
+                    preprocess_fusion_data_standalone(result, processed_output)
+                    output_files["fusion_candidates_master_processed"] = processed_output
 
-    # Save merged target panel fusion candidates (master) to sample directory
-    if merged_target is not None:
-        target_path = os.path.join(sample_dir, "fusion_candidates_master.csv")
-        merged_target.to_csv(target_path, index=False)
-        output_files["target_fusion"] = target_path
-        merged_metadata.target_fusion_path = target_path
-
-    # Save merged genome-wide fusion candidates (all) to sample directory
-    if merged_genome_wide is not None:
-        genome_path = os.path.join(sample_dir, "fusion_candidates_all.csv")
-        merged_genome_wide.to_csv(genome_path, index=False)
-        output_files["genome_wide_fusion"] = genome_path
-        merged_metadata.genome_wide_fusion_path = genome_path
-
-    # Save merged metadata to sample-specific directory
-    metadata_path = os.path.join(sample_dir, f"{sample_id}_fusion_metadata.json")
-    with open(metadata_path, "w") as f:
-        json.dump(merged_metadata.__dict__, f, default=json_serializable, indent=2)
-
-    # Update the original fusion_metadata object with merged data
-    fusion_metadata.__dict__.update(merged_metadata.__dict__)
+    # Process genome-wide candidates
+    if analysis_results["genome_wide_candidates"] is not None:
+        genome_wide_candidates = analysis_results["genome_wide_candidates"]
+        
+        if not genome_wide_candidates.empty:
+            # Filter for fusion candidates using the original logic
+            uniques_all = genome_wide_candidates["read_id"].duplicated(keep=False)
+            if uniques_all.any():
+                doubles_all = genome_wide_candidates[uniques_all]
+                counts_all = doubles_all.groupby("read_id", observed=True)["col4"].transform("nunique")
+                result_all = doubles_all[counts_all > 1]
+                
+                if not result_all.empty:
+                    # Save raw fusion candidates
+                    all_output = os.path.join(work_dir, sample_id, "fusion_candidates_all.csv")
+                    result_all.to_csv(all_output, index=False)
+                    output_files["fusion_candidates_all"] = all_output
+                    
+                    # Generate processed data for visualization
+                    processed_all_output = os.path.join(work_dir, sample_id, "fusion_candidates_all_processed.csv")
+                    preprocess_fusion_data_standalone(result_all, processed_all_output)
+                    output_files["fusion_candidates_all_processed"] = processed_all_output
 
     return output_files
 
@@ -700,6 +970,7 @@ def _perform_fusion_analysis(
     target_panel: str = "rCNS2",
     has_supplementary: bool = False,
     supplementary_read_ids: List[str] = [],
+    work_dir: str = None,
 ) -> Dict[str, Any]:
     """
     Perform the actual fusion analysis.
@@ -710,6 +981,9 @@ def _perform_fusion_analysis(
         metadata: File metadata
         fusion_metadata: Fusion metadata object
         target_panel: Target panel to use
+        has_supplementary: Whether file has supplementary reads
+        supplementary_read_ids: List of supplementary read IDs
+        work_dir: Working directory for saving metadata
 
     Returns:
         Dictionary with analysis results
@@ -725,6 +999,7 @@ def _perform_fusion_analysis(
         target_panel,
         has_supplementary,
         supplementary_read_ids,
+        work_dir,
     )
     return results
 
@@ -806,6 +1081,7 @@ def process_single_file(
                 target_panel,
                 has_supplementary,
                 supplementary_read_ids,
+                work_dir,
             )
 
             # Generate output files

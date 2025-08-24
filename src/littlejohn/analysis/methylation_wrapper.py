@@ -4,6 +4,7 @@ import shutil
 import runpy
 from contextlib import contextmanager, redirect_stderr
 import os
+
 from matplotlib.figure import Figure
 from typing import List, Optional, Dict, Any
 
