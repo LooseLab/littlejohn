@@ -1170,3 +1170,104 @@ def target_handler(job, work_dir=None):
         error_details = f"Error in target analysis for {job.context.filepath}: {str(e)}"
         job.context.add_error("target_analysis", error_details)
         logger.error(error_details)
+
+
+def ensure_sorted_igv_bam(sample_dir: str, threads: int = 4) -> str:
+    """
+    Ensure an IGV-ready coordinate-sorted and indexed BAM exists for a sample.
+
+    Preferred output: ``sample_dir/igv/igv_ready.bam`` (+ .bai).
+    Backward compat: if an existing Clair3-sorted BAM is present, reuse it.
+    If neither exists, sort and index ``sample_dir/target.bam`` into
+    ``sample_dir/igv/igv_ready.bam``.
+
+    Args:
+        sample_dir: Path to the sample output directory.
+        threads: Number of threads to pass to pysam.sort.
+
+    Returns:
+        The path to the sorted BAM file (empty string on failure).
+    """
+    logger = logging.getLogger("littlejohn.target")
+    try:
+        sample_dir = os.path.abspath(sample_dir)
+        igv_dir = os.path.join(sample_dir, "igv")
+        clair_dir = os.path.join(sample_dir, "clair3")
+        os.makedirs(igv_dir, exist_ok=True)
+
+        # Preferred IGV-ready path
+        out_bam = os.path.join(igv_dir, "igv_ready.bam")
+        out_bai = f"{out_bam}.bai"
+        if os.path.exists(out_bam) and os.path.exists(out_bai):
+            logger.info(f"IGV BAM already present: {out_bam}")
+            return out_bam
+
+        # Backward compatibility: reuse Clair3-sorted BAM if present
+        legacy_bams = [
+            os.path.join(clair_dir, "sorted_targets_exceeding_rerun.bam"),
+            os.path.join(clair_dir, "sorted_targets_exceeding.bam"),
+        ]
+        for legacy in legacy_bams:
+            if os.path.exists(legacy) and os.path.exists(f"{legacy}.bai"):
+                logger.info(f"Reusing legacy Clair3 BAM for IGV: {legacy}")
+                # Optionally copy to IGV location to standardize
+                try:
+                    import shutil
+                    shutil.copy2(legacy, out_bam)
+                    shutil.copy2(f"{legacy}.bai", out_bai)
+                    return out_bam
+                except Exception:
+                    # Fallback: just return legacy path
+                    return legacy
+
+        in_bam = os.path.join(sample_dir, "target.bam")
+        if not os.path.exists(in_bam):
+            logger.warning(f"target.bam not found in {sample_dir}; cannot build IGV BAM")
+            return ""
+
+        logger.info(f"Sorting BAM for IGV: {in_bam} -> {out_bam}")
+        pysam.sort(f"-@{threads}", "-o", out_bam, in_bam)
+        pysam.index(out_bam, out_bai)
+        logger.info(f"IGV BAM ready: {out_bam}")
+        return out_bam
+    except Exception as e:
+        logger.error(f"Failed to create IGV BAM in {sample_dir}: {e}")
+        return ""
+
+
+def igv_bam_handler(job, work_dir: Optional[str] = None) -> None:
+    """
+    Workflow handler to build an IGV-ready BAM for a sample.
+
+    Expects a per-sample directory containing `target.bam`. Outputs to
+    `sample_dir/igv/igv_ready.bam` (and .bai). On success, records the output
+    path in the job context under results['igv_bam'].
+    """
+    logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
+    try:
+        # Determine sample dir: prefer provided work_dir + sample_id
+        sid = job.context.get_sample_id() if hasattr(job.context, "get_sample_id") else "unknown"
+        base = work_dir or job.context.metadata.get("work_dir")
+        sample_dir = None
+        if base and sid and sid != "unknown":
+            sample_dir = os.path.join(base, sid)
+        else:
+            # Fallback: directory of the current file
+            sample_dir = os.path.dirname(job.context.filepath)
+
+        if not os.path.isdir(sample_dir):
+            raise RuntimeError(f"Sample directory not found: {sample_dir}")
+
+        out = ensure_sorted_igv_bam(sample_dir)
+        if not out:
+            raise RuntimeError("Failed to create IGV-ready BAM")
+
+        # Record result
+        try:
+            job.context.add_result("igv_bam", {"bam": out, "bai": f"{out}.bai"})
+        except Exception:
+            pass
+        logger.info(f"IGV-ready BAM created: {out}")
+    except Exception as e:
+        job.context.add_error("igv_bam", str(e))
+        logger.error(f"igv_bam handler failed: {e}")

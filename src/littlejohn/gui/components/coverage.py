@@ -9,11 +9,13 @@ import pandas as pd
 import logging
 
 try:
-    from nicegui import ui
+    from nicegui import ui, app
 except ImportError:  # pragma: no cover
     ui = None
+    app = None
 
 from littlejohn.gui.theme import styled_table
+
 
 def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
     """Build the Coverage UI section and attach refresh timers.
@@ -298,6 +300,83 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
     </q-td>
     """,
             )
+
+    # IGV viewer section
+    with ui.card().classes("w-full"):
+        ui.label("🧬 IGV").classes("text-lg font-semibold mb-2")
+        igv_div = ui.element("div").classes("w-full h-96 border")
+        igv_status = ui.label("IGV will load once an IGV-ready BAM is available.").classes(
+            "text-sm text-gray-600"
+        )
+        
+
+
+        async def _trigger_build_sorted_bam() -> None:
+            try:
+                # Debug: Check what's in the launcher
+                debug_info = f"Launcher type: {type(launcher).__name__}"
+                if hasattr(launcher, 'workflow_runner'):
+                    debug_info += f", Has workflow_runner: {launcher.workflow_runner is not None}"
+                    if launcher.workflow_runner is not None:
+                        debug_info += f", Runner type: {type(launcher.workflow_runner).__name__}"
+                else:
+                    debug_info += ", No workflow_runner attribute"
+                
+                # Check if we have a workflow runner
+                if hasattr(launcher, 'workflow_runner') and launcher.workflow_runner:
+                    # Check if the target.bam file exists
+                    target_bam = sample_dir / "target.bam"
+                    if not target_bam.exists():
+                        ui.notify("No target.bam file found. Please run target analysis first.", type="warning")
+                        return
+                    
+                    # Check if IGV BAM already exists
+                    igv_bam = sample_dir / "igv" / "igv_ready.bam"
+                    if igv_bam.exists() and (sample_dir / "igv" / "igv_ready.bam.bai").exists():
+                        ui.notify("IGV BAM already exists and is ready.", type="positive")
+                        return
+                    
+                    # Submit the IGV BAM generation job to the workflow system
+                    try:
+                        runner = launcher.workflow_runner
+                        sample_id = sample_dir.name
+                        
+                        # Check if it's a Ray workflow or Simple workflow
+                        if hasattr(runner, 'submit_sample_job'):
+                            # Simple workflow
+                            success = runner.submit_sample_job(str(sample_dir), 'igv_bam', sample_id)
+                        elif hasattr(runner, 'manager') and hasattr(runner.manager, 'submit_sample_job'):
+                            # Ray workflow - need to get the coordinator
+                            # This is more complex for Ray, so we'll provide a fallback
+                            ui.notify(
+                                "Ray workflow detected. IGV BAM generation should happen automatically "
+                                "after target analysis completes. If you need to regenerate it, "
+                                "please restart the workflow or check the logs.", 
+                                type="info"
+                            )
+                            return
+                        else:
+                            ui.notify("Unknown workflow type. Cannot submit IGV BAM job.", type="warning")
+                            return
+                        
+                        if success:
+                            ui.notify("IGV BAM generation job submitted to workflow queue!", type="positive")
+                        else:
+                            ui.notify("Failed to submit IGV BAM generation job. Check logs for details.", type="warning")
+                            
+                    except Exception as e:
+                        ui.notify(f"Error submitting IGV BAM job: {e}", type="negative")
+                        
+                else:
+                    ui.notify(f"No workflow runner available. Debug: {debug_info}. GUI is running but workflow integration is not available. This may be a configuration issue.", type="warning")
+            except Exception as e:
+                try:
+                    ui.notify(f"Error checking IGV BAM status: {e}", type="negative")
+                except Exception:
+                    # Client may have disconnected, ignore UI errors
+                    pass
+        with ui.row().classes("items-center gap-2 mt-2"):
+            ui.button("Generate IGV BAM", on_click=_trigger_build_sorted_bam)
 
     # Helpers
     def _log_notify(message: str, level: str = "warning", notify: bool = False) -> None:
@@ -665,6 +744,82 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     notify=False,
                 )
             launcher._coverage_state[key] = state
+            # IGV auto-init and auto-load when BAM becomes available (UI-only, light work)
+            try:
+                # Determine candidate BAMs (prefer standardized IGV path)
+                igv_dir = sample_dir / "igv"
+                clair_dir = sample_dir / "clair3"
+                candidates = [
+                    igv_dir / "igv_ready.bam",
+                    clair_dir / "sorted_targets_exceeding_rerun.bam",
+                    clair_dir / "sorted_targets_exceeding.bam",
+                    sample_dir / "target.bam",
+                ]
+                bam_path = None
+                for p in candidates:
+                    bai = Path(f"{p}.bai")
+                    if p.exists() and bai.exists():
+                        bam_path = p
+                        break
+
+                # Mount directory once
+                if bam_path is not None and app is not None:
+                    if bam_path.parent == igv_dir:
+                        mount = f"/samples/{sample_dir.name}/igv"
+                    elif bam_path.parent == clair_dir:
+                        mount = f"/samples/{sample_dir.name}/clair3"
+                    else:
+                        mount = f"/samples/{sample_dir.name}"
+                    try:
+                        app.add_static_files(mount, str(bam_path.parent))
+                    except Exception:
+                        # Already mounted or in tests without app
+                        pass
+
+                    # Define URLs first
+                    bam_url = f"{mount}/{bam_path.name}"
+                    bai_url = f"{mount}/{bam_path.name}.bai"
+                    
+                    # Initialize IGV once per page (include track immediately to avoid race)
+                    if not state.get("igv_initialized"):
+                        js_create = f"""
+                            const el = getElement('{igv_div.id}');
+                            const track = {{ name: '{sample_dir.name}', url: '{bam_url}', indexURL: '{bai_url}', format: 'bam', visibilityWindow: 1000000 }};
+                            const options = {{ genome: 'hg38', locus: 'chr1:1-1', tracks: [track] }};
+                            igv.createBrowser(el, options).then(b => {{ window.lj_igv = b; }});
+                        """
+                        try:
+                            ui.run_javascript(js_create, timeout=30.0)
+                            state["igv_initialized"] = True
+                            igv_status.set_text("IGV initialised.")
+                        except Exception:
+                            pass
+
+                    # Load/refresh BAM track if changed
+                    if state.get("igv_initialized") and state.get("igv_loaded_bam") != bam_url:
+                        js_track = f"""
+                            if (window.lj_igv) {{
+                                const name = '{sample_dir.name}';
+                                const track = {{ name, url: '{bam_url}', indexURL: '{bai_url}', format: 'bam', visibilityWindow: 1000000 }};
+                                window.lj_igv.loadTrack(track);
+                            }}
+                        """
+                        try:
+                            ui.run_javascript(js_track, timeout=60.0)
+                            state["igv_loaded_bam"] = bam_url
+                            igv_status.set_text("BAM loaded in IGV.")
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        igv_status.set_text("No IGV-viewable BAM found yet (need coordinate-sorted BAM with .bai).")
+                    except Exception:
+                        pass
+                
+
+            except Exception:
+                # Never let IGV logic break coverage refresh
+                pass
         except Exception as e:
             _log_notify(
                 f"Unexpected coverage refresh error: {e}", level="error", notify=True

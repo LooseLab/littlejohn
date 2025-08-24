@@ -1057,7 +1057,7 @@ def workflow(
 
                 # Import the new GUI launcher
                 try:
-                    from littlejohn.gui_launcher import launch_gui
+                    from littlejohn.gui.app import launch_gui
 
                     # Launch GUI using the new launcher FIRST so the global sender is ready
                     gui_launcher = launch_gui(

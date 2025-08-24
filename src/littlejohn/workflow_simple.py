@@ -13,6 +13,7 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 from tqdm import tqdm
 from littlejohn.logging_config import get_job_logger
+from littlejohn.analysis.target_analysis import igv_bam_handler
 
 
 # === Shared Context for Each File ===
@@ -350,6 +351,8 @@ class WorkflowManager:
                 "test": "mgmt",  # For testing purposes - map to mgmt queue
                 "long": "cnv",  # For testing purposes - map to cnv queue
                 "quick": "target",  # For testing purposes - map to target queue
+                # IGV BAM build goes to slow queue to avoid contention with analyses
+                "igv_bam": "slow",
                 # Classification queue
                 "sturgeon": "classification",
                 "nanodx": "classification",
@@ -373,6 +376,7 @@ class WorkflowManager:
                 "test": "analysis",  # For testing purposes
                 "long": "analysis",  # For testing purposes
                 "quick": "analysis",  # For testing purposes
+                "igv_bam": "slow",
                 # Classification queue
                 "sturgeon": "classification",
                 "nanodx": "classification",
@@ -1459,6 +1463,8 @@ class WorkflowRunner:
         # Register default handlers
         self.manager.register_handler("preprocessing", "echo", echo_handler)
         self.manager.register_handler("slow", "sleep", sleep_handler)
+        # Register IGV BAM handler on slow queue
+        self.manager.register_handler("slow", "igv_bam", igv_bam_handler)
 
     def register_handler(
         self, queue_type: str, job_type: str, handler: Callable[[Job], None]
@@ -1475,6 +1481,59 @@ class WorkflowRunner:
             command_handler(job, command_template)
 
         self.manager.register_handler(queue_type, job_type, handler)
+
+    def submit_sample_job(
+        self, sample_dir: str, job_type: str, sample_id: str = None
+    ) -> bool:
+        """
+        Submit a job for an existing sample directory.
+        
+        This allows users to manually trigger specific job types for samples
+        that have already been processed or need reprocessing.
+        
+        Args:
+            sample_dir: Path to the sample directory
+            job_type: Type of job to run (e.g., 'igv_bam')
+            sample_id: Optional sample ID (defaults to directory name)
+            
+        Returns:
+            True if job was successfully submitted, False otherwise
+        """
+        try:
+            if sample_id is None:
+                sample_id = Path(sample_dir).name
+            
+            # Create a context for this sample
+            context = WorkflowContext(
+                filepath=sample_dir,
+                metadata={
+                    "sample_id": sample_id,
+                    "sample_dir": sample_dir,
+                    "bam_metadata": {"sample_id": sample_id}
+                }
+            )
+            
+            # Create a job
+            job = Job(
+                job_id=next(self.manager._job_id_counter),
+                job_type=job_type,
+                context=context,
+                origin="slow",  # IGV BAM jobs go to slow queue
+                workflow=[f"slow:{job_type}"]
+            )
+            
+            # Submit the job to the appropriate queue
+            self.manager.enqueue_jobs([job])
+            
+            if self.verbose:
+                print(f"[WorkflowRunner] Submitted {job_type} job for sample {sample_id}")
+            
+            return True
+            
+        except Exception as e:
+            if self.verbose:
+                print(f"[WorkflowRunner] Failed to submit {job_type} job for sample {sample_id}: {e}")
+            return False
 
     def run_workflow(
         self,

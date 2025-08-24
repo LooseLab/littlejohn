@@ -122,6 +122,11 @@ class GUILauncher:
 
         self.workflow_runner = workflow_runner
         self.workflow_steps = workflow_steps or []
+        
+        # Debug logging
+        print(f"[GUI] Workflow runner set: {workflow_runner is not None}")
+        if workflow_runner is not None:
+            print(f"[GUI] Workflow runner type: {type(workflow_runner).__name__}")
         # Store absolute monitored directory to avoid relative path issues
         try:
             self.monitored_directory = (
@@ -2293,6 +2298,47 @@ class GUILauncher:
     def get_gui_url(self) -> str:
         """Get the URL where the GUI is running."""
         return f"http://{self.host}:{self.port}"
+
+    def submit_sample_job(
+        self, sample_dir: str, job_type: str, sample_id: str = None
+    ) -> bool:
+        """
+        Submit a job for an existing sample directory.
+        
+        This allows users to manually trigger specific job types for samples
+        that have already been processed or need reprocessing.
+        
+        Args:
+            sample_dir: Path to the sample directory
+            job_type: Type of job to run (e.g., 'igv_bam')
+            sample_id: Optional sample ID (defaults to directory name)
+            
+        Returns:
+            True if job was successfully submitted, False otherwise
+        """
+        try:
+            if not hasattr(self, 'workflow_runner') or self.workflow_runner is None:
+                print(f"[GUI] No workflow runner available for {job_type} job")
+                return False
+            
+            if sample_id is None:
+                sample_id = Path(sample_dir).name
+            
+            # Check if it's a Simple workflow or Ray workflow
+            if hasattr(self.workflow_runner, 'submit_sample_job'):
+                # Simple workflow
+                return self.workflow_runner.submit_sample_job(sample_dir, job_type, sample_id)
+            elif hasattr(self.workflow_runner, 'manager') and hasattr(self.workflow_runner.manager, 'submit_sample_job'):
+                # Ray workflow - this is more complex, so we'll provide a fallback
+                print(f"[GUI] Ray workflow detected for {job_type} job - manual submission not yet supported")
+                return False
+            else:
+                print(f"[GUI] Unknown workflow type for {job_type} job")
+                return False
+                
+        except Exception as e:
+            print(f"[GUI] Failed to submit {job_type} job for sample {sample_id}: {e}")
+            return False
 
 
 def launch_gui(

@@ -82,9 +82,13 @@ except Exception:
     _cnv_handler = None
 
 try:
-    from littlejohn.analysis.target_analysis import target_handler as _target_handler
+    from littlejohn.analysis.target_analysis import (
+        target_handler as _target_handler,
+        igv_bam_handler as _igv_bam_handler,
+    )
 except Exception:
     _target_handler = None
+    _igv_bam_handler = None
 
 try:
     from littlejohn.analysis.fusion_analysis import fusion_handler as _fusion_handler
@@ -208,7 +212,7 @@ QUEUE_TO_TYPES: Dict[str, Set[str]] = {
     "target": {"target"},
     "fusion": {"fusion"},
     "classification": {"sturgeon", "nanodx", "pannanodx"},
-    "slow": {"random_forest"},
+    "slow": {"random_forest", "igv_bam"},
 }
 
 TRIGGERS: Dict[str, List[str]] = {
@@ -216,6 +220,8 @@ TRIGGERS: Dict[str, List[str]] = {
     "preprocessing": ["bed_conversion", "mgmt", "cnv", "target", "fusion"],
     # bed_conversion -> classifiers
     "bed_conversion": ["sturgeon", "nanodx", "pannanodx", "random_forest"],
+    # Build IGV-ready BAM after target analysis
+    "target": ["igv_bam"],
 }
 
 # Per-sample de-duplication to avoid output races. Ensure only one job of these types
@@ -246,6 +252,7 @@ RESOURCE_HINTS: Dict[str, Dict[str, Any]] = {
     "nanodx": {"num_cpus": 1},
     "pannanodx": {"num_cpus": 1},
     "random_forest": {"num_cpus": 1},
+    "igv_bam": {"num_cpus": 1},
 }
 
 # ---------- Utilities ----------
@@ -476,6 +483,7 @@ class Coordinator:
             ("nanodx", nanodx_handler_remote),
             ("pannanodx", pannanodx_handler_remote),
             ("random_forest", random_forest_handler_remote),
+            ("igv_bam", ray.remote(_wrap_real_handler(_igv_bam_handler, "igv_bam"))),
         ]
 
         preset = (self.preset or "").lower().strip()
@@ -689,6 +697,56 @@ class Coordinator:
                 ref = proc.process.remote(job)
                 self._inflight[ref] = job
             self.inflight_by_type[job.job_type] = inflight_for_type + 1
+
+    async def submit_sample_job(
+        self, sample_dir: str, job_type: str, sample_id: str = None
+    ) -> bool:
+        """
+        Submit a job for an existing sample directory.
+        
+        This allows users to manually trigger specific job types for samples
+        that have already been processed or need reprocessing.
+        
+        Args:
+            sample_dir: Path to the sample directory
+            job_type: Type of job to run (e.g., 'igv_bam')
+            sample_id: Optional sample ID (defaults to directory name)
+            
+        Returns:
+            True if job was successfully submitted, False otherwise
+        """
+        try:
+            if sample_id is None:
+                sample_id = Path(sample_dir).name
+            
+            # Create a context for this sample
+            context = WorkflowContext(
+                filepath=sample_dir,
+                metadata={
+                    "sample_id": sample_id,
+                    "sample_dir": sample_dir,
+                    "bam_metadata": {"sample_id": sample_id}
+                }
+            )
+            
+            # Create a job
+            job = Job(
+                job_id=next(_job_id_counter),
+                job_type=job_type,
+                queue="slow",  # IGV BAM jobs go to slow queue
+                workflow=[f"slow:{job_type}"],
+                step=0,
+                context=context
+            )
+            
+            # Submit the job
+            await self.submit_jobs([job])
+            
+            return True
+            
+        except Exception as e:
+            print(f"[RayWorkflow] Failed to submit {job_type} job for sample {sample_id}: {e}")
+            return False
 
     async def _on_finish(
         self, job: Job, ok: bool, ctx: WorkflowContext, err: Optional[str]
