@@ -1172,7 +1172,7 @@ def target_handler(job, work_dir=None):
         logger.error(error_details)
 
 
-def ensure_sorted_igv_bam(sample_dir: str, threads: int = 4) -> str:
+def ensure_sorted_igv_bam(sample_dir: str, threads: int = 4, force_regenerate: bool = False) -> str:
     """
     Ensure an IGV-ready coordinate-sorted and indexed BAM exists for a sample.
 
@@ -1184,7 +1184,8 @@ def ensure_sorted_igv_bam(sample_dir: str, threads: int = 4) -> str:
     Args:
         sample_dir: Path to the sample output directory.
         threads: Number of threads to pass to pysam.sort.
-
+        force_regenerate: If True, force recreation even if output exists.
+        
     Returns:
         The path to the sorted BAM file (empty string on failure).
     """
@@ -1198,7 +1199,9 @@ def ensure_sorted_igv_bam(sample_dir: str, threads: int = 4) -> str:
         # Preferred IGV-ready path
         out_bam = os.path.join(igv_dir, "igv_ready.bam")
         out_bai = f"{out_bam}.bai"
-        if os.path.exists(out_bam) and os.path.exists(out_bai):
+        
+        # Check if files exist and force_regenerate is not set
+        if not force_regenerate and os.path.exists(out_bam) and os.path.exists(out_bai):
             logger.info(f"IGV BAM already present: {out_bam}")
             return out_bam
 
@@ -1249,16 +1252,34 @@ def igv_bam_handler(job, work_dir: Optional[str] = None) -> None:
         sid = job.context.get_sample_id() if hasattr(job.context, "get_sample_id") else "unknown"
         base = work_dir or job.context.metadata.get("work_dir")
         sample_dir = None
+        
+        logger.info(f"IGV BAM job: sample_id={sid}, work_dir={work_dir}, base={base}")
+        
         if base and sid and sid != "unknown":
             sample_dir = os.path.join(base, sid)
+            logger.info(f"Using work_dir + sample_id path: {sample_dir}")
         else:
             # Fallback: directory of the current file
             sample_dir = os.path.dirname(job.context.filepath)
+            logger.info(f"Using fallback path: {sample_dir}")
+        
+        # Additional fallback: if the filepath is already a sample directory, use it directly
+        if os.path.isdir(job.context.filepath):
+            sample_dir = job.context.filepath
+            logger.info(f"Using filepath directly as sample directory: {sample_dir}")
 
         if not os.path.isdir(sample_dir):
             raise RuntimeError(f"Sample directory not found: {sample_dir}")
-
-        out = ensure_sorted_igv_bam(sample_dir)
+        
+        logger.info(f"Final sample directory: {sample_dir}")
+        logger.info(f"Looking for target.bam in: {os.path.join(sample_dir, 'target.bam')}")
+        
+        # Check if force_regenerate is requested
+        force_regenerate = job.context.metadata.get("force_regenerate", False)
+        if force_regenerate:
+            logger.info("Force regenerate requested - will recreate IGV BAM even if it exists")
+        
+        out = ensure_sorted_igv_bam(sample_dir, force_regenerate=force_regenerate)
         if not out:
             raise RuntimeError("Failed to create IGV-ready BAM")
 

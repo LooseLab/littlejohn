@@ -520,6 +520,7 @@ class Coordinator:
                 "analysis": ["mgmt", "cnv", "target", "fusion"],
                 "classif": ["sturgeon", "nanodx", "pannanodx"],
                 "rf": ["random_forest"],
+                "slow": ["igv_bam"],  # Add slow pool for igv_bam jobs
             }
 
             # Determine concurrency per pool based on preset
@@ -609,6 +610,7 @@ class Coordinator:
             self.using_pools = False
         # start drain loop to observe completions
         try:
+            print(f"[RayWorkflow] Available processors: {list(self.processors.keys())}")
             asyncio.create_task(self._drain_loop())
         except Exception:
             pass
@@ -616,12 +618,14 @@ class Coordinator:
     # ----- submission & lifecycle -----
     async def submit_jobs(self, jobs: List[Job]) -> None:
         for job in jobs:
+            print(f"[RayWorkflow] Submitting job {job.job_id} of type {job.job_type} for sample {job.context.get_sample_id()}")
             sample_id = job.context.get_sample_id()
             if job.job_type in DEDUP_TYPES:
                 key = (sample_id, job.job_type)
                 run = self.running.get(key, 0)
                 pend = self.pending.get(key, 0)
                 if run + pend >= 2 or pend >= 1:
+                    print(f"[RayWorkflow] Skipping {job.job_type} job due to deduplication")
                     self.total_skipped += 1
                     continue
                 self.pending[key] = pend + 1
@@ -632,6 +636,7 @@ class Coordinator:
                 ra = self.running_by_type_sample.get(key_ts, 0)
                 pa = self.pending_by_type_sample.get(key_ts, 0)
                 if (ra + pa) > 0:
+                    print(f"[RayWorkflow] Queuing {job.job_type} job due to per-sample serialization")
                     self.waiting_by_type_sample.setdefault(key_ts, []).append(job)
                     self.pending_by_type_sample[key_ts] = pa + 1
                     continue
@@ -641,7 +646,9 @@ class Coordinator:
             # submit to dedicated job-type processor
             proc = self.processors.get(job.job_type)
             if proc is None:
+                print(f"[RayWorkflow] No processor found for job type {job.job_type}")
                 continue
+            print(f"[RayWorkflow] Found processor {proc} for job type {job.job_type}")
             # Backpressure: if too many outstanding for this type, queue locally
             inflight_for_type = int(self.inflight_by_type.get(job.job_type, 0))
             if inflight_for_type >= self.max_inflight_per_type:
@@ -699,7 +706,7 @@ class Coordinator:
             self.inflight_by_type[job.job_type] = inflight_for_type + 1
 
     async def submit_sample_job(
-        self, sample_dir: str, job_type: str, sample_id: str = None
+        self, sample_dir: str, job_type: str, sample_id: str = None, force_regenerate: bool = False
     ) -> bool:
         """
         Submit a job for an existing sample directory.
@@ -711,6 +718,7 @@ class Coordinator:
             sample_dir: Path to the sample directory
             job_type: Type of job to run (e.g., 'igv_bam')
             sample_id: Optional sample ID (defaults to directory name)
+            force_regenerate: If True, force regeneration even if output exists
             
         Returns:
             True if job was successfully submitted, False otherwise
@@ -725,6 +733,8 @@ class Coordinator:
                 metadata={
                     "sample_id": sample_id,
                     "sample_dir": sample_dir,
+                    "work_dir": os.path.dirname(sample_dir),  # Set the work_dir to parent directory
+                    "force_regenerate": force_regenerate,  # Add force_regenerate flag
                     "bam_metadata": {"sample_id": sample_id}
                 }
             )
@@ -733,7 +743,7 @@ class Coordinator:
             job = Job(
                 job_id=next(_job_id_counter),
                 job_type=job_type,
-                queue="slow",  # IGV BAM jobs go to slow queue
+                origin="manual",  # Use 'origin' instead of 'queue'
                 workflow=[f"slow:{job_type}"],
                 step=0,
                 context=context
@@ -1648,6 +1658,36 @@ class RayFileWatcher(FileSystemEventHandler):
             self._flush_if_needed(force=True)
 
 
+# Global coordinator reference for external access
+_GLOBAL_COORDINATOR = None
+
+async def _get_coordinator():
+    """Get the global coordinator reference for external job submission."""
+    global _GLOBAL_COORDINATOR
+    if _GLOBAL_COORDINATOR is None:
+        # Try to get the coordinator by name if it exists
+        try:
+            _GLOBAL_COORDINATOR = ray.get_actor("littlejohn_coordinator")
+        except Exception:
+            pass
+    return _GLOBAL_COORDINATOR
+
+def get_coordinator_sync():
+    """Get the global coordinator reference synchronously."""
+    global _GLOBAL_COORDINATOR
+    if _GLOBAL_COORDINATOR is None:
+        # Try to get the coordinator by name if it exists
+        try:
+            _GLOBAL_COORDINATOR = ray.get_actor("littlejohn_coordinator")
+        except Exception:
+            pass
+    return _GLOBAL_COORDINATOR
+
+def set_coordinator(coord):
+    """Set the global coordinator reference from outside."""
+    global _GLOBAL_COORDINATOR
+    _GLOBAL_COORDINATOR = coord
+
 async def run(
     plan: List[str],
     paths: List[str],
@@ -1661,6 +1701,7 @@ async def run(
     work_dir: Optional[str] = None,
     log_level: str = "INFO",
     preset: Optional[str] = None,
+    workflow_runner: Any = None,
 ):
     global GLOBAL_LOG_LEVEL
     GLOBAL_LOG_LEVEL = (log_level or "INFO").upper()
@@ -1682,6 +1723,11 @@ async def run(
         coord = Coordinator.options(name="littlejohn_coordinator").remote(
             analysis_workers=analysis_workers, preset=preset
         )
+    
+    # Set global coordinator reference for external access
+    global _GLOBAL_COORDINATOR
+    _GLOBAL_COORDINATOR = coord
+    
     # run async setup without blocking the event loop
     try:
         await coord.setup.remote()
@@ -1728,7 +1774,7 @@ async def run(
             print("GUI not launched: --work-dir not provided.")
         else:
             launcher = _gui_launch(
-                workflow_runner=None, workflow_steps=plan, monitored_directory=work_dir
+                workflow_runner=workflow_runner, workflow_steps=plan, monitored_directory=work_dir
             )
             try:
                 url = (
@@ -2049,6 +2095,7 @@ if __name__ == "__main__":
                 ignore_patterns=args.ignore,
                 recursive=not args.no_recursive,
                 preset=args.preset,
+                workflow_runner=None,
             )
         )
     except KeyboardInterrupt:
