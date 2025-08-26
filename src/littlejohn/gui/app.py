@@ -35,6 +35,7 @@ def launch_gui(
         )
 
     launcher = GUILauncher(host, port)
+    
     # Normalize monitored directory to an absolute path to avoid CWD issues
     abs_mon_dir = (
         str(Path(monitored_directory).resolve()) if monitored_directory else ""

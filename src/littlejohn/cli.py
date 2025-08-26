@@ -313,6 +313,7 @@ def _create_ray_workflow_runner(
         class _RayCoreWrapper:
             def __init__(self):
                 self.manager = type("_DummyManager", (), {"get_priority_info": lambda _self: {}})()
+                self.coordinator = None  # Will be set when workflow starts
 
             def register_handler(self, *args, **kwargs):
                 # Handlers are wired inside workflow_ray; keep API parity
@@ -320,6 +321,54 @@ def _create_ray_workflow_runner(
 
             def register_command_handler(self, *args, **kwargs):
                 return None
+
+            def submit_sample_job(self, sample_dir: str, job_type: str, sample_id: str = None, force_regenerate: bool = False) -> bool:
+                """Submit a job for an existing sample directory using Ray workflow."""
+                try:
+                    # Try to get coordinator with retries
+                    import time
+                    from littlejohn import workflow_ray as wrn
+                    
+                    max_retries = 5
+                    retry_delay = 1.0
+                    
+                    for attempt in range(max_retries):
+                        # Try to get coordinator
+                        if self.coordinator is None:
+                            try:
+                                self.coordinator = wrn.get_coordinator_sync()
+                            except Exception:
+                                pass
+                        
+                        if self.coordinator is not None:
+                            break
+                        
+                        if attempt < max_retries - 1:
+                            print(f"[Ray] Coordinator not ready, retrying in {retry_delay}s... (attempt {attempt + 1}/{max_retries})")
+                            time.sleep(retry_delay)
+                            retry_delay *= 1.5  # Exponential backoff
+                    
+                    if self.coordinator is None:
+                        print(f"[Ray] No coordinator available for {job_type} job after {max_retries} attempts")
+                        return False
+                    
+                    # Submit the job using the coordinator
+                    # Ray remote calls are synchronous from the caller's perspective
+                    result = self.coordinator.submit_sample_job.remote(sample_dir, job_type, sample_id, force_regenerate)
+                    
+                    # Wait for the result (this is the actual async part)
+                    import ray
+                    try:
+                        final_result = ray.get(result, timeout=30.0)
+                        print(f"[Ray] Successfully submitted {job_type} job for sample {sample_id or 'unknown'}")
+                        return final_result
+                    except Exception as e:
+                        print(f"[Ray] Job submission failed: {e}")
+                        return False
+                        
+                except Exception as e:
+                    print(f"[Ray] Failed to submit {job_type} job: {e}")
+                    return False
 
             def run_workflow(
                 self,
@@ -332,8 +381,15 @@ def _create_ray_workflow_runner(
                 analysis_workers_local: int,
                 preset: Optional[str] = None,
             ) -> None:
-                asyncio.run(
-                    wrn.run(
+                # Store reference to self for coordinator access
+                self_ref = self
+                
+                async def _run_with_coordinator():
+                    import asyncio
+                    from littlejohn import workflow_ray as wrn
+                    
+                    # Run the workflow first to create the coordinator
+                    await wrn.run(
                         plan=workflow_steps,
                         paths=[str(path)],
                         analysis_workers=analysis_workers_local,
@@ -346,8 +402,19 @@ def _create_ray_workflow_runner(
                         work_dir=None,
                         log_level=log_level_local,
                         preset=preset,
+                        workflow_runner=self_ref,
                     )
-                )
+                    
+                    # After the workflow starts, try to get the coordinator reference
+                    try:
+                        coord = wrn.get_coordinator_sync()
+                        if coord:
+                            self_ref.coordinator = coord
+                            print(f"[Ray] Coordinator reference set for job submission")
+                    except Exception as e:
+                        print(f"[Ray] Warning: Could not set coordinator reference: {e}")
+                
+                asyncio.run(_run_with_coordinator())
 
         click.echo("Using Ray Core distributed workflow (workflow_ray)")
         return _RayCoreWrapper()
@@ -927,6 +994,17 @@ def workflow(
                 queue_priority,
             )
 
+            # Create workflow runner for Ray workflow (needed for GUI integration)
+            runner = _create_workflow_runner(
+                True,  # use_ray=True
+                verbose,
+                analysis_workers,
+                legacy_analysis_queue,
+                log_level,
+                preprocessing_workers=preprocessing_workers,
+                bed_workers=bed_workers,
+            )
+
             # Run Ray Core implementation
             try:
                 import asyncio
@@ -946,6 +1024,7 @@ def workflow(
                         work_dir=str(work_dir) if work_dir else None,
                         log_level=log_level,
                         preset=preset,
+                        workflow_runner=runner,
                     )
                 )
             except KeyboardInterrupt:

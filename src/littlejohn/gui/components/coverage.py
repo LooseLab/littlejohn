@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import time
 
 import natsort
 import numpy as np
@@ -304,79 +305,547 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
     # IGV viewer section
     with ui.card().classes("w-full"):
         ui.label("🧬 IGV").classes("text-lg font-semibold mb-2")
-        igv_div = ui.element("div").classes("w-full h-96 border")
-        igv_status = ui.label("IGV will load once an IGV-ready BAM is available.").classes(
+        igv_div = ui.element("div").classes("w-full h-[600px] border")
+        igv_status = ui.label("Checking for IGV-ready BAM files...").classes(
             "text-sm text-gray-600"
         )
         
+        # IGV state management - prevent unnecessary redraws
+        def _get_igv_state():
+            key = str(sample_dir)
+            if key not in launcher._coverage_state:
+                launcher._coverage_state[key] = {}
+            return launcher._coverage_state[key]
+        
+        def _is_igv_ready():
+            """Check if IGV browser is properly initialized and ready."""
+            state = _get_igv_state()
+            return (
+                state.get("igv_initialized", False) and 
+                state.get("igv_browser_ready", False) and
+                state.get("igv_loaded_bam") is not None
+            )
+        
+        def _set_igv_ready(bam_url: str):
+            """Mark IGV as ready with the current BAM."""
+            state = _get_igv_state()
+            state["igv_initialized"] = True
+            state["igv_browser_ready"] = True
+            state["igv_loaded_bam"] = bam_url
+        
+        def _clear_igv_state():
+            """Reset IGV state to force reinitialization."""
+            state = _get_igv_state()
+            state["igv_initialized"] = False
+            state["igv_browser_ready"] = False
+            state["igv_loaded_bam"] = None
+        
+        # Immediate check for existing IGV BAM files
+        def _check_existing_igv_bam():
+            try:
+                # Only proceed if IGV isn't already ready
+                if _is_igv_ready():
+                    igv_status.set_text("IGV is already loaded and ready.")
+                    return
+                
+                # Determine candidate BAMs (prefer standardized IGV path)
+                igv_dir = sample_dir / "igv"
+                clair_dir = sample_dir / "clair3"
+                candidates = [
+                    igv_dir / "igv_ready.bam",
+                    clair_dir / "sorted_targets_exceeding_rerun.bam",
+                    clair_dir / "sorted_targets_exceeding.bam",
+                    sample_dir / "target.bam",
+                ]
+                
+                bam_path = None
+                for p in candidates:
+                    bai = Path(f"{p}.bai")
+                    if p.exists() and bai.exists():
+                        bam_path = p
+                        break
+                
+                if bam_path is not None:
+                    igv_status.set_text(f"Found existing BAM: {bam_path.name}")
+                    # Trigger immediate IGV loading
+                    ui.timer(0.1, lambda: _load_igv_bam(bam_path), once=True)
+                else:
+                    igv_status.set_text("No IGV-ready BAM found yet (need coordinate-sorted BAM with .bai).")
+                    
+            except Exception as e:
+                igv_status.set_text(f"Error checking for BAM files: {e}")
+        
+        # Function to load BAM into IGV
+        def _load_igv_bam(bam_path: Path):
+            try:
+                # Check if we already have this BAM loaded
+                state = _get_igv_state()
+                bam_url = f"/samples/{sample_dir.name}/{bam_path.name}"
+                if state.get("igv_loaded_bam") == bam_url and _is_igv_ready():
+                    igv_status.set_text(f"BAM {bam_path.name} already loaded in IGV.")
+                    return
+                
+                # Mount directory once
+                if bam_path.parent == sample_dir / "igv":
+                    mount = f"/samples/{sample_dir.name}/igv"
+                elif bam_path.parent == sample_dir / "clair3":
+                    mount = f"/samples/{sample_dir.name}/clair3"
+                else:
+                    mount = f"/samples/{sample_dir.name}"
+                
+                try:
+                    if app is not None:
+                        app.add_static_files(mount, str(bam_path.parent))
+                except Exception:
+                    # Already mounted or in tests without app
+                    pass
 
-
-        async def _trigger_build_sorted_bam() -> None:
+                # Define URLs
+                bam_url = f"{mount}/{bam_path.name}"
+                bai_url = f"{mount}/{bam_path.name}.bai"
+                
+                # Check if we need to create a new browser or just add tracks
+                if not state.get("igv_initialized") or not state.get("igv_browser_ready"):
+                    # Create new IGV browser
+                    js_create = f"""
+                        const el = getElement('{igv_div.id}');
+                        const track = {{ name: '{sample_dir.name}', url: '{bam_url}', indexURL: '{bai_url}', format: 'bam', visibilityWindow: 1000000 }};
+                        const options = {{ genome: 'hg38', locus: 'chr1:1-1', tracks: [track] }};
+                        igv.createBrowser(el, options).then(b => {{ 
+                            window.lj_igv = b; 
+                            window.lj_igv_browser_ready = true;
+                            console.log('IGV browser created successfully');
+                        }});
+                    """
+                    
+                    try:
+                        ui.run_javascript(js_create, timeout=30.0)
+                        _set_igv_ready(bam_url)
+                        igv_status.set_text(f"IGV browser created with {bam_path.name}")
+                    except Exception as e:
+                        igv_status.set_text(f"Failed to create IGV browser: {e}")
+                        _clear_igv_state()
+                else:
+                    # Browser exists, just add/update the track
+                    js_add_track = f"""
+                        if (window.lj_igv && window.lj_igv_browser_ready) {{
+                            // Remove existing track with same name if it exists
+                            const existingTrack = window.lj_igv.findTracksByName('{sample_dir.name}')[0];
+                            if (existingTrack) {{
+                                window.lj_igv.removeTrack(existingTrack);
+                            }}
+                            
+                            // Add new track
+                            const track = {{ name: '{sample_dir.name}', url: '{bam_url}', indexURL: '{bai_url}', format: 'bam', visibilityWindow: 1000000 }};
+                            window.lj_igv.loadTrack(track);
+                            console.log('Track updated in existing IGV browser');
+                        }}
+                    """
+                    
+                    try:
+                        ui.run_javascript(js_add_track, timeout=30.0)
+                        _set_igv_ready(bam_url)
+                        igv_status.set_text(f"Track updated in IGV: {bam_path.name}")
+                    except Exception as e:
+                        igv_status.set_text(f"Failed to update track: {e}")
+                        
+            except Exception as e:
+                igv_status.set_text(f"Error loading IGV: {e}")
+                _clear_igv_state()
+        
+        # Check for existing files immediately
+        ui.timer(0.1, _check_existing_igv_bam, once=True)
+        
+        # Function to refresh IGV BAM check (useful after regeneration)
+        def _refresh_igv_check():
+            try:
+                # Only refresh if IGV isn't ready or if we need to check for new files
+                if _is_igv_ready():
+                    # Check if the current BAM still exists
+                    current_bam = _get_igv_state().get("igv_loaded_bam")
+                    if current_bam:
+                        # Extract filename from URL and check if it still exists
+                        bam_name = current_bam.split("/")[-1]
+                        igv_dir = sample_dir / "igv"
+                        clair_dir = sample_dir / "clair3"
+                        candidates = [
+                            igv_dir / bam_name,
+                            clair_dir / bam_name,
+                            sample_dir / bam_name,
+                        ]
+                        
+                        if any(p.exists() and Path(f"{p}.bai").exists() for p in candidates):
+                            igv_status.set_text("IGV is ready and BAM file is current.")
+                            return
+                
+                # If we get here, we need to refresh
+                _clear_igv_state()
+                _check_existing_igv_bam()
+            except Exception as e:
+                print(f"Error refreshing IGV check: {e}")
+        
+        # Function to clear data tracks from IGV (keeps reference tracks)
+        def _clear_igv_tracks():
+            try:
+                # First check if IGV is actually ready
+                if not _is_igv_ready():
+                    igv_status.set_text("IGV is not ready - cannot clear tracks.")
+                    return
+                
+                # More robust JavaScript to clear tracks
+                js_clear = """
+                    try {
+                        console.log('Attempting to clear IGV tracks...');
+                        console.log('window.lj_igv:', window.lj_igv);
+                        console.log('window.lj_igv_browser_ready:', window.lj_igv_browser_ready);
+                        
+                        if (window.lj_igv) {
+                            // Try different methods to get tracks
+                            let tracks = [];
+                            
+                            // Method 1: Try getTracks() (standard IGV.js API)
+                            if (typeof window.lj_igv.getTracks === 'function') {
+                                tracks = window.lj_igv.getTracks();
+                                console.log('Using getTracks() method, found:', tracks.length);
+                            }
+                            // Method 2: Try findTracksByName (alternative API)
+                            else if (typeof window.lj_igv.findTracksByName === 'function') {
+                                tracks = window.lj_igv.findTracksByName('*');
+                                console.log('Using findTracksByName method, found:', tracks.length);
+                            }
+                            // Method 3: Try accessing tracks property directly
+                            else if (window.lj_igv.tracks && Array.isArray(window.lj_igv.tracks)) {
+                                tracks = window.lj_igv.tracks;
+                                console.log('Using tracks property, found:', tracks.length);
+                            }
+                            // Method 4: Try to enumerate all properties to find tracks
+                            else {
+                                console.log('Available methods on IGV browser:');
+                                for (let prop in window.lj_igv) {
+                                    if (typeof window.lj_igv[prop] === 'function') {
+                                        console.log('Method:', prop);
+                                    }
+                                }
+                                console.log('Available properties on IGV browser:');
+                                for (let prop in window.lj_igv) {
+                                    if (typeof window.lj_igv[prop] !== 'function') {
+                                        console.log('Property:', prop, '=', window.lj_igv[prop]);
+                                    }
+                                }
+                                throw new Error('Could not find tracks using any known method');
+                            }
+                            
+                            if (tracks.length > 0) {
+                                console.log('Found tracks to remove:', tracks.length);
+                                
+                                // Only remove data tracks, keep reference tracks
+                                const tracksToRemove = [];
+                                const tracksToKeep = [];
+                                
+                                tracks.forEach((track, index) => {
+                                    const trackName = track.name || track.id || 'unnamed';
+                                    const trackType = track.type || 'unknown';
+                                    
+                                    // Keep essential IGV reference tracks
+                                    if (trackName === 'ideogram' || 
+                                        trackName === 'ruler' || 
+                                        trackName === 'sequence' ||
+                                        trackName === 'Refseq Select' ||
+                                        trackType === 'ideogram' ||
+                                        trackType === 'ruler' ||
+                                        trackType === 'sequence') {
+                                        tracksToKeep.push(track);
+                                        console.log('Keeping track', index, ':', trackName, '(', trackType, ')');
+                                    } else {
+                                        // This is a data track (BAM, etc.) - remove it
+                                        tracksToRemove.push(track);
+                                        console.log('Will remove track', index, ':', trackName, '(', trackType, ')');
+                                    }
+                                });
+                                
+                                console.log('Tracks to keep:', tracksToKeep.length);
+                                console.log('Tracks to remove:', tracksToRemove.length);
+                                
+                                // Remove only the data tracks
+                                tracksToRemove.forEach((track, index) => {
+                                    try {
+                                        if (typeof window.lj_igv.removeTrack === 'function') {
+                                            window.lj_igv.removeTrack(track);
+                                            console.log('Removed data track:', track.name || track.id || 'unnamed');
+                                        } else {
+                                            console.log('removeTrack method not available');
+                                        }
+                                    } catch (e) {
+                                        console.error('Error removing track:', e);
+                                    }
+                                });
+                                
+                                console.log('Data track removal completed');
+                                
+                                // Force a redraw
+                                if (typeof window.lj_igv.redraw === 'function') {
+                                    window.lj_igv.redraw();
+                                    console.log('Forced IGV redraw');
+                                } else if (typeof window.lj_igv.update === 'function') {
+                                    window.lj_igv.update();
+                                    console.log('Forced IGV update');
+                                } else {
+                                    console.log('No redraw/update method available');
+                                }
+                            } else {
+                                console.log('No tracks found to remove');
+                            }
+                        } else {
+                            console.log('No IGV browser found');
+                        }
+                    } catch (e) {
+                        console.error('Error in track clearing:', e);
+                    }
+                """
+                
+                ui.run_javascript(js_clear, timeout=15.0)
+                
+                # Update status and state
+                igv_status.set_text("IGV data tracks cleared. Reference tracks preserved.")
+                
+                # Don't clear the IGV state - just mark that data tracks are cleared
+                state = _get_igv_state()
+                state["data_tracks_cleared"] = True
+                
+            except Exception as e:
+                igv_status.set_text(f"Error clearing tracks: {e}")
+                print(f"Error in _clear_igv_tracks: {e}")
+        
+        # Function to reload BAM data into existing IGV browser
+        def _reload_bam_track():
+            try:
+                # First check if IGV is actually ready
+                if not _is_igv_ready():
+                    igv_status.set_text("IGV is not ready - cannot reload BAM.")
+                    return
+                
+                # Find the current BAM file
+                state = _get_igv_state()
+                current_bam_url = state.get("igv_loaded_bam")
+                
+                if not current_bam_url:
+                    igv_status.set_text("No BAM file currently loaded - cannot reload.")
+                    return
+                
+                # Extract BAM name for display
+                bam_name = current_bam_url.split("/")[-1]
+                
+                # JavaScript to reload the BAM track
+                js_reload = f"""
+                    try {{
+                        console.log('Attempting to reload BAM track...');
+                        console.log('BAM URL:', '{current_bam_url}');
+                        
+                        if (window.lj_igv) {{
+                            // Create the track configuration
+                            const trackConfig = {{
+                                name: '{bam_name}',
+                                url: '{current_bam_url}',
+                                indexURL: '{current_bam_url}.bai',
+                                format: 'bam',
+                                visibilityWindow: 1000000,
+                                type: 'alignment'
+                            }};
+                            
+                            console.log('Track config:', trackConfig);
+                            
+                            // Add the track to the browser
+                            if (typeof window.lj_igv.loadTrack === 'function') {{
+                                window.lj_igv.loadTrack(trackConfig);
+                                console.log('BAM track reloaded successfully');
+                            }} else {{
+                                console.log('loadTrack method not available');
+                                // Try alternative method
+                                if (typeof window.lj_igv.addTrack === 'function') {{
+                                    window.lj_igv.addTrack(trackConfig);
+                                    console.log('BAM track added using addTrack method');
+                                }} else {{
+                                    throw new Error('No track loading method available');
+                                }}
+                            }}
+                            
+                            // Force a redraw
+                            if (typeof window.lj_igv.redraw === 'function') {{
+                                window.lj_igv.redraw();
+                                console.log('Forced IGV redraw after reload');
+                            }} else if (typeof window.lj_igv.update === 'function') {{
+                                window.lj_igv.update();
+                                console.log('Forced IGV update after reload');
+                            }}
+                        }} else {{
+                            console.log('No IGV browser found');
+                        }}
+                    }} catch (e) {{
+                        console.error('Error reloading BAM track:', e);
+                    }}
+                """
+                
+                ui.run_javascript(js_reload, timeout=20.0)
+                
+                # Update status
+                igv_status.set_text(f"Reloading BAM track: {bam_name}")
+                
+                # Mark that data tracks are no longer cleared
+                state["data_tracks_cleared"] = False
+                
+            except Exception as e:
+                igv_status.set_text(f"Error reloading BAM: {e}")
+                print(f"Error in _reload_bam_track: {e}")
+        
+        # Function to debug IGV state
+        def _debug_igv_state():
+            try:
+                js_debug = """
+                    console.log('=== IGV Debug Info ===');
+                    console.log('window.lj_igv:', window.lj_igv);
+                    console.log('window.lj_igv_browser_ready:', window.lj_igv_browser_ready);
+                    
+                    if (window.lj_igv) {
+                        console.log('IGV browser exists');
+                        console.log('Browser type:', typeof window.lj_igv);
+                        console.log('Available methods:', Object.getOwnPropertyNames(window.lj_igv));
+                        
+                        // Try different methods to get tracks
+                        let tracks = [];
+                        let methodUsed = 'none';
+                        
+                        if (typeof window.lj_igv.getTracks === 'function') {
+                            tracks = window.lj_igv.getTracks();
+                            methodUsed = 'getTracks()';
+                        } else if (typeof window.lj_igv.findTracksByName === 'function') {
+                            tracks = window.lj_igv.findTracksByName('*');
+                            methodUsed = 'findTracksByName()';
+                        } else if (window.lj_igv.tracks && Array.isArray(window.lj_igv.tracks)) {
+                            tracks = window.lj_igv.tracks;
+                            methodUsed = 'tracks property';
+                        }
+                        
+                        console.log('Method used to get tracks:', methodUsed);
+                        console.log('Current tracks:', tracks.length);
+                        
+                        if (tracks.length > 0) {
+                            tracks.forEach((track, i) => {
+                                console.log(`Track ${i}:`, {
+                                    name: track.name || 'unnamed',
+                                    id: track.id || 'no-id',
+                                    type: track.type || 'unknown-type',
+                                    visible: track.visible !== undefined ? track.visible : 'unknown'
+                                });
+                            });
+                        }
+                        
+                        // Check for common IGV methods
+                        const commonMethods = ['getTracks', 'findTracksByName', 'removeTrack', 'addTrack', 'redraw', 'update'];
+                        console.log('Available common methods:');
+                        commonMethods.forEach(method => {
+                            console.log(`  ${method}:`, typeof window.lj_igv[method] === 'function' ? '✓' : '✗');
+                        });
+                        
+                    } else {
+                        console.log('No IGV browser found');
+                    }
+                    
+                    // Check Python state
+                    console.log('Python state check requested');
+                """
+                
+                ui.run_javascript(js_debug, timeout=10.0)
+                
+                # Also show Python state
+                state = _get_igv_state()
+                debug_info = f"Python IGV State: initialized={state.get('igv_initialized')}, browser_ready={state.get('igv_browser_ready')}, bam={state.get('igv_loaded_bam')}, tracks_cleared={state.get('tracks_cleared')}"
+                igv_status.set_text(debug_info)
+                print(debug_info)
+                
+            except Exception as e:
+                igv_status.set_text(f"Debug error: {e}")
+                print(f"Error in debug: {e}")
+        
+        # IGV control buttons
+        with ui.row().classes("items-center gap-2 mt-2"):
+            ui.button("🔄 Refresh IGV Check", on_click=_refresh_igv_check)
+            ui.button("Clear Data Tracks", on_click=_clear_igv_tracks)
+            ui.button("📁 Reload BAM", on_click=_reload_bam_track)
+            ui.button("🐛 Debug IGV", on_click=_debug_igv_state)
+        
+        # BAM generation buttons
+        async def _trigger_build_sorted_bam(force_regenerate: bool = False) -> None:
             try:
                 # Debug: Check what's in the launcher
-                debug_info = f"Launcher type: {type(launcher).__name__}"
-                if hasattr(launcher, 'workflow_runner'):
-                    debug_info += f", Has workflow_runner: {launcher.workflow_runner is not None}"
-                    if launcher.workflow_runner is not None:
-                        debug_info += f", Runner type: {type(launcher.workflow_runner).__name__}"
-                else:
-                    debug_info += ", No workflow_runner attribute"
+                debug_info = f"launcher type: {type(launcher)}, workflow_runner: {getattr(launcher, 'workflow_runner', 'None')}"
+                
+                if force_regenerate:
+                    ui.notify(f"Force regenerate mode: will recreate IGV BAM even if it exists", type="info")
+                
+                # Check if target.bam exists (required for IGV BAM generation)
+                target_bam = sample_dir / "target.bam"
+                if not target_bam.exists():
+                    ui.notify("No target.bam file found. Please run target analysis first.", type="warning")
+                    return
+                
+                # Check if IGV BAM already exists (only for normal generation, not force regenerate)
+                igv_bam = sample_dir / "igv" / "igv_ready.bam"
+                if not force_regenerate and igv_bam.exists() and (sample_dir / "igv" / "igv_ready.bam.bai").exists():
+                    ui.notify("IGV BAM already exists and is ready.", type="positive")
+                    return
+                
+                if force_regenerate:
+                    ui.notify(f"Proceeding with force regenerate - existing files will be overwritten", type="info")
                 
                 # Check if we have a workflow runner
-                if hasattr(launcher, 'workflow_runner') and launcher.workflow_runner:
-                    # Check if the target.bam file exists
-                    target_bam = sample_dir / "target.bam"
-                    if not target_bam.exists():
-                        ui.notify("No target.bam file found. Please run target analysis first.", type="warning")
-                        return
-                    
-                    # Check if IGV BAM already exists
-                    igv_bam = sample_dir / "igv" / "igv_ready.bam"
-                    if igv_bam.exists() and (sample_dir / "igv" / "igv_ready.bam.bai").exists():
-                        ui.notify("IGV BAM already exists and is ready.", type="positive")
-                        return
-                    
-                    # Submit the IGV BAM generation job to the workflow system
-                    try:
-                        runner = launcher.workflow_runner
-                        sample_id = sample_dir.name
-                        
-                        # Check if it's a Ray workflow or Simple workflow
-                        if hasattr(runner, 'submit_sample_job'):
-                            # Simple workflow
-                            success = runner.submit_sample_job(str(sample_dir), 'igv_bam', sample_id)
-                        elif hasattr(runner, 'manager') and hasattr(runner.manager, 'submit_sample_job'):
-                            # Ray workflow - need to get the coordinator
-                            # This is more complex for Ray, so we'll provide a fallback
-                            ui.notify(
-                                "Ray workflow detected. IGV BAM generation should happen automatically "
-                                "after target analysis completes. If you need to regenerate it, "
-                                "please restart the workflow or check the logs.", 
-                                type="info"
-                            )
-                            return
-                        else:
-                            ui.notify("Unknown workflow type. Cannot submit IGV BAM job.", type="warning")
-                            return
-                        
-                        if success:
-                            ui.notify("IGV BAM generation job submitted to workflow queue!", type="positive")
-                        else:
-                            ui.notify("Failed to submit IGV BAM generation job. Check logs for details.", type="warning")
-                            
-                    except Exception as e:
-                        ui.notify(f"Error submitting IGV BAM job: {e}", type="negative")
-                        
-                else:
+                if not hasattr(launcher, 'workflow_runner') or not launcher.workflow_runner:
                     ui.notify(f"No workflow runner available. Debug: {debug_info}. GUI is running but workflow integration is not available. This may be a configuration issue.", type="warning")
+                    return
+                
+                # Submit the IGV BAM generation job to the workflow system
+                try:
+                    runner = launcher.workflow_runner
+                    sample_id = sample_dir.name
+                    
+                    # Check if it's a Ray workflow or Simple workflow
+                    if hasattr(runner, 'submit_sample_job'):
+                        # Simple workflow
+                        success = runner.submit_sample_job(str(sample_dir), 'igv_bam', sample_id, force_regenerate)
+                    elif hasattr(runner, 'manager') and hasattr(runner.manager, 'submit_sample_job'):
+                        # Ray workflow - need to get the coordinator
+                        # This is more complex for Ray, so we'll provide a fallback
+                        ui.notify(
+                            "Ray workflow detected. IGV BAM generation should happen automatically "
+                            "after target analysis completes. If you need to regenerate it, "
+                            "please restart the workflow or check the logs.", 
+                            type="info"
+                        )
+                        return
+                    else:
+                        ui.notify("Unknown workflow type. Cannot submit IGV BAM job.", type="warning")
+                        return
+                    
+                    if success:
+                        action = "regenerated" if force_regenerate else "generated"
+                        ui.notify(f"IGV BAM {action} job submitted to workflow queue!", type="positive")
+                        # Refresh the IGV check after successful job submission
+                        _refresh_igv_check()
+                    else:
+                        ui.notify("Failed to submit IGV BAM generation job. Check logs for details.", type="warning")
+                        
+                except Exception as e:
+                    ui.notify(f"Error submitting IGV BAM job: {e}", type="negative")
+                    
             except Exception as e:
                 try:
                     ui.notify(f"Error checking IGV BAM status: {e}", type="negative")
                 except Exception:
                     # Client may have disconnected, ignore UI errors
                     pass
+        
         with ui.row().classes("items-center gap-2 mt-2"):
-            ui.button("Generate IGV BAM", on_click=_trigger_build_sorted_bam)
+            ui.button("Generate IGV BAM (if missing)", on_click=_trigger_build_sorted_bam)
+            ui.button("Force Regenerate IGV BAM", on_click=lambda: _trigger_build_sorted_bam(force_regenerate=True))
 
     # Helpers
     def _log_notify(message: str, level: str = "warning", notify: bool = False) -> None:
@@ -744,77 +1213,42 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     notify=False,
                 )
             launcher._coverage_state[key] = state
-            # IGV auto-init and auto-load when BAM becomes available (UI-only, light work)
+            
+            # IGV management - only update if necessary
             try:
-                # Determine candidate BAMs (prefer standardized IGV path)
-                igv_dir = sample_dir / "igv"
-                clair_dir = sample_dir / "clair3"
-                candidates = [
-                    igv_dir / "igv_ready.bam",
-                    clair_dir / "sorted_targets_exceeding_rerun.bam",
-                    clair_dir / "sorted_targets_exceeding.bam",
-                    sample_dir / "target.bam",
-                ]
-                bam_path = None
-                for p in candidates:
-                    bai = Path(f"{p}.bai")
-                    if p.exists() and bai.exists():
-                        bam_path = p
-                        break
-
-                # Mount directory once
-                if bam_path is not None and app is not None:
-                    if bam_path.parent == igv_dir:
-                        mount = f"/samples/{sample_dir.name}/igv"
-                    elif bam_path.parent == clair_dir:
-                        mount = f"/samples/{sample_dir.name}/clair3"
-                    else:
-                        mount = f"/samples/{sample_dir.name}"
-                    try:
-                        app.add_static_files(mount, str(bam_path.parent))
-                    except Exception:
-                        # Already mounted or in tests without app
-                        pass
-
-                    # Define URLs first
-                    bam_url = f"{mount}/{bam_path.name}"
-                    bai_url = f"{mount}/{bam_path.name}.bai"
+                # Check if IGV needs attention (only if not already ready)
+                if not _is_igv_ready():
+                    # Look for available BAM files
+                    igv_dir = sample_dir / "igv"
+                    clair_dir = sample_dir / "clair3"
+                    candidates = [
+                        igv_dir / "igv_ready.bam",
+                        clair_dir / "sorted_targets_exceeding_rerun.bam",
+                        clair_dir / "sorted_targets_exceeding.bam",
+                        sample_dir / "target.bam",
+                    ]
                     
-                    # Initialize IGV once per page (include track immediately to avoid race)
-                    if not state.get("igv_initialized"):
-                        js_create = f"""
-                            const el = getElement('{igv_div.id}');
-                            const track = {{ name: '{sample_dir.name}', url: '{bam_url}', indexURL: '{bai_url}', format: 'bam', visibilityWindow: 1000000 }};
-                            const options = {{ genome: 'hg38', locus: 'chr1:1-1', tracks: [track] }};
-                            igv.createBrowser(el, options).then(b => {{ window.lj_igv = b; }});
-                        """
-                        try:
-                            ui.run_javascript(js_create, timeout=30.0)
-                            state["igv_initialized"] = True
-                            igv_status.set_text("IGV initialised.")
-                        except Exception:
-                            pass
-
-                    # Load/refresh BAM track if changed
-                    if state.get("igv_initialized") and state.get("igv_loaded_bam") != bam_url:
-                        js_track = f"""
-                            if (window.lj_igv) {{
-                                const name = '{sample_dir.name}';
-                                const track = {{ name, url: '{bam_url}', indexURL: '{bai_url}', format: 'bam', visibilityWindow: 1000000 }};
-                                window.lj_igv.loadTrack(track);
-                            }}
-                        """
-                        try:
-                            ui.run_javascript(js_track, timeout=60.0)
-                            state["igv_loaded_bam"] = bam_url
-                            igv_status.set_text("BAM loaded in IGV.")
-                        except Exception:
-                            pass
+                    bam_path = None
+                    for p in candidates:
+                        bai = Path(f"{p}.bai")
+                        if p.exists() and bai.exists():
+                            bam_path = p
+                            break
+                    
+                    if bam_path is not None:
+                        # Found a BAM file, trigger IGV loading
+                        ui.timer(0.1, lambda: _load_igv_bam(bam_path), once=True)
                 else:
-                    try:
-                        igv_status.set_text("No IGV-viewable BAM found yet (need coordinate-sorted BAM with .bai).")
-                    except Exception:
-                        pass
+                    # IGV is ready, just update status occasionally
+                    if state.get("last_igv_status_update", 0) < time.time() - 60:  # Update status every minute
+                        try:
+                            igv_status.set_text("IGV is ready and loaded.")
+                            state["last_igv_status_update"] = time.time()
+                        except Exception:
+                            pass
+            except Exception:
+                # Never let IGV logic break coverage refresh
+                pass
                 
 
             except Exception:

@@ -123,10 +123,6 @@ class GUILauncher:
         self.workflow_runner = workflow_runner
         self.workflow_steps = workflow_steps or []
         
-        # Debug logging
-        print(f"[GUI] Workflow runner set: {workflow_runner is not None}")
-        if workflow_runner is not None:
-            print(f"[GUI] Workflow runner type: {type(workflow_runner).__name__}")
         # Store absolute monitored directory to avoid relative path issues
         try:
             self.monitored_directory = (
@@ -744,6 +740,7 @@ class GUILauncher:
                     ui.label("📋 All Tracked Samples").classes(
                         "text-lg font-semibold mb-4"
                     )
+                    
                     # Filters row
                     with ui.row().classes("items-center gap-2 mb-2"):
 
@@ -1085,6 +1082,8 @@ class GUILauncher:
                             # No selection behavior needed; per-row buttons handle navigation
                         except Exception:
                             pass
+                    
+
 
     def _update_samples_table(self, data: Dict[str, Any]):
         """Update the samples overview table with new data."""
@@ -1092,6 +1091,7 @@ class GUILauncher:
             if not hasattr(self, "samples_table"):
                 return
             samples = data.get("samples", [])
+            
             # Deduplicate by sample_id taking the newest last_seen
             by_id: Dict[str, Dict[str, Any]] = {}
             for s in samples:
@@ -1182,6 +1182,7 @@ class GUILauncher:
             # Replace rows to avoid duplicates then apply filters
             self._last_samples_rows = rows
             self._apply_samples_table_filters()
+            
             # Update known IDs from unfiltered cache
             self._known_sample_ids = {
                 r.get("sample_id")
@@ -1199,7 +1200,6 @@ class GUILauncher:
                 self._current_sample_id = rows_sorted[0].get("sample_id")
         except Exception as e:
             logging.debug(f"Error updating samples table: {e}")
-
 
     # -------- Samples table helpers: search, filter, sort --------
     def _format_timestamp_for_display(self, value: Any) -> str:
@@ -1226,6 +1226,7 @@ class GUILauncher:
                 return str(value)
             except Exception:
                 return ""
+                
     def _normalize_rows_for_display(
         self, rows: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
@@ -1473,245 +1474,273 @@ class GUILauncher:
                         "Generate Report", on_click=confirm_report_generation
                     ).classes("object-right ml-auto text-sm font-semibold px-3 py-1 rounded")
 
+            # Main content area with loading state
             with ui.column().classes("w-full p-4 gap-4"):
-                # Summary section (new component)
-                try:
-                    from .gui.components.summary import add_summary_section  # type: ignore
-
-                    add_summary_section(sample_dir, sample_id)
-                except Exception as e:
-                    logging.exception(f"[GUI] Summary section failed: {e}")
+                # Loading container that will be hidden when data is ready
+                loading_container = ui.column().classes("w-full items-center justify-center p-8")
+                with loading_container:
+                    ui.spinner('bars', size='4em').classes("mb-4")
+                    ui.label("Loading sample data...").classes("text-lg text-gray-600")
+                    ui.label("This may take a moment for large datasets").classes("text-sm text-gray-500")
+                
+                # Content container that will be shown when data is ready
+                content_container = ui.column().classes("w-full gap-4").style("display: none")
+                
+                with content_container:
+                    # Summary section (new component)
                     try:
-                        ui.notify(f"Summary section failed: {e}", type="warning")
-                    except Exception:
-                        pass
+                        from .gui.components.summary import add_summary_section  # type: ignore
 
-                # Classification section (refactored component)
-                try:
-                    from .gui.components.classification import add_classification_section  # type: ignore
-
-                    add_classification_section(sample_dir)
-                except Exception as e:
-                    logging.exception(f"[GUI] Classification section failed: {e}")
-                    try:
-                        ui.notify(f"Classification section failed: {e}", type="warning")
-                    except Exception:
-                        pass
-
-                # Coverage section (refactored component)
-                try:
-                    from .gui.components.coverage import add_coverage_section  # type: ignore
-
-                    add_coverage_section(self, sample_dir)
-                except Exception as e:
-                    try:
-                        ui.notify(f"Coverage section failed: {e}", type="warning")
-                    except Exception:
-                        pass
-
-                # MGMT section (refactored component)
-                try:
-                    from .gui.components.mgmt import add_mgmt_section  # type: ignore
-
-                    add_mgmt_section(self, sample_dir)
-                except Exception as e:
-                    logging.exception(f"[GUI] MGMT section failed: {e}")
-                    try:
-                        ui.notify(f"MGMT section failed: {e}", type="warning")
-                    except Exception:
-                        pass
-
-                # CNV section (refactored component)
-                try:
-                    from .gui.components.cnv import add_cnv_section  # type: ignore
-
-                    # Pass launcher for shared state access (launcher._cnv_state)
-                    add_cnv_section(self, sample_dir)
-                except Exception as e:
-                    logging.exception(f"[GUI] CNV section failed: {e}")
-                    try:
-                        ui.notify(f"CNV section failed: {e}", type="warning")
-                    except Exception:
-                        pass
-
-                # Fusion section (target and genome-wide; excludes full SV UI)
-                try:
-                    from .gui.components.fusion import add_fusion_section  # type: ignore
-
-                    add_fusion_section(self, sample_dir)
-                except Exception as e:
-                    logging.exception(f"[GUI] Fusion section failed: {e}")
-                    try:
-                        ui.notify(f"Fusion section failed: {e}", type="warning")
-                    except Exception:
-                        pass
-
-                # Files in output directory
-                with ui.card().classes("w-full"):
-                    ui.label("📁 Output Files").classes("text-lg font-semibold mb-2")
-                    with ui.row().classes("items-center gap-3 mb-2"):
-                        files_search = ui.input("Search files…").props(
-                            "borderless dense clearable"
-                        )
-                    from littlejohn.gui.theme import styled_table
-                    _files_container, files_table = styled_table(
-                        columns=[
-                            {
-                                "name": "name",
-                                "label": "File",
-                                "field": "name",
-                                "sortable": True,
-                            },
-                            {
-                                "name": "size",
-                                "label": "Size (bytes)",
-                                "field": "size",
-                                "sortable": True,
-                            },
-                            {
-                                "name": "mtime",
-                                "label": "Last Modified",
-                                "field": "mtime",
-                                "sortable": True,
-                            },
-                        ],
-                        rows=[],
-                        pagination=20,
-                        class_size="table-xs",
-                    )
-                    try:
-                        files_table.props(
-                            'multi-sort rows-per-page-options="[10,20,50,0]"'
-                        )
-                        files_search.bind_value(files_table, "filter")
-                    except Exception:
-                        pass
-
-                # master.csv summary
-                with ui.card().classes("w-full"):
-                    ui.label("📊 master.csv Summary").classes(
-                        "text-lg font-semibold mb-2"
-                    )
-                    with ui.row().classes("items-center gap-3 mb-2"):
-                        summary_search = ui.input("Search fields…").props(
-                            "borderless dense clearable"
-                        )
-                    from littlejohn.gui.theme import styled_table
-                    _summary_container, summary_table = styled_table(
-                        columns=[
-                            {
-                                "name": "key",
-                                "label": "Field",
-                                "field": "key",
-                                "sortable": True,
-                            },
-                            {
-                                "name": "value",
-                                "label": "Value",
-                                "field": "value",
-                                "sortable": True,
-                            },
-                        ],
-                        rows=[],
-                        pagination=0,
-                        class_size="table-xs",
-                    )
-                    try:
-                        summary_table.props("multi-sort")
-                        summary_search.bind_value(summary_table, "filter")
-                    except Exception:
-                        pass
-
-            # Periodic refresher for files table and master.csv summary
-            _notify_state = {"files_error": False, "csv_error": False}
-
-            def _refresh_sample_detail() -> None:
-                # Refresh files list
-                try:
-                    rows = []
-                    if sample_dir and sample_dir.exists():
-                        for f in sorted(sample_dir.iterdir()):
-                            if f.is_file():
-                                try:
-                                    stat = f.stat()
-                                    rows.append(
-                                        {
-                                            "name": f.name,
-                                            "size": stat.st_size,
-                                            "mtime": time.strftime(
-                                                "%Y-%m-%d %H:%M:%S",
-                                                time.localtime(stat.st_mtime),
-                                            ),
-                                        }
-                                    )
-                                except Exception:
-                                    continue
-                    files_table.rows = rows
-                    files_table.update()
-                except Exception as e:
-                    if not _notify_state["files_error"]:
+                        add_summary_section(sample_dir, sample_id)
+                    except Exception as e:
+                        logging.exception(f"[GUI] Summary section failed: {e}")
                         try:
-                            ui.notify(
-                                f"Failed to list output files for {sample_id}: {e}",
-                                type="warning",
-                            )
+                            ui.notify(f"Summary section failed: {e}", type="warning")
                         except Exception:
                             pass
-                        _notify_state["files_error"] = True
 
-                # Refresh master.csv summary
-                try:
-                    if sample_dir:
-                        csv_path = sample_dir / "master.csv"
-                        if csv_path.exists():
-                            with csv_path.open("r", newline="") as fh:
-                                reader = csv.DictReader(fh)
-                                first_row = next(reader, None)
-                            if first_row:
-                                preferred_keys = [
-                                    "counter_bam_passed",
-                                    "counter_bam_failed",
-                                    "counter_bases_count",
-                                    "counter_mapped_count",
-                                    "counter_unmapped_count",
-                                    "run_info_run_time",
-                                    "run_info_device",
-                                    "run_info_model",
-                                    "run_info_flow_cell",
-                                    "bam_tracking_counter",
-                                    "bam_tracking_total_files",
-                                ]
-                                rows2 = []
-                                for k in preferred_keys:
-                                    if k in first_row:
-                                        rows2.append(
-                                            {"key": k, "value": first_row.get(k, "")}
+                    # Classification section (refactored component)
+                    try:
+                        from .gui.components.classification import add_classification_section  # type: ignore
+
+                        add_classification_section(sample_dir)
+                    except Exception as e:
+                        logging.exception(f"[GUI] Classification section failed: {e}")
+                        try:
+                            ui.notify(f"Classification section failed: {e}", type="warning")
+                        except Exception:
+                            pass
+
+                    # Coverage section (refactored component)
+                    try:
+                        from .gui.components.coverage import add_coverage_section  # type: ignore
+
+                        add_coverage_section(self, sample_dir)
+                    except Exception as e:
+                        try:
+                            ui.notify(f"Coverage section failed: {e}", type="warning")
+                        except Exception:
+                            pass
+
+                    # MGMT section (refactored component)
+                    try:
+                        from .gui.components.mgmt import add_mgmt_section  # type: ignore
+
+                        add_mgmt_section(self, sample_dir)
+                    except Exception as e:
+                        logging.exception(f"[GUI] MGMT section failed: {e}")
+                        try:
+                            ui.notify(f"MGMT section failed: {e}", type="warning")
+                        except Exception:
+                            pass
+
+                    # CNV section (refactored component)
+                    try:
+                        from .gui.components.cnv import add_cnv_section  # type: ignore
+
+                        # Pass launcher for shared state access (launcher._cnv_state)
+                        add_cnv_section(self, sample_dir)
+                    except Exception as e:
+                        logging.exception(f"[GUI] CNV section failed: {e}")
+                        try:
+                            ui.notify(f"CNV section failed: {e}", type="warning")
+                        except Exception:
+                            pass
+
+                    # Fusion section (target and genome-wide; excludes full SV UI)
+                    try:
+                        from .gui.components.fusion import add_fusion_section  # type: ignore
+
+                        add_fusion_section(self, sample_dir)
+                    except Exception as e:
+                        logging.exception(f"[GUI] Fusion section failed: {e}")
+                        try:
+                            ui.notify(f"Fusion section failed: {e}", type="warning")
+                        except Exception:
+                            pass
+
+                    # Files in output directory
+                    with ui.card().classes("w-full"):
+                        ui.label("📁 Output Files").classes("text-lg font-semibold mb-2")
+                        with ui.row().classes("items-center gap-3 mb-2"):
+                            files_search = ui.input("Search files…").props(
+                                "borderless dense clearable"
+                            )
+                        from littlejohn.gui.theme import styled_table
+                        _files_container, files_table = styled_table(
+                            columns=[
+                                {
+                                    "name": "name",
+                                    "label": "File",
+                                    "field": "name",
+                                    "sortable": True,
+                                },
+                                {
+                                    "name": "size",
+                                    "label": "Size (bytes)",
+                                    "field": "size",
+                                    "sortable": True,
+                                },
+                                {
+                                    "name": "mtime",
+                                    "label": "Last Modified",
+                                    "field": "mtime",
+                                    "sortable": True,
+                                },
+                            ],
+                            rows=[],
+                            pagination=20,
+                            class_size="table-xs",
+                        )
+                        try:
+                            files_table.props(
+                                'multi-sort rows-per-page-options="[10,20,50,0]"'
+                            )
+                            files_search.bind_value(files_table, "filter")
+                        except Exception:
+                            pass
+
+                    # master.csv summary
+                    with ui.card().classes("w-full"):
+                        ui.label("📊 master.csv Summary").classes(
+                            "text-lg font-semibold mb-2"
+                        )
+                        with ui.row().classes("items-center gap-3 mb-2"):
+                            summary_search = ui.input("Search fields…").props(
+                                "borderless dense clearable"
+                            )
+                        from littlejohn.gui.theme import styled_table
+                        _summary_container, summary_table = styled_table(
+                            columns=[
+                                {
+                                    "name": "key",
+                                    "label": "Field",
+                                    "field": "key",
+                                    "sortable": True,
+                                },
+                                {
+                                    "name": "value",
+                                    "label": "Value",
+                                    "field": "value",
+                                    "sortable": True,
+                                },
+                            ],
+                            rows=[],
+                            pagination=0,
+                            class_size="table-xs",
+                        )
+                        try:
+                            summary_table.props("multi-sort")
+                            summary_search.bind_value(summary_table, "filter")
+                        except Exception:
+                            pass
+
+                # Periodic refresher for files table and master.csv summary
+                _notify_state = {"files_error": False, "csv_error": False}
+
+                def _refresh_sample_detail() -> None:
+                    # Refresh files list
+                    try:
+                        rows = []
+                        if sample_dir and sample_dir.exists():
+                            for f in sorted(sample_dir.iterdir()):
+                                if f.is_file():
+                                    try:
+                                        stat = f.stat()
+                                        rows.append(
+                                            {
+                                                "name": f.name,
+                                                "size": stat.st_size,
+                                                "mtime": time.strftime(
+                                                    "%Y-%m-%d %H:%M:%S",
+                                                    time.localtime(stat.st_mtime),
+                                                ),
+                                            }
                                         )
-                                if not rows2:
-                                    rows2 = [
-                                        {"key": k, "value": v}
-                                        for k, v in first_row.items()
-                                    ]
-                                summary_table.rows = rows2
-                                summary_table.update()
-                        else:
-                            summary_table.rows = [
-                                {"key": "Status", "value": "master.csv not found"}
-                            ]
-                            summary_table.update()
-                except Exception as e:
-                    # Avoid breaking the UI; show one-time notification for visibility
-                    if not _notify_state["csv_error"]:
-                        try:
-                            ui.notify(
-                                f"Failed to read master.csv for {sample_id}: {e}",
-                                type="warning",
-                            )
-                        except Exception:
-                            pass
-                        _notify_state["csv_error"] = True
+                                    except Exception:
+                                        continue
+                        files_table.rows = rows
+                        files_table.update()
+                    except Exception as e:
+                        if not _notify_state["files_error"]:
+                            try:
+                                ui.notify(
+                                    f"Failed to list output files for {sample_id}: {e}",
+                                    type="warning",
+                                )
+                            except Exception:
+                                pass
+                            _notify_state["files_error"] = True
 
-            ui.timer(2.0, _refresh_sample_detail, active=True)
+                    # Refresh master.csv summary
+                    try:
+                        if sample_dir:
+                            csv_path = sample_dir / "master.csv"
+                            if csv_path.exists():
+                                with csv_path.open("r", newline="") as fh:
+                                    reader = csv.DictReader(fh)
+                                    first_row = next(reader, None)
+                                if first_row:
+                                    preferred_keys = [
+                                        "counter_bam_passed",
+                                        "counter_bam_failed",
+                                        "counter_bases_count",
+                                        "counter_mapped_count",
+                                        "counter_unmapped_count",
+                                        "run_info_run_time",
+                                        "run_info_device",
+                                        "run_info_model",
+                                        "run_info_flow_cell",
+                                        "bam_tracking_counter",
+                                        "bam_tracking_total_files",
+                                    ]
+                                    rows2 = []
+                                    for k in preferred_keys:
+                                        if k in first_row:
+                                            rows2.append(
+                                                {"key": k, "value": first_row.get(k, "")}
+                                            )
+                                    if not rows2:
+                                        rows2 = [
+                                            {"key": k, "value": v}
+                                            for k, v in first_row.items()
+                                        ]
+                                    summary_table.rows = rows2
+                                    summary_table.update()
+                            else:
+                                summary_table.rows = [
+                                    {"key": "Status", "value": "master.csv not found"}
+                                ]
+                                summary_table.update()
+                    except Exception as e:
+                        if not _notify_state["csv_error"]:
+                            try:
+                                ui.notify(
+                                    f"Failed to read master.csv for {sample_id}: {e}",
+                                    type="warning",
+                                )
+                            except Exception:
+                                pass
+                            _notify_state["csv_error"] = True
+
+                # Show content and hide loading after initial data load
+                def _show_content():
+                    loading_container.style("display: none")
+                    content_container.style("display: flex")
+                
+                # Initial data load with loading state
+                try:
+                    # Use a timer to simulate async loading and then show content
+                    ui.timer(0.1, _show_content, once=True)
+                except Exception:
+                    # Fallback: show content immediately if timer fails
+                    _show_content()
+
+                # Start periodic refresh
+                try:
+                    ui.timer(5.0, _refresh_sample_detail)
+                except Exception:
+                    pass
 
     def _create_workflow_monitor(self):
         """Create the main workflow monitoring page."""
