@@ -91,7 +91,6 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         "grid": {
                             "left": "5%",
                             "right": "5%",
-                            "bottom": "10%",
                             "top": "25%",
                             "containLabel": True,
                         },
@@ -303,34 +302,47 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
     """,
             )
 
-    # IGV viewer section
-    with ui.card().classes("w-full"):
-        ui.label("🧬 IGV").classes("text-lg font-semibold mb-2")
-        igv_div = ui.element("div").classes("w-full h-[600px] border")
-        igv_status = ui.label("Checking for IGV-ready BAM files...").classes(
-            "text-sm text-gray-600"
-        )
-        
-        # Add IGV library status indicator
-        igv_lib_status = ui.label("IGV library: Checking...").classes(
-            "text-xs text-gray-500"
-        )
+            # IGV viewer section
+            with ui.card().classes("w-full"):
+                ui.label("🧬 IGV").classes("text-lg font-semibold mb-2")
+                igv_div = ui.element("div").classes("w-full h-[600px] border")
+                igv_div._props["id"] = "igv-container"
+                igv_status = ui.label("Checking for IGV-ready BAM files...").classes(
+                    "text-sm text-gray-600"
+                )
+            
+            # Add IGV library status indicator
+            igv_lib_status = ui.label("IGV library: Checking...").classes(
+                "text-xs text-gray-500"
+            )
         
         # IGV state management - prevent unnecessary redraws
         def _get_igv_state():
-            key = str(sample_dir)
-            if key not in launcher._coverage_state:
-                launcher._coverage_state[key] = {}
-            return launcher._coverage_state[key]
+            try:
+                key = str(sample_dir)
+                if hasattr(launcher, '_coverage_state'):
+                    if key not in launcher._coverage_state:
+                        launcher._coverage_state[key] = {}
+                    return launcher._coverage_state[key]
+                else:
+                    launcher._coverage_state = {}
+                    launcher._coverage_state[key] = {}
+                    return launcher._coverage_state[key]
+            except Exception as e:
+                # Return empty state as fallback
+                return {}
         
         def _is_igv_ready():
             """Check if IGV browser is properly initialized and ready."""
-            state = _get_igv_state()
-            return (
-                state.get("igv_initialized", False) and 
-                state.get("igv_browser_ready", False) and
-                state.get("igv_loaded_bam") is not None
-            )
+            try:
+                state = _get_igv_state()
+                return (
+                    state.get("igv_initialized", False) and 
+                    state.get("igv_browser_ready", False) and
+                    state.get("igv_loaded_bam") is not None
+                )
+            except Exception as e:
+                return False
         
         def _set_igv_ready(bam_url: str):
             """Mark IGV as ready with the current BAM."""
@@ -384,40 +396,44 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
         # Function to check if IGV library is available
         def _check_igv_library():
             """Check if the IGV JavaScript library is available."""
-            js_check = """
-                try {
-                    if (typeof igv === 'undefined') {
-                        console.error('IGV library not loaded');
-                        return false;
-                    }
-                    
-                    // Check if IGV is fully initialized
-                    if (typeof igv.createBrowser !== 'function') {
-                        console.error('IGV library not fully initialized');
-                        return false;
-                    }
-                    
-                    console.log('IGV library is available and ready');
-                    return true;
-                } catch (e) {
-                    console.error('Error checking IGV library:', e);
-                    return false;
-                }
-            """
             try:
-                result = ui.run_javascript(js_check, timeout=10.0)
-                # Update the status indicator
-                if result:
-                    igv_lib_status.set_text("IGV library: ✓ Loaded and ready")
-                    igv_lib_status.classes("text-xs text-green-600")
-                else:
-                    igv_lib_status.set_text("IGV library: ✗ Not ready")
+                js_check = """
+                    try {
+                        if (typeof igv === 'undefined') {
+                            console.error('IGV library not loaded');
+                            return false;
+                        }
+                        
+                        // Check if IGV is fully initialized
+                        if (typeof igv.createBrowser !== 'function') {
+                            console.error('IGV library not fully initialized');
+                            return false;
+                        }
+                        
+                        console.log('IGV library is available and ready');
+                        return true;
+                    } catch (e) {
+                        console.error('Error checking IGV library:', e);
+                        return false;
+                    }
+                """
+                
+                try:
+                    result = ui.run_javascript(js_check, timeout=10.0)
+                    # Update the status indicator
+                    if result:
+                        igv_lib_status.set_text("IGV library: ✓ Loaded and ready")
+                        igv_lib_status.classes("text-xs text-green-600")
+                    else:
+                        igv_lib_status.set_text("IGV library: ✗ Not ready")
+                        igv_lib_status.classes("text-xs text-red-600")
+                    return result
+                except Exception as e:
+                    igv_lib_status.set_text("IGV library: ✗ Error checking")
                     igv_lib_status.classes("text-xs text-red-600")
-                return result
+                    print(f"Error checking IGV library: {e}")
+                    return False
             except Exception as e:
-                igv_lib_status.set_text("IGV library: ✗ Error checking")
-                igv_lib_status.classes("text-xs text-red-600")
-                print(f"Error checking IGV library: {e}")
                 return False
         
         # Function to retry IGV creation
@@ -433,29 +449,29 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
         # Function to wait for element to be ready
         def _wait_for_element_ready():
             """Wait for the IGV div element to be properly rendered."""
-            js_wait = f"""
-                return new Promise((resolve, reject) => {{
-                    const el = document.getElementById('{igv_div.id}');
-                    if (!el) {{
+            js_wait = """
+                return new Promise((resolve, reject) => {
+                    const el = document.getElementById('igv-container');
+                    if (!el) {
                         reject(new Error('Element not found'));
                         return;
-                    }}
+                    }
                     
-                    if (el.offsetWidth > 0 && el.offsetHeight > 0) {{
+                    if (el.offsetWidth > 0 && el.offsetHeight > 0) {
                         resolve(true);
                         return;
-                    }}
+                    }
                     
                     // Wait for element to be ready
-                    const checkReady = () => {{
-                        if (el.offsetWidth > 0 && el.offsetHeight > 0) {{
+                    const checkReady = () => {
+                        if (el.offsetWidth > 0 && el.offsetHeight > 0) {
                             resolve(true);
-                        }} else {{
+                        } else {
                             setTimeout(checkReady, 100);
-                        }}
-                    }};
+                        }
+                    };
                     checkReady();
-                }});
+                });
             """
             try:
                 return ui.run_javascript(js_wait, timeout=10.0)
@@ -496,6 +512,9 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 bam_url = f"{mount}/{bam_path.name}"
                 bai_url = f"{mount}/{bam_path.name}.bai"
                 
+                print(f"IGV: Loading BAM from {bam_url}")
+                print(f"IGV: BAI index from {bai_url}")
+                
                 # Check if we need to create a new browser or just add tracks
                 if not state.get("igv_initialized") or not state.get("igv_browser_ready"):
                     # Wait for element to be ready before creating IGV browser
@@ -507,61 +526,25 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     # Create new IGV browser
                     js_create = f"""
                         try {{
-                            console.log('Starting IGV browser creation...');
-                            console.log('IGV library available:', typeof igv !== 'undefined');
-                            console.log('IGV library version:', igv.version || 'unknown');
-                            
-                            // Check for minimum version compatibility
-                            if (igv.version && igv.version < '2.0.0') {{
-                                console.warn('IGV version may be too old for this functionality');
-                            }}
-                            console.log('Target element:', document.getElementById('{igv_div.id}'));
-                            
-                            const el = document.getElementById('{igv_div.id}');
+                            console.log('Creating minimal IGV browser...');
+                            const el = document.getElementById('igv-container');
                             if (!el) {{
                                 throw new Error('Target element not found');
                             }}
                             
-                            // Check if element is properly rendered
-                            if (el.offsetWidth === 0 || el.offsetHeight === 0) {{
-                                throw new Error('Target element has no dimensions - not ready for IGV');
-                            }}
+                            const options = {{ genome: 'hg38' }};
+                            console.log('IGV options:', options);
                             
-                            // Check if IGV library is fully initialized
-                            if (typeof igv.createBrowser !== 'function') {{
-                                throw new Error('IGV library not fully initialized');
-                            }}
-                            
-                            const track = {{ name: '{sample_dir.name}', url: '{bam_url}', indexURL: '{bai_url}', format: 'bam', visibilityWindow: 1000000 }};
-                            const options = {{ genome: 'hg38', locus: 'chr1:1-1', tracks: [track] }};
-                            
-                            console.log('Creating IGV browser with options:', options);
-                            
-                                                    igv.createBrowser(el, options).then(b => {{
-                            window.lj_igv = b; 
-                            window.lj_igv_browser_ready = true;
-                            console.log('IGV browser created successfully');
-                        }}).catch(error => {{
-                            console.error('IGV browser creation failed:', error);
-                            window.lj_igv_browser_ready = false;
-                            
-                            // Try fallback method
-                            try {{
-                                console.log('Trying fallback IGV creation...');
-                                const fallbackOptions = {{ genome: 'hg38' }};
-                                igv.createBrowser(el, fallbackOptions).then(b => {{
-                                    window.lj_igv = b;
-                                    window.lj_igv_browser_ready = true;
-                                    console.log('IGV browser created with fallback method');
-                                }});
-                            }} catch (fallbackError) {{
-                                console.error('Fallback IGV creation also failed:', fallbackError);
-                                throw error;
-                            }}
-                        }});
+                            igv.createBrowser(el, options).then(b => {{
+                                window.lj_igv = b; 
+                                window.lj_igv_browser_ready = true;
+                                console.log('IGV browser created successfully');
+                            }}).catch(error => {{
+                                console.error('IGV browser creation failed:', error);
+                                window.lj_igv_browser_ready = false;
+                            }});
                         }} catch (error) {{
                             console.error('Error in IGV browser creation:', error);
-                            throw error;
                         }}
                     """
                     
@@ -580,16 +563,17 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     # Browser exists, just add/update the track
                     js_add_track = f"""
                         if (window.lj_igv && window.lj_igv_browser_ready) {{
-                            // Remove existing track with same name if it exists
-                            const existingTrack = window.lj_igv.findTracksByName('{sample_dir.name}')[0];
-                            if (existingTrack) {{
-                                window.lj_igv.removeTrack(existingTrack);
-                            }}
+                            console.log('Adding track to existing IGV browser...');
                             
-                            // Add new track
-                            const track = {{ name: '{sample_dir.name}', url: '{bam_url}', indexURL: '{bai_url}', format: 'bam', visibilityWindow: 1000000 }};
-                            window.lj_igv.loadTrack(track);
-                            console.log('Track updated in existing IGV browser');
+                            const track = {{ name: '{sample_dir.name}', url: '{bam_url}', indexURL: '{bai_url}', format: 'bam' }};
+                            console.log('Track to load:', track);
+                            
+                            try {{
+                                window.lj_igv.loadTrack(track);
+                                console.log('Track loaded successfully');
+                            }} catch (error) {{
+                                console.error('Error loading track:', error);
+                            }}
                         }}
                     """
                     
@@ -609,10 +593,6 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
         
         # Add a delay to ensure IGV library is fully loaded
         ui.timer(1.0, _check_existing_igv_bam, once=True)
-        
-        # Check IGV library status periodically
-        ui.timer(2.0, _check_igv_library, once=True)
-        ui.timer(5.0, _check_igv_library, once=True)
         
         # Function to refresh IGV BAM check (useful after regeneration)
         def _refresh_igv_check():
@@ -650,111 +630,30 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     igv_status.set_text("IGV is not ready - cannot clear tracks.")
                     return
                 
-                # More robust JavaScript to clear tracks
+                # Simple JavaScript to clear tracks
                 js_clear = """
                     try {
                         console.log('Attempting to clear IGV tracks...');
-                        console.log('window.lj_igv:', window.lj_igv);
-                        console.log('window.lj_igv_browser_ready:', window.lj_igv_browser_ready);
                         
-                        if (window.lj_igv) {
-                            // Try different methods to get tracks
-                            let tracks = [];
-                            
-                            // Method 1: Try getTracks() (standard IGV.js API)
-                            if (typeof window.lj_igv.getTracks === 'function') {
-                                tracks = window.lj_igv.getTracks();
-                                console.log('Using getTracks() method, found:', tracks.length);
-                            }
-                            // Method 2: Try findTracksByName (alternative API)
-                            else if (typeof window.lj_igv.findTracksByName === 'function') {
-                                tracks = window.lj_igv.findTracksByName('*');
-                                console.log('Using findTracksByName method, found:', tracks.length);
-                            }
-                            // Method 3: Try accessing tracks property directly
-                            else if (window.lj_igv.tracks && Array.isArray(window.lj_igv.tracks)) {
-                                tracks = window.lj_igv.tracks;
-                                console.log('Using tracks property, found:', tracks.length);
-                            }
-                            // Method 4: Try to enumerate all properties to find tracks
-                            else {
-                                console.log('Available methods on IGV browser:');
-                                for (let prop in window.lj_igv) {
-                                    if (typeof window.lj_igv[prop] === 'function') {
-                                        console.log('Method:', prop);
-                                    }
-                                }
-                                console.log('Available properties on IGV browser:');
-                                for (let prop in window.lj_igv) {
-                                    if (typeof window.lj_igv[prop] !== 'function') {
-                                        console.log('Property:', prop, '=', window.lj_igv[prop]);
-                                    }
-                                }
-                                throw new Error('Could not find tracks using any known method');
-                            }
+                        if (window.lj_igv && typeof window.lj_igv.getTracks === 'function') {
+                            const tracks = window.lj_igv.getTracks();
+                            console.log('Found tracks:', tracks.length);
                             
                             if (tracks.length > 0) {
-                                console.log('Found tracks to remove:', tracks.length);
-                                
-                                // Only remove data tracks, keep reference tracks
-                                const tracksToRemove = [];
-                                const tracksToKeep = [];
-                                
                                 tracks.forEach((track, index) => {
-                                    const trackName = track.name || track.id || 'unnamed';
-                                    const trackType = track.type || 'unknown';
-                                    
-                                    // Keep essential IGV reference tracks
-                                    if (trackName === 'ideogram' || 
-                                        trackName === 'ruler' || 
-                                        trackName === 'sequence' ||
-                                        trackName === 'Refseq Select' ||
-                                        trackType === 'ideogram' ||
-                                        trackType === 'ruler' ||
-                                        trackType === 'sequence') {
-                                        tracksToKeep.push(track);
-                                        console.log('Keeping track', index, ':', trackName, '(', trackType, ')');
-                                    } else {
-                                        // This is a data track (BAM, etc.) - remove it
-                                        tracksToRemove.push(track);
-                                        console.log('Will remove track', index, ':', trackName, '(', trackType, ')');
-                                    }
-                                });
-                                
-                                console.log('Tracks to keep:', tracksToKeep.length);
-                                console.log('Tracks to remove:', tracksToRemove.length);
-                                
-                                // Remove only the data tracks
-                                tracksToRemove.forEach((track, index) => {
                                     try {
                                         if (typeof window.lj_igv.removeTrack === 'function') {
                                             window.lj_igv.removeTrack(track);
-                                            console.log('Removed data track:', track.name || track.id || 'unnamed');
-                                        } else {
-                                            console.log('removeTrack method not available');
+                                            console.log('Removed track:', index);
                                         }
                                     } catch (e) {
                                         console.error('Error removing track:', e);
                                     }
                                 });
-                                
-                                console.log('Data track removal completed');
-                                
-                                // Force a redraw
-                                if (typeof window.lj_igv.redraw === 'function') {
-                                    window.lj_igv.redraw();
-                                    console.log('Forced IGV redraw');
-                                } else if (typeof window.lj_igv.update === 'function') {
-                                    window.lj_igv.update();
-                                    console.log('Forced IGV update');
-                                } else {
-                                    console.log('No redraw/update method available');
-                                }
-                            } else {
-                                console.log('No tracks found to remove');
+                                console.log('Track clearing completed');
                             }
                         } else {
-                            console.log('No IGV browser found');
+                            console.log('No IGV browser or getTracks method available');
                         }
                     } catch (e) {
                         console.error('Error in track clearing:', e);
@@ -860,44 +759,16 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             """Check the browser console for any JavaScript errors."""
             js_check_console = """
                 try {
-                    // Check if there are any console errors
                     const errors = [];
                     
-                    // Override console.error to capture errors
-                    const originalError = console.error;
-                    console.error = function(...args) {
-                        errors.push(args.join(' '));
-                        originalError.apply(console, args);
-                    };
-                    
-                    // Check for common IGV-related issues
+                    // Check for basic IGV functionality
                     if (typeof igv === 'undefined') {
                         errors.push('IGV library not loaded');
                     } else if (typeof igv.createBrowser !== 'function') {
                         errors.push('IGV createBrowser method not available');
-                    } else if (igv.version) {
-                        errors.push(`IGV version: ${igv.version}`);
+                    } else {
+                        errors.push(`IGV version: ${igv.version || 'unknown'}`);
                     }
-                    
-                    // Check for element issues
-                    const el = document.getElementById('igv_div');
-                    if (!el) {
-                        errors.push('IGV div element not found');
-                    } else if (el.offsetWidth === 0 || el.offsetHeight === 0) {
-                        errors.push('IGV div element has no dimensions');
-                    }
-                    
-                    // Check for IGV library issues
-                    if (typeof igv === 'undefined') {
-                        errors.push('IGV library not loaded');
-                    } else if (typeof igv.createBrowser !== 'function') {
-                        errors.push('IGV createBrowser method not available');
-                    } else if (igv.version) {
-                        errors.push(`IGV version: ${igv.version}`);
-                    }
-                    
-                    // Restore original console.error
-                    console.error = originalError;
                     
                     return errors;
                 } catch (e) {
@@ -916,6 +787,103 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             except Exception as e:
                 ui.notify(f"Error checking console: {e}", type="negative")
         
+        # Function to create an empty IGV browser
+        def _create_empty_igv():
+            """Create an empty IGV browser with no tracks."""
+            try:
+                if not _check_igv_library():
+                    ui.notify("IGV library not available", type="warning")
+                    return
+                
+                # Debug: Print the element ID
+                print(f"IGV div ID: {igv_div.id}")
+                print(f"IGV div element: {igv_div}")
+                
+                # First, let's try to find the element and wait for it to be ready
+                js_find_element = """
+                    console.log('Looking for IGV div element...');
+                    console.log('Expected ID: igv-container');
+                    
+                    // List all divs on the page
+                    const allDivs = document.querySelectorAll('div');
+                    console.log('Total divs found:', allDivs.length);
+                    
+                    allDivs.forEach((div, i) => {
+                        console.log(`Div ${i}:`, {
+                            id: div.id,
+                            className: div.className,
+                            tagName: div.tagName,
+                            offsetWidth: div.offsetWidth,
+                            offsetHeight: div.offsetHeight
+                        });
+                    });
+                    
+                    // Try to find our specific element
+                    let el = document.getElementById('igv-container');
+                    if (!el) {
+                        console.log('Element not found by ID, trying by class...');
+                        const candidates = document.querySelectorAll('.w-full.h-\\[600px\\].border');
+                        console.log('Found candidates by class:', candidates.length);
+                        if (candidates.length > 0) {
+                            el = candidates[0];
+                            console.log('Using first candidate by class');
+                        }
+                    }
+                    
+                    if (el) {
+                        console.log('Element found:', el);
+                        console.log('Element dimensions:', el.offsetWidth, 'x', el.offsetHeight);
+                        return true;
+                    } else {
+                        console.log('No suitable element found');
+                        return false;
+                    }
+                """
+                
+                # Check if element exists first
+                element_found = ui.run_javascript(js_find_element, timeout=10.0)
+                if not element_found:
+                    ui.notify("IGV div element not found. Please wait for the page to load completely.", type="warning")
+                    return
+                
+                # Now create the IGV browser
+                js_empty = """
+                    try {
+                        console.log('Creating empty IGV browser...');
+                        
+                        // Find the element again
+                        let el = document.getElementById('igv-container');
+                        if (!el) {
+                            el = document.querySelector('.w-full.h-\\[600px\\].border');
+                        }
+                        
+                        if (!el) {
+                            throw new Error('Element still not found');
+                        }
+                        
+                        const options = { genome: 'hg38' };
+                        console.log('Creating empty IGV browser with options:', options);
+                        
+                        igv.createBrowser(el, options).then(b => {
+                            window.lj_igv = b; 
+                            window.lj_igv_browser_ready = true;
+                            console.log('Empty IGV browser created successfully');
+                        }).catch(error => {
+                            console.error('Empty IGV browser creation failed:', error);
+                            window.lj_igv_browser_ready = false;
+                        });
+                    } catch (error) {
+                        console.error('Error creating empty IGV:', error);
+                    }
+                """
+                
+                ui.run_javascript(js_empty, timeout=30.0)
+                ui.notify("Empty IGV browser creation initiated", type="info")
+                
+            except Exception as e:
+                ui.notify(f"Error creating empty IGV: {e}", type="negative")
+                print(f"Error in empty IGV: {e}")
+        
         # Function to test IGV browser creation
         def _test_igv_browser():
             """Test IGV browser creation with minimal configuration."""
@@ -924,31 +892,28 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     ui.notify("IGV library not available", type="warning")
                     return
                 
-                js_test = f"""
-                    try {{
+                js_test = """
+                    try {
                         console.log('Testing IGV browser creation...');
-                        const el = document.getElementById('{igv_div.id}');
-                        if (!el) {{
+                        const el = document.getElementById('igv-container');
+                        if (!el) {
                             throw new Error('Test element not found');
-                        }}
+                        }
                         
-                        const options = {{ 
-                            genome: 'hg38', 
-                            locus: 'chr1:1-1' 
-                        }};
-                        
+                        const options = { genome: 'hg38' };
                         console.log('Creating test IGV browser...');
-                        igv.createBrowser(el, options).then(b => {{
+                        
+                        igv.createBrowser(el, options).then(b => {
                             window.lj_igv = b;
                             window.lj_igv_browser_ready = true;
                             console.log('Test IGV browser created successfully');
-                        }}).catch(error => {{
+                        }).catch(error => {
                             console.error('Test IGV browser creation failed:', error);
                             window.lj_igv_browser_ready = false;
-                        }});
-                    }} catch (error) {{
+                        });
+                    } catch (error) {
                         console.error('Error in test IGV creation:', error);
-                    }}
+                    }
                 """
                 
                 ui.run_javascript(js_test, timeout=30.0)
@@ -968,50 +933,11 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     
                     if (window.lj_igv) {
                         console.log('IGV browser exists');
-                        console.log('Browser type:', typeof window.lj_igv);
                         console.log('Available methods:', Object.getOwnPropertyNames(window.lj_igv));
-                        
-                        // Try different methods to get tracks
-                        let tracks = [];
-                        let methodUsed = 'none';
-                        
-                        if (typeof window.lj_igv.getTracks === 'function') {
-                            tracks = window.lj_igv.getTracks();
-                            methodUsed = 'getTracks()';
-                        } else if (typeof window.lj_igv.findTracksByName === 'function') {
-                            tracks = window.lj_igv.findTracksByName('*');
-                            methodUsed = 'findTracksByName()';
-                        } else if (window.lj_igv.tracks && Array.isArray(window.lj_igv.tracks)) {
-                            tracks = window.lj_igv.tracks;
-                            methodUsed = 'tracks property';
-                        }
-                        
-                        console.log('Method used to get tracks:', methodUsed);
-                        console.log('Current tracks:', tracks.length);
-                        
-                        if (tracks.length > 0) {
-                            tracks.forEach((track, i) => {
-                                console.log(`Track ${i}:`, {
-                                    name: track.name || 'unnamed',
-                                    id: track.id || 'no-id',
-                                    type: track.type || 'unknown-type',
-                                    visible: track.visible !== undefined ? track.visible : 'unknown'
-                                });
-                            });
-                        }
-                        
-                        // Check for common IGV methods
-                        const commonMethods = ['getTracks', 'findTracksByName', 'removeTrack', 'addTrack', 'redraw', 'update'];
-                        console.log('Available common methods:');
-                        commonMethods.forEach(method => {
-                            console.log(`  ${method}:`, typeof window.lj_igv[method] === 'function' ? '✓' : '✗');
-                        });
-                        
                     } else {
                         console.log('No IGV browser found');
                     }
                     
-                    // Check Python state
                     console.log('Python state check requested');
                 """
                 
@@ -1030,12 +956,13 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
         # IGV control buttons
         with ui.row().classes("items-center gap-2 mt-2"):
             ui.button("🔄 Refresh IGV Check", on_click=_refresh_igv_check)
-            ui.button("Clear Data Tracks", on_click=_clear_igv_tracks)
+            ui.button("🗂️ Clear Data Tracks", on_click=_clear_igv_tracks)
             ui.button("📁 Reload BAM", on_click=_reload_bam_track)
-            ui.button("🐛 Debug IGV", on_click=_debug_igv_state)
-            ui.button("🔄 Manual IGV Load", on_click=lambda: _check_existing_igv_bam())
-            ui.button("🧪 Test IGV", on_click=lambda: _test_igv_browser())
-            ui.button("📋 Check Console", on_click=lambda: _check_console_errors())
+            ui.button("🧪 Test IGV", on_click=_test_igv_browser)
+        
+        # Add IGV library status check timers after all functions are defined
+        ui.timer(2.0, _check_igv_library, once=True)
+        ui.timer(5.0, _check_igv_library, once=True)
         
         # BAM generation buttons
         async def _trigger_build_sorted_bam(force_regenerate: bool = False) -> None:
@@ -2249,8 +2176,5 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
 
     # Trigger an immediate refresh on page load, then continue with periodic refreshes
-    try:
-        ui.timer(0.5, _refresh_coverage, once=True)
-    except Exception:
-        pass
+    ui.timer(0.5, _refresh_coverage, once=True)
     ui.timer(30.0, _refresh_coverage, active=True)
