@@ -1450,6 +1450,7 @@ class WorkflowRunner:
         use_separate_analysis_queues: bool = True,
         preprocessing_workers: int = 1,
         bed_workers: int = 1,
+        reference: Optional[Path] = None,
     ):
         self.manager = WorkflowManager(
             verbose=verbose,
@@ -1459,6 +1460,13 @@ class WorkflowRunner:
             bed_conversion_workers=bed_workers,
         )
         self.verbose = verbose
+        self.reference = reference
+        
+        # Log reference genome status
+        if self.reference:
+            print(f"[WorkflowRunner] Reference genome configured: {self.reference}")
+        else:
+            print("[WorkflowRunner] No reference genome configured - SNP calling will not be available")
 
         # Register default handlers
         self.manager.register_handler("preprocessing", "echo", echo_handler)

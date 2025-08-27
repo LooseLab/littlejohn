@@ -470,10 +470,9 @@ class VariantsSection(ReportSection):
             )
 
             # Get the VCF file paths
-            snp_vcf = os.path.join(self.report.output, "clair3", "snpsift_output.vcf")
-            indel_vcf = os.path.join(
-                self.report.output, "clair3", "snpsift_indel_output.vcf"
-            )
+            base_path = os.path.join(self.report.output, "clair3")
+            snp_vcf = os.path.join(base_path, "snpsift_output.vcf")
+            indel_vcf = os.path.join(base_path, "snpsift_indel_output.vcf")
 
             # Format the source text
             source_text = "Data sources:"

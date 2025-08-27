@@ -317,13 +317,34 @@ def _wrap_real_handler(
                     pass
             try:
                 sig = inspect.signature(py_handler)
+                # Check if handler accepts reference parameter
+                accepts_reference = "reference" in sig.parameters
+                
+                # Get reference from job metadata if available
+                reference = job.context.metadata.get("reference")
+                
+                # Debug logging for reference genome and work_dir
+                print(f"[Ray] Handler {job_type}: work_dir={work_dir}, reference={reference}")
+                print(f"[Ray] Handler {job_type}: accepts_reference={accepts_reference}")
+                print(f"[Ray] Handler {job_type}: in NEEDS_WORK_DIR={job_type in NEEDS_WORK_DIR}")
+                
+                # Call handler with appropriate parameters
                 if (
                     "work_dir" in sig.parameters
                     and work_dir
                     and (job_type in NEEDS_WORK_DIR)
                 ):
-                    py_handler(job, work_dir=work_dir)
+                    if accepts_reference and reference:
+                        print(f"[Ray] Calling {job_type} handler with work_dir and reference: {reference}")
+                        py_handler(job, work_dir=work_dir, reference=reference)
+                    else:
+                        print(f"[Ray] Calling {job_type} handler with work_dir only")
+                        py_handler(job, work_dir=work_dir)
+                elif accepts_reference and reference:
+                    print(f"[Ray] Calling {job_type} handler with reference only: {reference}")
+                    py_handler(job, reference=reference)
                 else:
+                    print(f"[Ray] Calling {job_type} handler with no additional parameters")
                     py_handler(job)
             except Exception:
                 # Fallback to legacy call
@@ -414,7 +435,7 @@ class TypeProcessor:
 
 @ray.remote
 class Coordinator:
-    def __init__(self, analysis_workers: int = 1, preset: Optional[str] = None):
+    def __init__(self, analysis_workers: int = 1, preset: Optional[str] = None, reference: Optional[str] = None):
         # dedup maps
         self.pending: Dict[Tuple[str, str], int] = {}
         self.running: Dict[Tuple[str, str], int] = {}
@@ -459,6 +480,16 @@ class Coordinator:
         # None -> legacy per-type actors; otherwise use grouped Pool actors
         self.preset: Optional[str] = preset
         self.using_pools: bool = False
+        
+        # Reference genome for SNP calling and other analyses
+        self.reference: Optional[str] = reference
+        
+        # Debug logging for reference genome
+        if self.reference:
+            print(f"[Ray] Coordinator initialized with reference: {self.reference}")
+        else:
+            print("[Ray] Coordinator initialized without reference genome")
+        
         # Keep references to any CPU limiter actors
         self._cpu_limiters: List[Any] = []
 
@@ -1461,6 +1492,13 @@ async def submit_existing_paths(
                 if work_dir:
                     for j in jobs:
                         j.context.add_metadata("work_dir", work_dir)
+                # Add reference genome to job metadata if available
+                if coord.reference:
+                    for j in jobs:
+                        j.context.add_metadata("reference", coord.reference)
+                    print(f"[Ray] Added reference to {len(jobs)} jobs: {coord.reference}")
+                else:
+                    print("[Ray] No reference genome available in coordinator")
                 seed_jobs += jobs
         elif pth.is_dir():
             # Stream directory walk in small batches; avoid building huge lists
@@ -1477,6 +1515,13 @@ async def submit_existing_paths(
                 if work_dir:
                     for j in jobs:
                         j.context.add_metadata("work_dir", work_dir)
+                # Add reference genome to job metadata if available
+                if coord.reference:
+                    for j in jobs:
+                        j.context.add_metadata("reference", coord.reference)
+                    print(f"[Ray] Added reference to {len(jobs)} jobs: {coord.reference}")
+                else:
+                    print("[Ray] No reference genome available in coordinator")
                 batch += jobs
                 if len(batch) >= 256:
                     await coord.submit_jobs.remote(batch)
@@ -1702,9 +1747,17 @@ async def run(
     log_level: str = "INFO",
     preset: Optional[str] = None,
     workflow_runner: Any = None,
+    reference: Optional[str] = None,
 ):
     global GLOBAL_LOG_LEVEL
     GLOBAL_LOG_LEVEL = (log_level or "INFO").upper()
+    
+    # Debug: Log reference genome status
+    if reference:
+        print(f"[Ray] Workflow run() received reference: {reference}")
+    else:
+        print("[Ray] Workflow run() no reference provided")
+    
     # Ensure any previous coordinator is terminated to avoid stale-code actors
     try:
         old = ray.get_actor("robin_coordinator")
@@ -1717,11 +1770,11 @@ async def run(
     # Start a fresh coordinator (not detached)
     try:
         coord = Coordinator.options(name="robin_coordinator", num_cpus=0).remote(
-            analysis_workers=analysis_workers, preset=preset
+            analysis_workers=analysis_workers, preset=preset, reference=reference
         )
     except Exception:
         coord = Coordinator.options(name="robin_coordinator").remote(
-            analysis_workers=analysis_workers, preset=preset
+            analysis_workers=analysis_workers, preset=preset, reference=reference
         )
     
     # Set global coordinator reference for external access

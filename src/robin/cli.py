@@ -303,6 +303,7 @@ def _create_ray_workflow_runner(
     log_level: str,
     preprocessing_workers: int = 1,
     bed_workers: int = 1,
+    reference: Optional[Path] = None,
 ) -> Any:
     """Create and configure Ray-based workflow runner (Ray Core)."""
     try:
@@ -311,9 +312,16 @@ def _create_ray_workflow_runner(
         from robin import workflow_ray as wrn
 
         class _RayCoreWrapper:
-            def __init__(self):
+            def __init__(self, reference: Optional[Path] = None):
                 self.manager = type("_DummyManager", (), {"get_priority_info": lambda _self: {}})()
                 self.coordinator = None  # Will be set when workflow starts
+                self.reference = reference  # Store reference genome for GUI access
+                
+                # Debug logging for reference genome
+                if self.reference:
+                    print(f"[RayCoreWrapper] ✅ SUCCESS: Reference genome stored: {self.reference}")
+                else:
+                    print("[RayCoreWrapper] ❌ FAILED: No reference genome stored")
 
             def register_handler(self, *args, **kwargs):
                 # Handlers are wired inside workflow_ray; keep API parity
@@ -403,6 +411,7 @@ def _create_ray_workflow_runner(
                         log_level=log_level_local,
                         preset=preset,
                         workflow_runner=self_ref,
+                        reference=str(reference) if reference else None,
                     )
                     
                     # After the workflow starts, try to get the coordinator reference
@@ -417,7 +426,7 @@ def _create_ray_workflow_runner(
                 asyncio.run(_run_with_coordinator())
 
         click.echo("Using Ray Core distributed workflow (workflow_ray)")
-        return _RayCoreWrapper()
+        return _RayCoreWrapper(reference=reference)
     except ImportError as e:
         click.echo(
             f"Warning: Ray Core not available ({e}). Falling back to threading-based workflow.",
@@ -512,6 +521,7 @@ def _create_workflow_runner(
     log_level: str,
     preprocessing_workers: int = 1,
     bed_workers: int = 1,
+    reference: Optional[Path] = None,
 ) -> Any:
     """Create the appropriate workflow runner based on configuration."""
     if analysis_workers < 1:
@@ -529,6 +539,7 @@ def _create_workflow_runner(
             log_level,
             preprocessing_workers=preprocessing_workers,
             bed_workers=bed_workers,
+            reference=reference,  # Pass reference parameter to Ray workflow runner
         )
         if runner is None:
             # Fallback to threading-based workflow
@@ -551,11 +562,12 @@ def _create_workflow_runner(
             use_separate_analysis_queues=not legacy_analysis_queue,
             preprocessing_workers=preprocessing_workers,
             bed_workers=bed_workers,
+            reference=reference,
         )
 
 
 def _register_handlers(
-    runner: Any, legacy_analysis_queue: bool, work_dir: Optional[Path]
+    runner: Any, legacy_analysis_queue: bool, work_dir: Optional[Path], reference: Optional[Path] = None
 ) -> None:
     """Register all workflow handlers with the runner."""
     for (
@@ -572,13 +584,23 @@ def _register_handlers(
             else queue_type
         )
 
-        # Create handler with work directory if specified and needed
+        # Create handler with work directory and/or reference genome if specified and needed
         if work_dir and needs_work_dir:
-
-            def create_handler_with_work_dir(handler, work_dir_path):
-                return lambda job: handler(job, work_dir=str(work_dir_path))
-
-            final_handler = create_handler_with_work_dir(handler_func, work_dir)
+            if reference and job_type == "target":
+                # Special handling for target analysis with reference genome
+                def create_handler_with_work_dir_and_ref(handler, work_dir_path, ref_path):
+                    return lambda job: handler(job, work_dir=str(work_dir_path), reference=str(ref_path))
+                final_handler = create_handler_with_work_dir_and_ref(handler_func, work_dir, reference)
+            else:
+                # Standard work directory handling
+                def create_handler_with_work_dir(handler, work_dir_path):
+                    return lambda job: handler(job, work_dir=str(work_dir_path))
+                final_handler = create_handler_with_work_dir(handler_func, work_dir)
+        elif reference and job_type == "target":
+            # Reference genome only (no work_dir needed)
+            def create_handler_with_ref(handler, ref_path):
+                return lambda job: handler(job, reference=str(ref_path))
+            final_handler = create_handler_with_ref(handler_func, reference)
         else:
             final_handler = handler_func
 
@@ -853,6 +875,12 @@ def _display_workflow_config(
     help="Show current queue priorities and exit. Only used when --use-ray is specified.",
 )
 @click.option(
+    "--reference",
+    "-r",
+    type=click.Path(exists=True, path_type=Path),
+    help="Path to reference genome (FASTA format). Required for SNP calling and some other analyses.",
+)
+@click.option(
     "--no-watch",
     is_flag=True,
     help="Do not watch directories for new files (default: watch enabled).",
@@ -901,6 +929,7 @@ def workflow(
     ray_num_cpus: Optional[int],
     queue_priority: tuple[str, ...],
     show_priorities: bool,
+    reference: Optional[Path],
     with_gui: bool,
     gui_host: str,
     gui_port: int,
@@ -950,6 +979,12 @@ def workflow(
 
         # Ray Core engine path (default when --use-ray is used)
         if use_ray:
+            # Debug: Log reference genome status
+            if reference:
+                click.echo(f"🔍 [CLI] Reference genome provided: {reference}")
+            else:
+                click.echo("🔍 [CLI] No reference genome provided")
+                
             # Ensure Ray is initialized if CPUs not specified
             try:
                 import ray
@@ -1003,6 +1038,7 @@ def workflow(
                 log_level,
                 preprocessing_workers=preprocessing_workers,
                 bed_workers=bed_workers,
+                reference=reference,  # Add reference parameter for Ray workflow too
             )
 
             # Run Ray Core implementation
@@ -1025,6 +1061,7 @@ def workflow(
                         log_level=log_level,
                         preset=preset,
                         workflow_runner=runner,
+                        reference=str(reference) if reference else None,
                     )
                 )
             except KeyboardInterrupt:
@@ -1054,6 +1091,7 @@ def workflow(
             log_level,
             preprocessing_workers=preprocessing_workers,
             bed_workers=bed_workers,
+            reference=reference,
         )
 
         # Handle Ray-specific configuration
@@ -1092,7 +1130,7 @@ def workflow(
                 click.echo(f"Job deduplication enabled for: {valid_dedup_jobs}")
 
         # Register handlers and command handlers
-        _register_handlers(runner, legacy_analysis_queue, work_dir)
+        _register_handlers(runner, legacy_analysis_queue, work_dir, reference)
         _register_command_handlers(runner, command_map, legacy_analysis_queue)
 
         # For Ray workflow, reinitialize processors after handlers are registered

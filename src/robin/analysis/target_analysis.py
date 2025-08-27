@@ -84,6 +84,12 @@ import pandas as pd
 import pysam
 from robin.logging_config import get_job_logger
 
+# Optional import for Docker functionality
+try:
+    import docker
+except ImportError:
+    docker = None
+
 
 def json_serializable(obj):
     """Convert numpy types to JSON serializable types."""
@@ -387,6 +393,16 @@ class TargetAnalysis:
         self.simtime = self.config.get("simtime", False)
         self.reference = self.config.get("reference", None)
         self.snp_calling = self.config.get("snp_calling", False)
+        
+        # Check environment variable for reference genome
+        if not self.reference:
+            self.reference = os.environ.get("LITTLEJOHN_REFERENCE")
+        
+        # Log reference genome status
+        if self.reference:
+            logger.info(f"Reference genome configured: {self.reference}")
+        else:
+            logger.info("No reference genome configured - SNP calling will not be available")
 
         logger.info("Target Analysis initialized")
 
@@ -733,34 +749,53 @@ class TargetAnalysis:
                     except (ValueError, IOError):
                         existing_targets_count = 0
 
-                if self.reference:
-                    logger.info(f"Reference genome found: {self.reference}")
+                # Always generate targets_exceeding_threshold.bed for potential SNP analysis
+                if len(run_list) > 0:
+                    logger.info(
+                        f"Found {len(run_list)} regions exceeding threshold"
+                    )
 
-                    if len(run_list) > 0:
-                        logger.info(
-                            f"Found {len(run_list)} regions exceeding threshold"
-                        )
+                    # Save updated count
+                    with open(targets_exceeding_file, "w") as f:
+                        f.write(str(len(run_list)))
 
-                        # Save updated count
-                        with open(targets_exceeding_file, "w") as f:
-                            f.write(str(len(run_list)))
+                    # Generate BED file for regions exceeding threshold
+                    run_list[["chrom", "startpos", "endpos"]].to_csv(
+                        os.path.join(
+                            sample_output_dir, "targets_exceeding_threshold.bed"
+                        ),
+                        sep="\t",
+                        header=None,
+                        index=None,
+                    )
 
-                        run_list[["chrom", "startpos", "endpos"]].to_csv(
-                            os.path.join(
-                                sample_output_dir, "targets_exceeding_threshold.bed"
-                            ),
-                            sep="\t",
-                            header=None,
-                            index=None,
-                        )
-
-                        logger.info(
-                            f"Targets exceeding threshold saved: {len(run_list)} regions"
-                        )
-                    else:
-                        logger.info("No regions exceed coverage threshold")
+                    logger.info(
+                        f"Targets exceeding threshold saved: {len(run_list)} regions"
+                    )
+                    
+                    # Log the results for debugging (no storage to avoid memory leaks)
+                    logger.info(f"Generated BED file with {len(run_list)} regions exceeding threshold")
                 else:
-                    logger.info("No reference genome provided")
+                    logger.info("No regions exceed coverage threshold")
+                    
+                    # Create empty BED file to avoid errors
+                    empty_bed_file = os.path.join(
+                        sample_output_dir, "targets_exceeding_threshold.bed"
+                    )
+                    with open(empty_bed_file, "w") as f:
+                        # Write minimal BED header
+                        pass
+                    
+                    logger.info("Created empty targets_exceeding_threshold.bed file")
+                    
+                    # Log the empty file creation (no storage to avoid memory leaks)
+                    logger.info("Created empty BED file - no regions exceed threshold")
+                
+                # Log reference genome status for SNP calling
+                if self.reference:
+                    logger.info(f"Reference genome found: {self.reference} - SNP calling will be available")
+                else:
+                    logger.info("No reference genome provided - SNP calling will not be available")
 
                 target_result.processing_steps.append("threshold_analysis_complete")
 
@@ -1023,7 +1058,7 @@ class TargetAnalysis:
 
 
 def process_single_file(
-    file_path: str, metadata: Dict[str, Any], work_dir: str, logger
+    file_path: str, metadata: Dict[str, Any], work_dir: str, logger, reference: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Process a single file for target analysis using the complete pipeline.
@@ -1062,6 +1097,11 @@ def process_single_file(
     try:
         # Initialize target analysis
         target_analysis = TargetAnalysis(work_dir=work_dir)
+        
+        # Set reference genome if provided
+        if reference:
+            target_analysis.reference = reference
+            logger.info(f"Using reference genome: {reference}")
 
         # Process the file
         target_metadata = target_analysis.process_file(file_path, metadata)
@@ -1104,7 +1144,7 @@ def process_single_file(
         return analysis_result
 
 
-def target_handler(job, work_dir=None):
+def target_handler(job, work_dir=None, reference=None):
     """
     Handler function for target analysis jobs.
     This function processes files for target-specific analysis.
@@ -1112,6 +1152,7 @@ def target_handler(job, work_dir=None):
     Args:
         job: The workflow job containing file and metadata
         work_dir: Optional base directory for output (defaults to file directory)
+        reference: Optional path to reference genome for SNP calling
     """
     # Get job-specific logger
     logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
@@ -1120,6 +1161,23 @@ def target_handler(job, work_dir=None):
         file_path = job.context.filepath
 
         logger.info(f"Starting target analysis for: {os.path.basename(file_path)}")
+        
+        # Debug: Log reference genome status
+        if reference:
+            logger.info(f"Reference genome provided to target_handler: {reference}")
+        else:
+            logger.info("No reference genome provided to target_handler")
+            
+        # Also check job metadata for reference
+        job_reference = job.context.metadata.get("reference")
+        if job_reference:
+            logger.info(f"Reference genome found in job metadata: {job_reference}")
+            # Use job metadata reference if not provided directly
+            if not reference:
+                reference = job_reference
+                logger.info(f"Using reference from job metadata: {reference}")
+        else:
+            logger.info("No reference genome found in job metadata")
 
         # Get metadata from preprocessing
         file_metadata = job.context.metadata.get("bam_metadata", {})
@@ -1133,7 +1191,7 @@ def target_handler(job, work_dir=None):
             os.makedirs(work_dir, exist_ok=True)
 
         # Process the file
-        result = process_single_file(file_path, file_metadata, work_dir, logger)
+        result = process_single_file(file_path, file_metadata, work_dir, logger, reference)
 
         # Store results in job context
         job.context.add_metadata("target_analysis", result)
@@ -1292,3 +1350,706 @@ def igv_bam_handler(job, work_dir: Optional[str] = None) -> None:
     except Exception as e:
         job.context.add_error("igv_bam", str(e))
         logger.error(f"igv_bam handler failed: {e}")
+
+
+def run_snp_analysis(sample_dir: str, threads: int = 4, force_regenerate: bool = False, reference: Optional[str] = None) -> str:
+    """
+    Run SNP analysis using Clair3 for a sample.
+    
+    This function runs the complete SNP calling pipeline including:
+    - BAM sorting and preparation
+    - Clair3 variant calling
+    - snpEff annotation
+    - SnpSift annotation with ClinVar data
+    
+    Args:
+        sample_dir: Path to the sample output directory
+        threads: Number of threads to use for processing
+        force_regenerate: If True, force recreation even if output exists
+        
+    Returns:
+        The path to the output directory containing SNP results (empty string on failure)
+    """
+    logger = logging.getLogger("littlejohn.target")
+    
+    # CRITICAL: Immediate logging to see if we even get here
+    print("🚀 ENTERING run_snp_analysis function - PRINT STATEMENT")
+    logger.info("🚀 ENTERING run_snp_analysis function")
+    logger.info(f"Parameters: sample_dir={sample_dir}, threads={threads}, force_regenerate={force_regenerate}, reference={reference}")
+    
+    # Also log to stderr to make sure we see it
+    import sys
+    print(f"🚀 ENTERING run_snp_analysis function - PRINT TO STDERR", file=sys.stderr)
+    
+    try:
+        print("🔄 STEP 1: Setting up sample directory - PRINT STATEMENT")
+        logger.info("🔄 STEP 1: Setting up sample directory")
+        sample_dir = os.path.abspath(sample_dir)
+        logger.info(f"Absolute sample_dir: {sample_dir}")
+        print(f"Absolute sample_dir: {sample_dir} - PRINT STATEMENT")
+        
+        clair_dir = os.path.join(sample_dir, "clair3")
+        logger.info(f"Clair3 output directory: {clair_dir}")
+        print(f"Clair3 output directory: {clair_dir} - PRINT STATEMENT")
+        
+        os.makedirs(clair_dir, exist_ok=True)
+        logger.info(f"✅ Clair3 directory created/verified: {clair_dir}")
+        print(f"✅ Clair3 directory created/verified: {clair_dir} - PRINT STATEMENT")
+        
+        logger.info("🔄 STEP 2: Checking for existing SNP analysis")
+        print("🔄 STEP 2: Checking for existing SNP analysis - PRINT STATEMENT")
+        
+        # Check if SNP analysis already exists and force_regenerate is not set
+        snp_output_files = [
+            os.path.join(clair_dir, "snpsift_output.vcf"),
+            os.path.join(clair_dir, "snpsift_indel_output.vcf")
+        ]
+        
+        if not force_regenerate and all(os.path.exists(f) for f in snp_output_files):
+            logger.info(f"SNP analysis already present in {clair_dir}")
+            return clair_dir
+        
+        print("🔄 STEP 3: Checking for required input files - PRINT STATEMENT")
+        logger.info("🔄 STEP 3: Checking for required input files")
+        target_bam = os.path.join(sample_dir, "target.bam")
+        targets_bed = os.path.join(sample_dir, "targets_exceeding_threshold.bed")
+        
+        print(f"Target BAM path: {target_bam} - PRINT STATEMENT")
+        print(f"Targets BED path: {targets_bed} - PRINT STATEMENT")
+        
+        logger.info(f"🔍 CHECKING INPUT FILES FOR CLAIR3")
+        logger.info(f"  Sample directory: {sample_dir}")
+        logger.info(f"  Target BAM path: {target_bam}")
+        logger.info(f"  Targets BED path: {targets_bed}")
+        logger.info(f"  Reference path: {reference}")
+        
+        print(f"Checking if target_bam exists: {os.path.exists(target_bam)} - PRINT STATEMENT")
+        print(f"Checking if targets_bed exists: {os.path.exists(targets_bed)} - PRINT STATEMENT")
+        
+        if not os.path.exists(target_bam):
+            print(f"❌ target.bam not found: {target_bam} - PRINT STATEMENT")
+            logger.error(f"❌ target.bam not found: {target_bam}")
+            return ""
+            
+        if not os.path.exists(targets_bed):
+            print(f"❌ targets_exceeding_threshold.bam not found: {targets_bed} - PRINT STATEMENT")
+            logger.error(f"❌ targets_exceeding_threshold.bed not found: {targets_bed}")
+            return ""
+        
+        print("✅ Both input files exist - PRINT STATEMENT")
+        
+        # Log file existence checks
+        logger.info("✅ INPUT FILES EXIST - PROCEEDING WITH ANALYSIS")
+        logger.info(f"  BAM file exists: {os.path.exists(target_bam)}")
+        logger.info(f"  BED file exists: {os.path.exists(targets_bed)}")
+        logger.info(f"  Reference exists: {os.path.exists(reference) if reference else 'None'}")
+        logger.info(f"  Clair3 output dir: {clair_dir}")
+        logger.info("✅ INPUT FILE CHECK COMPLETED")
+        
+        # Check for reference genome
+        if not reference:
+            # Try to find reference from common locations
+            possible_refs = [
+                os.path.join(sample_dir, "reference.fasta"),
+                os.path.join(sample_dir, "reference.fa"),
+                os.path.join(os.path.dirname(sample_dir), "reference.fasta"),
+                os.path.join(os.path.dirname(sample_dir), "reference.fa"),
+                "/usr/local/share/reference.fasta",
+                "/usr/local/share/reference.fa"
+            ]
+            
+            for ref_path in possible_refs:
+                if os.path.exists(ref_path):
+                    reference = ref_path
+                    break
+        
+        if not reference:
+            logger.error("Reference genome not found. SNP calling requires a reference genome.")
+            return ""
+        
+        logger.info(f"Starting SNP analysis for sample: {os.path.basename(sample_dir)}")
+        logger.info(f"Reference: {reference}")
+        logger.info(f"Target BAM: {target_bam}")
+        logger.info(f"Targets BED: {targets_bed}")
+        
+        print("🔄 ABOUT TO START BAM SORTING - PRINT STATEMENT")
+        logger.info("🔄 STEP 4: Sorting target BAM for Clair3")
+        sorted_bam = os.path.join(clair_dir, "sorted_targets_exceeding.bam")
+        logger.info(f"Sorting BAM: {target_bam} -> {sorted_bam}")
+        print(f"Sorting BAM: {target_bam} -> {sorted_bam} - PRINT STATEMENT")
+        
+        try:
+            # Check if sorted BAM already exists and is valid
+            if os.path.exists(sorted_bam) and os.path.exists(sorted_bam + ".bai"):
+                logger.info(f"✅ Sorted BAM already exists: {sorted_bam}")
+                # Verify the file is readable
+                try:
+                    test_bam = pysam.AlignmentFile(sorted_bam, "rb")
+                    test_bam.close()
+                    logger.info("✅ Sorted BAM file is valid and readable")
+                except Exception as e:
+                    logger.warning(f"⚠️ Existing sorted BAM appears corrupted, regenerating: {e}")
+                    os.remove(sorted_bam)
+                    if os.path.exists(sorted_bam + ".bai"):
+                        os.remove(sorted_bam + ".bai")
+                    raise Exception("Corrupted BAM file")
+            else:
+                logger.info("🔄 Creating new sorted BAM file...")
+            
+            # Sort the BAM file
+            logger.info(f"🔄 Sorting BAM with {threads} threads...")
+            pysam.sort(f"-@{threads}", "-o", sorted_bam, target_bam)
+            
+            # Verify the sorted file was created
+            if not os.path.exists(sorted_bam):
+                raise Exception(f"Sorted BAM file was not created: {sorted_bam}")
+            
+            # Create index
+            logger.info("🔄 Creating BAM index...")
+            pysam.index(sorted_bam)
+            
+            # Verify index was created
+            if not os.path.exists(sorted_bam + ".bai"):
+                raise Exception(f"BAM index was not created: {sorted_bam}.bai")
+            
+            # Final verification
+            file_size = os.path.getsize(sorted_bam)
+            logger.info(f"✅ BAM sorting completed successfully: {sorted_bam} ({file_size / (1024**2):.1f} MB)")
+            
+        except Exception as e:
+            logger.error(f"❌ BAM sorting failed: {e}")
+            # Clean up any partial files
+            for file_path in [sorted_bam, sorted_bam + ".bai"]:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    logger.info(f"Cleaned up partial file: {file_path}")
+            return ""
+        
+        logger.info("🔄 STEP 5: Running Clair3 pipeline")
+        logger.info("Running Clair3 pipeline...")
+        
+        # Run Clair3 pipeline using Docker
+        logger.info("🔍 CHECKING DOCKER AVAILABILITY")
+        if docker is None:
+            logger.error("❌ Docker module not available. Cannot run Clair3 pipeline.")
+            return ""
+        else:
+            logger.info("✅ Docker module is available")
+            
+        try:
+            client = docker.from_env()
+            
+            # Test Docker connectivity
+            try:
+                client.ping()
+                logger.info("✅ Docker daemon is accessible")
+            except Exception as docker_error:
+                logger.error(f"❌ Docker daemon not accessible: {docker_error}")
+                return ""
+            
+            # Check if Clair3 image exists
+            try:
+                client.images.get("hkubal/clairs-to:latest")
+                logger.info("✅ Clair3 image found: hkubal/clairs-to:latest")
+            except Exception as image_error:
+                logger.warning(f"⚠️ Clair3 image not found, attempting to pull: hkubal/clairs-to:latest")
+                try:
+                    client.images.pull("hkubal/clairs-to:latest")
+                    logger.info("✅ Clair3 image pulled successfully")
+                except Exception as pull_error:
+                    logger.error(f"❌ Failed to pull Clair3 image: {pull_error}")
+                    return ""
+            
+            # Create container-specific paths using the original working pattern
+            container_bamfile = f"/data/output/{os.path.basename(sorted_bam)}"  # BAM goes to output directory
+            container_bedfile = f"/data/bed/{os.path.basename(targets_bed)}"   # BED goes to bed directory
+            container_reference = f"/data/reference/{os.path.basename(reference)}"  # Reference goes to reference directory
+            container_output = "/data/output"
+            
+            print(f"🔍 DOCKER VOLUME DEBUGGING - PRINT STATEMENT")
+            print(f"Container BAM file path: {container_bamfile} - PRINT STATEMENT")
+            print(f"Container BED file path: {container_bedfile} - PRINT STATEMENT")
+            print(f"Container reference path: {container_reference} - PRINT STATEMENT")
+            print(f"Container output path: {container_output} - PRINT STATEMENT")
+            
+            # Define volume bindings
+            print("🔍 CREATING VOLUME BINDINGS - PRINT STATEMENT")
+            
+            # Clean up old debugging - no longer needed with the fixed approach
+            
+            # Use the original working pattern: bind each directory to its own container path
+            volume_bindings = {
+                os.path.abspath(os.path.dirname(sorted_bam)): {"bind": "/data/bam", "mode": "ro"},      # BAM directory (clair3)
+                os.path.abspath(os.path.dirname(targets_bed)): {"bind": "/data/bed", "mode": "ro"},    # BED directory (Sample_103)
+                os.path.abspath(os.path.dirname(reference)): {"bind": "/data/reference", "mode": "ro"}, # Reference directory
+                os.path.abspath(clair_dir): {"bind": "/data/output", "mode": "rw"},                     # Output directory (clair3)
+            }
+            
+            # Debug: Let's verify the BAM binding was added
+            print(f"🔍 VERIFYING BAM BINDING ADDED - PRINT STATEMENT")
+            bam_dir = os.path.dirname(sorted_bam)
+            if bam_dir in volume_bindings:
+                print(f"✅ BAM binding found: {bam_dir} -> {volume_bindings[bam_dir]['bind']} - PRINT STATEMENT")
+            else:
+                print(f"❌ BAM binding NOT found in volume_bindings - PRINT STATEMENT")
+            print(f"Volume bindings created: {volume_bindings} - PRINT STATEMENT")
+            
+            # Debug: Let's verify what each binding actually maps to
+            print(f"🔍 VOLUME BINDING VERIFICATION - PRINT STATEMENT")
+            print(f"  sorted_bam: {sorted_bam} - PRINT STATEMENT")
+            print(f"  os.path.dirname(sorted_bam): {os.path.dirname(sorted_bam)} - PRINT STATEMENT")
+            print(f"  targets_bed: {targets_bed} - PRINT STATEMENT")
+            print(f"  os.path.dirname(targets_bed): {os.path.dirname(targets_bed)} - PRINT STATEMENT")
+            print(f"  reference: {reference} - PRINT STATEMENT")
+            print(f"  os.path.dirname(reference): {os.path.dirname(reference)} - PRINT STATEMENT")
+            print(f"  clair_dir: {clair_dir} - PRINT STATEMENT")
+            
+            # Let's also check if the volume bindings dictionary has the right keys
+            print(f"🔍 VOLUME BINDINGS DICTIONARY KEYS - PRINT STATEMENT")
+            for key in volume_bindings.keys():
+                print(f"  Volume binding key: {key} - PRINT STATEMENT")
+            
+            # And let's check what each binding maps to
+            print(f"🔍 VOLUME BINDINGS MAPPING - PRINT STATEMENT")
+            for host_path, binding_info in volume_bindings.items():
+                print(f"  {host_path} -> {binding_info['bind']} - PRINT STATEMENT")
+            
+            print(f"Volume bindings: {volume_bindings} - PRINT STATEMENT")
+            print(f"Host BAM directory: {os.path.dirname(sorted_bam)} - PRINT STATEMENT")
+            print(f"Host BED directory: {os.path.dirname(targets_bed)} - PRINT STATEMENT")
+            print(f"Host reference directory: {os.path.dirname(reference)} - PRINT STATEMENT")
+            print(f"Host output directory: {clair_dir} - PRINT STATEMENT")
+            
+            # Verify all source directories exist and are accessible
+            print("🔍 ABOUT TO VERIFY VOLUME BINDINGS - PRINT STATEMENT")
+            print("🔍 VERIFYING VOLUME BINDINGS - PRINT STATEMENT")
+            logger.info("🔍 Verifying volume bindings...")
+            for source_path, binding_info in volume_bindings.items():
+                print(f"  Checking volume binding: {source_path} -> {binding_info['bind']} - PRINT STATEMENT")
+                if not os.path.exists(source_path):
+                    print(f"❌ Volume source path does not exist: {source_path} - PRINT STATEMENT")
+                    logger.error(f"❌ Volume source path does not exist: {source_path}")
+                    return ""
+                if not os.access(source_path, os.R_OK):
+                    print(f"❌ Volume source path not readable: {source_path} - PRINT STATEMENT")
+                    logger.error(f"❌ Volume source path not readable: {source_path}")
+                    return ""
+                print(f"✅ Volume binding verified: {source_path} -> {binding_info['bind']} - PRINT STATEMENT")
+                logger.info(f"✅ Volume binding verified: {source_path} -> {binding_info['bind']}")
+            
+            # Verify the specific files exist in their directories
+            logger.info("🔍 Verifying input files in volume directories...")
+            sorted_bam_dir = os.path.dirname(sorted_bam)
+            targets_bed_dir = os.path.dirname(targets_bed)
+            reference_dir = os.path.dirname(reference)
+            
+            if not os.path.exists(sorted_bam):
+                logger.error(f"❌ Sorted BAM file not found in directory: {sorted_bam}")
+                return ""
+            if not os.path.exists(targets_bed):
+                logger.error(f"❌ Targets BED file not found in directory: {targets_bed}")
+                return ""
+            if not os.path.exists(reference):
+                logger.error(f"❌ Reference file not found in directory: {reference}")
+                return ""
+            
+            logger.info(f"✅ All input files verified in their directories")
+            
+            host_config = client.api.create_host_config(binds=volume_bindings)
+            
+            # Build Clair3 command
+            command = (
+                f"/opt/bin/run_clairs_to "
+                f"--tumor_bam_fn {container_bamfile} "
+                f"--ref_fn {container_reference} "
+                f"--threads 4 "
+                f"--remove_intermediate_dir "
+                f"--platform ont_r10_guppy_hac_5khz "
+                f"--output_dir {container_output} "
+                f"-b {container_bedfile} "
+                f"--chunk_size 5000000 "
+                f"--disable_intermediate_phasing"
+            )
+            
+            logger.info(f"Running Clair3 command: {command}")
+            logger.info(f"Container input BAM: {container_bamfile}")
+            logger.info(f"Container input BED: {container_bedfile}")
+            logger.info(f"Container output dir: {container_output}")
+            logger.info(f"Container reference: {container_reference}")
+            logger.info(f"Volume bindings: {volume_bindings}")
+            
+            # Create and start container
+            logger.info("Creating Clair3 container...")
+            container = client.api.create_container(
+                image="hkubal/clairs-to:latest",
+                command=command,
+                volumes=list(volume_bindings.keys()),
+                host_config=host_config,
+            )
+            logger.info(f"Container created with ID: {container.get('Id')}")
+            
+            # Log system resources before starting
+            try:
+                import psutil
+                memory = psutil.virtual_memory()
+                logger.info(f"System memory: {memory.available / (1024**3):.1f} GB available out of {memory.total / (1024**3):.1f} GB")
+                logger.info(f"System CPU cores: {psutil.cpu_count()}")
+            except ImportError:
+                logger.info("psutil not available, skipping resource logging")
+            
+            # Start container
+            client.api.start(container=container.get("Id"))
+            
+            # Test file visibility in container before running Clair3
+            print("🔍 TESTING FILE VISIBILITY IN CONTAINER - PRINT STATEMENT")
+            logger.info("🔍 Testing file visibility in container...")
+            
+            # First, let's see what's actually in the host directories
+            print(f"🔍 HOST DIRECTORY CONTENTS - PRINT STATEMENT")
+            try:
+                bam_dir = os.path.dirname(sorted_bam)
+                bam_contents = os.listdir(bam_dir)
+                print(f"Host BAM directory ({bam_dir}) contents: {bam_contents} - PRINT STATEMENT")
+                
+                bed_dir = os.path.dirname(targets_bed)
+                bed_contents = os.listdir(bed_dir)
+                print(f"Host BED directory ({bed_dir}) contents: {bed_contents} - PRINT STATEMENT")
+                
+                ref_dir = os.path.dirname(reference)
+                ref_contents = os.listdir(ref_dir)
+                print(f"Host reference directory ({ref_dir}) contents: {ref_contents} - PRINT STATEMENT")
+            except Exception as e:
+                print(f"❌ Error listing host directories: {e} - PRINT STATEMENT")
+            
+            test_container = client.api.create_container(
+                image="hkubal/clairs-to:latest",
+                command="ls -la /data/bam /data/bed /data/reference",
+                volumes=list(volume_bindings.keys()),
+                host_config=host_config,
+            )
+            client.api.start(container=test_container.get("Id"))
+            
+            # Get test results
+            test_result = client.api.wait(container=test_container.get("Id"))
+            test_logs = client.api.logs(container=test_container.get("Id"), stdout=True, stderr=True)
+            test_output = test_logs.decode().strip()
+            
+            print(f"Container file visibility test results: - PRINT STATEMENT")
+            print(f"  Exit code: {test_result['StatusCode']} - PRINT STATEMENT")
+            print(f"  Output: {test_output} - PRINT STATEMENT")
+            
+            logger.info(f"Container file visibility test:")
+            logger.info(f"  Exit code: {test_result['StatusCode']}")
+            logger.info(f"  Output: {test_output}")
+            
+            # Clean up test container
+            client.api.remove_container(container=test_container.get("Id"))
+            
+            if test_result["StatusCode"] != 0:
+                print("⚠️ File visibility test failed - this may indicate volume binding issues - PRINT STATEMENT")
+                logger.warning("⚠️ File visibility test failed - this may indicate volume binding issues")
+            else:
+                print("✅ File visibility test passed - container can see all input files - PRINT STATEMENT")
+                logger.info("✅ File visibility test passed - container can see all input files")
+            
+            # Stream container logs
+            for line in client.api.logs(container=container.get("Id"), stream=True, follow=True):
+                logger.info(f"Clair3: {line.decode().strip()}")
+            
+            # Wait for completion
+            result = client.api.wait(container=container.get("Id"))
+            if result["StatusCode"] != 0:
+                # Get detailed error logs before removing container
+                error_logs = client.api.logs(container=container.get("Id"), stderr=True, stdout=False)
+                error_details = error_logs.decode().strip()
+                if error_details:
+                    logger.error(f"Clair3 container error logs: {error_details}")
+                
+                # Also get stdout logs for context
+                stdout_logs = client.api.logs(container=container.get("Id"), stdout=True, stderr=False)
+                stdout_details = stdout_logs.decode().strip()
+                if stdout_details:
+                    logger.info(f"Clair3 container stdout logs: {stdout_details}")
+                
+                raise Exception(f"Clair3 container exited with status code {result['StatusCode']}. Check logs above for details.")
+            
+            # Clean up container
+            client.api.remove_container(container=container.get("Id"))
+            
+            # Copy output files with standardized names
+            shutil.copy2(f"{clair_dir}/snv.vcf.gz", f"{clair_dir}/output_done.vcf.gz")
+            shutil.copy2(f"{clair_dir}/indel.vcf.gz", f"{clair_dir}/output_indel_done.vcf.gz")
+            
+            logger.info("Clair3 pipeline completed successfully")
+            
+        except ImportError:
+            logger.error("Docker not available. Cannot run Clair3 pipeline.")
+            return ""
+        except Exception as e:
+            logger.error(f"Error running Clair3 pipeline: {e}")
+            return ""
+        
+        logger.info("🔄 STEP 6: Running annotation pipeline")
+        logger.info("Running annotation pipeline...")
+        
+        try:
+            # SNP annotation with snpEff
+            snpeff_cmd = ["snpEff", "-q", "hg38", f"{clair_dir}/output_done.vcf.gz"]
+            snpeff_out = f"{clair_dir}/snpeff_output.vcf"
+            
+            with open(snpeff_out, "w") as fout:
+                result = subprocess.run(snpeff_cmd, stdout=fout, stderr=subprocess.PIPE, text=True)
+            
+            if result.returncode != 0:
+                logger.warning(f"snpEff failed: {result.stderr}")
+                logger.info("Using raw Clair3 output for SNP annotation")
+                # Decompress the gzipped file when copying to .vcf extension
+                import gzip
+                with gzip.open(f"{clair_dir}/output_done.vcf.gz", 'rt') as f_in:
+                    with open(snpeff_out, 'w') as f_out:
+                        f_out.write(f_in.read())
+            
+            # SnpSift annotation
+            try:
+                from littlejohn import resources
+                clinvar_path = os.path.join(
+                    os.path.dirname(os.path.abspath(resources.__file__)), "clinvar.vcf"
+                )
+                
+                if os.path.exists(clinvar_path):
+                    snpsift_cmd = ["SnpSift", "annotate", clinvar_path, snpeff_out]
+                    snpsift_out = f"{clair_dir}/snpsift_output.vcf"
+                    
+                    with open(snpsift_out, "w") as fout:
+                        result = subprocess.run(snpsift_cmd, stdout=fout, stderr=subprocess.PIPE, text=True)
+                    
+                    if result.returncode != 0:
+                        logger.warning(f"SnpSift failed: {result.stderr}")
+                        shutil.copy2(snpeff_out, snpsift_out)
+                else:
+                    logger.warning("ClinVar file not found, using snpEff output")
+                    shutil.copy2(snpeff_out, f"{clair_dir}/snpsift_output.vcf")
+                    
+            except Exception as e:
+                logger.warning(f"SnpSift annotation failed: {e}")
+                shutil.copy2(snpeff_out, f"{clair_dir}/snpsift_output.vcf")
+            
+            # INDEL annotation
+            snpeff_indel_cmd = ["snpEff", "-q", "hg38", f"{clair_dir}/output_indel_done.vcf.gz"]
+            snpeff_indel_out = f"{clair_dir}/snpeff_indel_output.vcf"
+            
+            with open(snpeff_indel_out, "w") as fout:
+                result = subprocess.run(snpeff_indel_cmd, stdout=fout, stderr=subprocess.PIPE, text=True)
+            
+            if result.returncode != 0:
+                logger.warning(f"snpEff (INDEL) failed: {result.stderr}")
+                # Decompress the gzipped file when copying to .vcf extension
+                import gzip
+                with gzip.open(f"{clair_dir}/output_indel_done.vcf.gz", 'rt') as f_in:
+                    with open(snpeff_indel_out, 'w') as f_out:
+                        f_out.write(f_in.read())
+            
+            # SnpSift annotation for INDELs
+            try:
+                if os.path.exists(clinvar_path):
+                    snpsift_indel_cmd = ["SnpSift", "annotate", clinvar_path, snpeff_indel_out]
+                    snpsift_indel_out = f"{clair_dir}/snpsift_indel_output.vcf"
+                    
+                    with open(snpsift_indel_out, "w") as fout:
+                        result = subprocess.run(snpsift_indel_cmd, stdout=fout, stderr=subprocess.PIPE, text=True)
+                    
+                    if result.returncode != 0:
+                        logger.warning(f"SnpSift (INDEL) failed: {result.stderr}")
+                        shutil.copy2(snpeff_indel_out, snpsift_indel_out)
+                else:
+                    shutil.copy2(snpeff_indel_out, f"{clair_dir}/snpsift_indel_output.vcf")
+                    
+            except Exception as e:
+                logger.warning(f"SnpSift INDEL annotation failed: {e}")
+                shutil.copy2(snpeff_indel_out, f"{clair_dir}/snpsift_indel_output.vcf")
+            
+            logger.info("Annotation pipeline completed successfully")
+            
+        except Exception as e:
+            logger.error(f"Error in annotation pipeline: {e}")
+            return ""
+        
+        # Parse VCF files to CSV format
+        logger.info("Parsing VCF files...")
+        try:
+            # Import parse_vcf function or implement basic parsing
+            def basic_vcf_to_csv(vcf_file, csv_file):
+                """Basic VCF to CSV conversion"""
+                try:
+                    with open(vcf_file, 'r') as f:
+                        lines = [line.strip() for line in f if not line.startswith('#')]
+                    
+                    if not lines:
+                        return
+                    
+                    # Parse header from first non-comment line
+                    header = lines[0].split('\t')
+                    
+                    # Parse data
+                    data = []
+                    for line in lines[1:]:
+                        fields = line.split('\t')
+                        if len(fields) >= len(header):
+                            data.append(fields[:len(header)])
+                    
+                    # Create DataFrame and save
+                    df = pd.DataFrame(data, columns=header)
+                    df.to_csv(csv_file, index=False)
+                    logger.info(f"VCF parsed to CSV: {csv_file}")
+                    
+                except Exception as e:
+                    logger.warning(f"Basic VCF parsing failed for {vcf_file}: {e}")
+            
+            # Parse both SNP and INDEL VCFs
+            basic_vcf_to_csv(
+                f"{clair_dir}/snpsift_output.vcf", 
+                f"{clair_dir}/snpsift_output.vcf.csv"
+            )
+            basic_vcf_to_csv(
+                f"{clair_dir}/snpsift_indel_output.vcf", 
+                f"{clair_dir}/snpsift_indel_output.vcf.csv"
+            )
+            
+            # Note: VCF files are now properly uncompressed when they have .vcf extensions
+            # Compressed .vcf.gz files are only used as input to processing tools
+            
+        except Exception as e:
+            logger.warning(f"VCF parsing failed: {e}")
+        
+        logger.info("🎉 FINAL SUCCESS: SNP analysis completed successfully!")
+        logger.info(f"SNP analysis completed successfully for {os.path.basename(sample_dir)}")
+        logger.info(f"Output directory: {clair_dir}")
+        return clair_dir
+        
+    except Exception as e:
+        print(f"❌ EXCEPTION in run_snp_analysis: {e} - PRINT STATEMENT")
+        logger.error(f"Failed to run SNP analysis in {sample_dir}: {e}")
+        import traceback
+        print(f"❌ TRACEBACK: {traceback.format_exc()} - PRINT STATEMENT")
+        return ""
+
+
+def snp_analysis_handler(job, work_dir: Optional[str] = None) -> None:
+    """
+    Workflow handler to run SNP analysis using Clair3 for a sample.
+    
+    Expects a per-sample directory containing `target.bam` and `targets_exceeding_threshold.bed`.
+    Outputs to `sample_dir/clair3/` with annotated VCF files and CSV summaries.
+    On success, records the output directory in the job context under results['snp_analysis'].
+    
+    Required metadata:
+    - reference: Path to reference genome (optional, will auto-detect)
+    - threads: Number of threads to use (default: 4)
+    - force_regenerate: Whether to force regeneration of existing results (default: False)
+    """
+    logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
+    
+    try:
+        # Determine sample dir: prefer provided work_dir + sample_id
+        sid = job.context.get_sample_id() if hasattr(job.context, "get_sample_id") else "unknown"
+        base = work_dir or job.context.metadata.get("work_dir")
+        sample_dir = None
+        
+        logger.info(f"SNP analysis job: sample_id={sid}, work_dir={work_dir}, base={base}")
+        
+        if base and sid and sid != "unknown":
+            sample_dir = os.path.join(base, sid)
+            logger.info(f"Using work_dir + sample_id path: {sample_dir}")
+        else:
+            # Fallback: directory of the current file
+            sample_dir = os.path.dirname(job.context.filepath)
+            logger.info(f"Using fallback path: {sample_dir}")
+        
+        # Additional fallback: if the filepath is already a sample directory, use it directly
+        if os.path.isdir(job.context.filepath):
+            sample_dir = job.context.filepath
+            logger.info(f"Using filepath directly as sample directory: {sample_dir}")
+
+        if not os.path.isdir(sample_dir):
+            raise RuntimeError(f"Sample directory not found: {sample_dir}")
+        
+        logger.info(f"Final sample directory: {sample_dir}")
+        
+        # Let's see what's actually in this directory
+        try:
+            if os.path.exists(sample_dir):
+                dir_contents = os.listdir(sample_dir)
+                logger.info(f"📁 Directory contents of {sample_dir}:")
+                for item in dir_contents:
+                    item_path = os.path.join(sample_dir, item)
+                    if os.path.isfile(item_path):
+                        size = os.path.getsize(item_path)
+                        logger.info(f"  📄 {item} ({size / (1024**2):.1f} MB)")
+                    else:
+                        logger.info(f"  📁 {item}/")
+            else:
+                logger.error(f"❌ Sample directory does not exist: {sample_dir}")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not list directory contents: {e}")
+        
+        # Check for required input files
+        target_bam = os.path.join(sample_dir, "target.bam")
+        targets_bed = os.path.join(sample_dir, "targets_exceeding_threshold.bed")
+        
+        if not os.path.exists(target_bam):
+            raise RuntimeError(f"target.bam not found: {target_bam}")
+        
+        if not os.path.exists(targets_bed):
+            raise RuntimeError(f"targets_exceeding_threshold.bed not found: {targets_bed}")
+        
+        # Get job parameters
+        threads = job.context.metadata.get("threads", 4)
+        force_regenerate = job.context.metadata.get("force_regenerate", False)
+        reference = job.context.metadata.get("reference")
+        
+        # Debug logging for reference genome
+        logger.info(f"=== SNP ANALYSIS HANDLER DEBUGGING ===")
+        logger.info(f"Job metadata keys: {list(job.context.metadata.keys())}")
+        logger.info(f"Job metadata: {job.context.metadata}")
+        logger.info(f"Extracted reference: {reference}")
+        logger.info(f"=== END SNP ANALYSIS HANDLER DEBUGGING ===")
+        
+        if force_regenerate:
+            logger.info("Force regenerate requested - will recreate SNP analysis even if it exists")
+        
+        if reference:
+            logger.info(f"✅ Using reference genome from job metadata: {reference}")
+        else:
+            logger.warning("❌ No reference genome in job metadata - will try to auto-detect")
+        
+        # Run SNP analysis
+        logger.info("🚀 ABOUT TO CALL run_snp_analysis function")
+        logger.info(f"Calling run_snp_analysis with: sample_dir={sample_dir}, threads={threads}, force_regenerate={force_regenerate}, reference={reference}")
+        
+        output_dir = run_snp_analysis(sample_dir, threads=threads, force_regenerate=force_regenerate, reference=reference)
+        
+        logger.info(f"run_snp_analysis returned: {output_dir}")
+        
+        if not output_dir:
+            raise RuntimeError("Failed to complete SNP analysis")
+
+        # Record result
+        try:
+            job.context.add_result("snp_analysis", {
+                "output_dir": output_dir,
+                "snps_vcf": os.path.join(output_dir, "snpsift_output.vcf"),
+                "indels_vcf": os.path.join(output_dir, "snpsift_indel_output.vcf"),
+                "snps_csv": os.path.join(output_dir, "snpsift_output.vcf.csv"),
+                "indels_csv": os.path.join(output_dir, "snpsift_indel_output.vcf.csv"),
+                "sample_id": sid,
+                "analysis_timestamp": time.time()
+            })
+        except Exception:
+            pass
+        
+        logger.info(f"SNP analysis completed successfully for {sid}")
+        logger.info(f"Output directory: {output_dir}")
+        
+    except Exception as e:
+        job.context.add_error("snp_analysis", str(e))
+        logger.error(f"snp_analysis handler failed: {e}")
