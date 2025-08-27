@@ -1373,31 +1373,24 @@ def run_snp_analysis(sample_dir: str, threads: int = 4, force_regenerate: bool =
     logger = logging.getLogger("littlejohn.target")
     
     # CRITICAL: Immediate logging to see if we even get here
-    print("🚀 ENTERING run_snp_analysis function - PRINT STATEMENT")
     logger.info("🚀 ENTERING run_snp_analysis function")
     logger.info(f"Parameters: sample_dir={sample_dir}, threads={threads}, force_regenerate={force_regenerate}, reference={reference}")
     
     # Also log to stderr to make sure we see it
     import sys
-    print(f"🚀 ENTERING run_snp_analysis function - PRINT TO STDERR", file=sys.stderr)
     
     try:
-        print("🔄 STEP 1: Setting up sample directory - PRINT STATEMENT")
         logger.info("🔄 STEP 1: Setting up sample directory")
         sample_dir = os.path.abspath(sample_dir)
         logger.info(f"Absolute sample_dir: {sample_dir}")
-        print(f"Absolute sample_dir: {sample_dir} - PRINT STATEMENT")
         
         clair_dir = os.path.join(sample_dir, "clair3")
         logger.info(f"Clair3 output directory: {clair_dir}")
-        print(f"Clair3 output directory: {clair_dir} - PRINT STATEMENT")
         
         os.makedirs(clair_dir, exist_ok=True)
         logger.info(f"✅ Clair3 directory created/verified: {clair_dir}")
-        print(f"✅ Clair3 directory created/verified: {clair_dir} - PRINT STATEMENT")
         
         logger.info("🔄 STEP 2: Checking for existing SNP analysis")
-        print("🔄 STEP 2: Checking for existing SNP analysis - PRINT STATEMENT")
         
         # Check if SNP analysis already exists and force_regenerate is not set
         snp_output_files = [
@@ -1409,13 +1402,9 @@ def run_snp_analysis(sample_dir: str, threads: int = 4, force_regenerate: bool =
             logger.info(f"SNP analysis already present in {clair_dir}")
             return clair_dir
         
-        print("🔄 STEP 3: Checking for required input files - PRINT STATEMENT")
         logger.info("🔄 STEP 3: Checking for required input files")
         target_bam = os.path.join(sample_dir, "target.bam")
         targets_bed = os.path.join(sample_dir, "targets_exceeding_threshold.bed")
-        
-        print(f"Target BAM path: {target_bam} - PRINT STATEMENT")
-        print(f"Targets BED path: {targets_bed} - PRINT STATEMENT")
         
         logger.info(f"🔍 CHECKING INPUT FILES FOR CLAIR3")
         logger.info(f"  Sample directory: {sample_dir}")
@@ -1423,20 +1412,15 @@ def run_snp_analysis(sample_dir: str, threads: int = 4, force_regenerate: bool =
         logger.info(f"  Targets BED path: {targets_bed}")
         logger.info(f"  Reference path: {reference}")
         
-        print(f"Checking if target_bam exists: {os.path.exists(target_bam)} - PRINT STATEMENT")
-        print(f"Checking if targets_bed exists: {os.path.exists(targets_bed)} - PRINT STATEMENT")
         
         if not os.path.exists(target_bam):
-            print(f"❌ target.bam not found: {target_bam} - PRINT STATEMENT")
             logger.error(f"❌ target.bam not found: {target_bam}")
             return ""
             
         if not os.path.exists(targets_bed):
-            print(f"❌ targets_exceeding_threshold.bam not found: {targets_bed} - PRINT STATEMENT")
             logger.error(f"❌ targets_exceeding_threshold.bed not found: {targets_bed}")
             return ""
         
-        print("✅ Both input files exist - PRINT STATEMENT")
         
         # Log file existence checks
         logger.info("✅ INPUT FILES EXIST - PROCEEDING WITH ANALYSIS")
@@ -1472,11 +1456,9 @@ def run_snp_analysis(sample_dir: str, threads: int = 4, force_regenerate: bool =
         logger.info(f"Target BAM: {target_bam}")
         logger.info(f"Targets BED: {targets_bed}")
         
-        print("🔄 ABOUT TO START BAM SORTING - PRINT STATEMENT")
         logger.info("🔄 STEP 4: Sorting target BAM for Clair3")
         sorted_bam = os.path.join(clair_dir, "sorted_targets_exceeding.bam")
         logger.info(f"Sorting BAM: {target_bam} -> {sorted_bam}")
-        print(f"Sorting BAM: {target_bam} -> {sorted_bam} - PRINT STATEMENT")
         
         try:
             # Check if sorted BAM already exists and is valid
@@ -1565,16 +1547,7 @@ def run_snp_analysis(sample_dir: str, threads: int = 4, force_regenerate: bool =
             container_bedfile = f"/data/bed/{os.path.basename(targets_bed)}"   # BED goes to bed directory
             container_reference = f"/data/reference/{os.path.basename(reference)}"  # Reference goes to reference directory
             container_output = "/data/output"
-            
-            print(f"🔍 DOCKER VOLUME DEBUGGING - PRINT STATEMENT")
-            print(f"Container BAM file path: {container_bamfile} - PRINT STATEMENT")
-            print(f"Container BED file path: {container_bedfile} - PRINT STATEMENT")
-            print(f"Container reference path: {container_reference} - PRINT STATEMENT")
-            print(f"Container output path: {container_output} - PRINT STATEMENT")
-            
-            # Define volume bindings
-            print("🔍 CREATING VOLUME BINDINGS - PRINT STATEMENT")
-            
+                    
             # Clean up old debugging - no longer needed with the fixed approach
             
             # Use the original working pattern: bind each directory to its own container path
@@ -1586,55 +1559,16 @@ def run_snp_analysis(sample_dir: str, threads: int = 4, force_regenerate: bool =
             }
             
             # Debug: Let's verify the BAM binding was added
-            print(f"🔍 VERIFYING BAM BINDING ADDED - PRINT STATEMENT")
             bam_dir = os.path.dirname(sorted_bam)
-            if bam_dir in volume_bindings:
-                print(f"✅ BAM binding found: {bam_dir} -> {volume_bindings[bam_dir]['bind']} - PRINT STATEMENT")
-            else:
-                print(f"❌ BAM binding NOT found in volume_bindings - PRINT STATEMENT")
-            print(f"Volume bindings created: {volume_bindings} - PRINT STATEMENT")
             
-            # Debug: Let's verify what each binding actually maps to
-            print(f"🔍 VOLUME BINDING VERIFICATION - PRINT STATEMENT")
-            print(f"  sorted_bam: {sorted_bam} - PRINT STATEMENT")
-            print(f"  os.path.dirname(sorted_bam): {os.path.dirname(sorted_bam)} - PRINT STATEMENT")
-            print(f"  targets_bed: {targets_bed} - PRINT STATEMENT")
-            print(f"  os.path.dirname(targets_bed): {os.path.dirname(targets_bed)} - PRINT STATEMENT")
-            print(f"  reference: {reference} - PRINT STATEMENT")
-            print(f"  os.path.dirname(reference): {os.path.dirname(reference)} - PRINT STATEMENT")
-            print(f"  clair_dir: {clair_dir} - PRINT STATEMENT")
-            
-            # Let's also check if the volume bindings dictionary has the right keys
-            print(f"🔍 VOLUME BINDINGS DICTIONARY KEYS - PRINT STATEMENT")
-            for key in volume_bindings.keys():
-                print(f"  Volume binding key: {key} - PRINT STATEMENT")
-            
-            # And let's check what each binding maps to
-            print(f"🔍 VOLUME BINDINGS MAPPING - PRINT STATEMENT")
-            for host_path, binding_info in volume_bindings.items():
-                print(f"  {host_path} -> {binding_info['bind']} - PRINT STATEMENT")
-            
-            print(f"Volume bindings: {volume_bindings} - PRINT STATEMENT")
-            print(f"Host BAM directory: {os.path.dirname(sorted_bam)} - PRINT STATEMENT")
-            print(f"Host BED directory: {os.path.dirname(targets_bed)} - PRINT STATEMENT")
-            print(f"Host reference directory: {os.path.dirname(reference)} - PRINT STATEMENT")
-            print(f"Host output directory: {clair_dir} - PRINT STATEMENT")
-            
-            # Verify all source directories exist and are accessible
-            print("🔍 ABOUT TO VERIFY VOLUME BINDINGS - PRINT STATEMENT")
-            print("🔍 VERIFYING VOLUME BINDINGS - PRINT STATEMENT")
             logger.info("🔍 Verifying volume bindings...")
             for source_path, binding_info in volume_bindings.items():
-                print(f"  Checking volume binding: {source_path} -> {binding_info['bind']} - PRINT STATEMENT")
                 if not os.path.exists(source_path):
-                    print(f"❌ Volume source path does not exist: {source_path} - PRINT STATEMENT")
                     logger.error(f"❌ Volume source path does not exist: {source_path}")
                     return ""
                 if not os.access(source_path, os.R_OK):
-                    print(f"❌ Volume source path not readable: {source_path} - PRINT STATEMENT")
                     logger.error(f"❌ Volume source path not readable: {source_path}")
                     return ""
-                print(f"✅ Volume binding verified: {source_path} -> {binding_info['bind']} - PRINT STATEMENT")
                 logger.info(f"✅ Volume binding verified: {source_path} -> {binding_info['bind']}")
             
             # Verify the specific files exist in their directories
@@ -1657,36 +1591,164 @@ def run_snp_analysis(sample_dir: str, threads: int = 4, force_regenerate: bool =
             
             host_config = client.api.create_host_config(binds=volume_bindings)
             
-            # Build Clair3 command
-            command = (
-                f"/opt/bin/run_clairs_to "
-                f"--tumor_bam_fn {container_bamfile} "
-                f"--ref_fn {container_reference} "
-                f"--threads 4 "
-                f"--remove_intermediate_dir "
-                f"--platform ont_r10_guppy_hac_5khz "
-                f"--output_dir {container_output} "
-                f"-b {container_bedfile} "
-                f"--chunk_size 5000000 "
-                f"--disable_intermediate_phasing"
-            )
+            # Function to split BED file into manageable regions
+            def split_bed_into_regions(bed_file, max_region_size=100000000):
+                """Split BED file into efficient regions up to max_region_size bases"""
+                regions = []
+                try:
+                    # Read all BED entries and sort them
+                    bed_entries = []
+                    with open(bed_file, 'r') as f:
+                        for line_num, line in enumerate(f, 1):
+                            line = line.strip()
+                            if not line or line.startswith('#'):
+                                continue
+                            
+                            parts = line.split('\t')
+                            if len(parts) < 3:
+                                logger.warning(f"Skipping invalid BED line {line_num}: {line}")
+                                continue
+                            
+                            chrom = parts[0]
+                            start = int(parts[1])
+                            end = int(parts[2])
+                            bed_entries.append((chrom, start, end))
+                    
+                    # Sort by chromosome and start position
+                    bed_entries.sort(key=lambda x: (x[0], x[1]))
+                    
+                    # Group into efficient regions
+                    current_chrom = None
+                    current_start = None
+                    current_end = None
+                    
+                    for chrom, start, end in bed_entries:
+                        if chrom != current_chrom:
+                            # New chromosome, start new region
+                            if current_chrom is not None:
+                                regions.append(f"{current_chrom}:{current_start+1}-{current_end}")
+                            current_chrom = chrom
+                            current_start = start
+                            current_end = end
+                        elif end - current_start <= max_region_size:
+                            # Can extend current region
+                            current_end = end
+                        else:
+                            # Current region would exceed max size, start new one
+                            regions.append(f"{current_chrom}:{current_start+1}-{current_end}")
+                            current_start = start
+                            current_end = end
+                    
+                    # Add final region
+                    if current_chrom is not None:
+                        regions.append(f"{current_chrom}:{current_start+1}-{current_end}")
+                    
+                    logger.info(f"Combined BED entries into {len(regions)} efficient regions (max size: {max_region_size:,} bases)")
+                    return regions
+                except Exception as e:
+                    logger.error(f"Error splitting BED file: {e}")
+                    return []
             
-            logger.info(f"Running Clair3 command: {command}")
+            # Split BED file into regions
+            logger.info("Splitting BED file into efficient regions...")
+            regions = split_bed_into_regions(targets_bed, max_region_size=100000000)
+            
+            if not regions:
+                logger.error("Failed to split BED file into regions")
+                return ""
+            
+            logger.info(f"Processing {len(regions)} efficient regions: {regions[:5]}{'...' if len(regions) > 5 else ''}")
+            
+            # Log region sizes for efficiency analysis
+            total_bases = 0
+            for i, region in enumerate(regions):
+                try:
+                    chrom_part, pos_part = region.split(':')
+                    start_end = pos_part.split('-')
+                    start = int(start_end[0]) - 1  # Convert back to 0-based
+                    end = int(start_end[1])
+                    region_size = end - start
+                    total_bases += region_size
+                    logger.info(f"Region {i+1}: {region} (size: {region_size:,} bases)")
+                except Exception as e:
+                    logger.warning(f"Could not parse region size for {region}: {e}")
+            
+            logger.info(f"Total bases to process: {total_bases:,} across {len(regions)} regions")
+            logger.info(f"Average region size: {total_bases // len(regions):,} bases")
+            
+            # Process each region separately
+            all_snv_vcfs = []
+            all_indel_vcfs = []
+            
+            for i, region in enumerate(regions):
+                logger.info(f"Processing region {i+1}/{len(regions)}: {region}")
+                print(f"Processing region {i+1}/{len(regions)}: {region} - PRINT STATEMENT")
+                # Create region-specific output directory
+                region_output = f"{container_output}/region_{i+1}"
+                
+                # Build Clair3 command for this region
+                command = (
+                    f"/opt/bin/run_clairs_to "
+                    f"--tumor_bam_fn {container_bamfile} "
+                    f"--ref_fn {container_reference} "
+                    f"--threads 4 "
+                    f"--remove_intermediate_dir "
+                    f"--platform ont_r10_guppy_hac_5khz "
+                    f"--output_dir {region_output} "
+                    f"-b {container_bedfile} "
+                    f"--chunk_size 5000000 "
+                    f"--disable_intermediate_phasing "
+                    f"--region {region}"
+                )
+            
             logger.info(f"Container input BAM: {container_bamfile}")
             logger.info(f"Container input BED: {container_bedfile}")
             logger.info(f"Container output dir: {container_output}")
             logger.info(f"Container reference: {container_reference}")
             logger.info(f"Volume bindings: {volume_bindings}")
             
-            # Create and start container
-            logger.info("Creating Clair3 container...")
-            container = client.api.create_container(
-                image="hkubal/clairs-to:latest",
-                command=command,
-                volumes=list(volume_bindings.keys()),
-                host_config=host_config,
-            )
-            logger.info(f"Container created with ID: {container.get('Id')}")
+            # Function to merge VCF files
+            def merge_vcf_files(vcf_files, output_file, variant_type):
+                """Merge multiple VCF files into a single output file"""
+                try:
+                    if not vcf_files:
+                        logger.error(f"No {variant_type} VCF files to merge")
+                        return False
+                    
+                    logger.info(f"Merging {len(vcf_files)} {variant_type} VCF files into {output_file}")
+                    
+                    # Read headers from first file
+                    import gzip
+                    headers = []
+                    first_vcf = vcf_files[0]
+                    
+                    with gzip.open(first_vcf, 'rt') as f:
+                        for line in f:
+                            if line.startswith('#'):
+                                headers.append(line)
+                            else:
+                                break
+                    
+                    # Write merged output
+                    with gzip.open(output_file, 'wt') as out_f:
+                        # Write headers
+                        for header in headers:
+                            out_f.write(header)
+                        
+                        # Write variants from each file
+                        for vcf_file in vcf_files:
+                            if os.path.exists(vcf_file):
+                                with gzip.open(vcf_file, 'rt') as in_f:
+                                    for line in in_f:
+                                        if not line.startswith('#'):
+                                            out_f.write(line)
+                    
+                    logger.info(f"Successfully merged {variant_type} VCF files into {output_file}")
+                    return True
+                    
+                except Exception as e:
+                    logger.error(f"Error merging {variant_type} VCF files: {e}")
+                    return False
             
             # Log system resources before starting
             try:
@@ -1697,90 +1759,111 @@ def run_snp_analysis(sample_dir: str, threads: int = 4, force_regenerate: bool =
             except ImportError:
                 logger.info("psutil not available, skipping resource logging")
             
-            # Start container
-            client.api.start(container=container.get("Id"))
             
-            # Test file visibility in container before running Clair3
-            print("🔍 TESTING FILE VISIBILITY IN CONTAINER - PRINT STATEMENT")
-            logger.info("🔍 Testing file visibility in container...")
             
-            # First, let's see what's actually in the host directories
-            print(f"🔍 HOST DIRECTORY CONTENTS - PRINT STATEMENT")
-            try:
-                bam_dir = os.path.dirname(sorted_bam)
-                bam_contents = os.listdir(bam_dir)
-                print(f"Host BAM directory ({bam_dir}) contents: {bam_contents} - PRINT STATEMENT")
+            
+            # Process each region
+            for i, region in enumerate(regions):
+                print(f"Processing region {i+1}/{len(regions)}: {region} - PRINT STATEMENT")
+                logger.info(f"Processing region {i+1}/{len(regions)}: {region}")
                 
-                bed_dir = os.path.dirname(targets_bed)
-                bed_contents = os.listdir(bed_dir)
-                print(f"Host BED directory ({bed_dir}) contents: {bed_contents} - PRINT STATEMENT")
+                # Create region-specific output directory
+                region_output = f"{container_output}/region_{i+1}"
                 
-                ref_dir = os.path.dirname(reference)
-                ref_contents = os.listdir(ref_dir)
-                print(f"Host reference directory ({ref_dir}) contents: {ref_contents} - PRINT STATEMENT")
-            except Exception as e:
-                print(f"❌ Error listing host directories: {e} - PRINT STATEMENT")
+                # Build Clair3 command for this region
+                command = (
+                    f"/opt/bin/run_clairs_to "
+                    f"--tumor_bam_fn {container_bamfile} "
+                    f"--ref_fn {container_reference} "
+                    f"--threads 4 "
+                    f"--remove_intermediate_dir "
+                    f"--platform ont_r10_guppy_hac_5khz "
+                    f"--output_dir {region_output} "
+                    f"-b {container_bedfile} "
+                    f"--chunk_size 5000000 "
+                    f"--disable_intermediate_phasing "
+                    f"--region {region}"
+                )
+                
+                logger.info(f"Running Clair3 command for region {i+1}: {command}")
+                
+                # Create and start container for this region
+                logger.info(f"Creating Clair3 container for region {i+1}...")
+                container = client.api.create_container(
+                    image="hkubal/clairs-to:latest",
+                    command=command,
+                    volumes=list(volume_bindings.keys()),
+                    host_config=host_config,
+                )
+                logger.info(f"Container created with ID: {container.get('Id')}")
+                
+                # Start container
+                client.api.start(container=container.get("Id"))
+                
+                # Stream container logs
+                for line in client.api.logs(container=container.get("Id"), stream=True, follow=True):
+                    logger.info(f"Clair3 Region {i+1}: {line.decode().strip()}")
+                
+                # Wait for completion
+                result = client.api.wait(container=container.get("Id"))
+                if result["StatusCode"] != 0:
+                    # Get detailed error logs before removing container
+                    error_logs = client.api.logs(container=container.get("Id"), stderr=True, stdout=False)
+                    error_details = error_logs.decode().strip()
+                    if error_details:
+                        logger.error(f"Clair3 region {i+1} error logs: {error_details}")
+                    
+                    # Also get stdout logs for context
+                    stdout_logs = client.api.logs(container=container.get("Id"), stdout=True, stderr=False)
+                    stdout_details = stdout_logs.decode().strip()
+                    if stdout_details:
+                        logger.info(f"Clair3 region {i+1} stdout logs: {stdout_details}")
+                    
+                    logger.warning(f"Clair3 region {i+1} failed with status code {result['StatusCode']}, skipping this region")
+                    continue
+                
+                # Clean up container
+                client.api.remove_container(container=container.get("Id"))
+                
+                # Check if output files were created for this region
+                region_snv = f"{clair_dir}/region_{i+1}/snv.vcf.gz"
+                region_indel = f"{clair_dir}/region_{i+1}/indel.vcf.gz"
+                
+                if os.path.exists(region_snv):
+                    all_snv_vcfs.append(region_snv)
+                    logger.info(f"Region {i+1} SNV output created: {region_snv}")
+                else:
+                    logger.warning(f"Region {i+1} SNV output not found: {region_snv}")
+                
+                if os.path.exists(region_indel):
+                    all_indel_vcfs.append(region_indel)
+                    logger.info(f"Region {i+1} INDEL output created: {region_indel}")
+                else:
+                    logger.warning(f"Region {i+1} INDEL output not found: {region_indel}")
             
-            test_container = client.api.create_container(
-                image="hkubal/clairs-to:latest",
-                command="ls -la /data/bam /data/bed /data/reference",
-                volumes=list(volume_bindings.keys()),
-                host_config=host_config,
-            )
-            client.api.start(container=test_container.get("Id"))
+            # Merge all region outputs
+            logger.info(f"Merging {len(all_snv_vcfs)} SNV VCF files and {len(all_indel_vcfs)} INDEL VCF files...")
             
-            # Get test results
-            test_result = client.api.wait(container=test_container.get("Id"))
-            test_logs = client.api.logs(container=test_container.get("Id"), stdout=True, stderr=True)
-            test_output = test_logs.decode().strip()
-            
-            print(f"Container file visibility test results: - PRINT STATEMENT")
-            print(f"  Exit code: {test_result['StatusCode']} - PRINT STATEMENT")
-            print(f"  Output: {test_output} - PRINT STATEMENT")
-            
-            logger.info(f"Container file visibility test:")
-            logger.info(f"  Exit code: {test_result['StatusCode']}")
-            logger.info(f"  Output: {test_output}")
-            
-            # Clean up test container
-            client.api.remove_container(container=test_container.get("Id"))
-            
-            if test_result["StatusCode"] != 0:
-                print("⚠️ File visibility test failed - this may indicate volume binding issues - PRINT STATEMENT")
-                logger.warning("⚠️ File visibility test failed - this may indicate volume binding issues")
+            if all_snv_vcfs:
+                # Merge SNV VCFs
+                merged_snv = f"{clair_dir}/merged_snv.vcf.gz"
+                merge_vcf_files(all_snv_vcfs, merged_snv, "SNV")
+                shutil.copy2(merged_snv, f"{clair_dir}/output_done.vcf.gz")
+                logger.info(f"Merged SNV VCFs into: {clair_dir}/output_done.vcf.gz")
             else:
-                print("✅ File visibility test passed - container can see all input files - PRINT STATEMENT")
-                logger.info("✅ File visibility test passed - container can see all input files")
+                logger.error("No SNV VCF files were successfully created")
+                return ""
             
-            # Stream container logs
-            for line in client.api.logs(container=container.get("Id"), stream=True, follow=True):
-                logger.info(f"Clair3: {line.decode().strip()}")
+            if all_indel_vcfs:
+                # Merge INDEL VCFs
+                merged_indel = f"{clair_dir}/merged_indel.vcf.gz"
+                merge_vcf_files(all_indel_vcfs, merged_indel, "INDEL")
+                shutil.copy2(merged_indel, f"{clair_dir}/output_indel_done.vcf.gz")
+                logger.info(f"Merged INDEL VCFs into: {clair_dir}/output_indel_done.vcf.gz")
+            else:
+                logger.warning("No INDEL VCF files were successfully created")
             
-            # Wait for completion
-            result = client.api.wait(container=container.get("Id"))
-            if result["StatusCode"] != 0:
-                # Get detailed error logs before removing container
-                error_logs = client.api.logs(container=container.get("Id"), stderr=True, stdout=False)
-                error_details = error_logs.decode().strip()
-                if error_details:
-                    logger.error(f"Clair3 container error logs: {error_details}")
-                
-                # Also get stdout logs for context
-                stdout_logs = client.api.logs(container=container.get("Id"), stdout=True, stderr=False)
-                stdout_details = stdout_logs.decode().strip()
-                if stdout_details:
-                    logger.info(f"Clair3 container stdout logs: {stdout_details}")
-                
-                raise Exception(f"Clair3 container exited with status code {result['StatusCode']}. Check logs above for details.")
-            
-            # Clean up container
-            client.api.remove_container(container=container.get("Id"))
-            
-            # Copy output files with standardized names
-            shutil.copy2(f"{clair_dir}/snv.vcf.gz", f"{clair_dir}/output_done.vcf.gz")
-            shutil.copy2(f"{clair_dir}/indel.vcf.gz", f"{clair_dir}/output_indel_done.vcf.gz")
-            
-            logger.info("Clair3 pipeline completed successfully")
+            logger.info("Clair3 pipeline completed successfully for all regions")
             
         except ImportError:
             logger.error("Docker not available. Cannot run Clair3 pipeline.")
@@ -1794,79 +1877,277 @@ def run_snp_analysis(sample_dir: str, threads: int = 4, force_regenerate: bool =
         
         try:
             # SNP annotation with snpEff
-            snpeff_cmd = ["snpEff", "-q", "hg38", f"{clair_dir}/output_done.vcf.gz"]
+            logger.info(f"Starting snpEff annotation for SNPs...")
+            logger.info(f"Input file: {clair_dir}/output_done.vcf.gz")
+            logger.info(f"Output file: {clair_dir}/snpeff_output.vcf")
+            
+            # Define output file paths
             snpeff_out = f"{clair_dir}/snpeff_output.vcf"
+            snpsift_out = f"{clair_dir}/snpsift_output.vcf"
+            snpeff_indel_out = f"{clair_dir}/snpeff_indel_output.vcf"
+            snpsift_indel_out = f"{clair_dir}/snpsift_indel_output.vcf"
+            
+            # Check if input file exists and has content
+            if os.path.exists(f"{clair_dir}/output_done.vcf.gz"):
+                file_size = os.path.getsize(f"{clair_dir}/output_done.vcf.gz")
+                logger.info(f"Input VCF file exists, size: {file_size} bytes")
+                
+                # Check first few lines to verify it's a valid VCF
+                try:
+                    import gzip
+                    with gzip.open(f"{clair_dir}/output_done.vcf.gz", 'rt') as f:
+                        first_lines = [next(f) for _ in range(5)]
+                    logger.info(f"First 5 lines of input VCF:")
+                    for i, line in enumerate(first_lines):
+                        logger.info(f"  Line {i+1}: {line.strip()}")
+                except Exception as e:
+                    logger.warning(f"Could not read input VCF file: {e}")
+            else:
+                logger.error(f"Input VCF file does not exist: {clair_dir}/output_done.vcf.gz")
+            
+            snpeff_cmd = ["snpEff", "-q", "hg38", f"{clair_dir}/output_done.vcf.gz"]
+            logger.info(f"Running snpEff command: {' '.join(snpeff_cmd)}")
+            
+            # Check if snpEff is available
+            try:
+                snpeff_version = subprocess.run(["snpEff", "-version"], capture_output=True, text=True)
+                if snpeff_version.returncode == 0:
+                    logger.info(f"snpEff version: {snpeff_version.stdout.strip()}")
+                else:
+                    logger.warning(f"Could not get snpEff version: {snpeff_version.stderr}")
+            except FileNotFoundError:
+                logger.error("snpEff command not found in PATH")
             
             with open(snpeff_out, "w") as fout:
+                logger.info("Starting snpEff execution...")
                 result = subprocess.run(snpeff_cmd, stdout=fout, stderr=subprocess.PIPE, text=True)
+                logger.info(f"snpEff execution completed with return code: {result.returncode}")
             
             if result.returncode != 0:
-                logger.warning(f"snpEff failed: {result.stderr}")
+                logger.warning(f"snpEff failed with return code: {result.returncode}")
+                logger.warning(f"snpEff stderr output: {result.stderr}")
                 logger.info("Using raw Clair3 output for SNP annotation")
                 # Decompress the gzipped file when copying to .vcf extension
                 import gzip
                 with gzip.open(f"{clair_dir}/output_done.vcf.gz", 'rt') as f_in:
                     with open(snpeff_out, 'w') as f_out:
                         f_out.write(f_in.read())
+                logger.info("Created uncompressed VCF from gzipped input")
+            else:
+                logger.info("snpEff completed successfully!")
+                # Check the output file
+                if os.path.exists(snpeff_out):
+                    output_size = os.path.getsize(snpeff_out)
+                    logger.info(f"snpEff output file created, size: {output_size} bytes")
+                    
+                    # Check first few lines of output to verify annotation
+                    try:
+                        with open(snpeff_out, 'r') as f:
+                            first_lines = [next(f) for _ in range(5)]
+                        logger.info(f"First 5 lines of snpEff output:")
+                        for i, line in enumerate(first_lines):
+                            logger.info(f"  Line {i+1}: {line.strip()}")
+                    except Exception as e:
+                        logger.warning(f"Could not read snpEff output: {e}")
+                else:
+                    logger.error("snpEff output file was not created!")
             
             # SnpSift annotation
+            logger.info(f"Starting SnpSift annotation for SNPs...")
+            logger.info(f"Input file: {snpeff_out}")
+            logger.info(f"Output file: {snpsift_out}")
+            
+            # Check if snpEff output exists and has content
+            if os.path.exists(snpeff_out):
+                snpeff_size = os.path.getsize(snpeff_out)
+                logger.info(f"snpEff output file exists, size: {snpeff_size} bytes")
+            else:
+                logger.error(f"snpEff output file does not exist: {snpeff_out}")
+            
             try:
                 from littlejohn import resources
                 clinvar_path = os.path.join(
                     os.path.dirname(os.path.abspath(resources.__file__)), "clinvar.vcf"
                 )
                 
+                logger.info(f"Looking for ClinVar file at: {clinvar_path}")
+                
                 if os.path.exists(clinvar_path):
+                    clinvar_size = os.path.getsize(clinvar_path)
+                    logger.info(f"ClinVar file found, size: {clinvar_size} bytes")
+                    
+                    # Check if SnpSift is available
+                    try:
+                        snpsift_version = subprocess.run(["SnpSift", "-version"], capture_output=True, text=True)
+                        if snpsift_version.returncode == 0:
+                            logger.info(f"SnpSift version: {snpsift_version.stdout.strip()}")
+                        else:
+                            logger.warning(f"Could not get SnpSift version: {snpsift_version.stderr}")
+                    except FileNotFoundError:
+                        logger.error("SnpSift command not found in PATH")
+                    
                     snpsift_cmd = ["SnpSift", "annotate", clinvar_path, snpeff_out]
-                    snpsift_out = f"{clair_dir}/snpsift_output.vcf"
+                    logger.info(f"Running SnpSift command: {' '.join(snpsift_cmd)}")
                     
                     with open(snpsift_out, "w") as fout:
+                        logger.info("Starting SnpSift execution...")
                         result = subprocess.run(snpsift_cmd, stdout=fout, stderr=subprocess.PIPE, text=True)
+                        logger.info(f"SnpSift execution completed with return code: {result.returncode}")
                     
                     if result.returncode != 0:
-                        logger.warning(f"SnpSift failed: {result.stderr}")
+                        logger.warning(f"SnpSift failed with return code: {result.returncode}")
+                        logger.warning(f"SnpSift stderr output: {result.stderr}")
+                        logger.info("Using snpEff output for final SNP annotation")
                         shutil.copy2(snpeff_out, snpsift_out)
+                        logger.info("Copied snpEff output as final SNP annotation")
+                    else:
+                        logger.info("SnpSift completed successfully!")
+                        # Check the output file
+                        snpsift_out = f"{clair_dir}/snpsift_output.vcf"
+                        if os.path.exists(snpsift_out):
+                            output_size = os.path.getsize(snpsift_out)
+                            logger.info(f"SnpSift output file created, size: {output_size} bytes")
+                            
+                            # Check first few lines of output to verify annotation
+                            try:
+                                with open(snpsift_out, 'r') as f:
+                                    first_lines = [next(f) for _ in range(5)]
+                                logger.info(f"First 5 lines of SnpSift output:")
+                                for i, line in enumerate(first_lines):
+                                    logger.info(f"  Line {i+1}: {line.strip()}")
+                            except Exception as e:
+                                logger.warning(f"Could not read SnpSift output: {e}")
+                        else:
+                            logger.error("SnpSift output file was not created!")
                 else:
-                    logger.warning("ClinVar file not found, using snpEff output")
-                    shutil.copy2(snpeff_out, f"{clair_dir}/snpsift_output.vcf")
+                    logger.warning(f"ClinVar file not found at {clinvar_path}, using snpEff output")
+                    shutil.copy2(snpeff_out, snpsift_out)
+                    logger.info("Copied snpEff output as final SNP annotation (no ClinVar)")
                     
             except Exception as e:
-                logger.warning(f"SnpSift annotation failed: {e}")
-                shutil.copy2(snpeff_out, f"{clair_dir}/snpsift_output.vcf")
+                logger.warning(f"SnpSift annotation failed with exception: {e}")
+                logger.info("Using snpEff output for final SNP annotation")
+                shutil.copy2(snpeff_out, snpsift_out)
+                logger.info("Copied snpEff output as final SNP annotation due to exception")
             
             # INDEL annotation
+            logger.info(f"Starting snpEff annotation for INDELs...")
+            logger.info(f"Input file: {clair_dir}/output_indel_done.vcf.gz")
+            logger.info(f"Output file: {snpeff_indel_out}")
+            
+            # Check if input file exists and has content
+            if os.path.exists(f"{clair_dir}/output_indel_done.vcf.gz"):
+                file_size = os.path.getsize(f"{clair_dir}/output_indel_done.vcf.gz")
+                logger.info(f"INDEL input VCF file exists, size: {file_size} bytes")
+                
+                # Check first few lines to verify it's a valid VCF
+                try:
+                    import gzip
+                    with gzip.open(f"{clair_dir}/output_indel_done.vcf.gz", 'rt') as f:
+                        first_lines = [next(f) for _ in range(5)]
+                    logger.info(f"First 5 lines of INDEL input VCF:")
+                    for i, line in enumerate(first_lines):
+                        logger.info(f"  Line {i+1}: {line.strip()}")
+                except Exception as e:
+                    logger.warning(f"Could not read INDEL input VCF file: {e}")
+            else:
+                logger.error(f"INDEL input VCF file does not exist: {clair_dir}/output_indel_done.vcf.gz")
+            
             snpeff_indel_cmd = ["snpEff", "-q", "hg38", f"{clair_dir}/output_indel_done.vcf.gz"]
-            snpeff_indel_out = f"{clair_dir}/snpeff_indel_output.vcf"
+            logger.info(f"Running snpEff INDEL command: {' '.join(snpeff_indel_cmd)}")
             
             with open(snpeff_indel_out, "w") as fout:
+                logger.info("Starting snpEff INDEL execution...")
                 result = subprocess.run(snpeff_indel_cmd, stdout=fout, stderr=subprocess.PIPE, text=True)
+                logger.info(f"snpEff INDEL execution completed with return code: {result.returncode}")
             
             if result.returncode != 0:
-                logger.warning(f"snpEff (INDEL) failed: {result.stderr}")
+                logger.warning(f"snpEff (INDEL) failed with return code: {result.returncode}")
+                logger.warning(f"snpEff (INDEL) stderr output: {result.stderr}")
+                logger.info("Using raw Clair3 INDEL output for annotation")
                 # Decompress the gzipped file when copying to .vcf extension
                 import gzip
                 with gzip.open(f"{clair_dir}/output_indel_done.vcf.gz", 'rt') as f_in:
                     with open(snpeff_indel_out, 'w') as f_out:
                         f_out.write(f_in.read())
+                logger.info("Created uncompressed INDEL VCF from gzipped input")
+            else:
+                logger.info("snpEff INDEL completed successfully!")
+                # Check the output file
+                if os.path.exists(snpeff_indel_out):
+                    output_size = os.path.getsize(snpeff_indel_out)
+                    logger.info(f"snpEff INDEL output file created, size: {output_size} bytes")
+                    
+                    # Check first few lines of output to verify annotation
+                    try:
+                        with open(snpeff_indel_out, 'r') as f:
+                            first_lines = [next(f) for _ in range(5)]
+                        logger.info(f"First 5 lines of snpEff INDEL output:")
+                        for i, line in enumerate(first_lines):
+                            logger.info(f"  Line {i+1}: {line.strip()}")
+                    except Exception as e:
+                        logger.warning(f"Could not read snpEff INDEL output: {e}")
+                else:
+                    logger.error("snpEff INDEL output file was not created!")
             
             # SnpSift annotation for INDELs
+            logger.info(f"Starting SnpSift annotation for INDELs...")
+            logger.info(f"Input file: {snpeff_indel_out}")
+            logger.info(f"Output file: {snpsift_indel_out}")
+            
+            # Check if snpEff INDEL output exists and has content
+            if os.path.exists(snpeff_indel_out):
+                snpeff_indel_size = os.path.getsize(snpeff_indel_out)
+                logger.info(f"snpEff INDEL output file exists, size: {snpeff_indel_size} bytes")
+            else:
+                logger.error(f"snpEff INDEL output file does not exist: {snpeff_indel_out}")
+            
             try:
                 if os.path.exists(clinvar_path):
+                    logger.info(f"Using ClinVar file for INDEL annotation: {clinvar_path}")
+                    
                     snpsift_indel_cmd = ["SnpSift", "annotate", clinvar_path, snpeff_indel_out]
-                    snpsift_indel_out = f"{clair_dir}/snpsift_indel_output.vcf"
+                    logger.info(f"Running SnpSift INDEL command: {' '.join(snpsift_indel_cmd)}")
                     
                     with open(snpsift_indel_out, "w") as fout:
+                        logger.info("Starting SnpSift INDEL execution...")
                         result = subprocess.run(snpsift_indel_cmd, stdout=fout, stderr=subprocess.PIPE, text=True)
+                        logger.info(f"SnpSift INDEL execution completed with return code: {result.returncode}")
                     
                     if result.returncode != 0:
-                        logger.warning(f"SnpSift (INDEL) failed: {result.stderr}")
+                        logger.warning(f"SnpSift (INDEL) failed with return code: {result.returncode}")
+                        logger.warning(f"SnpSift (INDEL) stderr output: {result.stderr}")
+                        logger.info("Using snpEff INDEL output for final INDEL annotation")
                         shutil.copy2(snpeff_indel_out, snpsift_indel_out)
+                        logger.info("Copied snpEff INDEL output as final INDEL annotation")
+                    else:
+                        logger.info("SnpSift INDEL completed successfully!")
+                        # Check the output file
+                        if os.path.exists(snpsift_indel_out):
+                            output_size = os.path.getsize(snpsift_indel_out)
+                            logger.info(f"SnpSift INDEL output file created, size: {output_size} bytes")
+                            
+                            # Check first few lines of output to verify annotation
+                            try:
+                                with open(snpsift_indel_out, 'r') as f:
+                                    first_lines = [next(f) for _ in range(5)]
+                                logger.info(f"First 5 lines of SnpSift INDEL output:")
+                                for i, line in enumerate(first_lines):
+                                    logger.info(f"  Line {i+1}: {line.strip()}")
+                            except Exception as e:
+                                logger.warning(f"Could not read SnpSift INDEL output: {e}")
+                        else:
+                            logger.error("SnpSift INDEL output file was not created!")
                 else:
-                    shutil.copy2(snpeff_indel_out, f"{clair_dir}/snpsift_indel_output.vcf")
+                    logger.warning(f"ClinVar file not found for INDELs, using snpEff INDEL output")
+                    shutil.copy2(snpeff_indel_out, snpsift_indel_out)
+                    logger.info("Copied snpEff INDEL output as final INDEL annotation (no ClinVar)")
                     
             except Exception as e:
-                logger.warning(f"SnpSift INDEL annotation failed: {e}")
-                shutil.copy2(snpeff_indel_out, f"{clair_dir}/snpsift_indel_output.vcf")
+                logger.warning(f"SnpSift INDEL annotation failed with exception: {e}")
+                logger.info("Using snpEff INDEL output for final INDEL annotation")
+                shutil.copy2(snpeff_indel_out, snpsift_indel_out)
+                logger.info("Copied snpEff INDEL output as final INDEL annotation due to exception")
             
             logger.info("Annotation pipeline completed successfully")
             

@@ -311,6 +311,11 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             "text-sm text-gray-600"
         )
         
+        # Add IGV library status indicator
+        igv_lib_status = ui.label("IGV library: Checking...").classes(
+            "text-xs text-gray-500"
+        )
+        
         # IGV state management - prevent unnecessary redraws
         def _get_igv_state():
             key = str(sample_dir)
@@ -376,9 +381,95 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             except Exception as e:
                 igv_status.set_text(f"Error checking for BAM files: {e}")
         
+        # Function to check if IGV library is available
+        def _check_igv_library():
+            """Check if the IGV JavaScript library is available."""
+            js_check = """
+                try {
+                    if (typeof igv === 'undefined') {
+                        console.error('IGV library not loaded');
+                        return false;
+                    }
+                    
+                    // Check if IGV is fully initialized
+                    if (typeof igv.createBrowser !== 'function') {
+                        console.error('IGV library not fully initialized');
+                        return false;
+                    }
+                    
+                    console.log('IGV library is available and ready');
+                    return true;
+                } catch (e) {
+                    console.error('Error checking IGV library:', e);
+                    return false;
+                }
+            """
+            try:
+                result = ui.run_javascript(js_check, timeout=10.0)
+                # Update the status indicator
+                if result:
+                    igv_lib_status.set_text("IGV library: ✓ Loaded and ready")
+                    igv_lib_status.classes("text-xs text-green-600")
+                else:
+                    igv_lib_status.set_text("IGV library: ✗ Not ready")
+                    igv_lib_status.classes("text-xs text-red-600")
+                return result
+            except Exception as e:
+                igv_lib_status.set_text("IGV library: ✗ Error checking")
+                igv_lib_status.classes("text-xs text-red-600")
+                print(f"Error checking IGV library: {e}")
+                return False
+        
+        # Function to retry IGV creation
+        def _retry_igv_creation(bam_path: Path):
+            """Retry IGV browser creation after a failure."""
+            try:
+                igv_status.set_text("Retrying IGV browser creation...")
+                _load_igv_bam(bam_path)
+            except Exception as e:
+                igv_status.set_text(f"Retry failed: {e}")
+                print(f"IGV retry error: {e}")
+        
+        # Function to wait for element to be ready
+        def _wait_for_element_ready():
+            """Wait for the IGV div element to be properly rendered."""
+            js_wait = f"""
+                return new Promise((resolve, reject) => {{
+                    const el = document.getElementById('{igv_div.id}');
+                    if (!el) {{
+                        reject(new Error('Element not found'));
+                        return;
+                    }}
+                    
+                    if (el.offsetWidth > 0 && el.offsetHeight > 0) {{
+                        resolve(true);
+                        return;
+                    }}
+                    
+                    // Wait for element to be ready
+                    const checkReady = () => {{
+                        if (el.offsetWidth > 0 && el.offsetHeight > 0) {{
+                            resolve(true);
+                        }} else {{
+                            setTimeout(checkReady, 100);
+                        }}
+                    }};
+                    checkReady();
+                }});
+            """
+            try:
+                return ui.run_javascript(js_wait, timeout=10.0)
+            except Exception:
+                return False
+        
         # Function to load BAM into IGV
         def _load_igv_bam(bam_path: Path):
             try:
+                # First check if IGV library is available
+                if not _check_igv_library():
+                    igv_status.set_text("IGV library not yet loaded. Please wait and try again.")
+                    return
+                
                 # Check if we already have this BAM loaded
                 state = _get_igv_state()
                 bam_url = f"/samples/{sample_dir.name}/{bam_path.name}"
@@ -407,16 +498,71 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 
                 # Check if we need to create a new browser or just add tracks
                 if not state.get("igv_initialized") or not state.get("igv_browser_ready"):
+                    # Wait for element to be ready before creating IGV browser
+                    if not _wait_for_element_ready():
+                        igv_status.set_text("Waiting for IGV element to be ready...")
+                        ui.timer(0.5, lambda: _load_igv_bam(bam_path), once=True)
+                        return
+                    
                     # Create new IGV browser
                     js_create = f"""
-                        const el = getElement('{igv_div.id}');
-                        const track = {{ name: '{sample_dir.name}', url: '{bam_url}', indexURL: '{bai_url}', format: 'bam', visibilityWindow: 1000000 }};
-                        const options = {{ genome: 'hg38', locus: 'chr1:1-1', tracks: [track] }};
-                        igv.createBrowser(el, options).then(b => {{ 
+                        try {{
+                            console.log('Starting IGV browser creation...');
+                            console.log('IGV library available:', typeof igv !== 'undefined');
+                            console.log('IGV library version:', igv.version || 'unknown');
+                            
+                            // Check for minimum version compatibility
+                            if (igv.version && igv.version < '2.0.0') {{
+                                console.warn('IGV version may be too old for this functionality');
+                            }}
+                            console.log('Target element:', document.getElementById('{igv_div.id}'));
+                            
+                            const el = document.getElementById('{igv_div.id}');
+                            if (!el) {{
+                                throw new Error('Target element not found');
+                            }}
+                            
+                            // Check if element is properly rendered
+                            if (el.offsetWidth === 0 || el.offsetHeight === 0) {{
+                                throw new Error('Target element has no dimensions - not ready for IGV');
+                            }}
+                            
+                            // Check if IGV library is fully initialized
+                            if (typeof igv.createBrowser !== 'function') {{
+                                throw new Error('IGV library not fully initialized');
+                            }}
+                            
+                            const track = {{ name: '{sample_dir.name}', url: '{bam_url}', indexURL: '{bai_url}', format: 'bam', visibilityWindow: 1000000 }};
+                            const options = {{ genome: 'hg38', locus: 'chr1:1-1', tracks: [track] }};
+                            
+                            console.log('Creating IGV browser with options:', options);
+                            
+                                                    igv.createBrowser(el, options).then(b => {{
                             window.lj_igv = b; 
                             window.lj_igv_browser_ready = true;
                             console.log('IGV browser created successfully');
+                        }}).catch(error => {{
+                            console.error('IGV browser creation failed:', error);
+                            window.lj_igv_browser_ready = false;
+                            
+                            // Try fallback method
+                            try {{
+                                console.log('Trying fallback IGV creation...');
+                                const fallbackOptions = {{ genome: 'hg38' }};
+                                igv.createBrowser(el, fallbackOptions).then(b => {{
+                                    window.lj_igv = b;
+                                    window.lj_igv_browser_ready = true;
+                                    console.log('IGV browser created with fallback method');
+                                }});
+                            }} catch (fallbackError) {{
+                                console.error('Fallback IGV creation also failed:', fallbackError);
+                                throw error;
+                            }}
                         }});
+                        }} catch (error) {{
+                            console.error('Error in IGV browser creation:', error);
+                            throw error;
+                        }}
                     """
                     
                     try:
@@ -425,6 +571,10 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         igv_status.set_text(f"IGV browser created with {bam_path.name}")
                     except Exception as e:
                         igv_status.set_text(f"Failed to create IGV browser: {e}")
+                        print(f"IGV browser creation error: {e}")
+                        
+                        # Try to retry after a delay
+                        ui.timer(2.0, lambda: _retry_igv_creation(bam_path), once=True)
                         _clear_igv_state()
                 else:
                     # Browser exists, just add/update the track
@@ -456,6 +606,13 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
         
         # Check for existing files immediately
         ui.timer(0.1, _check_existing_igv_bam, once=True)
+        
+        # Add a delay to ensure IGV library is fully loaded
+        ui.timer(1.0, _check_existing_igv_bam, once=True)
+        
+        # Check IGV library status periodically
+        ui.timer(2.0, _check_igv_library, once=True)
+        ui.timer(5.0, _check_igv_library, once=True)
         
         # Function to refresh IGV BAM check (useful after regeneration)
         def _refresh_igv_check():
@@ -698,6 +855,109 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 igv_status.set_text(f"Error reloading BAM: {e}")
                 print(f"Error in _reload_bam_track: {e}")
         
+        # Function to check console for errors
+        def _check_console_errors():
+            """Check the browser console for any JavaScript errors."""
+            js_check_console = """
+                try {
+                    // Check if there are any console errors
+                    const errors = [];
+                    
+                    // Override console.error to capture errors
+                    const originalError = console.error;
+                    console.error = function(...args) {
+                        errors.push(args.join(' '));
+                        originalError.apply(console, args);
+                    };
+                    
+                    // Check for common IGV-related issues
+                    if (typeof igv === 'undefined') {
+                        errors.push('IGV library not loaded');
+                    } else if (typeof igv.createBrowser !== 'function') {
+                        errors.push('IGV createBrowser method not available');
+                    } else if (igv.version) {
+                        errors.push(`IGV version: ${igv.version}`);
+                    }
+                    
+                    // Check for element issues
+                    const el = document.getElementById('igv_div');
+                    if (!el) {
+                        errors.push('IGV div element not found');
+                    } else if (el.offsetWidth === 0 || el.offsetHeight === 0) {
+                        errors.push('IGV div element has no dimensions');
+                    }
+                    
+                    // Check for IGV library issues
+                    if (typeof igv === 'undefined') {
+                        errors.push('IGV library not loaded');
+                    } else if (typeof igv.createBrowser !== 'function') {
+                        errors.push('IGV createBrowser method not available');
+                    } else if (igv.version) {
+                        errors.push(`IGV version: ${igv.version}`);
+                    }
+                    
+                    // Restore original console.error
+                    console.error = originalError;
+                    
+                    return errors;
+                } catch (e) {
+                    return ['Error checking console: ' + e.message];
+                }
+            """
+            
+            try:
+                errors = ui.run_javascript(js_check_console, timeout=10.0)
+                if errors and len(errors) > 0:
+                    error_text = "Console errors found:\n" + "\n".join(errors)
+                    ui.notify(error_text, type="warning")
+                    print(error_text)
+                else:
+                    ui.notify("No console errors found", type="positive")
+            except Exception as e:
+                ui.notify(f"Error checking console: {e}", type="negative")
+        
+        # Function to test IGV browser creation
+        def _test_igv_browser():
+            """Test IGV browser creation with minimal configuration."""
+            try:
+                if not _check_igv_library():
+                    ui.notify("IGV library not available", type="warning")
+                    return
+                
+                js_test = f"""
+                    try {{
+                        console.log('Testing IGV browser creation...');
+                        const el = document.getElementById('{igv_div.id}');
+                        if (!el) {{
+                            throw new Error('Test element not found');
+                        }}
+                        
+                        const options = {{ 
+                            genome: 'hg38', 
+                            locus: 'chr1:1-1' 
+                        }};
+                        
+                        console.log('Creating test IGV browser...');
+                        igv.createBrowser(el, options).then(b => {{
+                            window.lj_igv = b;
+                            window.lj_igv_browser_ready = true;
+                            console.log('Test IGV browser created successfully');
+                        }}).catch(error => {{
+                            console.error('Test IGV browser creation failed:', error);
+                            window.lj_igv_browser_ready = false;
+                        }});
+                    }} catch (error) {{
+                        console.error('Error in test IGV creation:', error);
+                    }}
+                """
+                
+                ui.run_javascript(js_test, timeout=30.0)
+                ui.notify("Test IGV browser creation initiated", type="info")
+                
+            except Exception as e:
+                ui.notify(f"Error testing IGV: {e}", type="negative")
+                print(f"Error in test IGV: {e}")
+        
         # Function to debug IGV state
         def _debug_igv_state():
             try:
@@ -773,6 +1033,9 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             ui.button("Clear Data Tracks", on_click=_clear_igv_tracks)
             ui.button("📁 Reload BAM", on_click=_reload_bam_track)
             ui.button("🐛 Debug IGV", on_click=_debug_igv_state)
+            ui.button("🔄 Manual IGV Load", on_click=lambda: _check_existing_igv_bam())
+            ui.button("🧪 Test IGV", on_click=lambda: _test_igv_browser())
+            ui.button("📋 Check Console", on_click=lambda: _check_console_errors())
         
         # BAM generation buttons
         async def _trigger_build_sorted_bam(force_regenerate: bool = False) -> None:
