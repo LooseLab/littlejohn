@@ -18,56 +18,54 @@ from robin.gui.theme import styled_table
 def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
     """Build the MGMT section and attach refresh timer. Uses launcher._mgmt_state."""
     with ui.card().classes("w-full"):
-        mgmt_exp = ui.expansion("MGMT", icon="science").classes("w-full")
-        with mgmt_exp:
-            with ui.card().classes(
-                "w-full bg-gradient-to-r from-blue-50 to-indigo-50 mb-2 p-2"
-            ):
-                with ui.row().classes("gap-6 items-center"):
-                    mgmt_status = ui.label("MGMT status: Unknown").classes(
-                        "text-sm font-semibold text-blue-800"
-                    )
-                    mgmt_avg = ui.label("Average: --%").classes("text-sm text-gray-700")
-                    mgmt_pred = ui.label("Prediction: --%").classes(
-                        "text-sm text-gray-700"
-                    )
-            ui.label("MGMT methylation plot").classes("text-sm text-gray-700")
-            # mgmt_img = ui.image('')
-            # Persistent Matplotlib element (NiceGUI integration)
-            mgmt_mpl = ui.matplotlib(figsize=(4, 3))
-            ui.separator()
-            ui.label("MGMT results (latest)").classes("text-sm text-gray-700 mt-2")
-            _, mgmt_results_table = styled_table(
-                columns=[
-                    {"name": "average", "label": "Average %", "field": "average"},
-                    {"name": "pred", "label": "Prediction %", "field": "pred"},
-                    {"name": "status", "label": "Status", "field": "status"},
-                ],
-                rows=[],
-                pagination=0,
-                class_size="table-xs",
-            )
-            ui.separator()
-            ui.label("MGMT CpG Site Methylation Data").classes(
-                "text-sm text-gray-700 mt-2"
-            )
-            _, mgmt_sites_table = styled_table(
-                columns=[
-                    {"name": "site", "label": "Site", "field": "site"},
-                    {"name": "chr", "label": "Chr", "field": "chr"},
-                    {"name": "pos", "label": "CpG Position", "field": "pos"},
-                    {"name": "cov_fwd", "label": "Forward Cov", "field": "cov_fwd"},
-                    {"name": "cov_rev", "label": "Reverse Cov", "field": "cov_rev"},
-                    {"name": "cov_total", "label": "Total Cov", "field": "cov_total"},
-                    {"name": "meth", "label": "% Methylation", "field": "meth"},
-                    {"name": "meth_fwd", "label": "Forward %", "field": "meth_fwd"},
-                    {"name": "meth_rev", "label": "Reverse %", "field": "meth_rev"},
-                    {"name": "notes", "label": "Notes", "field": "notes"},
-                ],
-                rows=[],
-                pagination=0,
-                class_size="table-xs",
-            )
+        with ui.card().classes(
+            "w-full bg-gradient-to-r from-blue-50 to-indigo-50 mb-2 p-2"
+        ):
+            with ui.row().classes("gap-6 items-center"):
+                mgmt_status = ui.label("MGMT status: Unknown").classes(
+                    "text-sm font-semibold text-blue-800"
+                )
+                mgmt_avg = ui.label("Average: --%").classes("text-sm text-gray-700")
+                mgmt_pred = ui.label("Prediction: --%").classes(
+                    "text-sm text-gray-700"
+                )
+        ui.label("MGMT methylation plot").classes("text-sm text-gray-700")
+        # mgmt_img = ui.image('')
+        # Persistent Matplotlib element (NiceGUI integration)
+        mgmt_mpl = ui.matplotlib(figsize=(4, 3))
+        ui.separator()
+        ui.label("MGMT results (latest)").classes("text-sm text-gray-700 mt-2")
+        _, mgmt_results_table = styled_table(
+            columns=[
+                {"name": "average", "label": "Average %", "field": "average"},
+                {"name": "pred", "label": "Prediction %", "field": "pred"},
+                {"name": "status", "label": "Status", "field": "status"},
+            ],
+            rows=[],
+            pagination=0,
+            class_size="table-xs",
+        )
+        ui.separator()
+        ui.label("MGMT CpG Site Methylation Data").classes(
+            "text-sm text-gray-700 mt-2"
+        )
+        _, mgmt_sites_table = styled_table(
+            columns=[
+                {"name": "site", "label": "Site", "field": "site"},
+                {"name": "chr", "label": "Chr", "field": "chr"},
+                {"name": "pos", "label": "CpG Position", "field": "pos"},
+                {"name": "cov_fwd", "label": "Forward Cov", "field": "cov_fwd"},
+                {"name": "cov_rev", "label": "Reverse Cov", "field": "cov_rev"},
+                {"name": "cov_total", "label": "Total Cov", "field": "cov_total"},
+                {"name": "meth", "label": "% Methylation", "field": "meth"},
+                {"name": "meth_fwd", "label": "Forward %", "field": "meth_fwd"},
+                {"name": "meth_rev", "label": "Reverse %", "field": "meth_rev"},
+                {"name": "notes", "label": "Notes", "field": "notes"},
+            ],
+            rows=[],
+            pagination=0,
+            class_size="table-xs",
+        )
 
     def _extract_mgmt_specific_sites(bed_path: Path) -> List[Dict[str, Any]]:
         try:

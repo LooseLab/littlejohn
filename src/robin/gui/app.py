@@ -22,6 +22,7 @@ def launch_gui(
     workflow_runner: Any = None,
     workflow_steps: Optional[list] = None,
     monitored_directory: str = "",
+    reload: bool = False,
 ) -> GUILauncher:
     """Central entrypoint for launching the robin GUI (refactored).
 
@@ -34,13 +35,13 @@ def launch_gui(
             "NiceGUI is not available. Please install it with: pip install nicegui"
         )
 
-    launcher = GUILauncher(host, port)
+    launcher = GUILauncher(host, port, reload)
     
     # Normalize monitored directory to an absolute path to avoid CWD issues
     abs_mon_dir = (
         str(Path(monitored_directory).resolve()) if monitored_directory else ""
     )
-    success = launcher.launch_gui(workflow_runner, workflow_steps, abs_mon_dir)
+    success = launcher.launch_gui(workflow_runner, workflow_steps, abs_mon_dir, reload)
     if not success:
         raise RuntimeError("Failed to launch GUI")
 

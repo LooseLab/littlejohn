@@ -371,7 +371,7 @@ def frame(navtitle: str, batphone=False, smalltitle=None):
                             ui.button("Quit", icon="logout", on_click=quitdialog.open)
                     ui.image(IMAGEFILE).style("width: 50px")
 
-    with ui.column().classes("w-full h-full") as main_content:
+    with ui.column().classes("w-full h-full max-w-full overflow-hidden") as main_content:
         pass
 
     # Activity monitor removed

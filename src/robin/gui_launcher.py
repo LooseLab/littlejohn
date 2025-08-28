@@ -14,6 +14,7 @@ from collections import deque
 import csv
 from datetime import datetime
 from robin.analysis.master_csv_manager import MasterCSVManager
+
 from typing import Optional, Dict, Any, List
 from pathlib import Path
 from dataclasses import dataclass
@@ -60,7 +61,7 @@ class GUIUpdate:
 class GUILauncher:
     """Launcher for the robin workflow GUI using isolated threading with message queue."""
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 8081):
+    def __init__(self, host: str = "0.0.0.0", port: int = 8081, reload: bool = False):
         self.host = host
         self.port = port
         self.gui_thread = None
@@ -68,7 +69,7 @@ class GUILauncher:
         self.workflow_runner = None
         self.workflow_steps = []
         self.monitored_directory = ""
-
+        self.reload = reload
         # Message queue for non-blocking communication
         self.update_queue = queue.PriorityQueue()
         self.gui_ready = threading.Event()
@@ -114,6 +115,7 @@ class GUILauncher:
         workflow_runner: Any = None,
         workflow_steps: list = None,
         monitored_directory: str = "",
+        reload: bool = False,
     ) -> bool:
         """Launch the GUI in a completely isolated background thread."""
         if ui is None:
@@ -495,6 +497,22 @@ class GUILauncher:
             @ui.page("/live_data/{sample_id}")
             def sample_detail(sample_id: str):
                 """Individual sample detail page."""
+                # Add a page visit handler to refresh plots
+                def on_page_visit():
+                    """Handle page visit - refresh plots if needed."""
+                    try:
+                        logging.info(f"Page visit detected for sample {sample_id} - triggering plot refresh")
+                        # Small delay to ensure components are loaded
+                        ui.timer(1.0, lambda: self._refresh_sample_plots(sample_id), once=True)
+                    except Exception as e:
+                        logging.debug(f"Page visit handler failed for {sample_id}: {e}")
+                
+                # Also try to refresh immediately when the page is created
+                ui.timer(2.0, lambda: self._refresh_sample_plots(sample_id), once=True)
+                
+                # Register the page visit handler
+                ui.context.client.on_connect(on_page_visit)
+                
                 self._create_sample_detail_page(sample_id)
 
             # Enable global update processing regardless of which page is open
@@ -544,7 +562,7 @@ class GUILauncher:
                 host=self.host,
                 port=self.port,
                 show=False,
-                reload=False,
+                reload=self.reload,
                 title="ROBIN",
                 storage_secret="robin",
                 favicon=iconfile,
@@ -737,9 +755,11 @@ class GUILauncher:
 
                 # Samples table
                 with ui.card().classes("w-full"):
-                    ui.label("📋 All Tracked Samples").classes(
-                        "text-lg font-semibold mb-4"
-                    )
+                    with ui.row().classes("w-full items-center justify-between mb-4"):
+                        ui.label("📋 All Tracked Samples").classes(
+                            "text-lg font-semibold"
+                        )
+                        ui.button("🔄 Refresh All Plots", on_click=lambda: self._refresh_all_sample_plots()).classes("q-btn--secondary")
                     
                     # Filters row
                     with ui.row().classes("items-center gap-2 mb-2"):
@@ -1313,6 +1333,64 @@ class GUILauncher:
         except Exception:
             pass
 
+    def _refresh_sample_plots(self, sample_id: str):
+        """Refresh all plots for a specific sample by clearing all cached state."""
+        try:
+            if not self.monitored_directory:
+                return
+                
+            sample_dir = Path(self.monitored_directory) / sample_id
+            if not sample_dir.exists():
+                return
+                
+            # Clear ALL cached state to force complete regeneration
+            key = str(sample_dir)
+            
+            # Completely clear coverage state for this sample
+            if hasattr(self, '_coverage_state') and key in self._coverage_state:
+                old_state = self._coverage_state[key]
+                logging.info(f"Clearing coverage state for {sample_id}: {list(old_state.keys())}")
+                self._coverage_state[key] = {}
+                logging.info(f"Cleared all coverage state for sample {sample_id}")
+                
+            # Clear other component states if they exist
+            for attr in ['_mgmt_state', '_cnv_state', '_fusion_state']:
+                if hasattr(self, attr):
+                    state_dict = getattr(self, attr)
+                    if key in state_dict:
+                        old_state = state_dict[key]
+                        logging.info(f"Clearing {attr} state for {sample_id}: {list(old_state.keys())}")
+                        # Clear all state for these components
+                        state_dict[key] = {}
+                        logging.info(f"Cleared all {attr} state for sample {sample_id}")
+                        
+        except Exception as e:
+            logging.debug(f"Failed to refresh sample plots for {sample_id}: {e}")
+
+    def _refresh_all_sample_plots(self):
+        """Refresh all sample plots by resetting modification time caches."""
+        try:
+            if not self.monitored_directory:
+                return
+                
+            # Get all sample directories
+            monitored_path = Path(self.monitored_directory)
+            if not monitored_path.exists():
+                return
+                
+            sample_dirs = [d for d in monitored_path.iterdir() if d.is_dir()]
+            
+            for sample_dir in sample_dirs:
+                sample_id = sample_dir.name
+                self._refresh_sample_plots(sample_id)
+                
+            ui.notify(f"Refreshed plots for {len(sample_dirs)} samples", type="positive")
+            logging.info(f"Refreshed plots for {len(sample_dirs)} samples")
+            
+        except Exception as e:
+            ui.notify(f"Failed to refresh all plots: {e}", type="negative")
+            logging.exception("Failed to refresh all sample plots")
+
     def _create_sample_detail_page(self, sample_id: str):
         """Create the individual sample detail page."""
         with theme.frame(
@@ -1489,7 +1567,11 @@ class GUILauncher:
                 with content_container:
                     # Summary section (new component)
                     try:
-                        from .gui.components.summary import add_summary_section  # type: ignore
+                        try:
+                            from .gui.components.summary import add_summary_section  # type: ignore
+                        except ImportError:
+                            # Try absolute import if relative fails
+                            from littlejohn.gui.components.summary import add_summary_section
 
                         add_summary_section(sample_dir, sample_id)
                     except Exception as e:
@@ -1498,10 +1580,15 @@ class GUILauncher:
                             ui.notify(f"Summary section failed: {e}", type="warning")
                         except Exception:
                             pass
-
+                    
+                    
                     # Classification section (refactored component)
                     try:
-                        from .gui.components.classification import add_classification_section  # type: ignore
+                        try:
+                            from .gui.components.classification import add_classification_section  # type: ignore
+                        except ImportError:
+                            # Try absolute import if relative fails
+                            from littlejohn.gui.components.classification import add_classification_section
 
                         add_classification_section(sample_dir)
                     except Exception as e:
@@ -1510,10 +1597,14 @@ class GUILauncher:
                             ui.notify(f"Classification section failed: {e}", type="warning")
                         except Exception:
                             pass
-
+                    
                     # Coverage section (refactored component)
                     try:
-                        from .gui.components.coverage import add_coverage_section  # type: ignore
+                        try:
+                            from .gui.components.coverage import add_coverage_section  # type: ignore
+                        except ImportError:
+                            # Try absolute import if relative fails
+                            from littlejohn.gui.components.coverage import add_coverage_section
 
                         add_coverage_section(self, sample_dir)
                     except Exception as e:
@@ -1521,10 +1612,14 @@ class GUILauncher:
                             ui.notify(f"Coverage section failed: {e}", type="warning")
                         except Exception:
                             pass
-
+                    
                     # MGMT section (refactored component)
                     try:
-                        from .gui.components.mgmt import add_mgmt_section  # type: ignore
+                        try:
+                            from .gui.components.mgmt import add_mgmt_section  # type: ignore
+                        except ImportError:
+                            # Try absolute import if relative fails
+                            from littlejohn.gui.components.mgmt import add_mgmt_section
 
                         add_mgmt_section(self, sample_dir)
                     except Exception as e:
@@ -1533,10 +1628,14 @@ class GUILauncher:
                             ui.notify(f"MGMT section failed: {e}", type="warning")
                         except Exception:
                             pass
-
+                    
                     # CNV section (refactored component)
                     try:
-                        from .gui.components.cnv import add_cnv_section  # type: ignore
+                        try:
+                            from .gui.components.cnv import add_cnv_section  # type: ignore
+                        except ImportError:
+                            # Try absolute import if relative fails
+                            from littlejohn.gui.components.cnv import add_cnv_section
 
                         # Pass launcher for shared state access (launcher._cnv_state)
                         add_cnv_section(self, sample_dir)
@@ -1546,10 +1645,14 @@ class GUILauncher:
                             ui.notify(f"CNV section failed: {e}", type="warning")
                         except Exception:
                             pass
-
+                    
                     # Fusion section (target and genome-wide; excludes full SV UI)
                     try:
-                        from .gui.components.fusion import add_fusion_section  # type: ignore
+                        try:
+                            from .gui.components.fusion import add_fusion_section  # type: ignore
+                        except ImportError:
+                            # Try absolute import if relative fails
+                            from littlejohn.gui.components.fusion import add_fusion_section
 
                         add_fusion_section(self, sample_dir)
                     except Exception as e:
@@ -1558,7 +1661,7 @@ class GUILauncher:
                             ui.notify(f"Fusion section failed: {e}", type="warning")
                         except Exception:
                             pass
-
+                    
                     # Files in output directory
                     with ui.card().classes("w-full"):
                         ui.label("📁 Output Files").classes("text-lg font-semibold mb-2")
@@ -1634,6 +1737,7 @@ class GUILauncher:
                             summary_search.bind_value(summary_table, "filter")
                         except Exception:
                             pass
+                    
 
                 # Periodic refresher for files table and master.csv summary
                 _notify_state = {"files_error": False, "csv_error": False}
@@ -2369,7 +2473,6 @@ class GUILauncher:
             print(f"[GUI] Failed to submit {job_type} job for sample {sample_id}: {e}")
             return False
 
-
 def launch_gui(
     host="0.0.0.0",
     port: int = 8081,
@@ -2388,6 +2491,7 @@ def launch_gui(
         host=host,
         port=port,
         show=show,
+        reload=False,
         workflow_runner=workflow_runner,
         workflow_steps=workflow_steps,
         monitored_directory=monitored_directory,
@@ -2416,3 +2520,128 @@ def send_gui_update(update_type: UpdateType, data: Dict[str, Any], priority: int
 
 # Global reference retained for backward compatibility (now managed in gui.app)
 _current_gui_launcher = None
+
+
+if __name__ == "__main__":
+    """
+    Command-line interface for direct GUI launching.
+    
+    Usage:
+        # Launch GUI with default settings
+        python gui_launcher.py
+        
+        # Launch GUI pointing to specific directory
+        python gui_launcher.py test_out_priority_ray4
+        
+        # Launch GUI on specific port
+        python gui_launcher.py test_out_priority_ray4 --port 8081
+        
+        # Launch GUI without opening browser
+        python gui_launcher.py test_out_priority_ray4 --no-show
+        
+        # Launch GUI on different host
+        python gui_launcher.py test_out_priority_ray4 --host 0.0.0.0
+    """
+    import argparse
+    import sys
+    
+    parser = argparse.ArgumentParser(
+        description="Direct GUI launcher for LittleJohn workflow monitoring",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+        Examples:
+        python gui_launcher.py                                    # Launch with defaults
+        python gui_launcher.py test_out_priority_ray4            # Monitor specific directory
+        python gui_launcher.py test_out_priority_ray4 --port 8081 # Use different port
+        python gui_launcher.py test_out_priority_ray4 --no-show   # Don't open browser
+                """
+            )
+            
+    parser.add_argument(
+        "monitored_directory",
+        nargs="?",
+        default="",
+        help="Directory containing sample output folders to monitor"
+    )
+    
+    parser.add_argument(
+        "--host",
+        default="localhost",
+        help="Host to bind the GUI to (default: localhost)"
+    )
+    
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8080,
+        help="Port to run the GUI on (default: 8080)"
+    )
+    
+    parser.add_argument(
+        "--no-show",
+        action="store_true",
+        help="Don't automatically open the browser"
+    )
+    
+    args = parser.parse_args()
+    
+    # Validate monitored directory if provided
+    if args.monitored_directory:
+        monitored_path = Path(args.monitored_directory)
+        if not monitored_path.exists():
+            print(f"❌ Error: Directory '{args.monitored_directory}' does not exist")
+            sys.exit(1)
+        if not monitored_path.is_dir():
+            print(f"❌ Error: '{args.monitored_directory}' is not a directory")
+            sys.exit(1)
+        print(f"📁 Will monitor: {monitored_path.resolve()}")
+    
+    try:
+        # Create and launch GUI directly to avoid relative import issues
+        print("🚀 Creating GUI launcher...")
+        
+        # Create the GUI launcher directly
+        launcher = GUILauncher(
+            host=args.host,
+            port=args.port,
+            reload=False,
+        )
+        
+        # Set monitored directory if provided
+        if args.monitored_directory:
+            launcher.monitored_directory = str(Path(args.monitored_directory).resolve())
+        
+        print(f"🚀 Launching full GUI on http://{args.host}:{args.port}")
+        print("💡 Use Ctrl+C to stop the GUI")
+        
+        # Launch the GUI directly
+        success = launcher.launch_gui(
+            monitored_directory=args.monitored_directory,
+            workflow_runner=None,
+            workflow_steps=[],
+        )
+        
+        if success:
+            print("✅ GUI launched successfully!")
+            print("🌐 Open your browser to the URL above")
+            print("💡 Press Ctrl+C to stop the GUI")
+            
+            # Keep the main thread alive while GUI runs
+            try:
+                while launcher.is_gui_running():
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                print("\n🛑 Shutting down GUI...")
+                launcher.stop_gui()
+                print("👋 GUI stopped")
+        else:
+            print("❌ Failed to launch GUI")
+            sys.exit(1)
+        
+    except KeyboardInterrupt:
+        print("\n👋 GUI stopped by user")
+    except Exception as e:
+        print(f"❌ GUI failed to start: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
