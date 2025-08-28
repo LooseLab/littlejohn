@@ -85,10 +85,12 @@ try:
     from robin.analysis.target_analysis import (
         target_handler as _target_handler,
         igv_bam_handler as _igv_bam_handler,
+        snp_analysis_handler as _snp_analysis_handler,
     )
 except Exception:
     _target_handler = None
     _igv_bam_handler = None
+    _snp_analysis_handler = None
 
 try:
     from robin.analysis.fusion_analysis import fusion_handler as _fusion_handler
@@ -323,11 +325,6 @@ def _wrap_real_handler(
                 # Get reference from job metadata if available
                 reference = job.context.metadata.get("reference")
                 
-                # Debug logging for reference genome and work_dir
-                print(f"[Ray] Handler {job_type}: work_dir={work_dir}, reference={reference}")
-                print(f"[Ray] Handler {job_type}: accepts_reference={accepts_reference}")
-                print(f"[Ray] Handler {job_type}: in NEEDS_WORK_DIR={job_type in NEEDS_WORK_DIR}")
-                
                 # Call handler with appropriate parameters
                 if (
                     "work_dir" in sig.parameters
@@ -335,16 +332,12 @@ def _wrap_real_handler(
                     and (job_type in NEEDS_WORK_DIR)
                 ):
                     if accepts_reference and reference:
-                        print(f"[Ray] Calling {job_type} handler with work_dir and reference: {reference}")
                         py_handler(job, work_dir=work_dir, reference=reference)
                     else:
-                        print(f"[Ray] Calling {job_type} handler with work_dir only")
                         py_handler(job, work_dir=work_dir)
                 elif accepts_reference and reference:
-                    print(f"[Ray] Calling {job_type} handler with reference only: {reference}")
                     py_handler(job, reference=reference)
                 else:
-                    print(f"[Ray] Calling {job_type} handler with no additional parameters")
                     py_handler(job)
             except Exception:
                 # Fallback to legacy call
@@ -484,14 +477,18 @@ class Coordinator:
         # Reference genome for SNP calling and other analyses
         self.reference: Optional[str] = reference
         
-        # Debug logging for reference genome
+        # Reference genome status (logged at INFO level)
         if self.reference:
-            print(f"[Ray] Coordinator initialized with reference: {self.reference}")
+            pass  # Reference genome available
         else:
-            print("[Ray] Coordinator initialized without reference genome")
+            pass  # No reference genome
         
         # Keep references to any CPU limiter actors
         self._cpu_limiters: List[Any] = []
+
+    def get_reference(self) -> Optional[str]:
+        """Get the reference genome path."""
+        return self.reference
 
     # ----- handler registration API -----
     async def register_handler(self, job_type: str, remote_func) -> None:
@@ -515,6 +512,7 @@ class Coordinator:
             ("pannanodx", pannanodx_handler_remote),
             ("random_forest", random_forest_handler_remote),
             ("igv_bam", ray.remote(_wrap_real_handler(_igv_bam_handler, "igv_bam"))),
+            ("snp_analysis", ray.remote(_wrap_real_handler(_snp_analysis_handler, "snp_analysis"))),
         ]
 
         preset = (self.preset or "").lower().strip()
@@ -551,7 +549,7 @@ class Coordinator:
                 "analysis": ["mgmt", "cnv", "target", "fusion"],
                 "classif": ["sturgeon", "nanodx", "pannanodx"],
                 "rf": ["random_forest"],
-                "slow": ["igv_bam"],  # Add slow pool for igv_bam jobs
+                "slow": ["igv_bam", "snp_analysis"],  # Add slow pool for igv_bam and snp_analysis jobs
             }
 
             # Determine concurrency per pool based on preset
@@ -641,7 +639,6 @@ class Coordinator:
             self.using_pools = False
         # start drain loop to observe completions
         try:
-            print(f"[RayWorkflow] Available processors: {list(self.processors.keys())}")
             asyncio.create_task(self._drain_loop())
         except Exception:
             pass
@@ -649,14 +646,12 @@ class Coordinator:
     # ----- submission & lifecycle -----
     async def submit_jobs(self, jobs: List[Job]) -> None:
         for job in jobs:
-            print(f"[RayWorkflow] Submitting job {job.job_id} of type {job.job_type} for sample {job.context.get_sample_id()}")
             sample_id = job.context.get_sample_id()
             if job.job_type in DEDUP_TYPES:
                 key = (sample_id, job.job_type)
                 run = self.running.get(key, 0)
                 pend = self.pending.get(key, 0)
                 if run + pend >= 2 or pend >= 1:
-                    print(f"[RayWorkflow] Skipping {job.job_type} job due to deduplication")
                     self.total_skipped += 1
                     continue
                 self.pending[key] = pend + 1
@@ -667,7 +662,6 @@ class Coordinator:
                 ra = self.running_by_type_sample.get(key_ts, 0)
                 pa = self.pending_by_type_sample.get(key_ts, 0)
                 if (ra + pa) > 0:
-                    print(f"[RayWorkflow] Queuing {job.job_type} job due to per-sample serialization")
                     self.waiting_by_type_sample.setdefault(key_ts, []).append(job)
                     self.pending_by_type_sample[key_ts] = pa + 1
                     continue
@@ -677,9 +671,8 @@ class Coordinator:
             # submit to dedicated job-type processor
             proc = self.processors.get(job.job_type)
             if proc is None:
-                print(f"[RayWorkflow] No processor found for job type {job.job_type}")
-                continue
-            print(f"[RayWorkflow] Found processor {proc} for job type {job.job_type}")
+                continue  # Skip jobs without processors
+            # Found processor for job type
             # Backpressure: if too many outstanding for this type, queue locally
             inflight_for_type = int(self.inflight_by_type.get(job.job_type, 0))
             if inflight_for_type >= self.max_inflight_per_type:
@@ -786,8 +779,92 @@ class Coordinator:
             return True
             
         except Exception as e:
-            print(f"[RayWorkflow] Failed to submit {job_type} job for sample {sample_id}: {e}")
             return False
+
+    async def submit_snp_analysis_job(
+        self, sample_dir: str, sample_id: str = None, reference: str = None, threads: int = 4, force_regenerate: bool = False
+    ) -> bool:
+        """
+        Submit a SNP analysis job for an existing sample directory.
+        
+        This is a convenience method specifically for SNP analysis that ensures
+        all required metadata is properly set up.
+        
+        Args:
+            sample_dir: Path to the sample directory
+            sample_id: Optional sample ID (defaults to directory name)
+            reference: Path to reference genome (optional, will auto-detect if not provided)
+            threads: Number of threads to use for processing (default: 4)
+            force_regenerate: Whether to force regeneration of existing results (default: False)
+            
+        Returns:
+            True if job was successfully submitted, False otherwise
+        """
+        try:
+            if sample_id is None:
+                sample_id = Path(sample_dir).name
+            
+            # Create a context for this sample with SNP-specific metadata
+            metadata = {
+                "sample_id": sample_id,
+                "sample_dir": sample_dir,
+                "work_dir": os.path.dirname(sample_dir),  # Set the work_dir to parent directory
+                "threads": threads,
+                "force_regenerate": force_regenerate,
+                "bam_metadata": {"sample_id": sample_id}
+            }
+            
+            # Add reference genome if provided
+            if reference:
+                metadata["reference"] = reference
+            
+            context = WorkflowContext(
+                filepath=sample_dir,
+                metadata=metadata
+            )
+            
+            # Create a job
+            job = Job(
+                job_id=next(_job_id_counter),
+                job_type="snp_analysis",
+                origin="manual",  # Use 'origin' instead of 'queue'
+                workflow=["slow:snp_analysis"],
+                step=0,
+                context=context
+            )
+            
+            # Submit the job
+            await self.submit_jobs([job])
+            
+            return True
+            
+        except Exception as e:
+            return False
+
+    def is_sample_ready_for_snp_analysis(self, sample_dir: str) -> tuple[bool, list[str]]:
+        """
+        Check if a sample directory is ready for SNP analysis.
+        
+        Args:
+            sample_dir: Path to the sample directory
+            
+        Returns:
+            Tuple of (is_ready, missing_files) where is_ready is a boolean
+            and missing_files is a list of missing required files
+        """
+        required_files = [
+            "target.bam",
+            "targets_exceeding_threshold.bed"
+        ]
+        
+        missing_files = []
+        for filename in required_files:
+            file_path = os.path.join(sample_dir, filename)
+            if not os.path.exists(file_path):
+                missing_files.append(filename)
+        
+        is_ready = len(missing_files) == 0
+        return is_ready, missing_files
 
     async def _on_finish(
         self, job: Job, ok: bool, ctx: WorkflowContext, err: Optional[str]
@@ -1493,12 +1570,13 @@ async def submit_existing_paths(
                     for j in jobs:
                         j.context.add_metadata("work_dir", work_dir)
                 # Add reference genome to job metadata if available
-                if coord.reference:
-                    for j in jobs:
-                        j.context.add_metadata("reference", coord.reference)
-                    print(f"[Ray] Added reference to {len(jobs)} jobs: {coord.reference}")
-                else:
-                    print("[Ray] No reference genome available in coordinator")
+                try:
+                    coord_reference = ray.get(coord.get_reference.remote())
+                    if coord_reference:
+                        for j in jobs:
+                            j.context.add_metadata("reference", coord_reference)
+                except Exception:
+                    pass  # Silently continue if reference unavailable
                 seed_jobs += jobs
         elif pth.is_dir():
             # Stream directory walk in small batches; avoid building huge lists
@@ -1516,12 +1594,13 @@ async def submit_existing_paths(
                     for j in jobs:
                         j.context.add_metadata("work_dir", work_dir)
                 # Add reference genome to job metadata if available
-                if coord.reference:
-                    for j in jobs:
-                        j.context.add_metadata("reference", coord.reference)
-                    print(f"[Ray] Added reference to {len(jobs)} jobs: {coord.reference}")
-                else:
-                    print("[Ray] No reference genome available in coordinator")
+                try:
+                    coord_reference = ray.get(coord.get_reference.remote())
+                    if coord_reference:
+                        for j in jobs:
+                            j.context.add_metadata("reference", coord_reference)
+                except Exception:
+                    pass  # Silently continue if reference unavailable
                 batch += jobs
                 if len(batch) >= 256:
                     await coord.submit_jobs.remote(batch)
@@ -1752,11 +1831,31 @@ async def run(
     global GLOBAL_LOG_LEVEL
     GLOBAL_LOG_LEVEL = (log_level or "INFO").upper()
     
-    # Debug: Log reference genome status
+    # Configure Ray logging to reduce verbose output
+    import logging
+    ray_logger = logging.getLogger("ray")
+    ray_logger.setLevel(logging.WARNING)
+    
+    # Also reduce Raylet logging
+    raylet_logger = logging.getLogger("raylet")
+    raylet_logger.setLevel(logging.WARNING)
+    
+    # Reduce other Ray-related logging
+    logging.getLogger("ray.worker").setLevel(logging.WARNING)
+    logging.getLogger("ray.remote").setLevel(logging.WARNING)
+    logging.getLogger("ray.actor").setLevel(logging.WARNING)
+    logging.getLogger("ray.util").setLevel(logging.WARNING)
+    
+    # Set Ray environment variables to reduce verbose output
+    import os
+    os.environ["RAY_DISABLE_IMPORT_WARNING"] = "1"
+    os.environ["RAY_DISABLE_DEPRECATION_WARNING"] = "1"
+    
+    # Reference genome status (minimal logging)
     if reference:
-        print(f"[Ray] Workflow run() received reference: {reference}")
+        pass  # Reference genome provided
     else:
-        print("[Ray] Workflow run() no reference provided")
+        pass  # No reference genome provided
     
     # Ensure any previous coordinator is terminated to avoid stale-code actors
     try:

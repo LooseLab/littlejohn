@@ -317,11 +317,11 @@ def _create_ray_workflow_runner(
                 self.coordinator = None  # Will be set when workflow starts
                 self.reference = reference  # Store reference genome for GUI access
                 
-                # Debug logging for reference genome
+                # Debug logging for reference genome (only in verbose mode)
                 if self.reference:
-                    print(f"[RayCoreWrapper] ✅ SUCCESS: Reference genome stored: {self.reference}")
+                    pass  # Reference genome stored successfully
                 else:
-                    print("[RayCoreWrapper] ❌ FAILED: No reference genome stored")
+                    pass  # No reference genome stored
 
             def register_handler(self, *args, **kwargs):
                 # Handlers are wired inside workflow_ray; keep API parity
@@ -352,12 +352,10 @@ def _create_ray_workflow_runner(
                             break
                         
                         if attempt < max_retries - 1:
-                            print(f"[Ray] Coordinator not ready, retrying in {retry_delay}s... (attempt {attempt + 1}/{max_retries})")
                             time.sleep(retry_delay)
                             retry_delay *= 1.5  # Exponential backoff
                     
                     if self.coordinator is None:
-                        print(f"[Ray] No coordinator available for {job_type} job after {max_retries} attempts")
                         return False
                     
                     # Submit the job using the coordinator
@@ -368,15 +366,72 @@ def _create_ray_workflow_runner(
                     import ray
                     try:
                         final_result = ray.get(result, timeout=30.0)
-                        print(f"[Ray] Successfully submitted {job_type} job for sample {sample_id or 'unknown'}")
                         return final_result
                     except Exception as e:
-                        print(f"[Ray] Job submission failed: {e}")
                         return False
                         
                 except Exception as e:
-                    print(f"[Ray] Failed to submit {job_type} job: {e}")
                     return False
+
+            def submit_snp_analysis_job(self, sample_dir: str, sample_id: str = None, reference: str = None, threads: int = 4, force_regenerate: bool = False) -> bool:
+                """Submit a SNP analysis job for an existing sample directory using Ray workflow."""
+                try:
+                    # Try to get coordinator with retries
+                    import time
+                    from littlejohn import workflow_ray as wrn
+                    
+                    max_retries = 5
+                    retry_delay = 1.0
+                    
+                    for attempt in range(max_retries):
+                        # Try to get coordinator
+                        if self.coordinator is None:
+                            try:
+                                self.coordinator = wrn.get_coordinator_sync()
+                            except Exception:
+                                pass
+                        
+                        if self.coordinator is None:
+                            break
+                        
+                        if attempt < max_retries - 1:
+                            time.sleep(retry_delay)
+                            retry_delay *= 1.5  # Exponential backoff
+                    
+                    if self.coordinator is None:
+                        return False
+                    
+                    # Submit the SNP analysis job using the coordinator
+                    # Ray remote calls are synchronous from the caller's perspective
+                    result = self.coordinator.submit_snp_analysis_job.remote(sample_dir, sample_id, reference, threads, force_regenerate)
+                    
+                    # Wait for the result (this is the actual async part)
+                    import ray
+                    try:
+                        final_result = ray.get(result, timeout=30.0)
+                        return final_result
+                    except Exception as e:
+                        return False
+                        
+                except Exception as e:
+                    return False
+
+            def is_sample_ready_for_snp_analysis(self, sample_dir: str) -> tuple[bool, list[str]]:
+                """Check if a sample directory is ready for SNP analysis."""
+                import os
+                required_files = [
+                    "target.bam",
+                    "targets_exceeding_threshold.bed"
+                ]
+                
+                missing_files = []
+                for filename in required_files:
+                    file_path = os.path.join(sample_dir, filename)
+                    if not os.path.exists(file_path):
+                        missing_files.append(filename)
+                
+                is_ready = len(missing_files) == 0
+                return is_ready, missing_files
 
             def run_workflow(
                 self,
@@ -419,13 +474,11 @@ def _create_ray_workflow_runner(
                         coord = wrn.get_coordinator_sync()
                         if coord:
                             self_ref.coordinator = coord
-                            print(f"[Ray] Coordinator reference set for job submission")
-                    except Exception as e:
-                        print(f"[Ray] Warning: Could not set coordinator reference: {e}")
+                    except Exception:
+                        pass
                 
                 asyncio.run(_run_with_coordinator())
 
-        click.echo("Using Ray Core distributed workflow (workflow_ray)")
         return _RayCoreWrapper(reference=reference)
     except ImportError as e:
         click.echo(
@@ -449,6 +502,7 @@ def _initialize_ray(num_cpus: Optional[int]) -> None:
         if not ray.is_initialized():
             # Suppress Ray logging to prevent interference with progress bars
             import logging
+            import json
 
             ray_logger = logging.getLogger("ray")
             ray_logger.setLevel(logging.ERROR)
@@ -458,6 +512,11 @@ def _initialize_ray(num_cpus: Optional[int]) -> None:
             logging.getLogger("ray.util").setLevel(logging.ERROR)
 
             try:
+                # Set Ray environment variables to reduce verbose output
+                os.environ["RAY_DISABLE_IMPORT_WARNING"] = "1"
+                os.environ["RAY_DISABLE_DEPRECATION_WARNING"] = "1"
+                os.environ["RAY_OBJECT_STORE_ALLOW_SLOW_STORAGE"] = "1"
+                
                 # Bind dashboard to 0.0.0.0 when supported so it's reachable off-host
                 try:
                     ray.init(
@@ -465,17 +524,33 @@ def _initialize_ray(num_cpus: Optional[int]) -> None:
                         ignore_reinit_error=True,
                         include_dashboard=True,
                         dashboard_host=os.environ.get("RAY_DASHBOARD_HOST", "0.0.0.0"),
+                        object_store_memory=1000000000,  # 1GB object store
+                        temp_dir="/tmp/ray",  # Use /tmp for temporary files
+                        _system_config={
+                            "object_spilling_config": json.dumps({
+                                "type": "filesystem",
+                                "params": {
+                                    "directory_path": "/tmp/ray/spill"
+                                }
+                            }),
+                            "max_direct_call_object_size": 1000000,  # 1MB
+                            "object_store_full_delay_ms": 100,
+                            "object_store_full_max_retries": 0
+                        }
                     )
                 except TypeError:
                     # Older Ray versions may not support dashboard args
-                    ray.init(num_cpus=num_cpus, ignore_reinit_error=True)
-                click.echo(f"Ray initialized with {num_cpus} CPUs")
+                    ray.init(
+                        num_cpus=num_cpus, 
+                        ignore_reinit_error=True,
+                        object_store_memory=1000000000,
+                        temp_dir="/tmp/ray"
+                    )
+                pass  # Ray initialized successfully
             except Exception as e:
                 click.echo(f"Warning: Failed to initialize Ray: {e}", err=True)
         else:
-            click.echo(
-                f"Ray already initialized with {ray.available_resources().get('CPU', 'unknown')} CPUs"
-            )
+            pass  # Ray already initialized
 
 
 def _configure_queue_priorities(runner: Any, queue_priority: Tuple[str, ...]) -> None:
@@ -979,12 +1054,7 @@ def workflow(
 
         # Ray Core engine path (default when --use-ray is used)
         if use_ray:
-            # Debug: Log reference genome status
-            if reference:
-                click.echo(f"🔍 [CLI] Reference genome provided: {reference}")
-            else:
-                click.echo("🔍 [CLI] No reference genome provided")
-                
+            # Debug: Log reference genome status        
             # Ensure Ray is initialized if CPUs not specified
             try:
                 import ray

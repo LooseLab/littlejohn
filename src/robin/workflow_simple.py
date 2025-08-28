@@ -13,7 +13,8 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 from tqdm import tqdm
 from robin.logging_config import get_job_logger
-from robin.analysis.target_analysis import igv_bam_handler
+from robin.analysis.target_analysis import igv_bam_handler, snp_analysis_handler
+
 
 
 # === Shared Context for Each File ===
@@ -1473,6 +1474,8 @@ class WorkflowRunner:
         self.manager.register_handler("slow", "sleep", sleep_handler)
         # Register IGV BAM handler on slow queue
         self.manager.register_handler("slow", "igv_bam", igv_bam_handler)
+        # Register SNP analysis handler on slow queue
+        self.manager.register_handler("slow", "snp_analysis", snp_analysis_handler)
 
     def register_handler(
         self, queue_type: str, job_type: str, handler: Callable[[Job], None]
@@ -1523,7 +1526,7 @@ class WorkflowRunner:
             
             # Create a job
             job = Job(
-                job_id=next(self.manager._job_id_counter),
+                job_id=next(_job_id_counter),
                 job_type=job_type,
                 context=context,
                 origin="slow",  # IGV BAM jobs go to slow queue
@@ -1542,6 +1545,96 @@ class WorkflowRunner:
             if self.verbose:
                 print(f"[WorkflowRunner] Failed to submit {job_type} job for sample {sample_id}: {e}")
             return False
+
+    def submit_snp_analysis_job(
+        self, sample_dir: str, sample_id: str = None, reference: str = None, threads: int = 4, force_regenerate: bool = False
+    ) -> bool:
+        """
+        Submit a SNP analysis job for an existing sample directory.
+        
+        This is a convenience method specifically for SNP analysis that ensures
+        all required metadata is properly set up.
+        
+        Args:
+            sample_dir: Path to the sample directory
+            sample_id: Optional sample ID (defaults to directory name)
+            reference: Path to reference genome (optional, will auto-detect if not provided)
+            threads: Number of threads to use for processing (default: 4)
+            force_regenerate: Whether to force regeneration of existing results (default: False)
+            
+        Returns:
+            True if job was successfully submitted, False otherwise
+        """
+        try:
+            if sample_id is None:
+                sample_id = Path(sample_dir).name
+            
+            # Create a context for this sample with SNP-specific metadata
+            metadata = {
+                "sample_id": sample_id,
+                "sample_dir": sample_dir,
+                "bam_metadata": {"sample_id": sample_id},
+                "threads": threads,
+                "force_regenerate": force_regenerate
+            }
+            
+            # Add reference genome if provided
+            if reference:
+                metadata["reference"] = reference
+            
+            context = WorkflowContext(
+                filepath=sample_dir,
+                metadata=metadata
+            )
+            
+            # Create a job
+            job = Job(
+                job_id=next(_job_id_counter),
+                job_type="snp_analysis",
+                context=context,
+                origin="slow",  # SNP analysis jobs go to slow queue
+                workflow=["slow:snp_analysis"]
+            )
+            
+            # Submit the job to the appropriate queue
+            self.manager.enqueue_jobs([job])
+            
+            if self.verbose:
+                print(f"[WorkflowRunner] Submitted SNP analysis job for sample {sample_id}")
+                if reference:
+                    print(f"[WorkflowRunner] Using reference genome: {reference}")
+            
+            return True
+            
+        except Exception as e:
+            if self.verbose:
+                print(f"[WorkflowRunner] Failed to submit SNP analysis job for sample {sample_id}: {e}")
+            return False
+
+    def is_sample_ready_for_snp_analysis(self, sample_dir: str) -> tuple[bool, list[str]]:
+        """
+        Check if a sample directory is ready for SNP analysis.
+        
+        Args:
+            sample_dir: Path to the sample directory
+            
+        Returns:
+            Tuple of (is_ready, missing_files) where is_ready is a boolean
+            and missing_files is a list of missing required files
+        """
+        required_files = [
+            "target.bam",
+            "targets_exceeding_threshold.bed"
+        ]
+        
+        missing_files = []
+        for filename in required_files:
+            file_path = os.path.join(sample_dir, filename)
+            if not os.path.exists(file_path):
+                missing_files.append(filename)
+        
+        is_ready = len(missing_files) == 0
+        return is_ready, missing_files
 
     def run_workflow(
         self,

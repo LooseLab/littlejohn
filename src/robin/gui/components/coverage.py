@@ -1629,37 +1629,82 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         workflow=["fast:snp_analysis"]
                     )
                     
-                    # Run SNP analysis in background
-                    def run_snp_analysis():
-                        try:
-                            # Use the work_dir variable we calculated earlier
-                            snp_analysis_handler(job, work_dir=work_dir)
+                    # Submit SNP analysis as a workflow job (non-blocking)
+                    try:
+                        # Get the workflow runner from the launcher
+                        if hasattr(launcher, 'workflow_runner') and launcher.workflow_runner is not None:
+                            workflow_runner = launcher.workflow_runner
                             
-                            # Update UI on completion using the main thread
-                            # We'll use a different approach to avoid threading issues
-                            print("SNP analysis completed successfully!")
-                            
-                        except Exception as e:
-                            # Log error instead of trying to update UI from background thread
-                            ui.run_javascript(f"""
-                                // Update status
-                                var statusElement = document.querySelector('{snp_status_label.id}');
-                                if (statusElement) {{
-                                    statusElement.textContent = "SNP analysis failed: " + "{str(e)}";
-                                    statusElement.className = "text-sm text-red-600";
-                                }}
+                            # Submit the job through the workflow system
+                            if hasattr(workflow_runner, 'submit_snp_analysis_job'):
+                                # Use the dedicated SNP analysis method
+                                success = workflow_runner.submit_snp_analysis_job(
+                                    sample_dir=work_dir,
+                                    sample_id=sample_id,
+                                    reference=str(reference_genome) if reference_genome else None,
+                                    threads=4,
+                                    force_regenerate=False
+                                )
                                 
-                                // Re-enable button
-                                var buttonElement = document.querySelector('{snp_analysis_button.id}');
-                                if (buttonElement) {{
-                                    buttonElement.disabled = false;
-                                }}
-                            """)
-                    
-                    # Run in background thread
-                    import threading
-                    thread = threading.Thread(target=run_snp_analysis, daemon=True)
-                    thread.start()
+                                if success:
+                                    ui.notify("SNP analysis job submitted to workflow queue", type="info")
+                                    snp_status_label.set_text("Job submitted to workflow queue")
+                                    snp_status_label.classes(replace="text-sm text-blue-600")
+                                else:
+                                    raise Exception("Failed to submit SNP analysis job to workflow")
+                                    
+                            elif hasattr(workflow_runner, 'submit_sample_job'):
+                                # Fallback to generic job submission
+                                success = workflow_runner.submit_sample_job(
+                                    sample_dir=work_dir,
+                                    job_type="snp_analysis",
+                                    sample_id=sample_id
+                                )
+                                
+                                if success:
+                                    ui.notify("SNP analysis job submitted to workflow queue", type="info")
+                                    snp_status_label.set_text("Job submitted to workflow queue")
+                                    snp_status_label.classes(replace="text-sm text-blue-600")
+                                else:
+                                    raise Exception("Failed to submit SNP analysis job to workflow")
+                            else:
+                                raise Exception("Workflow runner does not support SNP analysis job submission")
+                        else:
+                            raise Exception("No workflow runner available")
+                            
+                    except Exception as e:
+                        # Fallback to direct handler call if workflow submission fails
+                        ui.notify(f"Workflow submission failed, falling back to direct execution: {e}", type="warning")
+                        
+                        def run_snp_analysis_fallback():
+                            try:
+                                # Use the work_dir variable we calculated earlier
+                                snp_analysis_handler(job, work_dir=work_dir)
+                                
+                                # Update UI on completion using the main thread
+                                print("SNP analysis completed successfully!")
+                                
+                            except Exception as e:
+                                # Log error instead of trying to update UI from background thread
+                                ui.run_javascript(f"""
+                                    // Update status
+                                    var statusElement = document.querySelector('{snp_status_label.id}');
+                                    if (statusElement) {{
+                                        statusElement.textContent = "SNP analysis failed: " + "{str(e)}";
+                                        statusElement.className = "text-sm text-red-600";
+                                    }}
+                                    
+                                    // Re-enable button
+                                    var buttonElement = document.querySelector('{snp_analysis_button.id}');
+                                    if (buttonElement) {{
+                                        buttonElement.disabled = false;
+                                    }}
+                                """)
+                        
+                        # Run in background thread as fallback
+                        import threading
+                        thread = threading.Thread(target=run_snp_analysis_fallback, daemon=True)
+                        thread.start()
                     
                     ui.notify("SNP analysis started in background", type="info")
                     

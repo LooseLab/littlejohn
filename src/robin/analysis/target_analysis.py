@@ -1422,14 +1422,6 @@ def run_snp_analysis(sample_dir: str, threads: int = 4, force_regenerate: bool =
             return ""
         
         
-        # Log file existence checks
-        logger.info("✅ INPUT FILES EXIST - PROCEEDING WITH ANALYSIS")
-        logger.info(f"  BAM file exists: {os.path.exists(target_bam)}")
-        logger.info(f"  BED file exists: {os.path.exists(targets_bed)}")
-        logger.info(f"  Reference exists: {os.path.exists(reference) if reference else 'None'}")
-        logger.info(f"  Clair3 output dir: {clair_dir}")
-        logger.info("✅ INPUT FILE CHECK COMPLETED")
-        
         # Check for reference genome
         if not reference:
             # Try to find reference from common locations
@@ -1592,7 +1584,7 @@ def run_snp_analysis(sample_dir: str, threads: int = 4, force_regenerate: bool =
             host_config = client.api.create_host_config(binds=volume_bindings)
             
             # Function to split BED file into manageable regions
-            def split_bed_into_regions(bed_file, max_region_size=100000000):
+            def split_bed_into_regions(bed_file, max_region_size=150000000):
                 """Split BED file into efficient regions up to max_region_size bases"""
                 regions = []
                 try:
@@ -1651,7 +1643,7 @@ def run_snp_analysis(sample_dir: str, threads: int = 4, force_regenerate: bool =
             
             # Split BED file into regions
             logger.info("Splitting BED file into efficient regions...")
-            regions = split_bed_into_regions(targets_bed, max_region_size=100000000)
+            regions = split_bed_into_regions(targets_bed, max_region_size=150000000)
             
             if not regions:
                 logger.error("Failed to split BED file into regions")
