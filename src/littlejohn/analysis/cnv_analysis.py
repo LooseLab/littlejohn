@@ -91,7 +91,7 @@ from scipy.ndimage import uniform_filter1d
 
 import ruptures as rpt
 from littlejohn.logging_config import get_job_logger
-import robin.resources as resources
+import littlejohn.resources as resources
 
 os.environ["CI"] = "1"
 
