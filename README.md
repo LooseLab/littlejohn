@@ -1,10 +1,10 @@
-# LittleJohn
+# robin
 
 A Python CLI tool for automated BAM file processing and bioinformatics analysis workflows.
 
 ## Overview
 
-LittleJohn is a specialized bioinformatics workflow engine designed for processing BAM files through automated pipelines. It provides a robust, multi-threaded system for running complex analysis workflows with built-in support for methylation analysis, copy number variation detection, fusion detection, and various classification algorithms.
+robin is a specialized bioinformatics workflow engine designed for processing BAM files through automated pipelines. It provides a robust, multi-threaded system for running complex analysis workflows with built-in support for methylation analysis, copy number variation detection, fusion detection, and various classification algorithms.
 
 ## Key Features
 
@@ -31,8 +31,8 @@ LittleJohn is a specialized bioinformatics workflow engine designed for processi
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/littlejohn.git
-cd littlejohn
+git clone https://github.com/yourusername/robin.git
+cd robin
 ```
 
 2. Install in development mode:
@@ -47,7 +47,7 @@ pip install -e .
 List all available job types organized by queue category:
 
 ```bash
-littlejohn list-job-types
+robin list-job-types
 ```
 
 **Available Job Types:**
@@ -61,7 +61,7 @@ littlejohn list-job-types
 Watch a directory for BAM file changes:
 
 ```bash
-littlejohn watch /path/to/directory [OPTIONS]
+robin watch /path/to/directory [OPTIONS]
 ```
 
 **Options:**
@@ -74,7 +74,7 @@ littlejohn watch /path/to/directory [OPTIONS]
 Run an async workflow on BAM files in a directory:
 
 ```bash
-littlejohn workflow /path/to/directory --workflow "workflow_plan" [OPTIONS]
+robin workflow /path/to/directory --workflow "workflow_plan" [OPTIONS]
 ```
 
 **Required Options:**
@@ -94,19 +94,19 @@ littlejohn workflow /path/to/directory --workflow "workflow_plan" [OPTIONS]
 List BAM files in a directory recursively:
 
 ```bash
-littlejohn list-files /path/to/directory
+robin list-files /path/to/directory
 ```
 
 ### `info`
 Display information about a file or directory:
 
 ```bash
-littlejohn info /path/to/file_or_directory
+robin info /path/to/file_or_directory
 ```
 
 ## Workflow System
 
-LittleJohn uses a sophisticated multi-queue workflow system with four specialized queues:
+robin uses a sophisticated multi-queue workflow system with four specialized queues:
 
 ### Queue Types
 
@@ -136,13 +136,13 @@ Workflows are specified using the format `queue:job_type`:
 
 ```bash
 # Simple workflow: preprocessing + MGMT analysis
-littlejohn workflow /path/to/bam/files --workflow "preprocessing:bed_conversion,analysis:mgmt"
+robin workflow /path/to/bam/files --workflow "preprocessing:bed_conversion,analysis:mgmt"
 
 # Full pipeline: preprocessing + multiple analyses + classification
-littlejohn workflow /path/to/bam/files --workflow "preprocessing:bed_conversion,analysis:mgmt,analysis:cnv,classification:sturgeon"
+robin workflow /path/to/bam/files --workflow "preprocessing:bed_conversion,analysis:mgmt,analysis:cnv,classification:sturgeon"
 
 # Multiple analyses for the same sample
-littlejohn workflow /path/to/bam/files --workflow "preprocessing:bed_conversion,analysis:mgmt,analysis:cnv,analysis:fusion"
+robin workflow /path/to/bam/files --workflow "preprocessing:bed_conversion,analysis:mgmt,analysis:cnv,analysis:fusion"
 ```
 
 **Note**: The `preprocessing:preprocessing` step is automatically added as the first step if not specified, ensuring metadata extraction for all workflows.
@@ -153,7 +153,7 @@ littlejohn workflow /path/to/bam/files --workflow "preprocessing:bed_conversion,
 MGMT (O6-methylguanine-DNA methyltransferase) promoter methylation analysis:
 
 ```bash
-littlejohn workflow /path/to/bam/files --workflow "analysis:mgmt" --verbose
+robin workflow /path/to/bam/files --workflow "analysis:mgmt" --verbose
 ```
 
 **Features:**
@@ -167,7 +167,7 @@ littlejohn workflow /path/to/bam/files --workflow "analysis:mgmt" --verbose
 Copy number variation analysis with breakpoint detection:
 
 ```bash
-littlejohn workflow /path/to/bam/files --workflow "analysis:cnv" --verbose
+robin workflow /path/to/bam/files --workflow "analysis:cnv" --verbose
 ```
 
 **Features:**
@@ -182,7 +182,7 @@ littlejohn workflow /path/to/bam/files --workflow "analysis:cnv" --verbose
 Fusion detection analysis:
 
 ```bash
-littlejohn workflow /path/to/bam/files --workflow "analysis:fusion" --verbose
+robin workflow /path/to/bam/files --workflow "analysis:fusion" --verbose
 ```
 
 **Features:**
@@ -194,29 +194,29 @@ littlejohn workflow /path/to/bam/files --workflow "analysis:fusion" --verbose
 Target-specific analysis:
 
 ```bash
-littlejohn workflow /path/to/bam/files --workflow "analysis:target" --verbose
+robin workflow /path/to/bam/files --workflow "analysis:target" --verbose
 ```
 
 ### Classification Modules
 
 #### Sturgeon Classification
 ```bash
-littlejohn workflow /path/to/bam/files --workflow "classification:sturgeon" --verbose
+robin workflow /path/to/bam/files --workflow "classification:sturgeon" --verbose
 ```
 
 #### NanoDX Analysis
 ```bash
-littlejohn workflow /path/to/bam/files --workflow "classification:nanodx" --verbose
+robin workflow /path/to/bam/files --workflow "classification:nanodx" --verbose
 ```
 
 #### PanNanoDX Analysis
 ```bash
-littlejohn workflow /path/to/bam/files --workflow "classification:pannanodx" --verbose
+robin workflow /path/to/bam/files --workflow "classification:pannanodx" --verbose
 ```
 
 #### Random Forest Analysis
 ```bash
-littlejohn workflow /path/to/bam/files --workflow "slow:random_forest" --verbose
+robin workflow /path/to/bam/files --workflow "slow:random_forest" --verbose
 ```
 
 ## Advanced Features
@@ -225,7 +225,7 @@ littlejohn workflow /path/to/bam/files --workflow "slow:random_forest" --verbose
 Prevent redundant processing when multiple upstream jobs complete simultaneously:
 
 ```bash
-littlejohn workflow /path/to/bam/files \
+robin workflow /path/to/bam/files \
   --workflow "preprocessing:bed_conversion,classification:sturgeon" \
   --deduplicate-jobs sturgeon \
   --verbose
@@ -235,7 +235,7 @@ littlejohn workflow /path/to/bam/files \
 Fine-grained control over output verbosity:
 
 ```bash
-littlejohn workflow /path/to/bam/files \
+robin workflow /path/to/bam/files \
   --workflow "preprocessing:bed_conversion,analysis:mgmt" \
   --log-level WARNING \
   --job-log-level preprocessing:DEBUG \
@@ -247,7 +247,7 @@ littlejohn workflow /path/to/bam/files \
 Specify a custom output directory for all analysis results:
 
 ```bash
-littlejohn workflow /path/to/bam/files \
+robin workflow /path/to/bam/files \
   --workflow "analysis:mgmt,analysis:cnv" \
   --work-dir /path/to/output \
   --verbose
@@ -257,7 +257,7 @@ littlejohn workflow /path/to/bam/files \
 Real-time progress monitoring with multiple progress bars:
 
 ```bash
-littlejohn workflow /path/to/bam/files \
+robin workflow /path/to/bam/files \
   --workflow "preprocessing:bed_conversion,analysis:mgmt,classification:sturgeon" \
   --verbose
 ```
@@ -281,13 +281,13 @@ Automatic creation and updating of `master.csv` files for each sample:
 ### Basic MGMT Analysis
 ```bash
 # Run MGMT analysis on all BAM files in a directory
-littlejohn workflow /path/to/bam/files --workflow "analysis:mgmt" --verbose
+robin workflow /path/to/bam/files --workflow "analysis:mgmt" --verbose
 ```
 
 ### Full Bioinformatics Pipeline
 ```bash
 # Run comprehensive analysis pipeline
-littlejohn workflow /path/to/bam/files \
+robin workflow /path/to/bam/files \
   --workflow "preprocessing:bed_conversion,analysis:mgmt,analysis:cnv,classification:sturgeon" \
   --work-dir /path/to/results \
   --deduplicate-jobs sturgeon \
@@ -295,7 +295,7 @@ littlejohn workflow /path/to/bam/files \
   --verbose
 
 # Complete workflow with all analysis modules
-littlejohn workflow ~/datasets/Demo_Run \
+robin workflow ~/datasets/Demo_Run \
   --work-dir test_out2 \
   --workflow "preprocessing:bed_conversion,analysis:fusion,analysis:mgmt,analysis:cnv,analysis:target,classification:sturgeon,classification:nanodx,classification:pannanodx,slow:random_forest" \
   --verbose \
@@ -305,12 +305,12 @@ littlejohn workflow ~/datasets/Demo_Run \
 ### Watch for New Files
 ```bash
 # Process existing files first, then watch for new ones
-littlejohn workflow /path/to/bam/files \
+robin workflow /path/to/bam/files \
   --workflow "analysis:mgmt" \
   --verbose
 
 # Only watch for new files (skip existing)
-littlejohn workflow /path/to/bam/files \
+robin workflow /path/to/bam/files \
   --workflow "analysis:mgmt" \
   --no-process-existing \
   --verbose
@@ -319,7 +319,7 @@ littlejohn workflow /path/to/bam/files \
 ### Custom Commands
 ```bash
 # Add custom commands to the workflow
-littlejohn workflow /path/to/bam/files \
+robin workflow /path/to/bam/files \
   --workflow "preprocessing:bed_conversion,analysis:mgmt" \
   --commands "notify:echo 'Processing complete for {file}'" \
   --verbose

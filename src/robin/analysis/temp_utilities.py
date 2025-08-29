@@ -2,8 +2,7 @@
 """
 Temporary utilities for robin BAM to parquet conversion.
 
-This module provides utilities for merging modkit files and creating parquet files,
-adapted from the marion package for use in robin.
+This module provides utilities for merging modkit files and creating parquet files.
 """
 
 import warnings
