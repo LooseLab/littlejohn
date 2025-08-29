@@ -826,6 +826,12 @@ class LightweightGeneAnalysis:
             ref_sequence = pileup_entry.get('reference_sequence', '')
             position = pileup_entry['position']
             
+            # NOTE: Indel analysis is complex and requires:
+            # 1. Reference genome sequence validation
+            # 2. Multi-position pileup analysis
+            # 3. CIGAR string parsing for true insertion/deletion evidence
+            # 4. Context-aware sequence alignment
+            
             if variant_type == "indel":
                 if len(expected_ref) > len(expected_alt):
                     # Deletion (e.g., TG→T)
@@ -841,23 +847,33 @@ class LightweightGeneAnalysis:
                     
                 else:
                     # Insertion (e.g., T→TG)
-                    # Check if we see the inserted base
-                    inserted_base = expected_alt[len(expected_ref):]
-                    alt_support = base_counts.get(inserted_base[0].upper(), 0) if inserted_base else 0
-                    ref_support = base_counts.get(expected_ref.upper(), 0)
-                    vaf = alt_support / total_coverage if total_coverage > 0 else 0
+                    # For insertions, we need to:
+                    # 1. Verify the reference base is correct
+                    # 2. Check if we actually see the insertion
+                    # 3. Validate the insertion context
                     
-                    # Determine evidence level for insertions
-                    if alt_support == 0:
-                        evidence_level = "no_support"
-                    elif alt_support < 3:
-                        evidence_level = "low_support"
-                    elif vaf < 0.1:
-                        evidence_level = "low_frequency"
-                    elif vaf < 0.3:
-                        evidence_level = "medium_frequency"
+                    # Get the reference base from the pileup
+                    ref_base = pileup_entry.get('reference', 'N')
+                    expected_ref_base = expected_ref[0] if expected_ref else 'N'
+                    
+                    # Check if reference base matches what we expect
+                    if ref_base != expected_ref_base:
+                        # Reference mismatch - this might not be the right position
+                        evidence_level = "reference_mismatch"
+                        ref_support = 0
+                        alt_support = 0
+                        vaf = 0.0
                     else:
-                        evidence_level = "high_frequency"
+                        # Reference matches, now check for insertion
+                        inserted_bases = expected_alt[len(expected_ref):]
+                        
+                        # For insertions, we need to look at the actual sequence context
+                        # This requires more sophisticated pileup analysis
+                        # For now, mark as requiring manual review
+                        evidence_level = "insertion_requires_review"
+                        ref_support = base_counts.get(expected_ref_base.upper(), 0)
+                        alt_support = 0  # Can't determine without proper insertion analysis
+                        vaf = 0.0
             else:
                 # Fallback for unknown indel types
                 ref_support = 0
