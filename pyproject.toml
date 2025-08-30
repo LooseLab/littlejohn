@@ -72,7 +72,8 @@ dependencies = [
     "packaging",
     "plotly",
     "svglib",
-    "geocoder"
+    "geocoder",
+    "cnv_from_bam",
 ]
 
 [project.optional-dependencies]

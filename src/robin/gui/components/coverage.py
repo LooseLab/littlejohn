@@ -1543,8 +1543,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 # Create and submit SNP analysis job
                 try:
                     # Import required modules
-                    from littlejohn.analysis.target_analysis import snp_analysis_handler
-                    from littlejohn.workflow_simple import Job, WorkflowContext
+                    from robin.analysis.target_analysis import snp_analysis_handler
+                    from robin.workflow_simple import Job, WorkflowContext
                     
                     # Create job metadata with reference genome
                     # Get reference genome from workflow runner (set by CLI)
@@ -1581,7 +1581,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     
                     # Fallback to environment variable
                     if not reference_genome:
-                        env_reference = os.environ.get("LITTLEJOHN_REFERENCE")
+                        env_reference = os.environ.get("robin_REFERENCE")
                         if env_reference and os.path.exists(env_reference):
                             reference_genome = env_reference
                             print(f"Using reference genome from environment: {reference_genome}")
@@ -2504,8 +2504,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 try:
                     # Import required modules
                     print("🔧 GUI: Importing required modules...")
-                    from littlejohn.analysis.lightweight_gene_analysis import lightweight_gene_analysis_handler
-                    from littlejohn.workflow_simple import Job, WorkflowContext
+                    from robin.analysis.lightweight_gene_analysis import lightweight_gene_analysis_handler
+                    from robin.workflow_simple import Job, WorkflowContext
                     
                     # Get reference genome from workflow runner (set by CLI)
                     reference_genome = None
@@ -2516,7 +2516,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     
                     # Fallback to environment variable
                     if not reference_genome:
-                        env_reference = os.environ.get("LITTLEJOHN_REFERENCE")
+                        env_reference = os.environ.get("robin_REFERENCE")
                         if env_reference and os.path.exists(env_reference):
                             reference_genome = env_reference
                     

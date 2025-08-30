@@ -1571,7 +1571,7 @@ class GUILauncher:
                             from .gui.components.summary import add_summary_section  # type: ignore
                         except ImportError:
                             # Try absolute import if relative fails
-                            from littlejohn.gui.components.summary import add_summary_section
+                            from robin.gui.components.summary import add_summary_section
 
                         add_summary_section(sample_dir, sample_id)
                     except Exception as e:
@@ -1588,7 +1588,7 @@ class GUILauncher:
                             from .gui.components.classification import add_classification_section  # type: ignore
                         except ImportError:
                             # Try absolute import if relative fails
-                            from littlejohn.gui.components.classification import add_classification_section
+                            from robin.gui.components.classification import add_classification_section
 
                         add_classification_section(sample_dir)
                     except Exception as e:
@@ -1604,7 +1604,7 @@ class GUILauncher:
                             from .gui.components.coverage import add_coverage_section  # type: ignore
                         except ImportError:
                             # Try absolute import if relative fails
-                            from littlejohn.gui.components.coverage import add_coverage_section
+                            from robin.gui.components.coverage import add_coverage_section
 
                         add_coverage_section(self, sample_dir)
                     except Exception as e:
@@ -1619,7 +1619,7 @@ class GUILauncher:
                             from .gui.components.mgmt import add_mgmt_section  # type: ignore
                         except ImportError:
                             # Try absolute import if relative fails
-                            from littlejohn.gui.components.mgmt import add_mgmt_section
+                            from robin.gui.components.mgmt import add_mgmt_section
 
                         add_mgmt_section(self, sample_dir)
                     except Exception as e:
@@ -1635,7 +1635,7 @@ class GUILauncher:
                             from .gui.components.cnv import add_cnv_section  # type: ignore
                         except ImportError:
                             # Try absolute import if relative fails
-                            from littlejohn.gui.components.cnv import add_cnv_section
+                            from robin.gui.components.cnv import add_cnv_section
 
                         # Pass launcher for shared state access (launcher._cnv_state)
                         add_cnv_section(self, sample_dir)
@@ -1652,7 +1652,7 @@ class GUILauncher:
                             from .gui.components.fusion import add_fusion_section  # type: ignore
                         except ImportError:
                             # Try absolute import if relative fails
-                            from littlejohn.gui.components.fusion import add_fusion_section
+                            from robin.gui.components.fusion import add_fusion_section
 
                         add_fusion_section(self, sample_dir)
                     except Exception as e:
@@ -2546,7 +2546,7 @@ if __name__ == "__main__":
     import sys
     
     parser = argparse.ArgumentParser(
-        description="Direct GUI launcher for LittleJohn workflow monitoring",
+        description="Direct GUI launcher for robin workflow monitoring",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
         Examples:

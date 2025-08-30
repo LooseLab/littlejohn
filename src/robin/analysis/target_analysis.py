@@ -396,7 +396,7 @@ class TargetAnalysis:
         
         # Check environment variable for reference genome
         if not self.reference:
-            self.reference = os.environ.get("LITTLEJOHN_REFERENCE")
+            self.reference = os.environ.get("robin_REFERENCE")
         
         # Log reference genome status
         if self.reference:
@@ -1370,7 +1370,7 @@ def run_snp_analysis(sample_dir: str, threads: int = 4, force_regenerate: bool =
     Returns:
         The path to the output directory containing SNP results (empty string on failure)
     """
-    logger = logging.getLogger("littlejohn.target")
+    logger = logging.getLogger("robin.target")
     
     # CRITICAL: Immediate logging to see if we even get here
     logger.info("🚀 ENTERING run_snp_analysis function")
@@ -1957,7 +1957,7 @@ def run_snp_analysis(sample_dir: str, threads: int = 4, force_regenerate: bool =
                 logger.error(f"snpEff output file does not exist: {snpeff_out}")
             
             try:
-                from littlejohn import resources
+                from robin import resources
                 clinvar_path = os.path.join(
                     os.path.dirname(os.path.abspath(resources.__file__)), "clinvar.vcf"
                 )

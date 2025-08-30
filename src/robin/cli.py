@@ -378,7 +378,7 @@ def _create_ray_workflow_runner(
                 try:
                     # Try to get coordinator with retries
                     import time
-                    from littlejohn import workflow_ray as wrn
+                    from robin import workflow_ray as wrn
                     
                     max_retries = 5
                     retry_delay = 1.0
