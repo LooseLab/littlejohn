@@ -8,6 +8,7 @@ import os
 import json
 import logging
 import pandas as pd
+from datetime import datetime
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import inch
@@ -74,14 +75,14 @@ class RobinReport:
             return None
 
     def _create_document(self):
-        """Create the PDF document with proper margins and settings."""
+        """Create the PDF document with enhanced M3 margins and settings."""
         return SimpleDocTemplate(
             self.filename,
             pagesize=A4,
-            rightMargin=0.75 * inch,
-            leftMargin=0.75 * inch,
-            topMargin=1.35 * inch,
-            bottomMargin=0.75 * inch,
+            rightMargin=1.0 * inch,    # Enhanced from 0.75 inch
+            leftMargin=1.0 * inch,     # Enhanced from 0.75 inch
+            topMargin=1.35 * inch,     # Keep existing for header compatibility
+            bottomMargin=1.0 * inch,   # Enhanced from 0.75 inch
         )
 
     def _initialize_sections(self):
@@ -120,13 +121,27 @@ class RobinReport:
         try:
             logger.info("Starting report generation")
 
-            # Add summary section header
+            # Add summary section header with enhanced M3 typography
             self.elements_summary.insert(
                 0,
                 Paragraph(
-                    f"Summary - {self.sample_id}", self.styles.styles["Heading1"]
+                    f"Summary - {self.sample_id}", self.styles.styles["DisplayMedium"]
                 ),
             )
+            
+            # Add enhanced summary card with M3 styling
+            summary_card_content = f"""
+            <b>ROBIN Analysis Report</b><br/>
+            Sample ID: {self.sample_id}<br/>
+            Centre ID: {self.centreID if self.centreID else 'Not specified'}<br/>
+            Report Type: {report_type.title()}<br/>
+            Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+            """
+            self.elements_summary.insert(
+                1,
+                Paragraph(summary_card_content, self.styles.styles["InfoCard"])
+            )
+            self.elements_summary.insert(2, Spacer(1, 16))
 
             # Process each section
             for section in self.sections:
@@ -148,14 +163,24 @@ class RobinReport:
                         f"Error processing section {section.__class__.__name__}: {e}",
                         exc_info=True,
                     )
+                    # Add error card to report for better user feedback
+                    error_content = f"""
+                    <b>⚠️ Section Processing Error</b><br/>
+                    Section: {section.__class__.__name__}<br/>
+                    Error: {str(e)[:100]}{'...' if len(str(e)) > 100 else ''}<br/>
+                    <i>This section was skipped due to processing errors.</i>
+                    """
+                    self.elements_summary.append(
+                        Paragraph(error_content, self.styles.styles["Error"])
+                    )
 
             # Add detailed analysis header and elements only for detailed reports
             if report_type == "detailed":
                 self.elements.insert(0, PageBreak())
                 self.elements.insert(
-                    1, Paragraph("Detailed Analysis", self.styles.styles["Heading1"])
+                    1, Paragraph("Detailed Analysis", self.styles.styles["HeadlineLarge"])
                 )
-                self.elements.insert(2, Spacer(1, 12))
+                self.elements.insert(2, Spacer(1, 16))  # Enhanced spacing
 
             # Add page break before end of report elements
             if self.end_of_report_elements:
@@ -183,6 +208,18 @@ class RobinReport:
             )
 
             logger.info(f"PDF created: {self.filename}")
+
+            # Add success message to report
+            success_content = f"""
+            <b>✅ Report Generation Complete</b><br/>
+            PDF file: {os.path.basename(self.filename)}<br/>
+            Total sections processed: {len(self.sections)}<br/>
+            Report type: {report_type.title()}
+            """
+            self.end_of_report_elements.append(
+                Paragraph(success_content, self.styles.styles["Success"])
+            )
+            self.end_of_report_elements.append(Spacer(1, 12))
 
             # Optionally export CSV/XLSX/ZIP
             if export_csv_dir:

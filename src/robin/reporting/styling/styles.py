@@ -58,17 +58,41 @@ class ReportStyles:
             logger.info("Using Helvetica as fallback font")
 
     def _setup_colors(self):
-        """Set up color palette for consistent branding."""
+        """Set up Material Design 3 color palette for consistent branding."""
         self.COLORS = {
-            "primary": HexColor("#4F9153"),  # ROBIN theme green
-            "secondary": HexColor("#367AB3"),  # Blue accent
-            "text": HexColor("#37474f"),
-            "success": HexColor("#2e7d32"),
-            "warning": HexColor("#f57c00"),
-            "error": HexColor("#c62828"),
-            "muted": HexColor("#546e7a"),
-            "border": HexColor("#e9ecef"),
-            "background": HexColor("#f8f9fa"),
+            # Primary colors (ROBIN green theme)
+            "primary": HexColor("#4F9153"),  # ROBIN theme green (unchanged)
+            "primary_container": HexColor("#D1E7DD"),  # Light green container
+            "on_primary": HexColor("#FFFFFF"),  # White text on primary
+            "on_primary_container": HexColor("#0D3B1E"),  # Dark text on primary container
+            
+            # Secondary colors (M3 purple)
+            "secondary": HexColor("#6750A4"),  # M3 purple
+            "secondary_container": HexColor("#EADDFF"),  # Light purple container
+            "on_secondary": HexColor("#FFFFFF"),  # White text on secondary
+            "on_secondary_container": HexColor("#21005D"),  # Dark text on secondary container
+            
+            # Surface colors
+            "surface": HexColor("#FEFBFF"),  # M3 surface
+            "surface_variant": HexColor("#E7E0EC"),  # M3 surface variant
+            "on_surface": HexColor("#1C1B1F"),  # M3 on surface
+            "on_surface_variant": HexColor("#49454F"),  # M3 on surface variant
+            
+            # Outline colors
+            "outline": HexColor("#79747E"),  # M3 outline
+            "outline_variant": HexColor("#CAC4D0"),  # M3 outline variant
+            
+            # Semantic colors
+            "success": HexColor("#4CAF50"),  # M3 success green
+            "warning": HexColor("#FF9800"),  # M3 warning orange
+            "error": HexColor("#F44336"),  # M3 error red
+            "info": HexColor("#2196F3"),  # M3 info blue
+            
+            # Legacy colors (for backward compatibility)
+            "text": HexColor("#1C1B1F"),  # M3 on surface
+            "muted": HexColor("#49454F"),  # M3 on surface variant
+            "border": HexColor("#CAC4D0"),  # M3 outline variant
+            "background": HexColor("#FEFBFF"),  # M3 surface
         }
 
     def _setup_styles(self):
@@ -93,72 +117,88 @@ class ReportStyles:
             medium_font = "FiraSans-Medium"
             mono_font = "FiraMono"
 
-        # Update base styles
+        # Update base styles with enhanced M3 typography
         for style_name in ["Title", "Heading1", "Heading2", "Normal"]:
             if style_name == "Title":
                 self.styles[style_name].fontName = bold_font
-                self.styles[style_name].fontSize = 18
-                self.styles[style_name].spaceAfter = 14
-                self.styles[style_name].spaceBefore = 7
+                self.styles[style_name].fontSize = 20  # Enhanced from 18
+                self.styles[style_name].leading = 28   # M3 leading ratio
+                self.styles[style_name].spaceAfter = 16
+                self.styles[style_name].spaceBefore = 8
                 self.styles[style_name].textColor = self.COLORS["primary"]
                 self.styles[style_name].alignment = 1
+                self.styles[style_name].allowWidows = 0
+                self.styles[style_name].allowOrphans = 0
             elif style_name == "Heading1":
                 self.styles[style_name].fontName = bold_font
-                self.styles[style_name].fontSize = 14
-                self.styles[style_name].spaceAfter = 7
-                self.styles[style_name].spaceBefore = 4
+                self.styles[style_name].fontSize = 16  # Enhanced from 14
+                self.styles[style_name].leading = 24   # M3 leading ratio
+                self.styles[style_name].spaceAfter = 12
+                self.styles[style_name].spaceBefore = 6
                 self.styles[style_name].textColor = self.COLORS["primary"]
+                self.styles[style_name].allowWidows = 0
+                self.styles[style_name].allowOrphans = 0
             elif style_name == "Heading2":
                 self.styles[style_name].fontName = medium_font
-                self.styles[style_name].fontSize = 12
-                self.styles[style_name].spaceAfter = 6
-                self.styles[style_name].spaceBefore = 4
+                self.styles[style_name].fontSize = 14  # Enhanced from 12
+                self.styles[style_name].leading = 20   # M3 leading ratio
+                self.styles[style_name].spaceAfter = 10
+                self.styles[style_name].spaceBefore = 5
                 self.styles[style_name].textColor = self.COLORS["secondary"]
+                self.styles[style_name].allowWidows = 0
+                self.styles[style_name].allowOrphans = 0
             else:  # Normal
                 self.styles[style_name].fontName = base_font
-                self.styles[style_name].fontSize = 9
-                self.styles[style_name].leading = 14
-                self.styles[style_name].spaceBefore = 2
-                self.styles[style_name].spaceAfter = 2
-                self.styles[style_name].textColor = self.COLORS["text"]
-                # Add support for HTML-like tags
+                self.styles[style_name].fontSize = 11  # Enhanced from 9
+                self.styles[style_name].leading = 16   # M3 leading ratio
+                self.styles[style_name].spaceBefore = 3
+                self.styles[style_name].spaceAfter = 3
+                self.styles[style_name].textColor = self.COLORS["on_surface"]
+                # Enhanced typography settings
                 self.styles[style_name].allowWidows = 0
                 self.styles[style_name].allowOrphans = 0
                 self.styles[style_name].wordWrap = "CJK"
+                self.styles[style_name].hyphenationLang = "en_US"
 
-        # Add custom styles
+        # Add custom styles with enhanced Material Design 3 typography
         custom_styles = {
             "Smaller": {
-                "fontSize": 7,
-                "leading": 11,
-                "textColor": self.COLORS["text"],
+                "fontSize": 8,  # Enhanced from 7
+                "leading": 12,   # M3 leading ratio
+                "textColor": self.COLORS["on_surface_variant"],
                 "fontName": base_font,
+                "spaceAfter": 2,
+                "spaceBefore": 1,
             },
             "Bold": {
-                "fontSize": 10,
-                "leading": 12,
+                "fontSize": 12,  # Enhanced from 10
+                "leading": 16,   # M3 leading ratio
                 "textColor": self.COLORS["primary"],
                 "fontName": bold_font,
+                "spaceAfter": 4,
+                "spaceBefore": 2,
             },
             "Emphasis": {
-                "fontSize": 10,
-                "leading": 12,
+                "fontSize": 12,  # Enhanced from 10
+                "leading": 16,   # M3 leading ratio
                 "textColor": self.COLORS["secondary"],
                 "fontName": medium_font,
+                "spaceAfter": 4,
+                "spaceBefore": 2,
             },
             "SummaryCard": {
-                "fontSize": 11,
-                "leading": 14,
-                "textColor": self.COLORS["primary"],
-                "backColor": self.COLORS["background"],
-                "borderColor": self.COLORS["border"],
+                "fontSize": 12,  # Enhanced from 11
+                "leading": 18,   # M3 leading ratio
+                "textColor": self.COLORS["on_surface"],
+                "backColor": self.COLORS["surface"],
+                "borderColor": self.COLORS["outline_variant"],
                 "borderWidth": 1,
-                "borderPadding": 8,
-                "spaceBefore": 8,
-                "spaceAfter": 8,
+                "borderPadding": 12,  # Enhanced from 8
+                "spaceBefore": 12,    # Enhanced from 8
+                "spaceAfter": 12,     # Enhanced from 8
                 "bulletIndent": 0,
-                "leftIndent": 8,
-                "rightIndent": 8,
+                "leftIndent": 12,     # Enhanced from 8
+                "rightIndent": 12,    # Enhanced from 8
                 "fontName": medium_font,
                 "allowWidows": 0,
                 "allowOrphans": 0,
@@ -166,29 +206,299 @@ class ReportStyles:
                 "alignment": 0,  # Left alignment
             },
             "Metric": {
-                "fontSize": 12,
-                "leading": 16,
+                "fontSize": 14,  # Enhanced from 12
+                "leading": 20,   # M3 leading ratio
                 "textColor": self.COLORS["secondary"],
                 "alignment": 1,
-                "spaceBefore": 4,
-                "spaceAfter": 4,
+                "spaceBefore": 6,   # Enhanced from 4
+                "spaceAfter": 6,    # Enhanced from 4
                 "fontName": bold_font,
             },
             "Caption": {
-                "fontSize": 9,
-                "leading": 11,
-                "textColor": self.COLORS["muted"],
+                "fontSize": 10,  # Enhanced from 9
+                "leading": 14,   # M3 leading ratio
+                "textColor": self.COLORS["on_surface_variant"],
                 "alignment": 1,
-                "spaceBefore": 4,
-                "spaceAfter": 12,
+                "spaceBefore": 6,   # Enhanced from 4
+                "spaceAfter": 16,   # Enhanced from 12
                 "fontName": base_font,
             },
             "MonoText": {
+                "fontSize": 10,  # Enhanced from 9
+                "leading": 14,   # M3 leading ratio
+                "fontName": mono_font,
+                "textColor": self.COLORS["on_surface"],
+                "backColor": self.COLORS["surface_variant"],
+                "spaceBefore": 3,
+                "spaceAfter": 3,
+            },
+            # Enhanced M3 typography scale
+            "DisplayLarge": {
+                "fontSize": 24,  # Enhanced from 22
+                "leading": 32,   # M3 leading ratio
+                "textColor": self.COLORS["on_surface"],
+                "fontName": bold_font,
+                "spaceAfter": 20,  # Enhanced from 16
+                "spaceBefore": 10, # Enhanced from 8
+                "allowWidows": 0,
+                "allowOrphans": 0,
+            },
+            "DisplayMedium": {
+                "fontSize": 22,  # Enhanced from 20
+                "leading": 28,   # M3 leading ratio
+                "textColor": self.COLORS["on_surface"],
+                "fontName": bold_font,
+                "spaceAfter": 16,  # Enhanced from 12
+                "spaceBefore": 8,  # Enhanced from 6
+                "allowWidows": 0,
+                "allowOrphans": 0,
+            },
+            "HeadlineLarge": {
+                "fontSize": 20,  # Enhanced from 18
+                "leading": 28,   # M3 leading ratio
+                "textColor": self.COLORS["on_surface"],
+                "fontName": bold_font,
+                "spaceAfter": 16,  # Enhanced from 12
+                "spaceBefore": 8,  # Enhanced from 6
+                "allowWidows": 0,
+                "allowOrphans": 0,
+            },
+            "HeadlineMedium": {
+                "fontSize": 18,  # Enhanced from 16
+                "leading": 24,   # M3 leading ratio
+                "textColor": self.COLORS["on_surface"],
+                "fontName": bold_font,
+                "spaceAfter": 12,  # Enhanced from 10
+                "spaceBefore": 6,  # Enhanced from 5
+                "allowWidows": 0,
+                "allowOrphans": 0,
+            },
+            "HeadlineSmall": {
+                "fontSize": 16,  # Enhanced from 14
+                "leading": 20,   # M3 leading ratio
+                "textColor": self.COLORS["on_surface"],
+                "fontName": bold_font,
+                "spaceAfter": 10,  # Enhanced from 8
+                "spaceBefore": 5,  # Enhanced from 4
+                "allowWidows": 0,
+                "allowOrphans": 0,
+            },
+            "BodyLarge": {
+                "fontSize": 12,  # Enhanced from 11
+                "leading": 18,   # M3 leading ratio
+                "textColor": self.COLORS["on_surface"],
+                "fontName": base_font,
+                "spaceAfter": 8,   # Enhanced from 6
+                "spaceBefore": 4,  # Enhanced from 3
+                "allowWidows": 0,
+                "allowOrphans": 0,
+                "wordWrap": "CJK",
+            },
+            "BodyMedium": {
+                "fontSize": 11,  # Enhanced from 10
+                "leading": 16,   # M3 leading ratio
+                "textColor": self.COLORS["on_surface"],
+                "fontName": base_font,
+                "spaceAfter": 6,   # Enhanced from 4
+                "spaceBefore": 3,  # Enhanced from 2
+                "allowWidows": 0,
+                "allowOrphans": 0,
+                "wordWrap": "CJK",
+            },
+            "BodySmall": {
+                "fontSize": 10,  # Enhanced from 9
+                "leading": 14,   # M3 leading ratio
+                "textColor": self.COLORS["on_surface_variant"],
+                "fontName": base_font,
+                "spaceAfter": 4,   # Enhanced from 3
+                "spaceBefore": 2,  # Enhanced from 1
+                "allowWidows": 0,
+                "allowOrphans": 0,
+                "wordWrap": "CJK",
+            },
+            "LabelLarge": {
+                "fontSize": 10,
+                "leading": 14,
+                "textColor": self.COLORS["on_surface"],
+                "fontName": medium_font,
+                "spaceAfter": 4,
+                "spaceBefore": 2,
+            },
+            "LabelMedium": {
                 "fontSize": 9,
                 "leading": 12,
+                "textColor": self.COLORS["on_surface_variant"],
+                "fontName": medium_font,
+                "spaceAfter": 3,
+                "spaceBefore": 1,
+            },
+            "LabelSmall": {
+                "fontSize": 8,
+                "leading": 10,
+                "textColor": self.COLORS["on_surface_variant"],
+                "fontName": medium_font,
+                "spaceAfter": 2,
+                "spaceBefore": 1,
+            },
+            "Alert": {
+                "fontSize": 10,
+                "leading": 14,
+                "textColor": self.COLORS["on_surface"],
+                "backColor": self.COLORS["surface_variant"],
+                "borderColor": self.COLORS["outline"],
+                "borderWidth": 1,
+                "borderPadding": 6,
+                "spaceBefore": 6,
+                "spaceAfter": 6,
+                "leftIndent": 6,
+                "rightIndent": 6,
+                "fontName": base_font,
+            },
+            "Success": {
+                "fontSize": 10,
+                "leading": 14,
+                "textColor": self.COLORS["success"],
+                "backColor": self.COLORS["surface"],
+                "borderColor": self.COLORS["success"],
+                "borderWidth": 1,
+                "borderPadding": 6,
+                "spaceBefore": 6,
+                "spaceAfter": 6,
+                "leftIndent": 6,
+                "rightIndent": 6,
+                "fontName": base_font,
+            },
+            "Warning": {
+                "fontSize": 10,
+                "leading": 14,
+                "textColor": self.COLORS["warning"],
+                "backColor": self.COLORS["surface"],
+                "borderColor": self.COLORS["warning"],
+                "borderWidth": 1,
+                "borderPadding": 6,
+                "spaceBefore": 6,
+                "spaceAfter": 6,
+                "leftIndent": 6,
+                "rightIndent": 6,
+                "fontName": base_font,
+            },
+            "Error": {
+                "fontSize": 10,
+                "leading": 14,
+                "textColor": self.COLORS["error"],
+                "backColor": self.COLORS["surface"],
+                "borderColor": self.COLORS["error"],
+                "borderWidth": 1,
+                "borderPadding": 6,
+                "spaceBefore": 6,
+                "spaceAfter": 6,
+                "leftIndent": 6,
+                "rightIndent": 6,
+                "fontName": base_font,
+            },
+            # Advanced M3 component styles
+            "Card": {
+                "fontSize": 12,
+                "leading": 18,
+                "textColor": self.COLORS["on_surface"],
+                "backColor": self.COLORS["surface"],
+                "borderColor": self.COLORS["outline_variant"],
+                "borderWidth": 1,
+                "borderPadding": 16,
+                "spaceBefore": 16,
+                "spaceAfter": 16,
+                "leftIndent": 16,
+                "rightIndent": 16,
+                "fontName": base_font,
+                "allowWidows": 0,
+                "allowOrphans": 0,
+                "wordWrap": "CJK",
+            },
+            "ElevatedCard": {
+                "fontSize": 12,
+                "leading": 18,
+                "textColor": self.COLORS["on_surface"],
+                "backColor": self.COLORS["surface"],
+                "borderColor": self.COLORS["outline"],
+                "borderWidth": 2,
+                "borderPadding": 20,
+                "spaceBefore": 20,
+                "spaceAfter": 20,
+                "leftIndent": 20,
+                "rightIndent": 20,
+                "fontName": base_font,
+                "allowWidows": 0,
+                "allowOrphans": 0,
+                "wordWrap": "CJK",
+            },
+            "InfoCard": {
+                "fontSize": 11,
+                "leading": 16,
+                "textColor": self.COLORS["on_surface"],
+                "backColor": self.COLORS["primary_container"],
+                "borderColor": self.COLORS["primary"],
+                "borderWidth": 1,
+                "borderPadding": 12,
+                "spaceBefore": 12,
+                "spaceAfter": 12,
+                "leftIndent": 12,
+                "rightIndent": 12,
+                "fontName": base_font,
+                "allowWidows": 0,
+                "allowOrphans": 0,
+                "wordWrap": "CJK",
+            },
+            "CodeBlock": {
+                "fontSize": 10,
+                "leading": 14,
+                "textColor": self.COLORS["on_surface"],
+                "backColor": self.COLORS["surface_variant"],
+                "borderColor": self.COLORS["outline_variant"],
+                "borderWidth": 1,
+                "borderPadding": 12,
+                "spaceBefore": 8,
+                "spaceAfter": 8,
+                "leftIndent": 12,
+                "rightIndent": 12,
                 "fontName": mono_font,
-                "textColor": self.COLORS["text"],
-                "backColor": self.COLORS["background"],
+                "allowWidows": 0,
+                "allowOrphans": 0,
+                "wordWrap": "CJK",
+            },
+            "Quote": {
+                "fontSize": 11,
+                "leading": 16,
+                "textColor": self.COLORS["on_surface_variant"],
+                "backColor": self.COLORS["surface"],
+                "borderColor": self.COLORS["secondary"],
+                "borderWidth": 3,
+                "borderPadding": 12,
+                "spaceBefore": 12,
+                "spaceAfter": 12,
+                "leftIndent": 16,
+                "rightIndent": 12,
+                "fontName": base_font,
+                "allowWidows": 0,
+                "allowOrphans": 0,
+                "wordWrap": "CJK",
+                "alignment": 0,
+            },
+            "Callout": {
+                "fontSize": 12,
+                "leading": 18,
+                "textColor": self.COLORS["on_surface"],
+                "backColor": self.COLORS["secondary_container"],
+                "borderColor": self.COLORS["secondary"],
+                "borderWidth": 1,
+                "borderPadding": 16,
+                "spaceBefore": 16,
+                "spaceAfter": 16,
+                "leftIndent": 16,
+                "rightIndent": 16,
+                "fontName": medium_font,
+                "allowWidows": 0,
+                "allowOrphans": 0,
+                "wordWrap": "CJK",
             },
         }
 
@@ -200,35 +510,101 @@ class ReportStyles:
             self.styles.add(ParagraphStyle(name=style_name, **style_props))
 
     def _setup_table_style(self):
-        """Set up the default table style."""
+        """Set up Material Design 3 table styles."""
         base_font = "FiraSans" if not self.use_default_font else "Helvetica"
         bold_font = "FiraSans-Bold" if not self.use_default_font else "Helvetica-Bold"
 
+        # Enhanced main table style with advanced M3 design
         self.MODERN_TABLE_STYLE = TableStyle(
             [
-                ("BACKGROUND", (0, 0), (-1, 0), self.COLORS["background"]),
-                ("TEXTCOLOR", (0, 0), (-1, 0), self.COLORS["primary"]),
-                ("FONTNAME", (0, 0), (-1, 0), bold_font),  # Header uses bold
-                ("FONTNAME", (0, 1), (-1, -1), base_font),  # Body uses regular
+                # Header styling with enhanced visual hierarchy
+                ("BACKGROUND", (0, 0), (-1, 0), self.COLORS["primary"]),
+                ("TEXTCOLOR", (0, 0), (-1, 0), self.COLORS["on_primary"]),
+                ("FONTNAME", (0, 0), (-1, 0), bold_font),
+                ("FONTSIZE", (0, 0), (-1, 0), 11),
+                ("TOPPADDING", (0, 0), (-1, 0), 14),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 14),
+                ("LINEBELOW", (0, 0), (-1, 0), 3, self.COLORS["primary"]),
+                
+                # Body styling with alternating row colors
+                ("BACKGROUND", (0, 1), (-1, -1), self.COLORS["surface"]),
+                ("TEXTCOLOR", (0, 1), (-1, -1), self.COLORS["on_surface"]),
+                ("FONTNAME", (0, 1), (-1, -1), base_font),
+                ("FONTSIZE", (0, 1), (-1, -1), 10),
+                ("TOPPADDING", (0, 1), (-1, -1), 10),
+                ("BOTTOMPADDING", (0, 1), (-1, -1), 10),
+                
+                # Enhanced padding and alignment
+                ("LEFTPADDING", (0, 0), (-1, -1), 18),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 18),
+                ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                
+                # Subtle alternating row backgrounds for better readability
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [self.COLORS["surface"], self.COLORS["surface_variant"]]),
+                
+                # Enhanced grid with better contrast
+                ("GRID", (0, 0), (-1, -1), 0.75, self.COLORS["outline"]),
+            ]
+        )
+
+        # Enhanced compact table style for dense data
+        self.COMPACT_TABLE_STYLE = TableStyle(
+            [
+                # Header styling with secondary color theme
+                ("BACKGROUND", (0, 0), (-1, 0), self.COLORS["secondary"]),
+                ("TEXTCOLOR", (0, 0), (-1, 0), self.COLORS["on_secondary"]),
+                ("FONTNAME", (0, 0), (-1, 0), bold_font),
                 ("FONTSIZE", (0, 0), (-1, 0), 10),
-                ("TOPPADDING", (0, 0), (-1, 0), 12),
-                ("BOTTOMPADDING", (0, 0), (-1, 0), 12),
-                ("LINEBELOW", (0, 0), (-1, 0), 1, self.COLORS["border"]),
-                ("BACKGROUND", (0, 1), (-1, -1), white),
-                ("TEXTCOLOR", (0, 1), (-1, -1), self.COLORS["text"]),
+                ("TOPPADDING", (0, 0), (-1, 0), 10),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 10),
+                ("LINEBELOW", (0, 0), (-1, 0), 2, self.COLORS["secondary"]),
+                
+                # Body styling with subtle alternating rows
+                ("BACKGROUND", (0, 1), (-1, -1), self.COLORS["surface"]),
+                ("TEXTCOLOR", (0, 1), (-1, -1), self.COLORS["on_surface"]),
+                ("FONTNAME", (0, 1), (-1, -1), base_font),
                 ("FONTSIZE", (0, 1), (-1, -1), 9),
                 ("TOPPADDING", (0, 1), (-1, -1), 8),
                 ("BOTTOMPADDING", (0, 1), (-1, -1), 8),
-                ("LEFTPADDING", (0, 0), (-1, -1), 16),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 16),
-                ("GRID", (0, 0), (-1, -1), 0.5, self.COLORS["border"]),
+                
+                # Enhanced padding and alignment
+                ("LEFTPADDING", (0, 0), (-1, -1), 14),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 14),
                 ("ALIGN", (0, 0), (-1, -1), "LEFT"),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                (
-                    "ROWBACKGROUNDS",
-                    (0, 1),
-                    (-1, -1),
-                    [white, self.COLORS["background"]],
-                ),
+                
+                # Subtle alternating row backgrounds
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [self.COLORS["surface"], self.COLORS["surface_variant"]]),
+                
+                # Enhanced grid
+                ("GRID", (0, 0), (-1, -1), 0.5, self.COLORS["outline_variant"]),
+            ]
+        )
+
+        # Summary table style for key metrics
+        self.SUMMARY_TABLE_STYLE = TableStyle(
+            [
+                # Header styling
+                ("BACKGROUND", (0, 0), (-1, 0), self.COLORS["primary"]),
+                ("TEXTCOLOR", (0, 0), (-1, 0), self.COLORS["on_primary"]),
+                ("FONTNAME", (0, 0), (-1, 0), bold_font),
+                ("FONTSIZE", (0, 0), (-1, 0), 11),
+                ("TOPPADDING", (0, 0), (-1, 0), 14),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 14),
+                
+                # Body styling
+                ("BACKGROUND", (0, 1), (-1, -1), self.COLORS["surface"]),
+                ("TEXTCOLOR", (0, 1), (-1, -1), self.COLORS["on_surface"]),
+                ("FONTNAME", (0, 1), (-1, -1), base_font),
+                ("FONTSIZE", (0, 1), (-1, -1), 10),
+                ("TOPPADDING", (0, 1), (-1, -1), 10),
+                ("BOTTOMPADDING", (0, 1), (-1, -1), 10),
+                
+                # Padding and alignment
+                ("LEFTPADDING", (0, 0), (-1, -1), 18),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 18),
+                ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                
+                # Border
+                ("BOX", (0, 0), (-1, -1), 1, self.COLORS["outline"]),
             ]
         )
