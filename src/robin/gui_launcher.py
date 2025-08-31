@@ -304,6 +304,13 @@ class GUILauncher:
                 # Apply filters and refresh table
                 self._apply_active_jobs_filters_and_update()
 
+                # Show/hide the "no active jobs" placeholder
+                if hasattr(self, "no_active_jobs_label"):
+                    if job_rows:
+                        self.no_active_jobs_label.set_visibility(False)
+                    else:
+                        self.no_active_jobs_label.set_visibility(True)
+
         except Exception as e:
             logging.debug(f"Error updating job status: {e}")
 
@@ -2057,7 +2064,7 @@ class GUILauncher:
                         pass
 
                     # Placeholder for when no jobs are active
-                    ui.label("No active jobs at the moment.").classes(
+                    self.no_active_jobs_label = ui.label("No active jobs at the moment.").classes(
                         "text-sm text-gray-500 mt-2"
                     )
 

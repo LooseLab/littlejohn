@@ -1,13 +1,16 @@
 """
 Module: theme
 
-This module defines the theme and layout for the entire application, ensuring a consistent look and feel across all pages.
+This module defines the theme and layout for the entire application, implementing Material Design 3 (M3) principles
+for a modern, accessible, and consistent user experience across all pages.
 
 It includes:
 
 - A context manager `frame` to create a custom page frame with navigation, header, and footer.
 - Utility functions to handle dark mode and remote access toggling.
-- Paths to external resources like images, HTML, and CSS files for styling.
+- Material Design 3 color tokens, typography scale, and spacing system.
+- Modern component styling with proper elevation and surface treatments.
+- Responsive design patterns and accessibility improvements.
 
 Functions:
 
@@ -70,7 +73,7 @@ def get_version_from_github():
 
 
 def styled_table(*, columns, rows=None, pagination=20, class_size="table-xs", **kwargs):
-    """Create a NiceGUI table wrapped in an overflow container and DaisyUI-like classes.
+    """Create a NiceGUI table with Material Design 3 styling.
 
     Args:
         columns: columns definition passed to ui.table
@@ -82,15 +85,15 @@ def styled_table(*, columns, rows=None, pagination=20, class_size="table-xs", **
     Returns:
         Tuple of (container, table) where container is the overflow wrapper column and table is the ui.table instance.
     """
-    # Outer overflow container to handle horizontal scroll on narrow screens
-    container = ui.column().classes("w-full overflow-x-auto compact-table")
+    # Outer container with M3 styling
+    container = ui.column().classes("w-full overflow-x-auto compact-table elevation-1 rounded-lg")
     with container:
         table = ui.table(columns=columns, rows=rows or [], pagination=pagination, **kwargs)
         try:
             table.classes(replace=f"table w-full {class_size} text-xs")
         except Exception:
             table.classes(f"table w-full {class_size} text-xs")
-        # Use Quasar's dense mode and reduce visual chrome
+        # Use Quasar's dense mode with M3 styling
         try:
             table.props("dense flat wrap-cells")
         except Exception:
@@ -111,10 +114,10 @@ async def check_version():
         remote_version_str = await run.io_bound(get_version_from_github)
 
         if not remote_version_str:
-            with ui.dialog() as dialog, ui.card():
-                ui.label("Version Check Error").classes("text-h6")
-                ui.label("Could not determine remote version. Please check manually.")
-                ui.button("OK", on_click=dialog.close)
+            with ui.dialog() as dialog, ui.card().classes("elevation-3 rounded-xl"):
+                ui.label("Version Check Error").classes("text-headline-small text-weight-bold q-mb-md")
+                ui.label("Could not determine remote version. Please check manually.").classes("text-body-medium q-mb-md")
+                ui.button("OK", on_click=dialog.close).classes("bg-primary text-white rounded-md")
             dialog.open()
             return
 
@@ -124,45 +127,45 @@ async def check_version():
         if local_version == remote_version:
             ui.notify("Your ROBIN installation is up to date!", type="positive")
         elif local_version < remote_version:
-            with ui.dialog() as dialog, ui.card():
-                ui.label("Update Available!").classes("text-h6")
-                ui.label(f"Your version: {local_version}")
-                ui.label(f"Latest version: {remote_version}")
-                ui.label("Would you like to visit the GitHub repository to update?")
-                with ui.row():
-                    ui.button("Continue with current version", on_click=dialog.close)
+            with ui.dialog() as dialog, ui.card().classes("elevation-3 rounded-xl"):
+                ui.label("Update Available!").classes("text-headline-small text-weight-bold q-mb-md")
+                ui.label(f"Your version: {local_version}").classes("text-body-medium")
+                ui.label(f"Latest version: {remote_version}").classes("text-body-medium")
+                ui.label("Would you like to visit the GitHub repository to update?").classes("text-body-medium q-mb-md")
+                with ui.row().classes("w-full justify-center gap-3"):
+                    ui.button("Continue with current version", on_click=dialog.close).classes("rounded-md")
                     ui.button(
                         "Visit GitHub",
                         on_click=lambda: ui.open("https://github.com/LooseLab/ROBIN"),
-                    ).classes("bg-primary")
+                    ).classes("bg-primary text-white rounded-md elevation-2")
             dialog.open()
         else:
-            with ui.dialog() as dialog, ui.card():
-                ui.label("Development Version").classes("text-h6")
-                ui.label(f"You are running a development version ({local_version}).")
-                ui.label(f"Latest release: {remote_version}")
+            with ui.dialog() as dialog, ui.card().classes("elevation-3 rounded-xl"):
+                ui.label("Development Version").classes("text-headline-small text-weight-bold q-mb-md")
+                ui.label(f"You are running a development version ({local_version}).").classes("text-body-medium")
+                ui.label(f"Latest release: {remote_version}").classes("text-body-medium")
                 ui.label(
                     "This version may be unstable and is only for testing purposes. It is not recommended for production use."
-                )
-                ui.label("Please consider using the latest release instead.")
-                ui.button("OK", on_click=dialog.close)
+                ).classes("text-body-medium q-mb-md")
+                ui.label("Please consider using the latest release instead.").classes("text-body-medium")
+                ui.button("OK", on_click=dialog.close).classes("bg-primary text-white rounded-md")
             dialog.open()
 
     except requests.RequestException:
-        with ui.dialog() as dialog, ui.card():
-            ui.label("Connection Error").classes("text-h6")
-            ui.label("Could not check for updates.")
+        with ui.dialog() as dialog, ui.card().classes("elevation-3 rounded-xl"):
+            ui.label("Connection Error").classes("text-headline-small text-weight-bold q-mb-md")
+            ui.label("Could not check for updates.").classes("text-body-medium")
             ui.label(
                 "Either you are not connected to the internet or you cannot access https://www.github.com/looselab/robin."
-            )
-            ui.label("Please manually check for updates.")
-            ui.button("OK", on_click=dialog.close)
+            ).classes("text-body-medium q-mb-md")
+            ui.label("Please manually check for updates.").classes("text-body-medium")
+            ui.button("OK", on_click=dialog.close).classes("bg-primary text-white rounded-md")
         dialog.open()
     except Exception as e:
-        with ui.dialog() as dialog, ui.card():
-            ui.label("Error").classes("text-h6")
-            ui.label(f"Error checking version: {str(e)}")
-            ui.button("OK", on_click=dialog.close)
+        with ui.dialog() as dialog, ui.card().classes("elevation-3 rounded-xl"):
+            ui.label("Error").classes("text-headline-small text-weight-bold q-mb-md")
+            ui.label(f"Error checking version: {str(e)}").classes("text-body-medium")
+            ui.button("OK", on_click=dialog.close).classes("bg-primary text-white rounded-md")
         dialog.open()
 
     # Mark version as checked for this session
@@ -184,12 +187,13 @@ HEADER_HTML = (Path(__file__).parent / "static" / "header.html").read_text()
 
 # Read the CSS styles for the application
 STYLE_CSS = (Path(__file__).parent / "static" / "styles.css").read_text()
+M3_COMPONENTS_CSS = (Path(__file__).parent / "static" / "m3-components.css").read_text()
 
 
 @contextmanager
 def frame(navtitle: str, batphone=False, smalltitle=None):
     """
-    Context manager to create a custom page frame with consistent styling and behavior across all pages.
+    Context manager to create a custom page frame with Material Design 3 styling and consistent behavior across all pages.
 
     Args:
         navtitle (str): The title to display in the navigation header.
@@ -207,7 +211,7 @@ def frame(navtitle: str, batphone=False, smalltitle=None):
     ui.add_head_html(
         '<script src="https://cdn.jsdelivr.net/npm/igv@3.2.0/dist/igv.min.js"></script>'
     )
-    ui.add_head_html(HEADER_HTML + f"<style>{STYLE_CSS}</style>")
+    ui.add_head_html(HEADER_HTML + f"<style>{STYLE_CSS}</style><style>{M3_COMPONENTS_CSS}</style>")
     ui.add_head_html(
         """
         <script>
@@ -223,14 +227,11 @@ def frame(navtitle: str, batphone=False, smalltitle=None):
     """
     )
 
-    # Create disclaimer dialog that appears on first visit
+    # Create disclaimer dialog that appears on first visit with M3 styling
     async def show_disclaimer():
-        # await ui.context.client.connected()
         if not app.storage.tab.get("disclaimer_acknowledged", False):
-            with ui.dialog().props(
-                "persistent"
-            ) as disclaimer_dialog, ui.card().classes("w-160"):
-                ui.label("DISCLAIMER").classes("text-h5 text-weight-bold q-mb-md")
+            with ui.dialog().props("persistent") as disclaimer_dialog, ui.card().classes("w-160 elevation-4 rounded-xl"):
+                ui.label("DISCLAIMER").classes("text-headline-small text-weight-bold q-mb-md")
                 ui.label(
                     "This tool and the data generated by it are intended for research use only and should not be used for "
                     "direct diagnostic purposes. The methylation-based classifications and other analyses provided here may "
@@ -238,55 +239,51 @@ def frame(navtitle: str, batphone=False, smalltitle=None):
                     "diagnostic assessment, which should include clinical history, radiological findings, and complete "
                     "histopathological and molecular evaluation. The final interpretation and diagnosis should always be "
                     "made by qualified healthcare professionals based on all available information."
-                ).classes("text-body1 q-mb-md")
+                ).classes("text-body-medium q-mb-md")
 
                 if batphone:
-                    ui.label("BATMAN Mode").classes("text-h5 text-weight-bold q-mb-md")
+                    ui.label("BATMAN Mode").classes("text-headline-small text-weight-bold q-mb-md")
                     ui.label(
                         "You are running this tool in BATMAN mode. "
                         "This is a beta version of the tool and may not be fully functional. "
                         "BATMAN means: Breakpoint Adaptive Targeting alongside Methylation Analysis on Nanopore. "
                         "This means that the target regions will be updated in real-time based on detected breakpoints. "
                         "This code only works with ReadFish at this time. "
-                    )
+                    ).classes("text-body-medium")
 
                 def acknowledge():
                     app.storage.tab["disclaimer_acknowledged"] = True
                     disclaimer_dialog.close()
 
-                ui.button("I agree", on_click=acknowledge).props("color=primary")
+                ui.button("I agree", on_click=acknowledge).classes("bg-primary text-white rounded-md elevation-2")
             disclaimer_dialog.open()
 
     ui.timer(0.5, show_disclaimer, once=True)
 
     # Add version check timer
-
     ui.timer(1.0, check_version, once=True)
 
-    # Create a persistent dialog for quitting the app
+    # Create a persistent dialog for quitting the app with M3 styling
     quitdialog = ui.dialog().props("persistent")
 
     async def quit_app():
         quitdialog.close()
         await cleanup_and_exit()
 
-    with quitdialog, ui.card():
+    with quitdialog, ui.card().classes("elevation-4 rounded-xl"):
         ui.label(
             "Quitting the app will stop running methylation analysis. Are you sure?"
-        )
-        ui.label("If you want to keep analysis running, click Cancel.")
+        ).classes("text-headline-small text-weight-bold q-mb-md")
+        ui.label("If you want to keep analysis running, click Cancel.").classes("text-body-medium")
         ui.label(
             "You can safely close this window and analysis will keep running in the background."
-        )
-        ui.button("Cancel", on_click=quitdialog.close).props("outline").classes(
-            "shadow-lg"
-        )
-        ui.button("Really Quit", icon="logout", on_click=quit_app).props(
-            "outline"
-        ).classes("shadow-lg")
+        ).classes("text-body-medium q-mb-md")
+        with ui.row().classes("w-full justify-center gap-3"):
+            ui.button("Cancel", on_click=quitdialog.close).classes("rounded-md")
+            ui.button("Really Quit", icon="logout", on_click=quit_app).classes("bg-error text-white rounded-md elevation-2")
 
-    # Create a header with navigation title and menu
-    header_classes = "items-center duration-200 p-0 px-4 no-wrap"
+    # Create a header with navigation title and menu using M3 styling
+    header_classes = "items-center duration-200 p-0 px-4 no-wrap elevation-1"
     if batphone:
         header_classes += " batphone"
 
@@ -295,25 +292,25 @@ def frame(navtitle: str, batphone=False, smalltitle=None):
             with ui.row().classes(
                 f"max-[{MENU_BREAKPOINT}px]:hidden items-center align-left"
             ):
-                ui.html(navtitle).classes("shadows-into").style(
-                    "font-size: 150%; font-weight: 300"
+                ui.html(navtitle).classes("text-headline-medium").style(
+                    "font-weight: 600; font-family: var(--font-primary)"
                 ).tailwind("drop-shadow", "font-bold")
             with ui.row().classes(
                 f"min-[{MENU_BREAKPOINT+1}px]:hidden items-center align-left"
             ):
-                ui.html(smalltitle).style("font-size: 150%; font-weight: 300").tailwind(
+                ui.html(smalltitle).classes("text-headline-medium").style("font-weight: 600; font-family: var(--font-primary)").tailwind(
                     "drop-shadow", "font-bold"
                 )
             with ui.row().classes("ml-auto align-top"):
-                with ui.row().classes("items-center m-auto"):
+                with ui.row().classes("items-center m-auto gap-3"):
                     ui.label(f"Viewing: {platform.node()}").classes(
-                        f"max-[{MENU_BREAKPOINT}px]:hidden"
+                        f"max-[{MENU_BREAKPOINT}px]:hidden text-body-medium"
                     )
-                    ui.label("CPU").classes(f"max-[{MENU_BREAKPOINT}px]:hidden")
+                    ui.label("CPU").classes(f"max-[{MENU_BREAKPOINT}px]:hidden text-body-medium")
                     cpu_activity = ui.circular_progress(max=100).classes(
                         f"max-[{MENU_BREAKPOINT}px]:hidden"
                     )
-                    ui.label("RAM").classes(f"max-[{MENU_BREAKPOINT}px]:hidden")
+                    ui.label("RAM").classes(f"max-[{MENU_BREAKPOINT}px]:hidden text-body-medium")
                     ram_utilisation = ui.circular_progress(max=100).classes(
                         f"max-[{MENU_BREAKPOINT}px]:hidden"
                     )
@@ -339,87 +336,83 @@ def frame(navtitle: str, batphone=False, smalltitle=None):
 
                     ui.timer(1.0, update_metrics)
 
-                    with ui.button(icon="menu"):
+                    with ui.button(icon="menu").classes("rounded-md"):
                         with ui.menu() as menu:
-                            ui.menu_item("Home", lambda: ui.navigate.to("/"))
-                            ui.menu_item("View Samples", lambda: ui.navigate.to("/live_data"))
+                            ui.menu_item("Home", lambda: ui.navigate.to("/")).classes("text-body-medium")
+                            ui.menu_item("View Samples", lambda: ui.navigate.to("/live_data")).classes("text-body-medium")
                             ui.menu_item(
                                 "Activity Monitor",
                                 lambda: ui.navigate.to("/robin"),
-                            )
+                            ).classes("text-body-medium")
                             ui.menu_item(
                                 "Workflow",
                                 lambda: ui.navigate.to("/workflow"),
-                            )
+                            ).classes("text-body-medium")
                             ui.menu_item(
                                 "Documentation",
                                 lambda: ui.navigate.to("https://looselab.github.io/ROBIN/"),
-                            )
+                            ).classes("text-body-medium")
                             ui.separator()
                             ui.switch("Allow Remote Access").classes(
                                 "ml-4 bg-transparent"
-                            ).props('color="black"').bind_value(
+                            ).props('color="primary"').bind_value(
                                 app.storage.general, "use_on_air"
                             )
                             ui.separator()
                             ui.switch("Dark Mode").classes("ml-4 bg-transparent").props(
-                                'color="black"'
+                                'color="primary"'
                             ).bind_value(app.storage.browser, "dark_mode")
                             ui.dark_mode().bind_value(app.storage.browser, "dark_mode")
                             ui.separator()
-                            ui.menu_item("Close", menu.close)
-                            ui.button("Quit", icon="logout", on_click=quitdialog.open)
+                            ui.menu_item("Close", menu.close).classes("text-body-medium")
+                            ui.button("Quit", icon="logout", on_click=quitdialog.open).classes("bg-error text-white rounded-md")
                     ui.image(IMAGEFILE).style("width: 50px")
 
     with ui.column().classes("w-full h-full max-w-full overflow-hidden") as main_content:
         pass
 
-    # Activity monitor removed
-
-    # Create a footer with useful information and quit button
-    footer_classes = "items-center"
+    # Create a footer with useful information and quit button using M3 styling
+    footer_classes = "items-center elevation-1"
     if batphone:
         footer_classes += " batphone"
     with ui.footer().classes(footer_classes):
-        with ui.dialog() as dialog, ui.card():
-            ui.label("Links").tailwind("text-2xl font-bold font-italic drop-shadow")
+        with ui.dialog() as dialog, ui.card().classes("elevation-3 rounded-xl"):
+            ui.label("Links").classes("text-headline-small text-weight-bold q-mb-md")
             ui.separator()
-            ui.link("Code on GitHub", "https://github.com/looselab/robin")
+            ui.link("Code on GitHub", "https://github.com/looselab/robin").classes("text-body-medium")
             ui.link(
                 "Rapid CNS2 Paper",
                 "https://link.springer.com/article/10.1007/s00401-022-02415-6",
-            )
+            ).classes("text-body-medium")
             ui.link(
                 "Sturgeon Classifier",
                 "https://www.nature.com/articles/s41586-023-06615-2",
-            )
+            ).classes("text-body-medium")
             ui.link(
                 "Protocol",
                 "https://www.protocols.io/view/intra-operative-nanopore-sequencing-to-classify-br-c65qzg5w",
-            )
-            ui.link("Oxford Nanopore", "https://nanoporetech.com/")
-            ui.link("epi2me labs", "https://labs.epi2me.io/")
-            ui.link("Looselab", "https://looselab.github.io/")
-            ui.button("Close", on_click=dialog.close)
+            ).classes("text-body-medium")
+            ui.link("Oxford Nanopore", "https://nanoporetech.com/").classes("text-body-medium")
+            ui.link("epi2me labs", "https://labs.epi2me.io/").classes("text-body-medium")
+            ui.link("Looselab", "https://looselab.github.io/").classes("text-body-medium")
+            ui.button("Close", on_click=dialog.close).classes("bg-primary text-white rounded-md")
         ui.image(IMAGEFILE).style("width: 40px")
-        ui.colors(primary="#555")
-        ui.button("Links", on_click=dialog.open)
+        ui.colors(primary="#4F9153")  # Green primary color
+        ui.button("Links", on_click=dialog.open).classes("rounded-md")
 
-        with ui.button(icon="info"):
+        with ui.button(icon="info").classes("rounded-md"):
             with ui.menu() as menu:
                 ui.label().bind_text_from(
                     app, "urls", backward=lambda n: f"Available urls: {n}"
-                )
-                ui.label("Version: " + __about__.__version__)
+                ).classes("text-body-medium")
+                ui.label("Version: " + __about__.__version__).classes("text-body-medium")
         ui.label(
             "Some aspects of this application are ©Looselab - all analyses provided for research use only."
-        ).classes(f"max-[{MENU_BREAKPOINT}px]:hidden").tailwind("text-sm font-italic")
-        ui.label("©Looselab").classes(f"min-[{MENU_BREAKPOINT+1}px]:hidden").tailwind(
-            "text-sm font-italic"
-        )
+        ).classes(f"max-[{MENU_BREAKPOINT}px]:hidden text-body-small text-weight-italic")
+        ui.label("©Looselab").classes(f"min-[{MENU_BREAKPOINT+1}px]:hidden text-body-small text-weight-italic")
         ui.label("Not for diagnostic use.").classes(
-            f"min-[{MENU_BREAKPOINT+1}px]:hidden"
-        ).tailwind("text-sm font-italic")
+            f"min-[{MENU_BREAKPOINT+1}px]:hidden text-body-small text-weight-italic"
+        )
 
     with main_content:
         yield
@@ -438,11 +431,11 @@ async def cleanup_and_exit():
     """
     logging.info("User initiated shutdown via UI")
 
-    # Create and show shutdown modal
-    with ui.dialog().props("persistent") as shutdown_dialog, ui.card().classes("w-96"):
-        ui.label("Shutting Down").classes("text-h5 text-weight-bold q-mb-md")
+    # Create and show shutdown modal with M3 styling
+    with ui.dialog().props("persistent") as shutdown_dialog, ui.card().classes("w-96 elevation-4 rounded-xl"):
+        ui.label("Shutting Down").classes("text-headline-small text-weight-bold q-mb-md")
         ui.label("ROBIN is shutting down. Please wait while we clean up...").classes(
-            "text-body1 q-mb-md"
+            "text-body-medium q-mb-md"
         )
         with ui.row().classes("w-full justify-center"):
             ui.spinner(size="lg", color="primary")
@@ -454,7 +447,6 @@ async def cleanup_and_exit():
     # Show the shutdown dialog
     shutdown_dialog.open()
     logging.info("Shutdown dialog opened")
-
 
     # Wait a moment to ensure the dialog is visible
     await asyncio.sleep(1.0)
@@ -505,18 +497,17 @@ def my_page():
         "<strong>R</strong>apid nanop<strong>O</strong>re <strong>B</strong>rain intraoperat<strong>I</strong>ve classificatio<strong>N</strong>",
         smalltitle="<strong>R.O.B.I.N</strong>",
     ):
-        ui.label("Welcome to the Application")
+        ui.label("Welcome to the Application").classes("text-headline-large text-center")
 
 
 @ui.page("/workflow")
 def workflow_page():
-    """Display the ROBIN workflow diagram."""
+    """Display the ROBIN workflow diagram with M3 styling."""
     with frame(
         "ROBIN Workflow",
         smalltitle="Workflow",
     ):
         # Get versions for the diagram
-        # modkit_version = get_modkit_version()
         sturgeon_version = get_sturgeon_version()
         crossnn_version = get_crossnn_version()
         cnv_from_bam_version = get_cnv_from_bam_version()
@@ -524,13 +515,13 @@ def workflow_page():
         ui.mermaid(
             f"""
 flowchart TD
-    %% Style definitions
-    classDef minKNOW fill:#f5fafd80,stroke:#339af0,stroke-width:1px,color:#1c7ed6,font-size:14px,font-weight:500
-    classDef robin fill:#f6fcf7,stroke:#495057,stroke-width:1px,color:#388e3c,font-size:14px,font-weight:500
-    classDef classifier fill:#fff0f699,stroke:#e64980,stroke-width:1px,color:#c2255c,font-size:14px,font-weight:500
-    classDef analysis fill:#fff4e699,stroke:#fd7e14,stroke-width:1px,color:#e8590c,font-size:14px,font-weight:500
-    classDef output fill:#ebfbee99,stroke:#40c057,stroke-width:1px,color:#2b8a3e,font-size:14px,font-weight:500
-    classDef headerLabel fill:#ffffff00,stroke:#ffffff00,color:#222,font-size:18px,font-weight:700
+    %% Style definitions with M3 color palette
+    classDef minKNOW fill:#E8DEF8,stroke:#6750A4,stroke-width:2px,color:#1D192B,font-size:14px,font-weight:500
+    classDef robin fill:#EADDFF,stroke:#6750A4,stroke-width:2px,color:#21005D,font-size:14px,font-weight:500
+    classDef classifier fill:#FFD8E4,stroke:#7D5260,stroke-width:2px,color:#31111D,font-size:14px,font-weight:500
+    classDef analysis fill:#FFD8E4,stroke:#7D5260,stroke-width:2px,color:#31111D,font-size:14px,font-weight:500
+    classDef output fill:#EADDFF,stroke:#6750A4,stroke-width:2px,color:#21005D,font-size:14px,font-weight:500
+    classDef headerLabel fill:#ffffff00,stroke:#ffffff00,color:#1C1B1F,font-size:18px,font-weight:700
 
     %% Custom header nodes
     robinLabel["<b>R.O.B.I.N v{__about__.__version__}</b>"]:::headerLabel
@@ -599,16 +590,16 @@ flowchart TD
     class crossnnCNS,crossnnPan,sturgeon,randomForest classifier
     class cnv,fusion,mgmt,coverage,snv analysis
     class report output
-    %% Subgraph background coloring
-    style MinKNOW fill:#f5fafd80,stroke:#339af0,stroke-width:2px
-    style ROBIN fill:#f6fcf7,stroke:#388e3c,stroke-width:2px
+    %% Subgraph background coloring with M3 colors
+    style MinKNOW fill:#E8DEF8,stroke:#6750A4,stroke-width:2px
+    style ROBIN fill:#EADDFF,stroke:#6750A4,stroke-width:2px
 """,
             config={
                 "theme": "redux",
                 "look": "neo",
                 "flowchart": {"curve": "basis", "defaultRenderer": "elk"},
             },
-        ).classes("w-full")
+        ).classes("w-full elevation-2 rounded-lg")
 
 
 def get_modkit_version():
@@ -690,29 +681,29 @@ def main():
         >>> main()
         None
     """
-    # Add some custom CSS because - why not!
-    ui.add_css(
-        """
-        .shadows-into light-regular {
-            font-family: "Shadows Into Light", cursive;
-            font-weight: 800;
-            font-style: normal;
-        }
-    """
-    )
+    # Add Apple HIG + Material Design 3 fonts
+    ui.add_head_html("""
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+        <style>
+            /* Apple HIG: System font fallbacks */
+            :root {
+                --font-primary: "SF Pro Display", "SF Pro", -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+                --font-mono: "SF Mono", "Monaco", "Menlo", "JetBrains Mono", "Consolas", "Liberation Mono", "Courier New", monospace;
+            }
+        </style>
+    """)
+    
     # Register some fonts that we might need later on (guarded)
-    # try:
     fonts_dir = Path(__file__).parent / "fonts"
     if fonts_dir.exists():
         app.add_static_files("/fonts", str(fonts_dir))
-    # except Exception:
-    #    pass
+    
     ui.run(storage_secret="robin")
 
 
 if __name__ in {"__main__", "__mp_main__"}:
-    # import doctest
-    # doctest.testmod()
     main()
 
 
@@ -752,9 +743,6 @@ def get_process_ram_usage():
     return round(python_ram, 2), round(
         r_ram, 2
     )  # Round to 2 decimal places for cleaner display
-
-
-# Activity monitor RAM collection removed
 
 
 def debug_process_tree():
