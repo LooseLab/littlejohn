@@ -32,7 +32,7 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
         ui.label("MGMT methylation plot").classes("text-sm text-gray-700")
         # mgmt_img = ui.image('')
         # Persistent Matplotlib element (NiceGUI integration)
-        mgmt_mpl = ui.matplotlib(figsize=(4, 3))
+        mgmt_mpl = ui.matplotlib(figsize=(4, 3)).classes("mx-auto flex justify-center")
         ui.separator()
         ui.label("MGMT results (latest)").classes("text-sm text-gray-700 mt-2")
         _, mgmt_results_table = styled_table(

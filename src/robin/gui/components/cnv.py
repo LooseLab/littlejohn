@@ -994,10 +994,11 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                         areas_data.append(
                             [{"xAxis": float(start_bp)}, {"xAxis": float(end_bp)}]
                         )
-                        # Label at the boundary (end of chromosome region)
+                        # Label at the center of chromosome region
+                        center_bp = (start_bp + end_bp) / 2
                         lines_data.append(
                             {
-                                "xAxis": float(end_bp),
+                                "xAxis": float(center_bp),
                                 "lineStyle": {"type": "dashed", "color": "#A0A0A0"},
                                 "label": {"show": True, "formatter": contig},
                             }
@@ -1035,6 +1036,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                 chart.options["series"][idx_cyto]["markLine"][
                                     "data"
                                 ] = band_lines
+                                # Disable animation for marker lines so they appear instantly
+                                chart.options["series"][idx_cyto]["markLine"]["animation"] = False
                             # Do not show centromeres in All view
                             if idx_centro is not None:
                                 chart.options["series"][idx_centro]["markArea"][
