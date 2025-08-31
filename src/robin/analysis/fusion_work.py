@@ -396,8 +396,8 @@ def _process_reads_for_fusions(
     # Apply memory optimizations
     df = _optimize_fusion_dataframe(df)
 
-    # Apply the EXACT filtering thresholds from the original code: MQ > 40, span > 100
-    df = df[(df["mapping_quality"] > 40) & (df["mapping_span"] > 100)].reset_index(drop=True)
+    # Apply the EXACT filtering thresholds from the original code: MQ > 40, span > 200
+    df = df[(df["mapping_quality"] > 40) & (df["mapping_span"] > 200)].reset_index(drop=True)
 
     return df if not df.empty else None
 

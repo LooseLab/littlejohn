@@ -373,7 +373,7 @@ def _process_reads_for_fusions(
     df = pd.DataFrame(rows)
 
     # Apply quality filters (matching ROBIN implementation)
-    df = df[(df["mapping_quality"] > 50) & (df["mapping_span"] > 150)].reset_index(
+    df = df[(df["mapping_quality"] > 50) & (df["mapping_span"] > 200)].reset_index(
         drop=True
     )
 
