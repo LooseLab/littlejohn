@@ -584,159 +584,64 @@ class GUILauncher:
         """Create the welcome page."""
         # Background and main container
         with theme.frame(
-            "Welcome",
-            smalltitle="Welcome",
+             "<strong>R</strong>apid nanop<strong>O</strong>re <strong>B</strong>rain intraoperat<strong>I</strong>ve classificatio<strong>N</strong>",
+            smalltitle="<strong>R.O.B.I.N</strong>",
             batphone=False,
         ):
-            with ui.card().classes("w-full shadow-lg rounded-xl"):
-                with ui.row().classes(
-                    "w-full items-center justify-between p-4 border-b border-gray-200"
-                ):
-                    with ui.row().classes("items-center gap-2"):
-                        # ui.icon('feed', color='primary').classes('text-xl')
+            # Main content container with full width and proper centering
+            with ui.column().classes("w-full min-h-screen p-4 md:p-8"):
+                # Header section
+                with ui.card().classes("w-full max-w-6xl mx-auto shadow-lg rounded-xl mb-8"):
+                    with ui.column().classes("p-8 text-center"):
                         ui.label("Welcome to R.O.B.I.N").classes(
-                            "text-sky-600 dark:text-white"
-                        ).style("font-size: 150%; font-weight: 300").tailwind(
-                            "drop-shadow", "font-bold"
-                        )
-                with ui.row().classes(
-                    "w-full items-center justify-between p-4 border-b border-gray-200"
-                ):
-                    ui.label(
-                        "This tool enables classification of brain tumours in real time from Oxford Nanopore Data."
-                    ).classes("text-black-600 dark:text-white").style(
-                        "font-size: 100%; font-weight: 300"
-                    ).tailwind(
-                        "drop-shadow", "font-bold"
-                    )
+                            "text-sky-600 dark:text-white text-4xl md:text-5xl font-bold mb-4"
+                        ).style("font-weight: 600")
+                        
+                        ui.label(
+                            "This tool enables real time analysis of data from Oxford Nanopore Technologies sequencers."
+                        ).classes("text-gray-700 dark:text-gray-300 text-lg md:text-xl mb-6")
 
-                    # Description card
-                    with ui.card().classes("w-full bg-white shadow-lg"):
-                        with ui.column().classes("p-6"):
-                            ui.label("What is R.O.B.I.N?").classes(
-                                "text-xl font-semibold mb-4"
+                # Main content section
+                with ui.card().classes("w-full max-w-6xl mx-auto shadow-lg rounded-xl mb-8"):
+                    with ui.column().classes("p-8"):
+                        ui.label("What is R.O.B.I.N?").classes(
+                            "text-2xl font-semibold mb-4 text-center"
+                        )
+                        ui.label(
+                            "ROBIN (Rapid nanopOre Brain intraoperatIve classificatioN) is a comprehensive bioinformatics workflow system designed for processing and analyzing BAM files. It provides automated preprocessing, multiple analysis pipelines, and real-time monitoring capabilities. It now incorporates LITTLE JOHN (Lightweight Infrastructure for Task Tracking and Logging with Extensible Job Orchestration for High-throughput aNalysis), which handles the heavy lifting behind the scenes."
+                        ).classes("text-gray-700 mb-8 text-center text-lg")
+
+                        # Action buttons - responsive grid layout
+                        with ui.grid(columns=2).classes("w-full gap-4 mb-8"):
+                            ui.link("📊 View All Samples", "/live_data").classes(
+                                "bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors text-center"
                             )
-                            ui.label(
-                                "ROBIN is a comprehensive bioinformatics workflow system designed for processing and analyzing BAM files. It provides automated preprocessing, multiple analysis pipelines, and real-time monitoring capabilities. It now encorporates Little John to help with the heavy lifting."
-                            ).classes("text-gray-700 mb-4")
+                            ui.link(
+                                "📊 Open Workflow Monitor", "/robin"
+                            ).classes(
+                                "bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors text-center"
+                            )
+                            ui.button(
+                                "🚀 Launch New Workflow",
+                                on_click=lambda: self._launch_workflow_button_clicked(),
+                            ).classes(
+                                "bg-green-600 hover:bg-green-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors"
+                            )
+                            ui.link("📋 View Documentation", "https://looselab.github.io/ROBIN/").classes(
+                                "bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors text-center"
+                            )
 
-                            with ui.row().classes("w-full justify-center gap-8 mt-6"):
-                                ui.link("�� View All Samples", "/live_data").classes(
-                                    "bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-8 py-4 rounded-lg shadow-lg transition-colors"
-                                )
-                                ui.link(
-                                    "📊 Open Workflow Monitor", "/robin"
-                                ).classes(
-                                    "bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-8 py-4 rounded-lg shadow-lg transition-colors"
-                                )
+                # News feed section
+                with ui.card().classes("w-full max-w-6xl mx-auto shadow-lg rounded-xl mb-8"):
+                    with ui.column().classes("w-full"):
+                        # Initialize news feed only if it hasn't been initialized yet
+                        if self.news_feed is None:
+                            self.news_feed = NewsFeed()
+                            self.news_feed.start_update_timer()
+                        # Create the news element
+                        self.news_feed.create_news_element()
 
-                                # Placeholder buttons for future functionality
-                                ui.button(
-                                    "🚀 Launch New Workflow",
-                                    on_click=lambda: self._launch_workflow_button_clicked(),
-                                ).classes(
-                                    "bg-green-600 hover:bg-green-700 text-white text-lg font-semibold px-8 py-4 rounded-lg shadow-lg transition-colors"
-                                )
-                                ui.link("📋 View Documentation", "https://looselab.github.io/ROBIN/").classes(
-                                    "bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-8 py-4 rounded-lg shadow-lg transition-colors"
-                                )
-                                
-                            with ui.column().classes("w-full justify-center gap-8 mt-6"):
-                                # Initialize news feed only if it hasn't been initialized yet
-                                if self.news_feed is None:
-                                    self.news_feed = NewsFeed()
-                                    self.news_feed.start_update_timer()
-                                # Create the news element
-                                self.news_feed.create_news_element()
-
-                            with ui.row().classes("w-full justify-center gap-8 mt-6"):
-                                with ui.column().classes("text-center"):
-                                    ui.label("🔬").classes("text-3xl mb-2")
-                                    ui.label("Preprocessing").classes(
-                                        "text-sm font-medium text-gray-600"
-                                    )
-                                with ui.column().classes("text-center"):
-                                    ui.label("🧬").classes("text-3xl mb-2")
-                                    ui.label("Methylation Classification").classes(
-                                        "text-sm font-medium text-gray-600"
-                                    )
-                                with ui.column().classes("text-center"):
-                                    ui.label("🧬").classes("text-3xl mb-2")
-                                    ui.label("MGMT Analysis").classes(
-                                        "text-sm font-medium text-gray-600"
-                                    )
-                                with ui.column().classes("text-center"):
-                                    ui.label("📊").classes("text-3xl mb-2")
-                                    ui.label("CNV Detection").classes(
-                                        "text-sm font-medium text-gray-600"
-                                    )
-                                with ui.column().classes("text-center"):
-                                    ui.label("🎯").classes("text-3xl mb-2")
-                                    ui.label("Target Analysis").classes(
-                                        "text-sm font-medium text-gray-600"
-                                    )
-                                with ui.column().classes("text-center"):
-                                    ui.label("🔗").classes("text-3xl mb-2")
-                                    ui.label("Fusion Detection").classes(
-                                        "text-sm font-medium text-gray-600"
-                                    )
-
-                    # Action buttons
-
-            # ToDo: Reimplement this.
-            """
-            with ui.row().classes("w-full no-wrap"):
-                with ui.column().classes("w-1/4"):
-                    with ui.card().classes("w-full shadow-lg rounded-xl"):
-                        with ui.row().classes(
-                            "w-full items-center justify-between p-4 border-b border-gray-200"
-                        ):
-                            with ui.row().classes("items-center gap-2"):
-                                # ui.icon('feed', color='primary').classes('text-xl')
-                                ui.label("View Data").classes(
-                                    "text-sky-600 dark:text-white"
-                                ).style("font-size: 150%; font-weight: 300").tailwind(
-                                    "drop-shadow", "font-bold"
-                                )
-                        with ui.button(on_click=lambda: ui.navigate.to("/live")).props(
-                            "color=green"
-                        ):
-                            ui.label("View Live Data")
-                            ui.image(
-                                os.path.join(
-                                    os.path.dirname(os.path.abspath(images.__file__)),
-                                    "ROBIN_logo_small.png",
-                                )
-                            ).classes("rounded-full w-16 h-16 ml-4")
-                        with ui.button(
-                            on_click=lambda: ui.navigate.to("/browse")
-                        ).props("color=green"):
-                            ui.label("Browse Historic Data")
-                            ui.image(
-                                os.path.join(
-                                    os.path.dirname(os.path.abspath(images.__file__)),
-                                    "ROBIN_logo_small.png",
-                                )
-                            ).classes("rounded-full w-16 h-16 ml-4")
                 
-                with ui.column().classes("w-2/4"):
-                    # Initialize news feed only if it hasn't been initialized yet
-                    if self.news_feed is None:
-                        self.news_feed = NewsFeed()
-                        self.news_feed.start_update_timer()
-                    # Create the news element
-                    self.news_feed.create_news_element()
-                with ui.column().classes("w-1/4"):
-                    # Initialize telemetry if enabled
-                    if self.telemetry:
-                        logging.info("Adding telemetry map to splash screen")
-                        self.telemetry.create_map_element()
-                    else:
-                        logging.warning(
-                            "No telemetry instance available for map display"
-                        )
-            """
-
     def _create_samples_overview(self):
         """Create the samples overview page showing all tracked samples."""
         # Page title and navigation

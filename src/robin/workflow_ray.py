@@ -2209,6 +2209,11 @@ def parse_args():
         choices=["p2i", "standard", "high"],
         help="Execution preset controlling actor grouping and concurrency",
     )
+    p.add_argument(
+        "--no-ray-dashboard",
+        action="store_true",
+        help="Disable Ray dashboard (default: dashboard enabled)",
+    )
     return p.parse_args()
 
 
@@ -2216,11 +2221,15 @@ if __name__ == "__main__":
     args = parse_args()
     try:
         # Expose dashboard on all interfaces when supported
-        ray.init(
-            address=args.ray_address,
-            include_dashboard=True,
-            dashboard_host=os.environ.get("RAY_DASHBOARD_HOST", "0.0.0.0"),
-        )
+        init_kwargs = {"address": args.ray_address}
+        
+        if not args.no_ray_dashboard:
+            init_kwargs.update({
+                "include_dashboard": True,
+                "dashboard_host": os.environ.get("RAY_DASHBOARD_HOST", "0.0.0.0"),
+            })
+            
+        ray.init(**init_kwargs)
     except TypeError:
         # Older Ray versions may not support dashboard args
         ray.init(address=args.ray_address)

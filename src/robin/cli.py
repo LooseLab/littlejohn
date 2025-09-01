@@ -488,8 +488,8 @@ def _create_ray_workflow_runner(
         return None
 
 
-def _initialize_ray(num_cpus: Optional[int]) -> None:
-    """Initialize Ray with specified CPU count."""
+def _initialize_ray(num_cpus: Optional[int], include_dashboard: bool = True) -> None:
+    """Initialize Ray with specified CPU count and dashboard option."""
     if num_cpus is not None:
         if num_cpus <= 0:
             click.echo(
@@ -518,34 +518,38 @@ def _initialize_ray(num_cpus: Optional[int]) -> None:
                 os.environ["RAY_OBJECT_STORE_ALLOW_SLOW_STORAGE"] = "1"
                 
                 # Bind dashboard to 0.0.0.0 when supported so it's reachable off-host
+                init_kwargs = {
+                    "num_cpus": num_cpus,
+                    "ignore_reinit_error": True,
+                    "object_store_memory": 1000000000,  # 1GB object store
+                    "temp_dir": "/tmp/ray",  # Use /tmp for temporary files
+                    "_system_config": {
+                        "object_spilling_config": json.dumps({
+                            "type": "filesystem",
+                            "params": {
+                                "directory_path": "/tmp/ray/spill"
+                            }
+                        }),
+                        "max_direct_call_object_size": 1000000,  # 1MB
+                        "object_store_full_delay_ms": 100,
+                        "object_store_full_max_retries": 0
+                    }
+                }
+                
+                if include_dashboard:
+                    init_kwargs.update({
+                        "include_dashboard": True,
+                        "dashboard_host": os.environ.get("RAY_DASHBOARD_HOST", "0.0.0.0"),
+                    })
+                    
                 try:
-                    ray.init(
-                        num_cpus=num_cpus,
-                        ignore_reinit_error=True,
-                        include_dashboard=True,
-                        dashboard_host=os.environ.get("RAY_DASHBOARD_HOST", "0.0.0.0"),
-                        object_store_memory=1000000000,  # 1GB object store
-                        temp_dir="/tmp/ray",  # Use /tmp for temporary files
-                        _system_config={
-                            "object_spilling_config": json.dumps({
-                                "type": "filesystem",
-                                "params": {
-                                    "directory_path": "/tmp/ray/spill"
-                                }
-                            }),
-                            "max_direct_call_object_size": 1000000,  # 1MB
-                            "object_store_full_delay_ms": 100,
-                            "object_store_full_max_retries": 0
-                        }
-                    )
+                    ray.init(**init_kwargs)
                 except TypeError:
                     # Older Ray versions may not support dashboard args
-                    ray.init(
-                        num_cpus=num_cpus, 
-                        ignore_reinit_error=True,
-                        object_store_memory=1000000000,
-                        temp_dir="/tmp/ray"
-                    )
+                    # Remove dashboard-specific args and retry
+                    init_kwargs.pop("include_dashboard", None)
+                    init_kwargs.pop("dashboard_host", None)
+                    ray.init(**init_kwargs)
                 pass  # Ray initialized successfully
             except Exception as e:
                 click.echo(f"Warning: Failed to initialize Ray: {e}", err=True)
@@ -984,6 +988,11 @@ def _display_workflow_config(
     default="standard",
     help="Execution preset for Ray Core: 'p2i' (2 CPUs cap, 4 grouped actors, concurrency 1), 'standard' (default; 4 CPUs cap, grouped actors, analysis uses analysis_workers), 'high' (per-job-type actors).",
 )
+@click.option(
+    "--ray-dashboard/--no-ray-dashboard",
+    default=True,
+    help="Enable Ray dashboard (default: on). Disable with --no-ray-dashboard. Only used when --use-ray is specified.",
+)
 def workflow(
     path: Path,
     workflow: str,
@@ -1010,6 +1019,7 @@ def workflow(
     gui_port: int,
     no_watch: bool,
     preset: Optional[str],
+    ray_dashboard: bool,
 ) -> None:
     """Run various operations on BAM files in a directory. Preprocessing is automatically included as the first step."""
     try:
@@ -1050,7 +1060,7 @@ def workflow(
         # If using Ray and CPU count specified, initialize Ray BEFORE creating runner
         # so the runner respects the requested CPU resources
         if use_ray and ray_num_cpus is not None:
-            _initialize_ray(ray_num_cpus)
+            _initialize_ray(ray_num_cpus, ray_dashboard)
 
         # Ray Core engine path (default when --use-ray is used)
         if use_ray:
@@ -1063,11 +1073,16 @@ def workflow(
                     # Apply preset CPU caps for Ray Core if provided
                     init_kwargs = {
                         "ignore_reinit_error": True,
-                        "include_dashboard": True,
-                        "dashboard_host": os.environ.get(
-                            "RAY_DASHBOARD_HOST", "0.0.0.0"
-                        ),
                     }
+                    
+                    if ray_dashboard:
+                        init_kwargs.update({
+                            "include_dashboard": True,
+                            "dashboard_host": os.environ.get(
+                                "RAY_DASHBOARD_HOST", "0.0.0.0"
+                            ),
+                        })
+                    
                     if preset in {"p2i", "standard"}:
                         init_kwargs["num_cpus"] = 2 if preset == "p2i" else 4
                     try:

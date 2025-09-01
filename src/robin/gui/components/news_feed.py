@@ -145,38 +145,34 @@ class NewsFeed:
     def create_news_element(self) -> None:
         """Create the news feed UI element."""
         try:
-            with ui.card().classes("w-full shadow-lg rounded-xl"):
-                # Header section with title and last update
-                with ui.row().classes(
-                    "w-full items-center justify-between p-4 border-b border-gray-200"
-                ):
-                    with ui.row().classes("items-center gap-2"):
-                        ui.icon("feed", color="primary").classes("text-xl")
-                        ui.label("ROBIN News").classes(
-                            "text-sky-600 dark:text-white"
-                        ).style("font-size: 150%; font-weight: 300").tailwind(
-                            "drop-shadow", "font-bold"
-                        )  # .classes('text-xl font-bold text-primary')
-                    if self.last_update:
-                        with ui.row().classes("items-center gap-1"):
-                            ui.icon("update", color="gray").classes("text-sm")
-                            ui.label(
-                                f'Updated {self.last_update.strftime("%H:%M %d/%m/%Y")}'
-                            ).classes("text-sm text-gray-600")
+            # Header section with title and last update
+            with ui.row().classes(
+                "w-full"
+            ):
+                with ui.row().classes("items-center gap-2"):
+                    ui.icon("feed", color="primary").classes("text-xl")
+                    ui.label("ROBIN News").classes(
+                        "text-sky-600 dark:text-white text-xl font-semibold"
+                    )
+                if self.last_update:
+                    with ui.row().classes("items-center gap-1"):
+                        ui.icon("update", color="gray").classes("text-sm")
+                        ui.label(
+                            f'Updated {self.last_update.strftime("%H:%M %d/%m/%Y")}'
+                        ).classes("text-sm text-gray-600")
 
-                # Scrollable news container with elegant styling
-                with ui.scroll_area().classes("w-full h-[calc(100vh-350px)]"):
-                    self._news_container = ui.column().classes("w-full gap-4 p-4")
-                    self._update_news_display()
+            # Scrollable news container with elegant styling
+            with ui.scroll_area().classes("w-full h-96"):
+                self._news_container = ui.column().classes("w-full gap-4 p-4")
+                self._update_news_display()
 
         except Exception as e:
             logging.error(f"Error creating news element: {str(e)}")
-            with ui.card().classes("w-full shadow-lg rounded-xl p-4"):
-                with ui.row().classes("items-center gap-2"):
-                    ui.icon("error", color="negative")
-                    ui.label("Error Loading News").classes(
-                        "text-xl font-bold text-negative"
-                    )
+            with ui.row().classes("items-center gap-2 p-4"):
+                ui.icon("error", color="negative")
+                ui.label("Error Loading News").classes(
+                    "text-xl font-bold text-negative"
+                )
 
     def _update_news_display(self) -> None:
         """Update the news display with current items."""
@@ -222,17 +218,15 @@ class NewsFeed:
                                 }.get(item.message_type, "info")
                                 ui.icon(icon_name, color="primary").classes("text-lg")
                                 ui.label(item.headline).classes(
-                                    "text-sky-600 dark:text-white"
-                                ).style("font-size: 150%; font-weight: 300").tailwind(
-                                    "drop-shadow", "font-bold"
-                                )  # .classes('font-bold text-lg text-primary')
+                                    "text-sky-600 dark:text-white text-lg font-semibold"
+                                )
 
                             # Main content with proper spacing and formatting
                             with ui.column().classes(
                                 "gap-3 pl-8"
                             ):  # Indent content under headline
                                 ui.label(item.content).classes(
-                                    "text-gray-700 text-sm leading-relaxed"
+                                    "text-gray-700 text-base leading-relaxed"
                                 )
 
                                 # Image handling with better presentation
@@ -251,10 +245,8 @@ class NewsFeed:
                                             with ui.row().classes(
                                                 "justify-center items-center"
                                             ):
-                                                # Create image with fixed dimensions and proper scaling
-                                                img = ui.image(item.image_url).style(
-                                                    "width: 600px; height: 300px; object-fit: contain;"
-                                                )
+                                                # Create image with responsive dimensions and proper scaling
+                                                img = ui.image(item.image_url).classes("w-full max-w-md h-auto rounded-lg")
 
                                             # Add error handling for image load failure
                                             def on_error(e):
