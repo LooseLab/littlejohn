@@ -124,7 +124,7 @@ class GUILauncher:
 
         self.workflow_runner = workflow_runner
         self.workflow_steps = workflow_steps or []
-        
+
         # Store absolute monitored directory to avoid relative path issues
         try:
             self.monitored_directory = (
@@ -504,22 +504,29 @@ class GUILauncher:
             @ui.page("/live_data/{sample_id}")
             def sample_detail(sample_id: str):
                 """Individual sample detail page."""
+
                 # Add a page visit handler to refresh plots
                 def on_page_visit():
                     """Handle page visit - refresh plots if needed."""
                     try:
-                        logging.info(f"Page visit detected for sample {sample_id} - triggering plot refresh")
+                        logging.info(
+                            f"Page visit detected for sample {sample_id} - triggering plot refresh"
+                        )
                         # Small delay to ensure components are loaded
-                        ui.timer(1.0, lambda: self._refresh_sample_plots(sample_id), once=True)
+                        ui.timer(
+                            1.0,
+                            lambda: self._refresh_sample_plots(sample_id),
+                            once=True,
+                        )
                     except Exception as e:
                         logging.debug(f"Page visit handler failed for {sample_id}: {e}")
-                
+
                 # Also try to refresh immediately when the page is created
                 ui.timer(2.0, lambda: self._refresh_sample_plots(sample_id), once=True)
-                
+
                 # Register the page visit handler
                 ui.context.client.on_connect(on_page_visit)
-                
+
                 self._create_sample_detail_page(sample_id)
 
             # Enable global update processing regardless of which page is open
@@ -554,7 +561,6 @@ class GUILauncher:
             except Exception as e:
                 logging.debug(f"Could not register fonts static dir: {e}")
 
-
             try:
                 iconfile = os.path.join(
                     os.path.dirname(os.path.abspath(images.__file__)), "favicon.ico"
@@ -584,25 +590,31 @@ class GUILauncher:
         """Create the welcome page."""
         # Background and main container
         with theme.frame(
-             "<strong>R</strong>apid nanop<strong>O</strong>re <strong>B</strong>rain intraoperat<strong>I</strong>ve classificatio<strong>N</strong>",
+            "<strong>R</strong>apid nanop<strong>O</strong>re <strong>B</strong>rain intraoperat<strong>I</strong>ve classificatio<strong>N</strong>",
             smalltitle="<strong>R.O.B.I.N</strong>",
             batphone=False,
         ):
             # Main content container with full width and proper centering
             with ui.column().classes("w-full min-h-screen p-4 md:p-8"):
                 # Header section
-                with ui.card().classes("w-full max-w-6xl mx-auto shadow-lg rounded-xl mb-8"):
+                with ui.card().classes(
+                    "w-full max-w-6xl mx-auto shadow-lg rounded-xl mb-8"
+                ):
                     with ui.column().classes("p-8 text-center"):
                         ui.label("Welcome to R.O.B.I.N").classes(
                             "text-sky-600 dark:text-white text-4xl md:text-5xl font-bold mb-4"
                         ).style("font-weight: 600")
-                        
+
                         ui.label(
                             "This tool enables real time analysis of data from Oxford Nanopore Technologies sequencers."
-                        ).classes("text-gray-700 dark:text-gray-300 text-lg md:text-xl mb-6")
+                        ).classes(
+                            "text-gray-700 dark:text-gray-300 text-lg md:text-xl mb-6"
+                        )
 
                 # Main content section
-                with ui.card().classes("w-full max-w-6xl mx-auto shadow-lg rounded-xl mb-8"):
+                with ui.card().classes(
+                    "w-full max-w-6xl mx-auto shadow-lg rounded-xl mb-8"
+                ):
                     with ui.column().classes("p-8"):
                         ui.label("What is R.O.B.I.N?").classes(
                             "text-2xl font-semibold mb-4 text-center"
@@ -616,9 +628,7 @@ class GUILauncher:
                             ui.link("📊 View All Samples", "/live_data").classes(
                                 "bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors text-center"
                             )
-                            ui.link(
-                                "📊 Open Workflow Monitor", "/robin"
-                            ).classes(
+                            ui.link("📊 Open Workflow Monitor", "/robin").classes(
                                 "bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors text-center"
                             )
                             ui.button(
@@ -627,12 +637,17 @@ class GUILauncher:
                             ).classes(
                                 "bg-green-600 hover:bg-green-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors"
                             )
-                            ui.link("📋 View Documentation", "https://looselab.github.io/ROBIN/").classes(
+                            ui.link(
+                                "📋 View Documentation",
+                                "https://looselab.github.io/ROBIN/",
+                            ).classes(
                                 "bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors text-center"
                             )
 
                 # News feed section
-                with ui.card().classes("w-full max-w-6xl mx-auto shadow-lg rounded-xl mb-8"):
+                with ui.card().classes(
+                    "w-full max-w-6xl mx-auto shadow-lg rounded-xl mb-8"
+                ):
                     with ui.column().classes("w-full"):
                         # Initialize news feed only if it hasn't been initialized yet
                         if self.news_feed is None:
@@ -641,7 +656,6 @@ class GUILauncher:
                         # Create the news element
                         self.news_feed.create_news_element()
 
-                
     def _create_samples_overview(self):
         """Create the samples overview page showing all tracked samples."""
         # Page title and navigation
@@ -671,8 +685,11 @@ class GUILauncher:
                         ui.label("📋 All Tracked Samples").classes(
                             "text-lg font-semibold"
                         )
-                        ui.button("🔄 Refresh All Plots", on_click=lambda: self._refresh_all_sample_plots()).classes("q-btn--secondary")
-                    
+                        ui.button(
+                            "🔄 Refresh All Plots",
+                            on_click=lambda: self._refresh_all_sample_plots(),
+                        ).classes("q-btn--secondary")
+
                     # Filters row
                     with ui.row().classes("items-center gap-2 mb-2"):
 
@@ -705,97 +722,102 @@ class GUILauncher:
                             .on(
                                 "update:model-value",
                                 lambda e: self._set_samples_origin_filter(
-                                    e.args['label'] if e.args and isinstance(e.args, dict) and 'label' in e.args else "All"
+                                    e.args["label"]
+                                    if e.args
+                                    and isinstance(e.args, dict)
+                                    and "label" in e.args
+                                    else "All"
                                 ),
                             )
                         )
 
                     # Create a placeholder table that will be updated later
                     from robin.gui.theme import styled_table
+
                     _samples_container, self.samples_table = styled_table(
-                            columns=[
-                                {
-                                    "name": "actions",
-                                    "label": "Actions",
-                                    "field": "actions",
-                                },
-                                {
-                                    "name": "sample_id",
-                                    "label": "Sample ID",
-                                    "field": "sample_id",
-                                    "sortable": True,
-                                },
-                                {
-                                    "name": "origin",
-                                    "label": "Origin",
-                                    "field": "origin",
-                                    "sortable": True,
-                                },
-                                {
-                                    "name": "run_start",
-                                    "label": "Run Start",
-                                    "field": "run_start",
-                                    "sortable": True,
-                                },
-                                {
-                                    "name": "device",
-                                    "label": "Device",
-                                    "field": "device",
-                                    "sortable": True,
-                                },
-                                {
-                                    "name": "flowcell",
-                                    "label": "Flowcell",
-                                    "field": "flowcell",
-                                    "sortable": True,
-                                },
-                                {
-                                    "name": "active_jobs",
-                                    "label": "Active",
-                                    "field": "active_jobs",
-                                    "sortable": True,
-                                },
-                                {
-                                    "name": "total_jobs",
-                                    "label": "Total",
-                                    "field": "total_jobs",
-                                    "sortable": True,
-                                },
-                                {
-                                    "name": "completed_jobs",
-                                    "label": "Completed",
-                                    "field": "completed_jobs",
-                                    "sortable": True,
-                                },
-                                {
-                                    "name": "failed_jobs",
-                                    "label": "Failed",
-                                    "field": "failed_jobs",
-                                    "sortable": True,
-                                },
-                                {
-                                    "name": "job_types",
-                                    "label": "Job Types",
-                                    "field": "job_types",
-                                    "sortable": True,
-                                },
-                                {
-                                    "name": "last_seen",
-                                    "label": "Last Activity",
-                                    "field": "last_seen",
-                                    "sortable": True,
-                                },
-                                {
-                                    "name": "export",
-                                    "label": "Export",
-                                    "field": "export",
-                                },
-                            ],
-                            rows=[],
-                            pagination=20,
-                            class_size="table-xs",
-                            row_key="sample_id",
-                        )
+                        columns=[
+                            {
+                                "name": "actions",
+                                "label": "Actions",
+                                "field": "actions",
+                            },
+                            {
+                                "name": "sample_id",
+                                "label": "Sample ID",
+                                "field": "sample_id",
+                                "sortable": True,
+                            },
+                            {
+                                "name": "origin",
+                                "label": "Origin",
+                                "field": "origin",
+                                "sortable": True,
+                            },
+                            {
+                                "name": "run_start",
+                                "label": "Run Start",
+                                "field": "run_start",
+                                "sortable": True,
+                            },
+                            {
+                                "name": "device",
+                                "label": "Device",
+                                "field": "device",
+                                "sortable": True,
+                            },
+                            {
+                                "name": "flowcell",
+                                "label": "Flowcell",
+                                "field": "flowcell",
+                                "sortable": True,
+                            },
+                            {
+                                "name": "active_jobs",
+                                "label": "Active",
+                                "field": "active_jobs",
+                                "sortable": True,
+                            },
+                            {
+                                "name": "total_jobs",
+                                "label": "Total",
+                                "field": "total_jobs",
+                                "sortable": True,
+                            },
+                            {
+                                "name": "completed_jobs",
+                                "label": "Completed",
+                                "field": "completed_jobs",
+                                "sortable": True,
+                            },
+                            {
+                                "name": "failed_jobs",
+                                "label": "Failed",
+                                "field": "failed_jobs",
+                                "sortable": True,
+                            },
+                            {
+                                "name": "job_types",
+                                "label": "Job Types",
+                                "field": "job_types",
+                                "sortable": True,
+                            },
+                            {
+                                "name": "last_seen",
+                                "label": "Last Activity",
+                                "field": "last_seen",
+                                "sortable": True,
+                            },
+                            {
+                                "name": "export",
+                                "label": "Export",
+                                "field": "export",
+                            },
+                        ],
+                        rows=[],
+                        pagination=20,
+                        class_size="table-xs",
+                        row_key="sample_id",
+                    )
                     try:
                         self.samples_table.props("rows-per-page-options=[10,20,50,0]")
                     except Exception:
@@ -834,9 +856,11 @@ class GUILauncher:
                     try:
                         self.samples_table.on(
                             "action",
-                            lambda e: ui.navigate.to(f"/live_data/{e.args}")
-                            if isinstance(getattr(e, "args", None), str)
-                            else ui.notify("Invalid button payload", type="warning"),
+                            lambda e: (
+                                ui.navigate.to(f"/live_data/{e.args}")
+                                if isinstance(getattr(e, "args", None), str)
+                                else ui.notify("Invalid button payload", type="warning")
+                            ),
                         )
                     except Exception:
                         pass
@@ -862,9 +886,11 @@ class GUILauncher:
                                             self._selected_sample_ids.discard(sid)
                                         # reflect state back into rows
                                         try:
-                                            for r in (self.samples_table.rows or []):
+                                            for r in self.samples_table.rows or []:
                                                 if r.get("sample_id") == sid:
-                                                    r["export"] = sid in self._selected_sample_ids
+                                                    r["export"] = (
+                                                        sid in self._selected_sample_ids
+                                                    )
                                             self.samples_table.update()
                                         except Exception:
                                             pass
@@ -889,9 +915,12 @@ class GUILauncher:
 
                     # Batch export selected reports
                     try:
+
                         async def _export_selected_reports(state: Dict[str, Any]):
                             try:
-                                selected = list(getattr(self, "_selected_sample_ids", set()) or [])
+                                selected = list(
+                                    getattr(self, "_selected_sample_ids", set()) or []
+                                )
                                 if not selected:
                                     ui.notify("No samples selected", type="warning")
                                     return
@@ -907,14 +936,21 @@ class GUILauncher:
                                             else None
                                         )
                                         if not sample_dir or not sample_dir.exists():
-                                            ui.notify(f"Missing output for {sid}", type="warning")
+                                            ui.notify(
+                                                f"Missing output for {sid}",
+                                                type="warning",
+                                            )
                                             continue
                                         filename = f"{sid}_run_report.pdf"
-                                        pdf_path = os.path.join(str(sample_dir), filename)
+                                        pdf_path = os.path.join(
+                                            str(sample_dir), filename
+                                        )
                                         os.makedirs(str(sample_dir), exist_ok=True)
                                         export_csv_dir = None
                                         if bool(state.get("export_csv", False)):
-                                            export_csv_dir = os.path.join(str(sample_dir), "report_csv")
+                                            export_csv_dir = os.path.join(
+                                                str(sample_dir), "report_csv"
+                                            )
                                         if ng_run is not None:
                                             pdf_file = await ng_run.io_bound(
                                                 create_pdf,
@@ -923,7 +959,9 @@ class GUILauncher:
                                                 state.get("type", "detailed"),
                                                 export_csv_dir=export_csv_dir,
                                                 export_xlsx=False,
-                                                export_zip=bool(state.get("export_csv", False)),
+                                                export_zip=bool(
+                                                    state.get("export_csv", False)
+                                                ),
                                             )
                                         else:
                                             pdf_file = create_pdf(
@@ -932,16 +970,26 @@ class GUILauncher:
                                                 state.get("type", "detailed"),
                                                 export_csv_dir=export_csv_dir,
                                                 export_xlsx=False,
-                                                export_zip=bool(state.get("export_csv", False)),
+                                                export_zip=bool(
+                                                    state.get("export_csv", False)
+                                                ),
                                             )
                                         ui.download(pdf_file)
                                         # Also offer CSV ZIP if requested
-                                        if bool(state.get("export_csv", False)) and export_csv_dir:
-                                            zip_path = os.path.join(export_csv_dir, f"{sid}_report_data.zip")
+                                        if (
+                                            bool(state.get("export_csv", False))
+                                            and export_csv_dir
+                                        ):
+                                            zip_path = os.path.join(
+                                                export_csv_dir, f"{sid}_report_data.zip"
+                                            )
                                             if os.path.exists(zip_path):
                                                 ui.download(zip_path)
                                     except Exception as e:
-                                        ui.notify(f"Export failed for {sid}: {e}", type="error")
+                                        ui.notify(
+                                            f"Export failed for {sid}: {e}",
+                                            type="error",
+                                        )
                                 ui.notify("Export complete")
                             except Exception:
                                 pass
@@ -956,10 +1004,15 @@ class GUILauncher:
                                 "summary": "Summary Only",
                                 "detailed": "Detailed",
                             }
-                            state: Dict[str, Any] = {"type": "detailed", "export_csv": False}
+                            state: Dict[str, Any] = {
+                                "type": "detailed",
+                                "export_csv": False,
+                            }
 
                             with ui.dialog() as dialog, ui.card().classes("w-96 p-4"):
-                                ui.label("Generate Report").classes("text-h6 font-bold mb-4")
+                                ui.label("Generate Report").classes(
+                                    "text-h6 font-bold mb-4"
+                                )
 
                                 # Report type selector
                                 with ui.column().classes("mb-4"):
@@ -967,7 +1020,9 @@ class GUILauncher:
                                     ui.toggle(
                                         report_types,
                                         value="detailed",
-                                        on_change=lambda e: state.update({"type": e.value}),
+                                        on_change=lambda e: state.update(
+                                            {"type": e.value}
+                                        ),
                                     )
 
                                 # Data export options
@@ -976,20 +1031,31 @@ class GUILauncher:
                                     ui.checkbox(
                                         "CSV data (ZIP)",
                                         value=False,
-                                        on_change=lambda e: state.update({"export_csv": bool(e.value)}),
+                                        on_change=lambda e: state.update(
+                                            {"export_csv": bool(e.value)}
+                                        ),
                                     )
 
                                 # Disclaimer section (match single-report dialog)
                                 with ui.column().classes("mb-4"):
                                     ui.label("Disclaimer").classes("font-bold mb-2")
-                                    formatted_text = EXTENDED_DISCLAIMER_TEXT.replace("\n\n", "<br><br>").replace("\n", " ")
-                                    ui.label(formatted_text).classes("text-sm text-gray-600 mb-4")
+                                    formatted_text = EXTENDED_DISCLAIMER_TEXT.replace(
+                                        "\n\n", "<br><br>"
+                                    ).replace("\n", " ")
+                                    ui.label(formatted_text).classes(
+                                        "text-sm text-gray-600 mb-4"
+                                    )
 
-                                ui.label("Are you sure you want to generate a report?").classes("mb-4")
+                                ui.label(
+                                    "Are you sure you want to generate a report?"
+                                ).classes("mb-4")
 
                                 # Buttons
                                 with ui.row().classes("justify-end gap-2"):
-                                    ui.button("Cancel", on_click=lambda: dialog.submit(("No", None))).props("flat")
+                                    ui.button(
+                                        "Cancel",
+                                        on_click=lambda: dialog.submit(("No", None)),
+                                    ).props("flat")
                                     ui.button(
                                         "Export",
                                         on_click=lambda: dialog.submit(("Yes", state)),
@@ -1014,8 +1080,6 @@ class GUILauncher:
                             # No selection behavior needed; per-row buttons handle navigation
                         except Exception:
                             pass
-                    
-
 
     def _update_samples_table(self, data: Dict[str, Any]):
         """Update the samples overview table with new data."""
@@ -1023,7 +1087,7 @@ class GUILauncher:
             if not hasattr(self, "samples_table"):
                 return
             samples = data.get("samples", [])
-            
+
             # Deduplicate by sample_id taking the newest last_seen
             by_id: Dict[str, Dict[str, Any]] = {}
             for s in samples:
@@ -1067,7 +1131,9 @@ class GUILauncher:
 
             # Patch from master.csv and persist the new overview values for later reload
             try:
-                base = Path(self.monitored_directory) if self.monitored_directory else None
+                base = (
+                    Path(self.monitored_directory) if self.monitored_directory else None
+                )
                 manager = (
                     MasterCSVManager(str(base)) if base and base.exists() else None
                 )
@@ -1100,7 +1166,9 @@ class GUILauncher:
                                     first_row.get("run_info_run_time", "")
                                 )
                                 row["device"] = first_row.get("run_info_device", "")
-                                row["flowcell"] = first_row.get("run_info_flow_cell", "")
+                                row["flowcell"] = first_row.get(
+                                    "run_info_flow_cell", ""
+                                )
                 except Exception:
                     pass
 
@@ -1114,7 +1182,7 @@ class GUILauncher:
             # Replace rows to avoid duplicates then apply filters
             self._last_samples_rows = rows
             self._apply_samples_table_filters()
-            
+
             # Update known IDs from unfiltered cache
             self._known_sample_ids = {
                 r.get("sample_id")
@@ -1158,7 +1226,7 @@ class GUILauncher:
                 return str(value)
             except Exception:
                 return ""
-                
+
     def _normalize_rows_for_display(
         self, rows: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
@@ -1203,7 +1271,7 @@ class GUILauncher:
                             r["origin"] = "Complete"
                 except Exception:
                     pass
-            
+
             origin = (self._samples_filters or {}).get("origin", "All")
             if origin and origin != "All":
                 rows = [r for r in rows if (r.get("origin") == origin)]
@@ -1250,32 +1318,36 @@ class GUILauncher:
         try:
             if not self.monitored_directory:
                 return
-                
+
             sample_dir = Path(self.monitored_directory) / sample_id
             if not sample_dir.exists():
                 return
-                
+
             # Clear ALL cached state to force complete regeneration
             key = str(sample_dir)
-            
+
             # Completely clear coverage state for this sample
-            if hasattr(self, '_coverage_state') and key in self._coverage_state:
+            if hasattr(self, "_coverage_state") and key in self._coverage_state:
                 old_state = self._coverage_state[key]
-                logging.info(f"Clearing coverage state for {sample_id}: {list(old_state.keys())}")
+                logging.info(
+                    f"Clearing coverage state for {sample_id}: {list(old_state.keys())}"
+                )
                 self._coverage_state[key] = {}
                 logging.info(f"Cleared all coverage state for sample {sample_id}")
-                
+
             # Clear other component states if they exist
-            for attr in ['_mgmt_state', '_cnv_state', '_fusion_state']:
+            for attr in ["_mgmt_state", "_cnv_state", "_fusion_state"]:
                 if hasattr(self, attr):
                     state_dict = getattr(self, attr)
                     if key in state_dict:
                         old_state = state_dict[key]
-                        logging.info(f"Clearing {attr} state for {sample_id}: {list(old_state.keys())}")
+                        logging.info(
+                            f"Clearing {attr} state for {sample_id}: {list(old_state.keys())}"
+                        )
                         # Clear all state for these components
                         state_dict[key] = {}
                         logging.info(f"Cleared all {attr} state for sample {sample_id}")
-                        
+
         except Exception as e:
             logging.debug(f"Failed to refresh sample plots for {sample_id}: {e}")
 
@@ -1284,21 +1356,23 @@ class GUILauncher:
         try:
             if not self.monitored_directory:
                 return
-                
+
             # Get all sample directories
             monitored_path = Path(self.monitored_directory)
             if not monitored_path.exists():
                 return
-                
+
             sample_dirs = [d for d in monitored_path.iterdir() if d.is_dir()]
-            
+
             for sample_dir in sample_dirs:
                 sample_id = sample_dir.name
                 self._refresh_sample_plots(sample_id)
-                
-            ui.notify(f"Refreshed plots for {len(sample_dirs)} samples", type="positive")
+
+            ui.notify(
+                f"Refreshed plots for {len(sample_dirs)} samples", type="positive"
+            )
             logging.info(f"Refreshed plots for {len(sample_dirs)} samples")
-            
+
         except Exception as e:
             ui.notify(f"Failed to refresh all plots: {e}", type="negative")
             logging.exception("Failed to refresh all sample plots")
@@ -1350,7 +1424,9 @@ class GUILauncher:
                     pass
 
             # Page title and navigation
-            with ui.row().classes("w-full"):  #'w-full bg-blue-600 text-white p-4 items-center justify-between'):
+            with ui.row().classes(
+                "w-full"
+            ):  #'w-full bg-blue-600 text-white p-4 items-center justify-between'):
                 with ui.row().classes("items-center"):
                     ui.label(f"{sample_id}").classes("text-2xl font-bold")
                     ui.label("Detailed sample information.").classes(
@@ -1366,7 +1442,10 @@ class GUILauncher:
                             "summary": "Summary Only",
                             "detailed": "Detailed",
                         }
-                        state: Dict[str, Any] = {"type": "detailed", "export_csv": False}
+                        state: Dict[str, Any] = {
+                            "type": "detailed",
+                            "export_csv": False,
+                        }
 
                         with ui.dialog() as dialog, ui.card().classes("w-96 p-4"):
                             ui.label("Generate Report").classes(
@@ -1398,7 +1477,9 @@ class GUILauncher:
                                 ui.checkbox(
                                     "CSV data (ZIP)",
                                     value=False,
-                                    on_change=lambda e: state.update({"export_csv": bool(e.value)}),
+                                    on_change=lambda e: state.update(
+                                        {"export_csv": bool(e.value)}
+                                    ),
                                 )
 
                             ui.label(
@@ -1440,7 +1521,9 @@ class GUILauncher:
                             os.makedirs(str(sample_dir), exist_ok=True)
                             export_csv_dir = None
                             if bool(state.get("export_csv", False)):
-                                export_csv_dir = os.path.join(str(sample_dir), "report_csv")
+                                export_csv_dir = os.path.join(
+                                    str(sample_dir), "report_csv"
+                                )
                             pdf_file = await ng_run.io_bound(
                                 create_pdf,
                                 pdf_path,
@@ -1453,7 +1536,9 @@ class GUILauncher:
                             ui.download(pdf_file)
                             # Also offer CSV ZIP if requested
                             if bool(state.get("export_csv", False)) and export_csv_dir:
-                                zip_path = os.path.join(export_csv_dir, f"{sample_id}_report_data.zip")
+                                zip_path = os.path.join(
+                                    export_csv_dir, f"{sample_id}_report_data.zip"
+                                )
                                 if os.path.exists(zip_path):
                                     ui.download(zip_path)
                             ui.notify("Report downloaded")
@@ -1462,20 +1547,28 @@ class GUILauncher:
 
                     ui.button(
                         "Generate Report", on_click=confirm_report_generation
-                    ).classes("object-right ml-auto text-sm font-semibold px-3 py-1 rounded")
+                    ).classes(
+                        "object-right ml-auto text-sm font-semibold px-3 py-1 rounded"
+                    )
 
             # Main content area with loading state
             with ui.column().classes("w-full p-4 gap-4"):
                 # Loading container that will be hidden when data is ready
-                loading_container = ui.column().classes("w-full items-center justify-center p-8")
+                loading_container = ui.column().classes(
+                    "w-full items-center justify-center p-8"
+                )
                 with loading_container:
-                    ui.spinner('bars', size='4em').classes("mb-4")
+                    ui.spinner("bars", size="4em").classes("mb-4")
                     ui.label("Loading sample data...").classes("text-lg text-gray-600")
-                    ui.label("This may take a moment for large datasets").classes("text-sm text-gray-500")
-                
+                    ui.label("This may take a moment for large datasets").classes(
+                        "text-sm text-gray-500"
+                    )
+
                 # Content container that will be shown when data is ready
-                content_container = ui.column().classes("w-full gap-4").style("display: none")
-                
+                content_container = (
+                    ui.column().classes("w-full gap-4").style("display: none")
+                )
+
                 with content_container:
                     # Summary section (new component)
                     try:
@@ -1492,31 +1585,36 @@ class GUILauncher:
                             ui.notify(f"Summary section failed: {e}", type="warning")
                         except Exception:
                             pass
-                    
-                    
+
                     # Classification section (refactored component)
                     try:
                         try:
                             from .gui.components.classification import add_classification_section  # type: ignore
                         except ImportError:
                             # Try absolute import if relative fails
-                            from robin.gui.components.classification import add_classification_section
+                            from robin.gui.components.classification import (
+                                add_classification_section,
+                            )
 
                         add_classification_section(sample_dir)
                     except Exception as e:
                         logging.exception(f"[GUI] Classification section failed: {e}")
                         try:
-                            ui.notify(f"Classification section failed: {e}", type="warning")
+                            ui.notify(
+                                f"Classification section failed: {e}", type="warning"
+                            )
                         except Exception:
                             pass
-                    
+
                     # Coverage section (refactored component)
                     try:
                         try:
                             from .gui.components.coverage import add_coverage_section  # type: ignore
                         except ImportError:
                             # Try absolute import if relative fails
-                            from robin.gui.components.coverage import add_coverage_section
+                            from robin.gui.components.coverage import (
+                                add_coverage_section,
+                            )
 
                         add_coverage_section(self, sample_dir)
                     except Exception as e:
@@ -1524,7 +1622,7 @@ class GUILauncher:
                             ui.notify(f"Coverage section failed: {e}", type="warning")
                         except Exception:
                             pass
-                    
+
                     # MGMT section (refactored component)
                     try:
                         try:
@@ -1540,7 +1638,7 @@ class GUILauncher:
                             ui.notify(f"MGMT section failed: {e}", type="warning")
                         except Exception:
                             pass
-                    
+
                     # CNV section (refactored component)
                     try:
                         try:
@@ -1557,7 +1655,7 @@ class GUILauncher:
                             ui.notify(f"CNV section failed: {e}", type="warning")
                         except Exception:
                             pass
-                    
+
                     # Fusion section (target and genome-wide; excludes full SV UI)
                     try:
                         try:
@@ -1573,15 +1671,18 @@ class GUILauncher:
                             ui.notify(f"Fusion section failed: {e}", type="warning")
                         except Exception:
                             pass
-                    
+
                     # Files in output directory
                     with ui.card().classes("w-full"):
-                        ui.label("📁 Output Files").classes("text-lg font-semibold mb-2")
+                        ui.label("📁 Output Files").classes(
+                            "text-lg font-semibold mb-2"
+                        )
                         with ui.row().classes("items-center gap-3 mb-2"):
                             files_search = ui.input("Search files…").props(
                                 "borderless dense clearable"
                             )
                         from robin.gui.theme import styled_table
+
                         _files_container, files_table = styled_table(
                             columns=[
                                 {
@@ -1625,6 +1726,7 @@ class GUILauncher:
                                 "borderless dense clearable"
                             )
                         from robin.gui.theme import styled_table
+
                         _summary_container, summary_table = styled_table(
                             columns=[
                                 {
@@ -1649,7 +1751,6 @@ class GUILauncher:
                             summary_search.bind_value(summary_table, "filter")
                         except Exception:
                             pass
-                    
 
                 # Periodic refresher for files table and master.csv summary
                 _notify_state = {"files_error": False, "csv_error": False}
@@ -1714,7 +1815,10 @@ class GUILauncher:
                                     for k in preferred_keys:
                                         if k in first_row:
                                             rows2.append(
-                                                {"key": k, "value": first_row.get(k, "")}
+                                                {
+                                                    "key": k,
+                                                    "value": first_row.get(k, ""),
+                                                }
                                             )
                                     if not rows2:
                                         rows2 = [
@@ -1743,7 +1847,7 @@ class GUILauncher:
                 def _show_content():
                     loading_container.style("display: none")
                     content_container.style("display: flex")
-                
+
                 # Initial data load with loading state
                 try:
                     # Use a timer to simulate async loading and then show content
@@ -1766,17 +1870,12 @@ class GUILauncher:
             batphone=False,
         ):
             # Page title and navigation
-            with ui.row().classes(
-                "w-full p-4 items-center justify-between"
-            ):
+            with ui.row().classes("w-full p-4 items-center justify-between"):
                 with ui.row().classes("items-center"):
-                    ui.label("📊 robin Workflow Monitor").classes(
-                        "text-2xl font-bold"
-                    )
+                    ui.label("📊 robin Workflow Monitor").classes("text-2xl font-bold")
                     ui.label("Real-time workflow monitoring and control").classes(
                         "text-sm ml-4 opacity-80"
                     )
-
 
             # Main content area
             with ui.column().classes("w-full p-4 gap-4"):
@@ -1902,6 +2001,7 @@ class GUILauncher:
 
                     # Active jobs table
                     from robin.gui.theme import styled_table
+
                     _jobs_container, self.active_jobs_table = styled_table(
                         columns=[
                             {
@@ -1969,9 +2069,9 @@ class GUILauncher:
                         pass
 
                     # Placeholder for when no jobs are active
-                    self.no_active_jobs_label = ui.label("No active jobs at the moment.").classes(
-                        "text-sm text-gray-500 mt-2"
-                    )
+                    self.no_active_jobs_label = ui.label(
+                        "No active jobs at the moment."
+                    ).classes("text-sm text-gray-500 mt-2")
 
                 # Live Logs
                 with ui.card().classes("w-full"):
@@ -2140,16 +2240,28 @@ class GUILauncher:
                             flowcell = first_row.get("run_info_flow_cell", "")
                             # Use saved last_seen if present
                             try:
-                                saved_last = float(first_row.get("samples_overview_last_seen", 0.0))
+                                saved_last = float(
+                                    first_row.get("samples_overview_last_seen", 0.0)
+                                )
                                 if saved_last:
                                     last_seen = saved_last
                             except Exception:
                                 pass
-                            ov_active = int(first_row.get("samples_overview_active_jobs", 0) or 0)
-                            ov_total = int(first_row.get("samples_overview_total_jobs", 0) or 0)
-                            ov_completed = int(first_row.get("samples_overview_completed_jobs", 0) or 0)
-                            ov_failed = int(first_row.get("samples_overview_failed_jobs", 0) or 0)
-                            ov_job_types = str(first_row.get("samples_overview_job_types", "") or "")
+                            ov_active = int(
+                                first_row.get("samples_overview_active_jobs", 0) or 0
+                            )
+                            ov_total = int(
+                                first_row.get("samples_overview_total_jobs", 0) or 0
+                            )
+                            ov_completed = int(
+                                first_row.get("samples_overview_completed_jobs", 0) or 0
+                            )
+                            ov_failed = int(
+                                first_row.get("samples_overview_failed_jobs", 0) or 0
+                            )
+                            ov_job_types = str(
+                                first_row.get("samples_overview_job_types", "") or ""
+                            )
                     except Exception:
                         pass
                     origin_value = (
@@ -2237,16 +2349,28 @@ class GUILauncher:
                             device = first_row.get("run_info_device", "")
                             flowcell = first_row.get("run_info_flow_cell", "")
                             try:
-                                saved_last = float(first_row.get("samples_overview_last_seen", 0.0))
+                                saved_last = float(
+                                    first_row.get("samples_overview_last_seen", 0.0)
+                                )
                                 if saved_last:
                                     last_seen = saved_last
                             except Exception:
                                 pass
-                            ov_active = int(first_row.get("samples_overview_active_jobs", 0) or 0)
-                            ov_total = int(first_row.get("samples_overview_total_jobs", 0) or 0)
-                            ov_completed = int(first_row.get("samples_overview_completed_jobs", 0) or 0)
-                            ov_failed = int(first_row.get("samples_overview_failed_jobs", 0) or 0)
-                            ov_job_types = str(first_row.get("samples_overview_job_types", "") or "")
+                            ov_active = int(
+                                first_row.get("samples_overview_active_jobs", 0) or 0
+                            )
+                            ov_total = int(
+                                first_row.get("samples_overview_total_jobs", 0) or 0
+                            )
+                            ov_completed = int(
+                                first_row.get("samples_overview_completed_jobs", 0) or 0
+                            )
+                            ov_failed = int(
+                                first_row.get("samples_overview_failed_jobs", 0) or 0
+                            )
+                            ov_job_types = str(
+                                first_row.get("samples_overview_job_types", "") or ""
+                            )
                     except Exception:
                         last_seen = None
                     if last_seen is None:
@@ -2280,11 +2404,17 @@ class GUILauncher:
                             updated = dict(existing_row)
                             # Preserve or refresh run info/overview from persisted values
                             formatted_run_start = (
-                                self._format_timestamp_for_display(run_start) if run_start else ""
+                                self._format_timestamp_for_display(run_start)
+                                if run_start
+                                else ""
                             )
-                            updated["run_start"] = formatted_run_start or existing_row.get("run_start", "")
+                            updated["run_start"] = (
+                                formatted_run_start or existing_row.get("run_start", "")
+                            )
                             updated["device"] = device or existing_row.get("device", "")
-                            updated["flowcell"] = flowcell or existing_row.get("flowcell", "")
+                            updated["flowcell"] = flowcell or existing_row.get(
+                                "flowcell", ""
+                            )
                             if ov_job_types:
                                 updated["job_types"] = ov_job_types
                             updated["active_jobs"] = ov_active
@@ -2349,41 +2479,48 @@ class GUILauncher:
     ) -> bool:
         """
         Submit a job for an existing sample directory.
-        
+
         This allows users to manually trigger specific job types for samples
         that have already been processed or need reprocessing.
-        
+
         Args:
             sample_dir: Path to the sample directory
             job_type: Type of job to run (e.g., 'igv_bam')
             sample_id: Optional sample ID (defaults to directory name)
-            
+
         Returns:
             True if job was successfully submitted, False otherwise
         """
         try:
-            if not hasattr(self, 'workflow_runner') or self.workflow_runner is None:
+            if not hasattr(self, "workflow_runner") or self.workflow_runner is None:
                 print(f"[GUI] No workflow runner available for {job_type} job")
                 return False
-            
+
             if sample_id is None:
                 sample_id = Path(sample_dir).name
-            
+
             # Check if it's a Simple workflow or Ray workflow
-            if hasattr(self.workflow_runner, 'submit_sample_job'):
+            if hasattr(self.workflow_runner, "submit_sample_job"):
                 # Simple workflow
-                return self.workflow_runner.submit_sample_job(sample_dir, job_type, sample_id)
-            elif hasattr(self.workflow_runner, 'manager') and hasattr(self.workflow_runner.manager, 'submit_sample_job'):
+                return self.workflow_runner.submit_sample_job(
+                    sample_dir, job_type, sample_id
+                )
+            elif hasattr(self.workflow_runner, "manager") and hasattr(
+                self.workflow_runner.manager, "submit_sample_job"
+            ):
                 # Ray workflow - this is more complex, so we'll provide a fallback
-                print(f"[GUI] Ray workflow detected for {job_type} job - manual submission not yet supported")
+                print(
+                    f"[GUI] Ray workflow detected for {job_type} job - manual submission not yet supported"
+                )
                 return False
             else:
                 print(f"[GUI] Unknown workflow type for {job_type} job")
                 return False
-                
+
         except Exception as e:
             print(f"[GUI] Failed to submit {job_type} job for sample {sample_id}: {e}")
             return False
+
 
 def launch_gui(
     host="0.0.0.0",
@@ -2437,26 +2574,26 @@ _current_gui_launcher = None
 if __name__ == "__main__":
     """
     Command-line interface for direct GUI launching.
-    
+
     Usage:
         # Launch GUI with default settings
         python gui_launcher.py
-        
+
         # Launch GUI pointing to specific directory
         python gui_launcher.py test_out_priority_ray4
-        
+
         # Launch GUI on specific port
         python gui_launcher.py test_out_priority_ray4 --port 8081
-        
+
         # Launch GUI without opening browser
         python gui_launcher.py test_out_priority_ray4 --no-show
-        
+
         # Launch GUI on different host
         python gui_launcher.py test_out_priority_ray4 --host 0.0.0.0
     """
     import argparse
     import sys
-    
+
     parser = argparse.ArgumentParser(
         description="Direct GUI launcher for robin workflow monitoring",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -2466,37 +2603,32 @@ if __name__ == "__main__":
         python gui_launcher.py test_out_priority_ray4            # Monitor specific directory
         python gui_launcher.py test_out_priority_ray4 --port 8081 # Use different port
         python gui_launcher.py test_out_priority_ray4 --no-show   # Don't open browser
-                """
-            )
-            
+                """,
+    )
+
     parser.add_argument(
         "monitored_directory",
         nargs="?",
         default="",
-        help="Directory containing sample output folders to monitor"
+        help="Directory containing sample output folders to monitor",
     )
-    
+
     parser.add_argument(
         "--host",
         default="localhost",
-        help="Host to bind the GUI to (default: localhost)"
+        help="Host to bind the GUI to (default: localhost)",
     )
-    
+
     parser.add_argument(
-        "--port",
-        type=int,
-        default=8080,
-        help="Port to run the GUI on (default: 8080)"
+        "--port", type=int, default=8080, help="Port to run the GUI on (default: 8080)"
     )
-    
+
     parser.add_argument(
-        "--no-show",
-        action="store_true",
-        help="Don't automatically open the browser"
+        "--no-show", action="store_true", help="Don't automatically open the browser"
     )
-    
+
     args = parser.parse_args()
-    
+
     # Validate monitored directory if provided
     if args.monitored_directory:
         monitored_path = Path(args.monitored_directory)
@@ -2507,37 +2639,37 @@ if __name__ == "__main__":
             print(f"❌ Error: '{args.monitored_directory}' is not a directory")
             sys.exit(1)
         print(f"📁 Will monitor: {monitored_path.resolve()}")
-    
+
     try:
         # Create and launch GUI directly to avoid relative import issues
         print("🚀 Creating GUI launcher...")
-        
+
         # Create the GUI launcher directly
         launcher = GUILauncher(
             host=args.host,
             port=args.port,
             reload=False,
         )
-        
+
         # Set monitored directory if provided
         if args.monitored_directory:
             launcher.monitored_directory = str(Path(args.monitored_directory).resolve())
-        
+
         print(f"🚀 Launching full GUI on http://{args.host}:{args.port}")
         print("💡 Use Ctrl+C to stop the GUI")
-        
+
         # Launch the GUI directly
         success = launcher.launch_gui(
             monitored_directory=args.monitored_directory,
             workflow_runner=None,
             workflow_steps=[],
         )
-        
+
         if success:
             print("✅ GUI launched successfully!")
             print("🌐 Open your browser to the URL above")
             print("💡 Press Ctrl+C to stop the GUI")
-            
+
             # Keep the main thread alive while GUI runs
             try:
                 while launcher.is_gui_running():
@@ -2549,11 +2681,12 @@ if __name__ == "__main__":
         else:
             print("❌ Failed to launch GUI")
             sys.exit(1)
-        
+
     except KeyboardInterrupt:
         print("\n👋 GUI stopped by user")
     except Exception as e:
         print(f"❌ GUI failed to start: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)

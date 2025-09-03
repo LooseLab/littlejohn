@@ -19,6 +19,8 @@ matplotlib.use("Agg")  # ensure non-interactive backend before importing pyplot
 import matplotlib.pyplot as plt
 import io
 
+from robin.classification_config import get_confidence_status
+
 logger = logging.getLogger(__name__)
 
 
@@ -234,37 +236,8 @@ class ClassificationSection(ReportSection):
                         else raw_confidence
                     )
 
-                    # Determine confidence level based on classifier
-                    if name == "Sturgeon":
-                        if confidence_value >= 0.85:
-                            confidence_status = "High"
-                            status_color = "#059669"  # Green
-                        elif confidence_value >= 0.65:
-                            confidence_status = "Medium"
-                            status_color = "#D97706"  # Amber
-                        else:
-                            confidence_status = "Low"
-                            status_color = "#DC2626"  # Red
-                    elif name == "NanoDX" or name == "PanNanoDX":
-                        if confidence_value >= 0.5:
-                            confidence_status = "High"
-                            status_color = "#059669"  # Green
-                        elif confidence_value >= 0.25:
-                            confidence_status = "Medium"
-                            status_color = "#D97706"  # Amber
-                        else:
-                            confidence_status = "Low"
-                            status_color = "#DC2626"  # Red
-                    elif name == "Random Forest":
-                        if confidence_value >= 0.85:
-                            confidence_status = "High"
-                            status_color = "#059669"  # Green
-                        elif confidence_value >= 0.65:
-                            confidence_status = "Medium"
-                            status_color = "#D97706"  # Amber
-                        else:
-                            confidence_status = "Low"
-                            status_color = "#DC2626"  # Red
+                    # Determine confidence level based on classifier using centralized config
+                    confidence_status, status_color = get_confidence_status(name.lower(), confidence_value)
 
                     # Add to summary table with HTML-like color formatting
                     summary_data.append(
@@ -280,12 +253,21 @@ class ClassificationSection(ReportSection):
                 logger.error(f"Error processing {name} classification: {str(e)}")
                 continue
 
-        # Add explanation text
+        # Add explanation text using centralized thresholds
+        from robin.classification_config import CLASSIFIER_CONFIDENCE_THRESHOLDS
+        
+        explanation_lines = ["Note: Classification confidence levels are defined as follows:"]
+        for classifier, thresholds in CLASSIFIER_CONFIDENCE_THRESHOLDS.items():
+            explanation_lines.append(
+                f"- {classifier.title()}: High (≥{thresholds['high']:.0f}%), "
+                f"Medium (≥{thresholds['medium']:.0f}%), Low (<{thresholds['medium']:.0f}%)"
+            )
+        explanation_lines.append(
+            "Multiple classifiers may provide different results based on their training data and methodology."
+        )
+        
         Explanation_text = Paragraph(
-            "Note: Classification confidence levels are defined as follows:\n"
-            "- Sturgeon and Random Forest: High (>85%), Medium (>65%), Low (<65%)\n"
-            "- NanoDX and PanNanoDX: High (>50%), Medium (>25%), Low (<25%)\n"
-            "Multiple classifiers may provide different results based on their training data and methodology.",
+            "\n".join(explanation_lines),
             ParagraphStyle(
                 "Explanation",
                 parent=self.styles.styles["Normal"],
@@ -305,18 +287,28 @@ class ClassificationSection(ReportSection):
                 # Strip HTML tags from Status for CSV, keep plain text
                 def _strip_html(s):
                     try:
-                        return str(s).replace("<font color=\"#059669\">", "").replace("<font color=\"#D97706\">", "").replace("<font color=\"#DC2626\">", "").replace("</font>", "")
+                        return (
+                            str(s)
+                            .replace('<font color="#059669">', "")
+                            .replace('<font color="#D97706">', "")
+                            .replace('<font color="#DC2626">', "")
+                            .replace("</font>", "")
+                        )
                     except Exception:
                         return s
+
                 rows = []
                 for r in summary_data[1:]:
-                    rows.append({
-                        "Classifier": r[0],
-                        "PredictedClass": r[1],
-                        "ConfidencePercent": r[2],
-                        "Status": _strip_html(r[3]),
-                    })
+                    rows.append(
+                        {
+                            "Classifier": r[0],
+                            "PredictedClass": r[1],
+                            "ConfidencePercent": r[2],
+                            "Status": _strip_html(r[3]),
+                        }
+                    )
                 from pandas import DataFrame as _DF
+
                 self.export_frames["classification_summary"] = _DF(rows)
             except Exception:
                 pass
@@ -383,14 +375,21 @@ class ClassificationSection(ReportSection):
                         try:
                             rows = []
                             for class_name, score in top_predictions.items():
-                                confidence = score / 100.0 if name == "Random Forest" else score
-                                rows.append({
-                                    "Classifier": name,
-                                    "PredictedClass": class_name,
-                                    "ConfidencePercent": f"{confidence:.1%}",
-                                })
-                            key = f"classification_{name.lower().replace(' ', '_')}_top10"
+                                confidence = (
+                                    score / 100.0 if name == "Random Forest" else score
+                                )
+                                rows.append(
+                                    {
+                                        "Classifier": name,
+                                        "PredictedClass": class_name,
+                                        "ConfidencePercent": f"{confidence:.1%}",
+                                    }
+                                )
+                            key = (
+                                f"classification_{name.lower().replace(' ', '_')}_top10"
+                            )
                             from pandas import DataFrame as _DF
+
                             self.export_frames[key] = _DF(rows)
                         except Exception:
                             pass

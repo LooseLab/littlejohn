@@ -183,17 +183,17 @@ def _setup_file_paths(target_panel: str = "rCNS2") -> Tuple[str, str]:
 def _load_bed_regions(bed_file: str) -> Dict[str, List[GeneRegion]]:
     """Load BED file regions into memory for efficient lookup."""
     regions = defaultdict(list)
-    
+
     if not os.path.exists(bed_file):
         return dict(regions)
-    
+
     try:
         with open(bed_file, "r") as f:
             for line_num, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
                     continue
-                
+
                 parts = line.split("\t")
                 if len(parts) < 4:
                     continue
@@ -278,9 +278,7 @@ def find_reads_with_supplementary(bamfile: str) -> Set[str]:
         )
         raise
 
-    logger.debug(
-        f"Found {len(reads_with_supp)} reads with supplementary alignments"
-    )
+    logger.debug(f"Found {len(reads_with_supp)} reads with supplementary alignments")
     return reads_with_supp
 
 
@@ -294,7 +292,7 @@ def _find_gene_intersections(
     """
     Find intersections between a read and gene regions.
     This method generates the EXACT column structure expected by the original fusion code.
-    
+
     Args:
         read: Pysam aligned segment
         ref_name: Reference chromosome name
@@ -312,21 +310,21 @@ def _find_gene_intersections(
             # Create the EXACT column structure expected by the original code
             read_rows.append(
                 {
-                    "col1": ref_name,                    # Chromosome
-                    "col2": gene_region.start,            # Gene start
-                    "col3": gene_region.end,              # Gene end
-                    "col4": gene_region.name,             # Gene name
-                    "reference_id": ref_name,             # Chromosome (duplicate for compatibility)
-                    "reference_start": ref_start,         # Read start position
-                    "reference_end": ref_end,             # Read end position
-                    "read_id": read.query_name,           # Read ID
+                    "col1": ref_name,  # Chromosome
+                    "col2": gene_region.start,  # Gene start
+                    "col3": gene_region.end,  # Gene end
+                    "col4": gene_region.name,  # Gene name
+                    "reference_id": ref_name,  # Chromosome (duplicate for compatibility)
+                    "reference_start": ref_start,  # Read start position
+                    "reference_end": ref_end,  # Read end position
+                    "read_id": read.query_name,  # Read ID
                     "mapping_quality": read.mapping_quality,  # Mapping quality
                     "strand": "-" if read.is_reverse else "+",  # Strand
-                    "read_start": read.query_alignment_start,   # Read alignment start
-                    "read_end": read.query_alignment_end,       # Read alignment end
-                    "is_secondary": read.is_secondary,         # Is secondary alignment
+                    "read_start": read.query_alignment_start,  # Read alignment start
+                    "read_end": read.query_alignment_end,  # Read alignment end
+                    "is_secondary": read.is_secondary,  # Is secondary alignment
                     "is_supplementary": read.is_supplementary,  # Is supplementary alignment
-                    "mapping_span": ref_end - ref_start,       # Mapping span
+                    "mapping_span": ref_end - ref_start,  # Mapping span
                 }
             )
 
@@ -341,7 +339,7 @@ def _process_reads_for_fusions(
     """
     Process reads to find gene intersections and create fusion candidates.
     This function matches the original fusion code exactly.
-    
+
     Args:
         bamfile: Path to BAM file
         reads_with_supp: Set of read names with supplementary alignments
@@ -397,7 +395,9 @@ def _process_reads_for_fusions(
     df = _optimize_fusion_dataframe(df)
 
     # Apply the EXACT filtering thresholds from the original code: MQ > 40, span > 200
-    df = df[(df["mapping_quality"] > 40) & (df["mapping_span"] > 200)].reset_index(drop=True)
+    df = df[(df["mapping_quality"] > 40) & (df["mapping_span"] > 200)].reset_index(
+        drop=True
+    )
 
     return df if not df.empty else None
 
@@ -439,36 +439,36 @@ def _optimize_fusion_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 def _filter_fusion_candidates(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     """
     Filter fusion candidates using the EXACT logic from the original fusion code.
-    
+
     Args:
         df: DataFrame with fusion candidates
-        
+
     Returns:
         Filtered DataFrame or None if no candidates
     """
     if df is None or df.empty:
         return None
-    
+
     try:
         # Filter for duplicated reads (reads that appear multiple times)
         uniques = df["read_id"].duplicated(keep=False)
-        
+
         if not uniques.any():
             return None
-            
+
         doubles = df[uniques]
-        
+
         # Count unique genes per read_id
         counts = doubles.groupby("read_id", observed=True)["col4"].transform("nunique")
-        
+
         # Filter for reads that map to more than 1 gene (this matches the original code logic exactly)
         result = doubles[counts > 1]
-        
+
         if result.empty:
             return None
-            
+
         return result.reset_index(drop=True)
-        
+
     except Exception as e:
         logger.error(f"Error filtering fusion candidates: {str(e)}")
         return None
@@ -501,7 +501,7 @@ def process_bam_for_fusions_work(
     try:
         # Ensure gene regions are loaded
         _ensure_gene_regions_loaded(target_panel)
-        
+
         # Find reads with supplementary alignments
         reads_with_supp = find_reads_with_supplementary(bamfile)
 
@@ -542,7 +542,7 @@ def process_bam_file(
 ):
     """
     Process a single BAM file for fusion detection with disk persistence.
-    
+
     Args:
         file_path: Path to BAM file
         temp_dir: Temporary directory
@@ -561,25 +561,25 @@ def process_bam_file(
         existing_metadata = _load_fusion_metadata(work_dir, sample_id)
         if existing_metadata:
             # Merge existing data with current metadata
-            fusion_metadata = _merge_fusion_metadata_objects(existing_metadata, fusion_metadata)
-            logger.info(f"Loaded and merged existing fusion metadata for sample {sample_id}")
+            fusion_metadata = _merge_fusion_metadata_objects(
+                existing_metadata, fusion_metadata
+            )
+            logger.info(
+                f"Loaded and merged existing fusion metadata for sample {sample_id}"
+            )
 
     if has_sup:
         target_candidates, genome_wide_candidates = process_bam_for_fusions_work(
             file_path, target_panel
         )
-        
+
         # Apply fusion candidate filtering to get the final results
         if target_candidates is not None and not target_candidates.empty:
             target_candidates = _filter_fusion_candidates(target_candidates)
-            if target_candidates is not None:
-                candidates = _optimize_dataframe_memory(target_candidates)
-
+            
         if genome_wide_candidates is not None and not genome_wide_candidates.empty:
             genome_wide_candidates = _filter_fusion_candidates(genome_wide_candidates)
-            if genome_wide_candidates is not None:
-                all_candidates = _optimize_dataframe_memory(genome_wide_candidates)
-
+            
         fusion_metadata.processing_steps.append("supplementary_found")
         results = {
             "has_supplementary": True,
@@ -594,36 +594,41 @@ def process_bam_file(
         }
 
         # Store fusion data in metadata - APPEND to existing data, don't replace
-        if not hasattr(fusion_metadata, 'fusion_data') or fusion_metadata.fusion_data is None:
+        if (
+            not hasattr(fusion_metadata, "fusion_data")
+            or fusion_metadata.fusion_data is None
+        ):
             fusion_metadata.fusion_data = {}
-        
+
         # Ensure required keys exist
         if "target_candidates" not in fusion_metadata.fusion_data:
             fusion_metadata.fusion_data["target_candidates"] = []
         if "genome_wide_candidates" not in fusion_metadata.fusion_data:
             fusion_metadata.fusion_data["genome_wide_candidates"] = []
-        
+
         # Append new target candidates to existing ones
         if target_candidates is not None:
             new_target_records = target_candidates.to_dict("records")
             fusion_metadata.fusion_data["target_candidates"].extend(new_target_records)
-        
+
         # Append new genome-wide candidates to existing ones
         if genome_wide_candidates is not None:
             new_genome_records = genome_wide_candidates.to_dict("records")
-            fusion_metadata.fusion_data["genome_wide_candidates"].extend(new_genome_records)
-        
+            fusion_metadata.fusion_data["genome_wide_candidates"].extend(
+                new_genome_records
+            )
+
         # Save updated fusion metadata to disk
         if work_dir and sample_id:
             _save_fusion_metadata(fusion_metadata, work_dir, sample_id)
             logger.info(f"Saved updated fusion metadata for sample {sample_id}")
-            
+
         return results
     else:
         # Even if no supplementary reads, save metadata to disk for consistency
         if work_dir and sample_id:
             _save_fusion_metadata(fusion_metadata, work_dir, sample_id)
-            
+
         return {
             "has_supplementary": False,
             "target_candidates_count": 0,
@@ -654,63 +659,81 @@ def _generate_output_files(
             Dictionary mapping file type to file path
     """
     # Use accumulated data from fusion_metadata instead of just current analysis_results
-    if (hasattr(fusion_metadata, 'fusion_data') and 
-        fusion_metadata.fusion_data and 
-        fusion_metadata.fusion_data.get("target_candidates")):
-        
+    if (
+        hasattr(fusion_metadata, "fusion_data")
+        and fusion_metadata.fusion_data
+        and fusion_metadata.fusion_data.get("target_candidates")
+    ):
+
         # Convert accumulated target candidates back to DataFrame
         target_candidates_data = fusion_metadata.fusion_data["target_candidates"]
         if target_candidates_data:
             target_candidates = pd.DataFrame(target_candidates_data)
-            
+
             # Filter for fusion candidates using the original logic
             uniques = target_candidates["read_id"].duplicated(keep=False)
             if uniques.any():
                 doubles = target_candidates[uniques]
-                counts = doubles.groupby("read_id", observed=True)["col4"].transform("nunique")
+                counts = doubles.groupby("read_id", observed=True)["col4"].transform(
+                    "nunique"
+                )
                 result = doubles[counts > 1]  # Use > 1 to match original logic exactly
-                
+
                 if not result.empty:
                     # Save the filtered fusion candidates to CSV
                     result.to_csv(
-                        os.path.join(work_dir, sample_id, "fusion_candidates_master.csv"),
-                        index=False
+                        os.path.join(
+                            work_dir, sample_id, "fusion_candidates_master.csv"
+                        ),
+                        index=False,
                     )
-                    
+
                     # Preprocess for visualization
                     preprocess_fusion_data_standalone(
                         result,
-                        os.path.join(work_dir, sample_id, "fusion_candidates_master_processed.csv"),
+                        os.path.join(
+                            work_dir,
+                            sample_id,
+                            "fusion_candidates_master_processed.csv",
+                        ),
                     )
 
     # Use accumulated data from fusion_metadata for genome-wide candidates
-    if (hasattr(fusion_metadata, 'fusion_data') and 
-        fusion_metadata.fusion_data and 
-        fusion_metadata.fusion_data.get("genome_wide_candidates")):
-        
+    if (
+        hasattr(fusion_metadata, "fusion_data")
+        and fusion_metadata.fusion_data
+        and fusion_metadata.fusion_data.get("genome_wide_candidates")
+    ):
+
         # Convert accumulated genome-wide candidates back to DataFrame
         genome_wide_data = fusion_metadata.fusion_data["genome_wide_candidates"]
         if genome_wide_data:
             genome_wide_candidates = pd.DataFrame(genome_wide_data)
-            
+
             # Filter for fusion candidates using the original logic
             uniques_all = genome_wide_candidates["read_id"].duplicated(keep=False)
             if uniques_all.any():
                 doubles_all = genome_wide_candidates[uniques_all]
-                counts_all = doubles_all.groupby("read_id", observed=True)["col4"].transform("nunique")
-                result_all = doubles_all[counts_all > 1]  # Use > 1 to match original logic exactly
-                
+                counts_all = doubles_all.groupby("read_id", observed=True)[
+                    "col4"
+                ].transform("nunique")
+                result_all = doubles_all[
+                    counts_all > 1
+                ]  # Use > 1 to match original logic exactly
+
                 if not result_all.empty:
                     # Save the filtered genome-wide candidates to CSV
                     result_all.to_csv(
                         os.path.join(work_dir, sample_id, "fusion_candidates_all.csv"),
-                        index=False
+                        index=False,
                     )
-                    
+
                     # Preprocess for visualization
                     preprocess_fusion_data_standalone(
                         result_all,
-                        os.path.join(work_dir, sample_id, "fusion_candidates_all_processed.csv"),
+                        os.path.join(
+                            work_dir, sample_id, "fusion_candidates_all_processed.csv"
+                        ),
                     )
 
     # Create sv_count.txt file with content "0" if it doesn't exist
@@ -745,32 +768,34 @@ def find_and_process_bam_files(root_dir):
 # =============================================================================
 
 
-def _save_fusion_metadata(fusion_metadata: FusionMetadata, work_dir: str, sample_id: str) -> None:
+def _save_fusion_metadata(
+    fusion_metadata: FusionMetadata, work_dir: str, sample_id: str
+) -> None:
     """
     Save fusion metadata to disk for persistence between BAM file processing.
-    
+
     Args:
         fusion_metadata: FusionMetadata object to save
-        work_dir: Working directory 
+        work_dir: Working directory
         sample_id: Sample ID for the metadata file name
     """
     try:
         # Ensure sample directory exists
         sample_dir = os.path.join(work_dir, sample_id)
         os.makedirs(sample_dir, exist_ok=True)
-        
+
         # Create metadata file path
         metadata_path = os.path.join(sample_dir, f"{sample_id}_fusion_metadata.json")
-        
+
         # Convert dataclass to dictionary for JSON serialization
         metadata_dict = asdict(fusion_metadata)
-        
+
         # Save to JSON file
         with open(metadata_path, "w") as f:
             json.dump(metadata_dict, f, indent=2)
-            
+
         logger.debug(f"Saved fusion metadata to {metadata_path}")
-        
+
     except Exception as e:
         logger.error(f"Error saving fusion metadata: {str(e)}")
         # Don't raise - just log the error so processing can continue
@@ -779,11 +804,11 @@ def _save_fusion_metadata(fusion_metadata: FusionMetadata, work_dir: str, sample
 def _load_fusion_metadata(work_dir: str, sample_id: str) -> Optional[FusionMetadata]:
     """
     Load existing fusion metadata from disk.
-    
+
     Args:
         work_dir: Working directory
         sample_id: Sample ID for the metadata file name
-        
+
     Returns:
         FusionMetadata object if found, None otherwise
     """
@@ -791,90 +816,101 @@ def _load_fusion_metadata(work_dir: str, sample_id: str) -> Optional[FusionMetad
         # Create metadata file path
         sample_dir = os.path.join(work_dir, sample_id)
         metadata_path = os.path.join(sample_dir, f"{sample_id}_fusion_metadata.json")
-        
+
         if not os.path.exists(metadata_path):
             return None
-            
+
         # Load from JSON file
         with open(metadata_path, "r") as f:
             metadata_dict = json.load(f)
-            
+
         # Convert dictionary back to FusionMetadata object
         fusion_metadata = FusionMetadata(**metadata_dict)
-        
+
         # Ensure the loaded metadata has the correct structure
-        if not hasattr(fusion_metadata, 'fusion_data') or fusion_metadata.fusion_data is None:
+        if (
+            not hasattr(fusion_metadata, "fusion_data")
+            or fusion_metadata.fusion_data is None
+        ):
             fusion_metadata.fusion_data = {}
-        
+
         # Ensure required keys exist
         if "target_candidates" not in fusion_metadata.fusion_data:
             fusion_metadata.fusion_data["target_candidates"] = []
         if "genome_wide_candidates" not in fusion_metadata.fusion_data:
             fusion_metadata.fusion_data["genome_wide_candidates"] = []
-        
+
         logger.debug(f"Loaded fusion metadata from {metadata_path}")
-        logger.debug(f"Existing data: {len(fusion_metadata.fusion_data.get('target_candidates', []))} target, {len(fusion_metadata.fusion_data.get('genome_wide_candidates', []))} genome-wide")
-        
+        logger.debug(
+            f"Existing data: {len(fusion_metadata.fusion_data.get('target_candidates', []))} target, {len(fusion_metadata.fusion_data.get('genome_wide_candidates', []))} genome-wide"
+        )
+
         return fusion_metadata
-        
+
     except Exception as e:
         logger.warning(f"Error loading fusion metadata: {str(e)}")
         return None
 
 
-def _merge_fusion_metadata_objects(existing: FusionMetadata, new: FusionMetadata) -> FusionMetadata:
+def _merge_fusion_metadata_objects(
+    existing: FusionMetadata, new: FusionMetadata
+) -> FusionMetadata:
     """
     Merge two FusionMetadata objects, combining their fusion data.
-    
+
     Args:
         existing: Existing FusionMetadata from disk
         new: New FusionMetadata from current processing
-        
+
     Returns:
         Merged FusionMetadata object
     """
     # Start with the new metadata object
     merged = new
-    
+
     # Merge processing steps (remove duplicates)
     existing_steps = existing.processing_steps or []
     new_steps = new.processing_steps or []
     merged.processing_steps = list(set(existing_steps + new_steps))
-    
+
     # Merge fusion data
     existing_fusion_data = existing.fusion_data or {}
     new_fusion_data = new.fusion_data or {}
-    
+
     # Combine target candidates
     existing_target = existing_fusion_data.get("target_candidates", [])
     new_target = new_fusion_data.get("target_candidates", [])
     merged_target = existing_target + new_target
-    
-    # Combine genome-wide candidates  
+
+    # Combine genome-wide candidates
     existing_genome = existing_fusion_data.get("genome_wide_candidates", [])
     new_genome = new_fusion_data.get("genome_wide_candidates", [])
     merged_genome = existing_genome + new_genome
-    
+
     # Update merged metadata - ensure complete structure
     merged.fusion_data = {
         "target_candidates": merged_target,
         "genome_wide_candidates": merged_genome,
     }
-    
+
     # Ensure all required keys exist (defensive programming)
     if "target_candidates" not in merged.fusion_data:
         merged.fusion_data["target_candidates"] = []
     if "genome_wide_candidates" not in merged.fusion_data:
         merged.fusion_data["genome_wide_candidates"] = []
-    
+
     # Update analysis results counts
     if merged.analysis_results:
         merged.analysis_results["target_candidates_count"] = len(merged_target)
         merged.analysis_results["genome_wide_candidates_count"] = len(merged_genome)
-    
-    logger.info(f"Merged fusion metadata: {len(existing_target)} + {len(new_target)} = {len(merged_target)} target candidates")
-    logger.info(f"Merged fusion metadata: {len(existing_genome)} + {len(new_genome)} = {len(merged_genome)} genome-wide candidates")
-    
+
+    logger.info(
+        f"Merged fusion metadata: {len(existing_target)} + {len(new_target)} = {len(merged_target)} target candidates"
+    )
+    logger.info(
+        f"Merged fusion metadata: {len(existing_genome)} + {len(new_genome)} = {len(merged_genome)} genome-wide candidates"
+    )
+
     return merged
 
 
@@ -912,28 +948,33 @@ def _annotate_results(result: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
 def get_gene_network(gene_pairs):
     """
     Build gene network from gene pairs with memory optimization.
-    
+
     Args:
         gene_pairs: List of gene pairs, where each pair should be a tuple of 2 gene names
-        
+
     Returns:
         List of connected components (gene groups)
     """
     if not gene_pairs:
         return []
-    
+
     G = nx.Graph()
-    
+
     for pair in gene_pairs:
         # Validate that pair is a tuple/list with exactly 2 elements
         if isinstance(pair, (tuple, list)) and len(pair) == 2:
             # Ensure both elements are strings and not empty
-            if pair[0] and pair[1] and isinstance(pair[0], str) and isinstance(pair[1], str):
+            if (
+                pair[0]
+                and pair[1]
+                and isinstance(pair[0], str)
+                and isinstance(pair[1], str)
+            ):
                 G.add_edge(pair[0], pair[1])
-    
+
     if not G.nodes():
         return []
-    
+
     connected_components = list(nx.connected_components(G))
 
     # Free the graph immediately
@@ -1074,9 +1115,9 @@ def preprocess_fusion_data_standalone(
                     # Only create pairs if we have at least 2 genes
                     if len(genes) >= 2:
                         valid_gene_pairs.append(tuple(genes))
-            
+
             gene_pairs = valid_gene_pairs
-            
+
             gene_groups_test = get_gene_network(gene_pairs)
             gene_groups = []
 
@@ -1108,6 +1149,7 @@ def preprocess_fusion_data_standalone(
     except Exception as e:
         print(f"Error pre-processing fusion data: {str(e)}")
         import traceback
+
         print(f"Exception details: {traceback.format_exc()}")
 
 
@@ -1194,6 +1236,3 @@ def preprocess_structural_variants_standalone(output_dir: str) -> None:
     except Exception as e:
         logger.error(f"Error pre-processing structural variants: {str(e)}")
         logger.error("Exception details:", exc_info=True)
-
-
-

@@ -238,16 +238,25 @@ class MasterCSVManager:
 
             # Update numeric counters
             existing_data["samples_overview_active_jobs"] = int(
-                overview.get("active_jobs", existing_data.get("samples_overview_active_jobs", 0))
+                overview.get(
+                    "active_jobs", existing_data.get("samples_overview_active_jobs", 0)
+                )
             )
             existing_data["samples_overview_total_jobs"] = int(
-                overview.get("total_jobs", existing_data.get("samples_overview_total_jobs", 0))
+                overview.get(
+                    "total_jobs", existing_data.get("samples_overview_total_jobs", 0)
+                )
             )
             existing_data["samples_overview_completed_jobs"] = int(
-                overview.get("completed_jobs", existing_data.get("samples_overview_completed_jobs", 0))
+                overview.get(
+                    "completed_jobs",
+                    existing_data.get("samples_overview_completed_jobs", 0),
+                )
             )
             existing_data["samples_overview_failed_jobs"] = int(
-                overview.get("failed_jobs", existing_data.get("samples_overview_failed_jobs", 0))
+                overview.get(
+                    "failed_jobs", existing_data.get("samples_overview_failed_jobs", 0)
+                )
             )
 
             # Job types: normalize to comma-separated sorted unique values
@@ -265,7 +274,9 @@ class MasterCSVManager:
             if existing_data.get("samples_overview_job_types"):
                 old_types = {
                     t.strip()
-                    for t in str(existing_data.get("samples_overview_job_types", "")).split(",")
+                    for t in str(
+                        existing_data.get("samples_overview_job_types", "")
+                    ).split(",")
                     if t.strip()
                 }
             else:
@@ -283,7 +294,9 @@ class MasterCSVManager:
             # Save
             self._save_to_csv(existing_data, master_csv_path)
             logger = logging.getLogger("robin.master_csv")
-            logger.debug(f"Updated samples overview in master.csv for sample {sample_id}")
+            logger.debug(
+                f"Updated samples overview in master.csv for sample {sample_id}"
+            )
         except Exception as e:
             logger = logging.getLogger("robin.master_csv")
             logger.warning(f"Failed to update samples overview for {sample_id}: {e}")

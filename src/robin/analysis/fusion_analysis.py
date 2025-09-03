@@ -693,6 +693,7 @@ def preprocess_fusion_data_standalone(
     finally:
         # Force garbage collection
         import gc
+
         gc.collect()
 
 
@@ -754,52 +755,68 @@ def _generate_output_files(
 ) -> Dict[str, str]:
     """Generate output files for fusion analysis."""
     output_files = {}
-    
+
     # Process target panel candidates
     if analysis_results["target_candidates"] is not None:
         target_candidates = analysis_results["target_candidates"]
-        
+
         if not target_candidates.empty:
             # Filter for fusion candidates using the original logic
             uniques = target_candidates["read_id"].duplicated(keep=False)
             if uniques.any():
                 doubles = target_candidates[uniques]
-                counts = doubles.groupby("read_id", observed=True)["col4"].transform("nunique")
+                counts = doubles.groupby("read_id", observed=True)["col4"].transform(
+                    "nunique"
+                )
                 result = doubles[counts > 1]
-                
+
                 if not result.empty:
                     # Save raw fusion candidates
-                    target_output = os.path.join(work_dir, sample_id, "fusion_candidates_master.csv")
+                    target_output = os.path.join(
+                        work_dir, sample_id, "fusion_candidates_master.csv"
+                    )
                     result.to_csv(target_output, index=False)
                     output_files["fusion_candidates_master"] = target_output
-                    
+
                     # Generate processed data for visualization
-                    processed_output = os.path.join(work_dir, sample_id, "fusion_candidates_master_processed.csv")
+                    processed_output = os.path.join(
+                        work_dir, sample_id, "fusion_candidates_master_processed.csv"
+                    )
                     preprocess_fusion_data_standalone(result, processed_output)
-                    output_files["fusion_candidates_master_processed"] = processed_output
+                    output_files["fusion_candidates_master_processed"] = (
+                        processed_output
+                    )
 
     # Process genome-wide candidates
     if analysis_results["genome_wide_candidates"] is not None:
         genome_wide_candidates = analysis_results["genome_wide_candidates"]
-        
+
         if not genome_wide_candidates.empty:
             # Filter for fusion candidates using the original logic
             uniques_all = genome_wide_candidates["read_id"].duplicated(keep=False)
             if uniques_all.any():
                 doubles_all = genome_wide_candidates[uniques_all]
-                counts_all = doubles_all.groupby("read_id", observed=True)["col4"].transform("nunique")
+                counts_all = doubles_all.groupby("read_id", observed=True)[
+                    "col4"
+                ].transform("nunique")
                 result_all = doubles_all[counts_all > 1]
-                
+
                 if not result_all.empty:
                     # Save raw fusion candidates
-                    all_output = os.path.join(work_dir, sample_id, "fusion_candidates_all.csv")
+                    all_output = os.path.join(
+                        work_dir, sample_id, "fusion_candidates_all.csv"
+                    )
                     result_all.to_csv(all_output, index=False)
                     output_files["fusion_candidates_all"] = all_output
-                    
+
                     # Generate processed data for visualization
-                    processed_all_output = os.path.join(work_dir, sample_id, "fusion_candidates_all_processed.csv")
+                    processed_all_output = os.path.join(
+                        work_dir, sample_id, "fusion_candidates_all_processed.csv"
+                    )
                     preprocess_fusion_data_standalone(result_all, processed_all_output)
-                    output_files["fusion_candidates_all_processed"] = processed_all_output
+                    output_files["fusion_candidates_all_processed"] = (
+                        processed_all_output
+                    )
 
     return output_files
 

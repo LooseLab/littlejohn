@@ -15,10 +15,19 @@ from robin.reporting.report import create_pdf
 @click.command()
 @click.argument("filename", type=str)
 @click.argument("output", type=str)
-@click.option("--export-csv-dir", type=str, default=None, help="Directory to write CSV exports of report data")
-@click.option("--zip/--no-zip", default=False, help="Zip CSVs and manifest into a single archive")
+@click.option(
+    "--export-csv-dir",
+    type=str,
+    default=None,
+    help="Directory to write CSV exports of report data",
+)
+@click.option(
+    "--zip/--no-zip", default=False, help="Zip CSVs and manifest into a single archive"
+)
 @click.option("--debug", is_flag=True, help="Enable debug logging")
-def main(filename: str, output: str, export_csv_dir: str | None, zip: bool, debug: bool):
+def main(
+    filename: str, output: str, export_csv_dir: str | None, zip: bool, debug: bool
+):
     """Create a PDF report from ROBIN analysis results.
 
     Args:

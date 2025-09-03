@@ -5,7 +5,7 @@ This module contains styling-related code for the ROBIN report generation.
 """
 
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.colors import HexColor, white
+from reportlab.lib.colors import HexColor
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import TableStyle
@@ -64,30 +64,29 @@ class ReportStyles:
             "primary": HexColor("#4F9153"),  # ROBIN theme green (unchanged)
             "primary_container": HexColor("#D1E7DD"),  # Light green container
             "on_primary": HexColor("#FFFFFF"),  # White text on primary
-            "on_primary_container": HexColor("#0D3B1E"),  # Dark text on primary container
-            
+            "on_primary_container": HexColor(
+                "#0D3B1E"
+            ),  # Dark text on primary container
             # Secondary colors (M3 purple)
             "secondary": HexColor("#6750A4"),  # M3 purple
             "secondary_container": HexColor("#EADDFF"),  # Light purple container
             "on_secondary": HexColor("#FFFFFF"),  # White text on secondary
-            "on_secondary_container": HexColor("#21005D"),  # Dark text on secondary container
-            
+            "on_secondary_container": HexColor(
+                "#21005D"
+            ),  # Dark text on secondary container
             # Surface colors
             "surface": HexColor("#FEFBFF"),  # M3 surface
             "surface_variant": HexColor("#E7E0EC"),  # M3 surface variant
             "on_surface": HexColor("#1C1B1F"),  # M3 on surface
             "on_surface_variant": HexColor("#49454F"),  # M3 on surface variant
-            
             # Outline colors
             "outline": HexColor("#79747E"),  # M3 outline
             "outline_variant": HexColor("#CAC4D0"),  # M3 outline variant
-            
             # Semantic colors
             "success": HexColor("#4CAF50"),  # M3 success green
             "warning": HexColor("#FF9800"),  # M3 warning orange
             "error": HexColor("#F44336"),  # M3 error red
             "info": HexColor("#2196F3"),  # M3 info blue
-            
             # Legacy colors (for backward compatibility)
             "text": HexColor("#1C1B1F"),  # M3 on surface
             "muted": HexColor("#49454F"),  # M3 on surface variant
@@ -122,7 +121,7 @@ class ReportStyles:
             if style_name == "Title":
                 self.styles[style_name].fontName = bold_font
                 self.styles[style_name].fontSize = 20  # Enhanced from 18
-                self.styles[style_name].leading = 28   # M3 leading ratio
+                self.styles[style_name].leading = 28  # M3 leading ratio
                 self.styles[style_name].spaceAfter = 16
                 self.styles[style_name].spaceBefore = 8
                 self.styles[style_name].textColor = self.COLORS["primary"]
@@ -132,7 +131,7 @@ class ReportStyles:
             elif style_name == "Heading1":
                 self.styles[style_name].fontName = bold_font
                 self.styles[style_name].fontSize = 16  # Enhanced from 14
-                self.styles[style_name].leading = 24   # M3 leading ratio
+                self.styles[style_name].leading = 24  # M3 leading ratio
                 self.styles[style_name].spaceAfter = 12
                 self.styles[style_name].spaceBefore = 6
                 self.styles[style_name].textColor = self.COLORS["primary"]
@@ -141,7 +140,7 @@ class ReportStyles:
             elif style_name == "Heading2":
                 self.styles[style_name].fontName = medium_font
                 self.styles[style_name].fontSize = 14  # Enhanced from 12
-                self.styles[style_name].leading = 20   # M3 leading ratio
+                self.styles[style_name].leading = 20  # M3 leading ratio
                 self.styles[style_name].spaceAfter = 10
                 self.styles[style_name].spaceBefore = 5
                 self.styles[style_name].textColor = self.COLORS["secondary"]
@@ -150,7 +149,7 @@ class ReportStyles:
             else:  # Normal
                 self.styles[style_name].fontName = base_font
                 self.styles[style_name].fontSize = 11  # Enhanced from 9
-                self.styles[style_name].leading = 16   # M3 leading ratio
+                self.styles[style_name].leading = 16  # M3 leading ratio
                 self.styles[style_name].spaceBefore = 3
                 self.styles[style_name].spaceAfter = 3
                 self.styles[style_name].textColor = self.COLORS["on_surface"]
@@ -164,7 +163,7 @@ class ReportStyles:
         custom_styles = {
             "Smaller": {
                 "fontSize": 8,  # Enhanced from 7
-                "leading": 12,   # M3 leading ratio
+                "leading": 12,  # M3 leading ratio
                 "textColor": self.COLORS["on_surface_variant"],
                 "fontName": base_font,
                 "spaceAfter": 2,
@@ -172,7 +171,7 @@ class ReportStyles:
             },
             "Bold": {
                 "fontSize": 12,  # Enhanced from 10
-                "leading": 16,   # M3 leading ratio
+                "leading": 16,  # M3 leading ratio
                 "textColor": self.COLORS["primary"],
                 "fontName": bold_font,
                 "spaceAfter": 4,
@@ -180,7 +179,7 @@ class ReportStyles:
             },
             "Emphasis": {
                 "fontSize": 12,  # Enhanced from 10
-                "leading": 16,   # M3 leading ratio
+                "leading": 16,  # M3 leading ratio
                 "textColor": self.COLORS["secondary"],
                 "fontName": medium_font,
                 "spaceAfter": 4,
@@ -188,17 +187,17 @@ class ReportStyles:
             },
             "SummaryCard": {
                 "fontSize": 12,  # Enhanced from 11
-                "leading": 18,   # M3 leading ratio
+                "leading": 18,  # M3 leading ratio
                 "textColor": self.COLORS["on_surface"],
                 "backColor": self.COLORS["surface"],
                 "borderColor": self.COLORS["outline_variant"],
                 "borderWidth": 1,
                 "borderPadding": 12,  # Enhanced from 8
-                "spaceBefore": 12,    # Enhanced from 8
-                "spaceAfter": 12,     # Enhanced from 8
+                "spaceBefore": 12,  # Enhanced from 8
+                "spaceAfter": 12,  # Enhanced from 8
                 "bulletIndent": 0,
-                "leftIndent": 12,     # Enhanced from 8
-                "rightIndent": 12,    # Enhanced from 8
+                "leftIndent": 12,  # Enhanced from 8
+                "rightIndent": 12,  # Enhanced from 8
                 "fontName": medium_font,
                 "allowWidows": 0,
                 "allowOrphans": 0,
@@ -207,25 +206,25 @@ class ReportStyles:
             },
             "Metric": {
                 "fontSize": 14,  # Enhanced from 12
-                "leading": 20,   # M3 leading ratio
+                "leading": 20,  # M3 leading ratio
                 "textColor": self.COLORS["secondary"],
                 "alignment": 1,
-                "spaceBefore": 6,   # Enhanced from 4
-                "spaceAfter": 6,    # Enhanced from 4
+                "spaceBefore": 6,  # Enhanced from 4
+                "spaceAfter": 6,  # Enhanced from 4
                 "fontName": bold_font,
             },
             "Caption": {
                 "fontSize": 10,  # Enhanced from 9
-                "leading": 14,   # M3 leading ratio
+                "leading": 14,  # M3 leading ratio
                 "textColor": self.COLORS["on_surface_variant"],
                 "alignment": 1,
-                "spaceBefore": 6,   # Enhanced from 4
-                "spaceAfter": 16,   # Enhanced from 12
+                "spaceBefore": 6,  # Enhanced from 4
+                "spaceAfter": 16,  # Enhanced from 12
                 "fontName": base_font,
             },
             "MonoText": {
                 "fontSize": 10,  # Enhanced from 9
-                "leading": 14,   # M3 leading ratio
+                "leading": 14,  # M3 leading ratio
                 "fontName": mono_font,
                 "textColor": self.COLORS["on_surface"],
                 "backColor": self.COLORS["surface_variant"],
@@ -235,17 +234,17 @@ class ReportStyles:
             # Enhanced M3 typography scale
             "DisplayLarge": {
                 "fontSize": 24,  # Enhanced from 22
-                "leading": 32,   # M3 leading ratio
+                "leading": 32,  # M3 leading ratio
                 "textColor": self.COLORS["on_surface"],
                 "fontName": bold_font,
                 "spaceAfter": 20,  # Enhanced from 16
-                "spaceBefore": 10, # Enhanced from 8
+                "spaceBefore": 10,  # Enhanced from 8
                 "allowWidows": 0,
                 "allowOrphans": 0,
             },
             "DisplayMedium": {
                 "fontSize": 22,  # Enhanced from 20
-                "leading": 28,   # M3 leading ratio
+                "leading": 28,  # M3 leading ratio
                 "textColor": self.COLORS["on_surface"],
                 "fontName": bold_font,
                 "spaceAfter": 16,  # Enhanced from 12
@@ -255,7 +254,7 @@ class ReportStyles:
             },
             "HeadlineLarge": {
                 "fontSize": 20,  # Enhanced from 18
-                "leading": 28,   # M3 leading ratio
+                "leading": 28,  # M3 leading ratio
                 "textColor": self.COLORS["on_surface"],
                 "fontName": bold_font,
                 "spaceAfter": 16,  # Enhanced from 12
@@ -265,7 +264,7 @@ class ReportStyles:
             },
             "HeadlineMedium": {
                 "fontSize": 18,  # Enhanced from 16
-                "leading": 24,   # M3 leading ratio
+                "leading": 24,  # M3 leading ratio
                 "textColor": self.COLORS["on_surface"],
                 "fontName": bold_font,
                 "spaceAfter": 12,  # Enhanced from 10
@@ -275,7 +274,7 @@ class ReportStyles:
             },
             "HeadlineSmall": {
                 "fontSize": 16,  # Enhanced from 14
-                "leading": 20,   # M3 leading ratio
+                "leading": 20,  # M3 leading ratio
                 "textColor": self.COLORS["on_surface"],
                 "fontName": bold_font,
                 "spaceAfter": 10,  # Enhanced from 8
@@ -285,10 +284,10 @@ class ReportStyles:
             },
             "BodyLarge": {
                 "fontSize": 12,  # Enhanced from 11
-                "leading": 18,   # M3 leading ratio
+                "leading": 18,  # M3 leading ratio
                 "textColor": self.COLORS["on_surface"],
                 "fontName": base_font,
-                "spaceAfter": 8,   # Enhanced from 6
+                "spaceAfter": 8,  # Enhanced from 6
                 "spaceBefore": 4,  # Enhanced from 3
                 "allowWidows": 0,
                 "allowOrphans": 0,
@@ -296,10 +295,10 @@ class ReportStyles:
             },
             "BodyMedium": {
                 "fontSize": 11,  # Enhanced from 10
-                "leading": 16,   # M3 leading ratio
+                "leading": 16,  # M3 leading ratio
                 "textColor": self.COLORS["on_surface"],
                 "fontName": base_font,
-                "spaceAfter": 6,   # Enhanced from 4
+                "spaceAfter": 6,  # Enhanced from 4
                 "spaceBefore": 3,  # Enhanced from 2
                 "allowWidows": 0,
                 "allowOrphans": 0,
@@ -307,10 +306,10 @@ class ReportStyles:
             },
             "BodySmall": {
                 "fontSize": 10,  # Enhanced from 9
-                "leading": 14,   # M3 leading ratio
+                "leading": 14,  # M3 leading ratio
                 "textColor": self.COLORS["on_surface_variant"],
                 "fontName": base_font,
-                "spaceAfter": 4,   # Enhanced from 3
+                "spaceAfter": 4,  # Enhanced from 3
                 "spaceBefore": 2,  # Enhanced from 1
                 "allowWidows": 0,
                 "allowOrphans": 0,
@@ -525,7 +524,6 @@ class ReportStyles:
                 ("TOPPADDING", (0, 0), (-1, 0), 14),
                 ("BOTTOMPADDING", (0, 0), (-1, 0), 14),
                 ("LINEBELOW", (0, 0), (-1, 0), 3, self.COLORS["primary"]),
-                
                 # Body styling with alternating row colors
                 ("BACKGROUND", (0, 1), (-1, -1), self.COLORS["surface"]),
                 ("TEXTCOLOR", (0, 1), (-1, -1), self.COLORS["on_surface"]),
@@ -533,15 +531,17 @@ class ReportStyles:
                 ("FONTSIZE", (0, 1), (-1, -1), 10),
                 ("TOPPADDING", (0, 1), (-1, -1), 10),
                 ("BOTTOMPADDING", (0, 1), (-1, -1), 10),
-                
                 # Enhanced padding and alignment
                 ("LEFTPADDING", (0, 0), (-1, -1), 18),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 18),
                 ("ALIGN", (0, 0), (-1, -1), "LEFT"),
-                
                 # Subtle alternating row backgrounds for better readability
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [self.COLORS["surface"], self.COLORS["surface_variant"]]),
-                
+                (
+                    "ROWBACKGROUNDS",
+                    (0, 1),
+                    (-1, -1),
+                    [self.COLORS["surface"], self.COLORS["surface_variant"]],
+                ),
                 # Enhanced grid with better contrast
                 ("GRID", (0, 0), (-1, -1), 0.75, self.COLORS["outline"]),
             ]
@@ -558,7 +558,6 @@ class ReportStyles:
                 ("TOPPADDING", (0, 0), (-1, 0), 10),
                 ("BOTTOMPADDING", (0, 0), (-1, 0), 10),
                 ("LINEBELOW", (0, 0), (-1, 0), 2, self.COLORS["secondary"]),
-                
                 # Body styling with subtle alternating rows
                 ("BACKGROUND", (0, 1), (-1, -1), self.COLORS["surface"]),
                 ("TEXTCOLOR", (0, 1), (-1, -1), self.COLORS["on_surface"]),
@@ -566,15 +565,17 @@ class ReportStyles:
                 ("FONTSIZE", (0, 1), (-1, -1), 9),
                 ("TOPPADDING", (0, 1), (-1, -1), 8),
                 ("BOTTOMPADDING", (0, 1), (-1, -1), 8),
-                
                 # Enhanced padding and alignment
                 ("LEFTPADDING", (0, 0), (-1, -1), 14),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 14),
                 ("ALIGN", (0, 0), (-1, -1), "LEFT"),
-                
                 # Subtle alternating row backgrounds
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [self.COLORS["surface"], self.COLORS["surface_variant"]]),
-                
+                (
+                    "ROWBACKGROUNDS",
+                    (0, 1),
+                    (-1, -1),
+                    [self.COLORS["surface"], self.COLORS["surface_variant"]],
+                ),
                 # Enhanced grid
                 ("GRID", (0, 0), (-1, -1), 0.5, self.COLORS["outline_variant"]),
             ]
@@ -590,7 +591,6 @@ class ReportStyles:
                 ("FONTSIZE", (0, 0), (-1, 0), 11),
                 ("TOPPADDING", (0, 0), (-1, 0), 14),
                 ("BOTTOMPADDING", (0, 0), (-1, 0), 14),
-                
                 # Body styling
                 ("BACKGROUND", (0, 1), (-1, -1), self.COLORS["surface"]),
                 ("TEXTCOLOR", (0, 1), (-1, -1), self.COLORS["on_surface"]),
@@ -598,12 +598,10 @@ class ReportStyles:
                 ("FONTSIZE", (0, 1), (-1, -1), 10),
                 ("TOPPADDING", (0, 1), (-1, -1), 10),
                 ("BOTTOMPADDING", (0, 1), (-1, -1), 10),
-                
                 # Padding and alignment
                 ("LEFTPADDING", (0, 0), (-1, -1), 18),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 18),
                 ("ALIGN", (0, 0), (-1, -1), "LEFT"),
-                
                 # Border
                 ("BOX", (0, 0), (-1, -1), 1, self.COLORS["outline"]),
             ]

@@ -79,10 +79,10 @@ class RobinReport:
         return SimpleDocTemplate(
             self.filename,
             pagesize=A4,
-            rightMargin=1.0 * inch,    # Enhanced from 0.75 inch
-            leftMargin=1.0 * inch,     # Enhanced from 0.75 inch
-            topMargin=1.35 * inch,     # Keep existing for header compatibility
-            bottomMargin=1.0 * inch,   # Enhanced from 0.75 inch
+            rightMargin=1.0 * inch,  # Enhanced from 0.75 inch
+            leftMargin=1.0 * inch,  # Enhanced from 0.75 inch
+            topMargin=1.35 * inch,  # Keep existing for header compatibility
+            bottomMargin=1.0 * inch,  # Enhanced from 0.75 inch
         )
 
     def _initialize_sections(self):
@@ -109,7 +109,13 @@ class RobinReport:
             DisclaimerSection(self),
         ]
 
-    def generate_report(self, report_type="detailed", export_csv_dir=None, export_xlsx=False, export_zip=False):
+    def generate_report(
+        self,
+        report_type="detailed",
+        export_csv_dir=None,
+        export_xlsx=False,
+        export_zip=False,
+    ):
         """Generate the complete PDF report.
 
         Args:
@@ -128,7 +134,7 @@ class RobinReport:
                     f"Summary - {self.sample_id}", self.styles.styles["DisplayMedium"]
                 ),
             )
-            
+
             # Add enhanced summary card with M3 styling
             summary_card_content = f"""
             <b>ROBIN Analysis Report</b><br/>
@@ -138,8 +144,7 @@ class RobinReport:
             Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
             """
             self.elements_summary.insert(
-                1,
-                Paragraph(summary_card_content, self.styles.styles["InfoCard"])
+                1, Paragraph(summary_card_content, self.styles.styles["InfoCard"])
             )
             self.elements_summary.insert(2, Spacer(1, 16))
 
@@ -178,7 +183,8 @@ class RobinReport:
             if report_type == "detailed":
                 self.elements.insert(0, PageBreak())
                 self.elements.insert(
-                    1, Paragraph("Detailed Analysis", self.styles.styles["HeadlineLarge"])
+                    1,
+                    Paragraph("Detailed Analysis", self.styles.styles["HeadlineLarge"]),
                 )
                 self.elements.insert(2, Spacer(1, 16))  # Enhanced spacing
 
@@ -274,37 +280,60 @@ class RobinReport:
                                 for f in manifest["files"]:
                                     # Reload to avoid potential dtype issues
                                     try:
-                                        df = pd.read_csv(f["path"]) if f["path"].endswith(".csv") else None
+                                        df = (
+                                            pd.read_csv(f["path"])
+                                            if f["path"].endswith(".csv")
+                                            else None
+                                        )
                                     except Exception:
                                         df = None
                                     if df is not None:
-                                        sheet_name = os.path.basename(f["path"]).replace(
-                                            f"{self.sample_id}_", ""
-                                        ).replace(".csv", "")[:31]
-                                        df.to_excel(writer, index=False, sheet_name=sheet_name)
+                                        sheet_name = (
+                                            os.path.basename(f["path"])
+                                            .replace(f"{self.sample_id}_", "")
+                                            .replace(".csv", "")[:31]
+                                        )
+                                        df.to_excel(
+                                            writer, index=False, sheet_name=sheet_name
+                                        )
                             logger.info(f"XLSX written: {xlsx_path}")
                         except Exception as ex:
-                            logger.error("Error writing XLSX: %s", str(ex), exc_info=True)
+                            logger.error(
+                                "Error writing XLSX: %s", str(ex), exc_info=True
+                            )
 
                     # Optional ZIP archive
                     if export_zip:
                         try:
                             import zipfile
+
                             zip_path = os.path.join(
                                 export_csv_dir, f"{self.sample_id}_report_data.zip"
                             )
-                            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                            with zipfile.ZipFile(
+                                zip_path, "w", zipfile.ZIP_DEFLATED
+                            ) as zf:
                                 for f in manifest["files"]:
                                     if os.path.exists(f["path"]):
-                                        zf.write(f["path"], arcname=os.path.basename(f["path"]))
+                                        zf.write(
+                                            f["path"],
+                                            arcname=os.path.basename(f["path"]),
+                                        )
                                 if os.path.exists(manifest_path):
-                                    zf.write(manifest_path, arcname=os.path.basename(manifest_path))
+                                    zf.write(
+                                        manifest_path,
+                                        arcname=os.path.basename(manifest_path),
+                                    )
                             logger.info(f"ZIP written: {zip_path}")
                         except Exception as ex:
-                            logger.error("Error writing ZIP: %s", str(ex), exc_info=True)
+                            logger.error(
+                                "Error writing ZIP: %s", str(ex), exc_info=True
+                            )
                 except Exception as ex:
                     logger.error(
-                        "Error exporting CSV/XLSX/ZIP artifacts: %s", str(ex), exc_info=True
+                        "Error exporting CSV/XLSX/ZIP artifacts: %s",
+                        str(ex),
+                        exc_info=True,
                     )
 
             return self.filename
@@ -313,7 +342,14 @@ class RobinReport:
             raise
 
 
-def create_pdf(filename, output, report_type="detailed", export_csv_dir=None, export_xlsx=False, export_zip=False):
+def create_pdf(
+    filename,
+    output,
+    report_type="detailed",
+    export_csv_dir=None,
+    export_xlsx=False,
+    export_zip=False,
+):
     """Create a PDF report from ROBIN analysis results.
 
     Args:

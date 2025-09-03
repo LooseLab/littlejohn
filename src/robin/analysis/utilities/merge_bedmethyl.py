@@ -11,13 +11,11 @@ import gc
 from copy import deepcopy
 import numpy as np
 
-import sturgeon
 
 # Sturgeon-related imports (must be installed)
-from sturgeon.utils import validate_model_file, get_model_path, read_probes_file
-from sturgeon.prediction import bed_to_numpy
+from sturgeon.utils import read_probes_file
 
-#from sturgeon.utils import read_probes_file, map_methyl_calls_to_probes_chr
+# from sturgeon.utils import read_probes_file, map_methyl_calls_to_probes_chr
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -40,6 +38,7 @@ def configure_logging(level: int = logging.INFO) -> None:
         )
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
+
 
 def load_modkit_data(parquet_path):
     """
@@ -845,6 +844,7 @@ if __name__ == "__main__":
         logger.info("Bedmethyl processing completed successfully.")
     except Exception as e:
         logger.error(f"An error occurred during bedmethyl processing: {e}")
+
 
 def map_methyl_calls_to_probes_chr(
     probes_df: pd.DataFrame,

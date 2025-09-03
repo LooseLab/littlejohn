@@ -20,18 +20,20 @@ import logging
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List
 from robin.logging_config import get_job_logger
-from robin.analysis.utilities.merge_bedmethyl import load_modkit_data, modkit_pileup_file_to_bed
+from robin.analysis.utilities.merge_bedmethyl import (
+    load_modkit_data,
+    modkit_pileup_file_to_bed,
+)
 import tempfile
 import gc
 import pandas as pd
 import numpy as np
 
-#from robin.subpages.Sturgeon_object import predict_sample_from_dataframe
+# from robin.subpages.Sturgeon_object import predict_sample_from_dataframe
 
 import sturgeon
 
 # Sturgeon-related imports (must be installed)
-from sturgeon.utils import validate_model_file, get_model_path, read_probes_file
 from sturgeon.prediction import bed_to_numpy
 
 import sys
@@ -39,13 +41,13 @@ import sys
 import zipfile
 import json
 import onnxruntime
-from sturgeon.utils import load_bed_file, softmax, merge_predictions
-from sturgeon.constants import METHYL_VALUE, UNMETHYL_VALUE, NOMEASURE_VALUE
-import gc
+from sturgeon.utils import load_bed_file, softmax
+from sturgeon.constants import NOMEASURE_VALUE
 
 from robin import models
 
 logger = logging.getLogger(__name__)
+
 
 @dataclass
 class SturgeonMetadata:
@@ -146,7 +148,6 @@ class SturgeonAnalysis:
     def _get_probes_file(self, reference_genome: str) -> str:
         """Get the probes file path for the given reference genome"""
         import os
-        import sturgeon
 
         probes_file = os.path.join(
             os.path.dirname(sturgeon.__file__),
@@ -253,6 +254,7 @@ def sturgeon_handler(job, work_dir=None):
         job.context.add_error("sturgeon_analysis", str(e))
         logger.error(f"Error in Sturgeon analysis for {job.context.filepath}: {e}")
 
+
 def sturgeon_bam_background_work(parquet_path, output_path, probes_file, currenttime):
     # Initialize variables to None for cleanup
     merged_modkit_df = None
@@ -277,7 +279,7 @@ def sturgeon_bam_background_work(parquet_path, output_path, probes_file, current
             diagnosis = predict_sample_from_dataframe(result_df)
             mydf_to_save = diagnosis
             mydf_to_save["timestamp"] = currenttime
-            
+
             # if self.check_file_time(os.path.join(self.output, sampleID, "sturgeon_scores.csv")):
             if os.path.exists(os.path.join(output_path, "sturgeon_scores.csv")):
                 sturgeon_df_store = pd.read_csv(
@@ -324,8 +326,8 @@ def sturgeon_bam_background_work(parquet_path, output_path, probes_file, current
 
         # Force garbage collection
         gc.collect()
-        
-        
+
+
 def predict_sample_from_dataframe(
     bed_df: pd.DataFrame,
     # model_file: str,
@@ -397,11 +399,7 @@ def predict_sample_from_dataframe(
         os.path.dirname(os.path.abspath(models.__file__)), "general.zip"
     )
 
-    # Validate and load model
-    model_path = get_model_path(modelfile)
-    if not validate_model_file(modelfile):
-        raise ValueError(f"Invalid model file: {modelfile}")
-
+    
     # Save DataFrame as a temporary BED file
     with tempfile.NamedTemporaryFile(delete=True, suffix=".bed") as tmp_bed:
         temp_bed_file = tmp_bed.name
@@ -466,7 +464,6 @@ def model_forward(
     finally:
         if ort_value is not None:
             del ort_value
-
 
 
 def run_sturgeon_mem_free(model_file, bed_file):
@@ -564,7 +561,8 @@ def run_sturgeon_mem_free(model_file, bed_file):
             try:
                 inference_session.set_providers([])
                 del inference_session
-            except:
+            except Exception as e:
+                logger.error(f"Failed to delete inference session: {e}")
                 pass
 
         # Comprehensive cleanup of all variables
@@ -601,13 +599,15 @@ def run_sturgeon_mem_free(model_file, bed_file):
 
             # Clear any cached memory by getting device info
             ort.get_device()
-        except:
+        except Exception as e:
+            logger.error(f"Failed to clear cached memory: {e}")
             pass
 
         # Force garbage collection
         gc.collect()
 
     return prediction_df
+
 
 if __name__ in {"__main__", "__mp_main__"}:
     import argparse
@@ -640,4 +640,3 @@ if __name__ in {"__main__", "__mp_main__"}:
     else:
         # This is the main GUI launch
         print("GUI launched by auto-reload function.")
-        mainrun()

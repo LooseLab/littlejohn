@@ -310,17 +310,17 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 igv_status = ui.label("Checking for IGV-ready BAM files...").classes(
                     "text-sm text-gray-600"
                 )
-            
+
             # Add IGV library status indicator
             igv_lib_status = ui.label("IGV library: Checking...").classes(
                 "text-xs text-gray-500"
             )
-        
+
         # IGV state management - prevent unnecessary redraws
         def _get_igv_state():
             try:
                 key = str(sample_dir)
-                if hasattr(launcher, '_coverage_state'):
+                if hasattr(launcher, "_coverage_state"):
                     if key not in launcher._coverage_state:
                         launcher._coverage_state[key] = {}
                     return launcher._coverage_state[key]
@@ -328,29 +328,29 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     launcher._coverage_state = {}
                     launcher._coverage_state[key] = {}
                     return launcher._coverage_state[key]
-            except Exception as e:
+            except Exception:
                 # Return empty state as fallback
                 return {}
-        
+
         def _is_igv_ready():
             """Check if IGV browser is properly initialized and ready."""
             try:
                 state = _get_igv_state()
                 return (
-                    state.get("igv_initialized", False) and 
-                    state.get("igv_browser_ready", False) and
-                    state.get("igv_loaded_bam") is not None
+                    state.get("igv_initialized", False)
+                    and state.get("igv_browser_ready", False)
+                    and state.get("igv_loaded_bam") is not None
                 )
-            except Exception as e:
+            except Exception:
                 return False
-        
+
         def _set_igv_ready(bam_url: str):
             """Mark IGV as ready with the current BAM."""
             state = _get_igv_state()
             state["igv_initialized"] = True
             state["igv_browser_ready"] = True
             state["igv_loaded_bam"] = bam_url
-        
+
         def _clear_igv_state():
             """Reset IGV state to force reinitialization."""
             state = _get_igv_state()
@@ -358,7 +358,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             state["igv_browser_ready"] = False
             state["igv_loaded_bam"] = None
             state["igv_loading"] = False
-        
+
         # Immediate check for existing IGV BAM files
         def _check_existing_igv_bam():
             try:
@@ -366,7 +366,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 if _is_igv_ready():
                     igv_status.set_text("IGV is already loaded and ready.")
                     return
-                
+
                 # Determine candidate BAMs (prefer standardized IGV path)
                 igv_dir = sample_dir / "igv"
                 clair_dir = sample_dir / "clair3"
@@ -376,24 +376,26 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     clair_dir / "sorted_targets_exceeding.bam",
                     sample_dir / "target.bam",
                 ]
-                
+
                 bam_path = None
                 for p in candidates:
                     bai = Path(f"{p}.bai")
                     if p.exists() and bai.exists():
                         bam_path = p
                         break
-                
+
                 if bam_path is not None:
                     igv_status.set_text(f"Found existing BAM: {bam_path.name}")
                     # Trigger immediate IGV loading
                     ui.timer(0.1, lambda: _load_igv_bam(bam_path), once=True)
                 else:
-                    igv_status.set_text("No IGV-ready BAM found yet (need coordinate-sorted BAM with .bai).")
-                    
+                    igv_status.set_text(
+                        "No IGV-ready BAM found yet (need coordinate-sorted BAM with .bai)."
+                    )
+
             except Exception as e:
                 igv_status.set_text(f"Error checking for BAM files: {e}")
-        
+
         # Function to check if IGV library is available
         def _check_igv_library():
             """Check if the IGV JavaScript library is available."""
@@ -418,7 +420,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         return false;
                     }
                 """
-                
+
                 try:
                     result = ui.run_javascript(js_check, timeout=10.0)
                     # Update the status indicator
@@ -434,9 +436,9 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     igv_lib_status.classes("text-xs text-red-600")
                     print(f"Error checking IGV library: {e}")
                     return False
-            except Exception as e:
+            except Exception:
                 return False
-        
+
         # Function to retry IGV creation
         def _retry_igv_creation(bam_path: Path):
             """Retry IGV browser creation after a failure."""
@@ -446,7 +448,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             except Exception as e:
                 igv_status.set_text(f"Retry failed: {e}")
                 print(f"IGV retry error: {e}")
-        
+
         # Function to wait for element to be ready
         def _wait_for_element_ready():
             """Wait for the IGV div element to be properly rendered."""
@@ -478,32 +480,34 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 return ui.run_javascript(js_wait, timeout=10.0)
             except Exception:
                 return False
-        
+
         # Function to load BAM into IGV
         def _load_igv_bam(bam_path: Path):
             try:
                 # Get state first
                 state = _get_igv_state()
-                
+
                 # Prevent multiple simultaneous IGV loading attempts
                 if state.get("igv_loading", False):
                     igv_status.set_text("IGV is already being loaded, please wait...")
                     return
-                
+
                 # First check if IGV library is available
                 if not _check_igv_library():
-                    igv_status.set_text("IGV library not yet loaded. Please wait and try again.")
+                    igv_status.set_text(
+                        "IGV library not yet loaded. Please wait and try again."
+                    )
                     return
-                
+
                 # Check if we already have this BAM loaded
                 bam_url = f"/samples/{sample_dir.name}/{bam_path.name}"
                 if state.get("igv_loaded_bam") == bam_url and _is_igv_ready():
                     igv_status.set_text(f"BAM {bam_path.name} already loaded in IGV.")
                     return
-                
+
                 # Mark that we're loading IGV
                 state["igv_loading"] = True
-                
+
                 # Mount directory once
                 if bam_path.parent == sample_dir / "igv":
                     mount = f"/samples/{sample_dir.name}/igv"
@@ -511,7 +515,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     mount = f"/samples/{sample_dir.name}/clair3"
                 else:
                     mount = f"/samples/{sample_dir.name}"
-                
+
                 try:
                     if app is not None:
                         app.add_static_files(mount, str(bam_path.parent))
@@ -522,40 +526,42 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 # Define URLs
                 bam_url = f"{mount}/{bam_path.name}"
                 bai_url = f"{mount}/{bam_path.name}.bai"
-                
+
                 # Check if we need to create a new browser or just add tracks
-                if not state.get("igv_initialized") or not state.get("igv_browser_ready"):
+                if not state.get("igv_initialized") or not state.get(
+                    "igv_browser_ready"
+                ):
                     # Wait for element to be ready before creating IGV browser
                     if not _wait_for_element_ready():
                         igv_status.set_text("Waiting for IGV element to be ready...")
                         ui.timer(0.5, lambda: _load_igv_bam(bam_path), once=True)
                         return
-                    
+
                     # Create new IGV browser
-                    js_create = f"""
-                        try {{
+                    js_create = """
+                        try {
                             console.log('Creating minimal IGV browser...');
                             const el = document.getElementById('igv-container');
-                            if (!el) {{
+                            if (!el) {
                                 throw new Error('Target element not found');
-                            }}
+                            }
                             
-                            const options = {{ genome: 'hg38' }};
+                            const options = { genome: 'hg38' };
                             console.log('IGV options:', options);
                             
-                            igv.createBrowser(el, options).then(b => {{
+                            igv.createBrowser(el, options).then(b => {
                                 window.lj_igv = b; 
                                 window.lj_igv_browser_ready = true;
                                 console.log('IGV browser created successfully');
-                            }}).catch(error => {{
+                            }).catch(error => {
                                 console.error('IGV browser creation failed:', error);
                                 window.lj_igv_browser_ready = false;
-                            }});
-                        }} catch (error) {{
+                            });
+                        } catch (error) {
                             console.error('Error in IGV browser creation:', error);
-                        }}
+                        }
                     """
-                    
+
                     try:
                         ui.run_javascript(js_create, timeout=30.0)
                         _set_igv_ready(bam_url)
@@ -567,7 +573,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         print(f"IGV browser creation error: {e}")
                         # Clear loading flag on failure
                         state["igv_loading"] = False
-                        
+
                         # Try to retry after a delay
                         ui.timer(2.0, lambda: _retry_igv_creation(bam_path), once=True)
                         _clear_igv_state()
@@ -588,7 +594,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             }}
                         }}
                     """
-                    
+
                     try:
                         ui.run_javascript(js_add_track, timeout=30.0)
                         _set_igv_ready(bam_url)
@@ -599,17 +605,17 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         igv_status.set_text(f"Failed to update track: {e}")
                         # Clear loading flag on failure
                         state["igv_loading"] = False
-                        
+
             except Exception as e:
                 igv_status.set_text(f"Error loading IGV: {e}")
                 _clear_igv_state()
                 # Clear loading flag on error
-                if 'state' in locals():
+                if "state" in locals():
                     state["igv_loading"] = False
-        
+
         # Check for existing files once after a delay to ensure IGV library is loaded
         ui.timer(2.0, _check_existing_igv_bam, once=True)
-        
+
         # Function to refresh IGV BAM check (useful after regeneration)
         def _refresh_igv_check():
             try:
@@ -627,17 +633,19 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             clair_dir / bam_name,
                             sample_dir / bam_name,
                         ]
-                        
-                        if any(p.exists() and Path(f"{p}.bai").exists() for p in candidates):
+
+                        if any(
+                            p.exists() and Path(f"{p}.bai").exists() for p in candidates
+                        ):
                             igv_status.set_text("IGV is ready and BAM file is current.")
                             return
-                
+
                 # If we get here, we need to refresh
                 _clear_igv_state()
                 _check_existing_igv_bam()
             except Exception as e:
                 print(f"Error refreshing IGV check: {e}")
-        
+
         # Function to clear data tracks from IGV (keeps reference tracks)
         def _clear_igv_tracks():
             # Initialize state variable
@@ -647,7 +655,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 if not _is_igv_ready():
                     igv_status.set_text("IGV is not ready - cannot clear tracks.")
                     return
-                
+
                 # Simple JavaScript to clear tracks
                 js_clear = """
                     try {
@@ -677,21 +685,23 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         console.error('Error in track clearing:', e);
                     }
                 """
-                
+
                 ui.run_javascript(js_clear, timeout=15.0)
-                
+
                 # Update status and state
-                igv_status.set_text("IGV data tracks cleared. Reference tracks preserved.")
-                
+                igv_status.set_text(
+                    "IGV data tracks cleared. Reference tracks preserved."
+                )
+
                 # Don't clear the IGV state - just mark that data tracks are cleared
                 state = _get_igv_state()
                 if state:
                     state["data_tracks_cleared"] = True
-                
+
             except Exception as e:
                 igv_status.set_text(f"Error clearing tracks: {e}")
                 print(f"Error in _clear_igv_tracks: {e}")
-        
+
         # Function to reload BAM data into existing IGV browser
         def _reload_bam_track():
             # Initialize state variable
@@ -701,18 +711,18 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 if not _is_igv_ready():
                     igv_status.set_text("IGV is not ready - cannot reload BAM.")
                     return
-                
+
                 # Find the current BAM file
                 state = _get_igv_state()
                 current_bam_url = state.get("igv_loaded_bam")
-                
+
                 if not current_bam_url:
                     igv_status.set_text("No BAM file currently loaded - cannot reload.")
                     return
-                
+
                 # Extract BAM name for display
                 bam_name = current_bam_url.split("/")[-1]
-                
+
                 # JavaScript to reload the BAM track
                 js_reload = f"""
                     try {{
@@ -762,20 +772,20 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         console.error('Error reloading BAM track:', e);
                     }}
                 """
-                
+
                 ui.run_javascript(js_reload, timeout=20.0)
-                
+
                 # Update status
                 igv_status.set_text(f"Reloading BAM track: {bam_name}")
-                
+
                 # Mark that data tracks are no longer cleared
                 if state:
                     state["data_tracks_cleared"] = False
-                
+
             except Exception as e:
                 igv_status.set_text(f"Error reloading BAM: {e}")
                 print(f"Error in _reload_bam_track: {e}")
-        
+
         # Function to check console for errors
         def _check_console_errors():
             """Check the browser console for any JavaScript errors."""
@@ -797,7 +807,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     return ['Error checking console: ' + e.message];
                 }
             """
-            
+
             try:
                 errors = ui.run_javascript(js_check_console, timeout=10.0)
                 if errors and len(errors) > 0:
@@ -808,7 +818,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     ui.notify("No console errors found", type="positive")
             except Exception as e:
                 ui.notify(f"Error checking console: {e}", type="negative")
-        
+
         # Function to create an empty IGV browser
         def _create_empty_igv():
             """Create an empty IGV browser with no tracks."""
@@ -816,7 +826,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 if not _check_igv_library():
                     ui.notify("IGV library not available", type="warning")
                     return
-                                
+
                 # First, let's try to find the element and wait for it to be ready
                 js_find_element = """
                     console.log('Looking for IGV div element...');
@@ -857,13 +867,16 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         return false;
                     }
                 """
-                
+
                 # Check if element exists first
                 element_found = ui.run_javascript(js_find_element, timeout=10.0)
                 if not element_found:
-                    ui.notify("IGV div element not found. Please wait for the page to load completely.", type="warning")
+                    ui.notify(
+                        "IGV div element not found. Please wait for the page to load completely.",
+                        type="warning",
+                    )
                     return
-                
+
                 # Now create the IGV browser
                 js_empty = """
                     try {
@@ -894,15 +907,14 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         console.error('Error creating empty IGV:', error);
                     }
                 """
-                
+
                 ui.run_javascript(js_empty, timeout=30.0)
                 ui.notify("Empty IGV browser creation initiated", type="info")
-                
+
             except Exception as e:
                 ui.notify(f"Error creating empty IGV: {e}", type="negative")
                 print(f"Error in empty IGV: {e}")
-        
-        
+
         # Function to debug IGV state
         def _debug_igv_state():
             try:
@@ -920,105 +932,142 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     
                     console.log('Python state check requested');
                 """
-                
+
                 ui.run_javascript(js_debug, timeout=10.0)
-                
+
                 # Also show Python state
                 state = _get_igv_state()
                 debug_info = f"Python IGV State: initialized={state.get('igv_initialized')}, browser_ready={state.get('igv_browser_ready')}, bam={state.get('igv_loaded_bam')}, tracks_cleared={state.get('tracks_cleared')}"
                 igv_status.set_text(debug_info)
-                
+
             except Exception as e:
                 igv_status.set_text(f"Debug error: {e}")
                 print(f"Error in debug: {e}")
-        
+
         # IGV control buttons
         with ui.row().classes("items-center gap-2 mt-2"):
             ui.button("🔄 Refresh IGV Check", on_click=_refresh_igv_check)
             ui.button("🗂️ Clear Data Tracks", on_click=_clear_igv_tracks)
             ui.button("📁 Reload BAM", on_click=_reload_bam_track)
-            
+
         # Add IGV library status check timer once after a delay
         ui.timer(3.0, _check_igv_library, once=True)
-        
+
         # BAM generation buttons
         async def _trigger_build_sorted_bam(force_regenerate: bool = False) -> None:
             try:
                 # Debug: Check what's in the launcher
                 debug_info = f"launcher type: {type(launcher)}, workflow_runner: {getattr(launcher, 'workflow_runner', 'None')}"
-                
+
                 if force_regenerate:
-                    ui.notify(f"Force regenerate mode: will recreate IGV BAM even if it exists", type="info")
-                
+                    ui.notify(
+                        "Force regenerate mode: will recreate IGV BAM even if it exists",
+                        type="info",
+                    )
+
                 # Check if target.bam exists (required for IGV BAM generation)
                 target_bam = sample_dir / "target.bam"
                 if not target_bam.exists():
-                    ui.notify("No target.bam file found. Please run target analysis first.", type="warning")
+                    ui.notify(
+                        "No target.bam file found. Please run target analysis first.",
+                        type="warning",
+                    )
                     return
-                
+
                 # Check if IGV BAM already exists (only for normal generation, not force regenerate)
                 igv_bam = sample_dir / "igv" / "igv_ready.bam"
-                if not force_regenerate and igv_bam.exists() and (sample_dir / "igv" / "igv_ready.bam.bai").exists():
+                if (
+                    not force_regenerate
+                    and igv_bam.exists()
+                    and (sample_dir / "igv" / "igv_ready.bam.bai").exists()
+                ):
                     ui.notify("IGV BAM already exists and is ready.", type="positive")
                     return
-                
+
                 if force_regenerate:
-                    ui.notify(f"Proceeding with force regenerate - existing files will be overwritten", type="info")
-                
+                    ui.notify(
+                        "Proceeding with force regenerate - existing files will be overwritten",
+                        type="info",
+                    )
+
                 # Check if we have a workflow runner
-                if not hasattr(launcher, 'workflow_runner') or not launcher.workflow_runner:
-                    ui.notify(f"No workflow runner available. Debug: {debug_info}. GUI is running but workflow integration is not available. This may be a configuration issue.", type="warning")
+                if (
+                    not hasattr(launcher, "workflow_runner")
+                    or not launcher.workflow_runner
+                ):
+                    ui.notify(
+                        f"No workflow runner available. Debug: {debug_info}. GUI is running but workflow integration is not available. This may be a configuration issue.",
+                        type="warning",
+                    )
                     return
-                
+
                 # Submit the IGV BAM generation job to the workflow system
                 try:
                     runner = launcher.workflow_runner
                     sample_id = sample_dir.name
-                    
+
                     # Check if it's a Ray workflow or Simple workflow
-                    if hasattr(runner, 'submit_sample_job'):
+                    if hasattr(runner, "submit_sample_job"):
                         # Simple workflow
-                        success = runner.submit_sample_job(str(sample_dir), 'igv_bam', sample_id, force_regenerate)
-                    elif hasattr(runner, 'manager') and hasattr(runner.manager, 'submit_sample_job'):
+                        success = runner.submit_sample_job(
+                            str(sample_dir), "igv_bam", sample_id, force_regenerate
+                        )
+                    elif hasattr(runner, "manager") and hasattr(
+                        runner.manager, "submit_sample_job"
+                    ):
                         # Ray workflow - need to get the coordinator
                         # This is more complex for Ray, so we'll provide a fallback
                         ui.notify(
                             "Ray workflow detected. IGV BAM generation should happen automatically "
                             "after target analysis completes. If you need to regenerate it, "
-                            "please restart the workflow or check the logs.", 
-                            type="info"
+                            "please restart the workflow or check the logs.",
+                            type="info",
                         )
                         return
                     else:
-                        ui.notify("Unknown workflow type. Cannot submit IGV BAM job.", type="warning")
+                        ui.notify(
+                            "Unknown workflow type. Cannot submit IGV BAM job.",
+                            type="warning",
+                        )
                         return
-                    
+
                     if success:
                         action = "regenerated" if force_regenerate else "generated"
-                        ui.notify(f"IGV BAM {action} job submitted to workflow queue!", type="positive")
+                        ui.notify(
+                            f"IGV BAM {action} job submitted to workflow queue!",
+                            type="positive",
+                        )
                         # Refresh the IGV check after successful job submission
                         _refresh_igv_check()
                     else:
-                        ui.notify("Failed to submit IGV BAM generation job. Check logs for details.", type="warning")
-                        
+                        ui.notify(
+                            "Failed to submit IGV BAM generation job. Check logs for details.",
+                            type="warning",
+                        )
+
                 except Exception as e:
                     ui.notify(f"Error submitting IGV BAM job: {e}", type="negative")
-                    
+
             except Exception as e:
                 try:
                     ui.notify(f"Error checking IGV BAM status: {e}", type="negative")
                 except Exception:
                     # Client may have disconnected, ignore UI errors
                     pass
-        
+
         with ui.row().classes("items-center gap-2 mt-2"):
-            ui.button("Generate IGV BAM (if missing)", on_click=_trigger_build_sorted_bam)
-            ui.button("Force Regenerate IGV BAM", on_click=lambda: _trigger_build_sorted_bam(force_regenerate=True))
+            ui.button(
+                "Generate IGV BAM (if missing)", on_click=_trigger_build_sorted_bam
+            )
+            ui.button(
+                "Force Regenerate IGV BAM",
+                on_click=lambda: _trigger_build_sorted_bam(force_regenerate=True),
+            )
 
     # SNP Analysis section
     with ui.card().classes("w-full"):
         ui.label("🧬 SNP Analysis").classes("text-lg font-semibold mb-2")
-        
+
         # SNP Analysis controls and status
         with ui.row().classes("w-full items-center justify-between mb-4"):
             with ui.column().classes("gap-2"):
@@ -1026,54 +1075,64 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 snp_status_label = ui.label("Ready to run SNP analysis").classes(
                     "text-sm text-gray-600"
                 )
-                
+
                 # Add file availability status
                 snp_files_status = ui.label("Checking required files...").classes(
                     "text-xs text-gray-500"
                 )
-            
+
             with ui.column().classes("gap-2 items-end"):
                 # SNP Analysis button
                 snp_analysis_button = ui.button(
                     "Run SNP Analysis",
                     icon="play_arrow",
-                    on_click=lambda: _trigger_snp_analysis()
+                    on_click=lambda: _trigger_snp_analysis(),
                 ).props("color=primary data-snp-analysis-button")
-                
+
                 # Force regenerate checkbox
                 force_regenerate_checkbox = ui.checkbox(
-                    "Force regenerate",
-                    value=False
+                    "Force regenerate", value=False
                 ).props("dense")
-        
+
         # SNP Analysis requirements check
         with ui.expansion().classes("w-full").props("icon=info"):
             ui.label("Requirements").classes("text-sm font-medium mb-2")
             with ui.column().classes("gap-1 text-sm"):
-                ui.label("• target.bam - Target regions BAM file (generated by target analysis)")
-                ui.label("• targets_exceeding_threshold.bed - BED file defining regions (auto-generated by target analysis)")
-                ui.label("• Reference genome (hg38 recommended) - provided via CLI --reference option")
+                ui.label(
+                    "• target.bam - Target regions BAM file (generated by target analysis)"
+                )
+                ui.label(
+                    "• targets_exceeding_threshold.bed - BED file defining regions (auto-generated by target analysis)"
+                )
+                ui.label(
+                    "• Reference genome (hg38 recommended) - provided via CLI --reference option"
+                )
                 ui.label("• Docker running with hkubal/clairs-to:latest image")
                 ui.label("• snpEff and SnpSift installed")
-            
+
             # Add helpful note about file generation
             with ui.row().classes("w-full mt-2 p-2 bg-blue-50 rounded"):
                 ui.icon("info").classes("text-blue-600")
-                ui.label("Note: Both target.bam and targets_exceeding_threshold.bed are automatically generated when you run target analysis. You don't need to create them manually.").classes("text-sm text-blue-800")
-        
+                ui.label(
+                    "Note: Both target.bam and targets_exceeding_threshold.bed are automatically generated when you run target analysis. You don't need to create them manually."
+                ).classes("text-sm text-blue-800")
+
         # SNP Analysis results display
         with ui.expansion().classes("w-full").props("icon=assessment"):
             ui.label("Results").classes("text-sm font-medium mb-2")
-            
+
             # Results status
-            snp_results_status = ui.label("No SNP analysis results yet").classes(
-                "text-sm text-gray-600"
-            ).props("data-snp-results-status")
-            
+            snp_results_status = (
+                ui.label("No SNP analysis results yet")
+                .classes("text-sm text-gray-600")
+                .props("data-snp-results-status")
+            )
+
             # Results table placeholder
             snp_results_container = ui.column().classes("w-full")
-            
-                            # Function to check and display SNP results
+
+            # Function to check and display SNP results
+
         def _check_snp_results():
             try:
                 clair_dir = sample_dir / "clair3"
@@ -1081,13 +1140,13 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 indel_vcf = clair_dir / "snpsift_indel_output.vcf"
                 snp_csv = clair_dir / "snpsift_output.vcf.csv"
                 indel_csv = clair_dir / "snpsift_indel_output.vcf.csv"
-                
+
                 if snp_vcf.exists() and indel_vcf.exists():
                     snp_results_status.set_text("SNP analysis completed successfully!")
-                    
+
                     # Clear previous results
                     snp_results_container.clear()
-                    
+
                     # Display results summary
                     with snp_results_container:
                         with ui.row().classes("w-full gap-4"):
@@ -1096,54 +1155,67 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 if snp_csv.exists():
                                     try:
                                         snp_df = pd.read_csv(snp_csv)
-                                        ui.label(f"Total SNPs: {len(snp_df)}").classes("text-xs text-gray-600")
+                                        ui.label(f"Total SNPs: {len(snp_df)}").classes(
+                                            "text-xs text-gray-600"
+                                        )
                                     except Exception:
-                                        ui.label("SNP data available").classes("text-xs text-green-600")
+                                        ui.label("SNP data available").classes(
+                                            "text-xs text-green-600"
+                                        )
                                 else:
-                                    ui.label("SNP data available").classes("text-xs text-green-600")
-                            
+                                    ui.label("SNP data available").classes(
+                                        "text-xs text-green-600"
+                                    )
+
                             with ui.card().classes("flex-1"):
                                 ui.label("INDELs").classes("text-sm font-medium")
                                 if indel_csv.exists():
                                     try:
                                         indel_df = pd.read_csv(indel_csv)
-                                        ui.label(f"Total INDELs: {len(indel_df)}").classes("text-xs text-gray-600")
+                                        ui.label(
+                                            f"Total INDELs: {len(indel_df)}"
+                                        ).classes("text-xs text-gray-600")
                                     except Exception:
-                                        ui.label("INDEL data available").classes("text-xs text-green-600")
+                                        ui.label("INDEL data available").classes(
+                                            "text-xs text-green-600"
+                                        )
                                 else:
-                                    ui.label("INDEL data available").classes("text-xs text-green-600")
-                    
+                                    ui.label("INDEL data available").classes(
+                                        "text-xs text-green-600"
+                                    )
+
                     # Update button state
                     snp_analysis_button.set_text("Rerun SNP Analysis")
                     snp_analysis_button.props("color=secondary")
-                    
+
                     # Add detailed results viewer
                     with ui.expansion().classes("w-full").props("icon=table_chart"):
                         ui.label("Detailed Results").classes("text-sm font-medium mb-2")
-                        
+
                         # Tabs for SNPs and INDELs
-                        with ui.tabs().classes('w-full') as tabs:
-                            with ui.tab('SNPs', icon='dna'):
+                        with ui.tabs().classes("w-full"):# as tabs:
+                            with ui.tab("SNPs", icon="dna"):
                                 _display_variant_table(snp_csv, "SNP", clair_dir)
-                            
-                            with ui.tab('INDELs', icon='straighten'):
+
+                            with ui.tab("INDELs", icon="straighten"):
                                 _display_variant_table(indel_csv, "INDEL", clair_dir)
-                    
+
                 else:
                     snp_results_status.set_text("No SNP analysis results found")
-                    
+
             except Exception as e:
                 snp_results_status.set_text(f"Error checking results: {e}")
-        
+
         # Helper function to detect gzipped files
         def _is_gzipped(file_path):
             """Check if a file is gzipped by reading first few bytes"""
             try:
-                with open(file_path, 'rb') as f:
-                    return f.read(2) == b'\x1f\x8b'
-            except:
+                with open(file_path, "rb") as f:
+                    return f.read(2) == b"\x1f\x8b"
+            except Exception as e:
+                logging.debug(f"   Coverage: <access denied>: {e}")
                 return False
-        
+
         # Function to display variant table with filtering and details
         def _display_variant_table(csv_file, variant_type, clair_dir):
             """Display variant data in a comprehensive table with filtering"""
@@ -1154,157 +1226,226 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     vcf_file = clair_dir / "snpsift_output.vcf"
                 else:
                     vcf_file = clair_dir / "snpsift_indel_output.vcf"
-                
+
                 if not vcf_file.exists():
-                    ui.label(f"No {variant_type} VCF data available").classes("text-sm text-gray-500")
+                    ui.label(f"No {variant_type} VCF data available").classes(
+                        "text-sm text-gray-500"
+                    )
                     return
-                
+
                 # Read the VCF data directly
                 df = None
                 try:
                     # Check if file is compressed
-                    if str(vcf_file).endswith('.gz') or _is_gzipped(vcf_file):
+                    if str(vcf_file).endswith(".gz") or _is_gzipped(vcf_file):
                         import gzip
-                        with gzip.open(vcf_file, 'rt') as f:
-                            lines = [line.strip() for line in f if not line.startswith('#')]
+
+                        with gzip.open(vcf_file, "rt") as f:
+                            lines = [
+                                line.strip() for line in f if not line.startswith("#")
+                            ]
                     else:
-                        with open(vcf_file, 'r') as f:
-                            lines = [line.strip() for line in f if not line.startswith('#')]
-                    
+                        with open(vcf_file, "r") as f:
+                            lines = [
+                                line.strip() for line in f if not line.startswith("#")
+                            ]
+
                     if not lines:
-                        ui.label(f"No {variant_type} variants found").classes("text-sm text-gray-500")
+                        ui.label(f"No {variant_type} variants found").classes(
+                            "text-sm text-gray-500"
+                        )
                         return
-                    
+
                     # Parse VCF data properly
                     data = []
                     for line in lines:
-                        fields = line.split('\t')
+                        fields = line.split("\t")
                         if len(fields) >= 8:  # Minimum VCF format
-                            data.append(fields[:8])  # CHROM, POS, ID, REF, ALT, QUAL, FILTER, INFO
-                    
+                            data.append(
+                                fields[:8]
+                            )  # CHROM, POS, ID, REF, ALT, QUAL, FILTER, INFO
+
                     # Create DataFrame with proper column names
-                    df = pd.DataFrame(data, columns=['CHROM', 'POS', 'ID', 'REF', 'ALT', 'QUAL', 'FILTER', 'INFO'])
-                    
+                    df = pd.DataFrame(
+                        data,
+                        columns=[
+                            "CHROM",
+                            "POS",
+                            "ID",
+                            "REF",
+                            "ALT",
+                            "QUAL",
+                            "FILTER",
+                            "INFO",
+                        ],
+                    )
+
                 except Exception as e:
-                    ui.label(f"Error reading {variant_type} VCF: {e}").classes("text-sm text-red-500")
+                    ui.label(f"Error reading {variant_type} VCF: {e}").classes(
+                        "text-sm text-red-500"
+                    )
                     return
-                
+
                 if df.empty:
-                    ui.label(f"No {variant_type} variants found").classes("text-sm text-gray-500")
+                    ui.label(f"No {variant_type} variants found").classes(
+                        "text-sm text-gray-500"
+                    )
                     return
-                
+
                 # Display summary statistics
                 with ui.row().classes("w-full gap-4 mb-4"):
                     with ui.card().classes("flex-1"):
-                        ui.label(f"Total {variant_type}s").classes("text-sm font-medium")
-                        ui.label(f"{len(df)}").classes("text-2xl font-bold text-blue-600")
-                    
+                        ui.label(f"Total {variant_type}s").classes(
+                            "text-sm font-medium"
+                        )
+                        ui.label(f"{len(df)}").classes(
+                            "text-2xl font-bold text-blue-600"
+                        )
+
                     with ui.card().classes("flex-1"):
                         ui.label("Passing Filters").classes("text-sm font-medium")
                         # Check if we have filter data in the FILTER column
-                        if 'FILTER' in df.columns:
+                        if "FILTER" in df.columns:
                             try:
                                 # Count PASS variants
-                                passing = sum(1 for val in df['FILTER'] if str(val) == 'PASS')
-                                ui.label(f"{passing}").classes("text-2xl font-bold text-green-600")
-                            except:
-                                ui.label("N/A").classes("text-2xl font-bold text-gray-400")
+                                passing = sum(
+                                    1 for val in df["FILTER"] if str(val) == "PASS"
+                                )
+                                ui.label(f"{passing}").classes(
+                                    "text-2xl font-bold text-green-600"
+                                )
+                            except Exception as e:
+                                logging.debug(f"   Coverage: <access denied>: {e}")
+                                ui.label("N/A").classes(
+                                    "text-2xl font-bold text-gray-400"
+                                )
                         else:
                             ui.label("N/A").classes("text-2xl font-bold text-gray-400")
-                    
+
                     with ui.card().classes("flex-1"):
                         ui.label("Avg Quality").classes("text-sm font-medium")
                         # Check if we have quality data in the QUAL column
-                        if 'QUAL' in df.columns:
+                        if "QUAL" in df.columns:
                             try:
                                 # Calculate average quality from QUAL column
-                                qual_values = pd.to_numeric(df['QUAL'], errors='coerce')
+                                qual_values = pd.to_numeric(df["QUAL"], errors="coerce")
                                 avg_qual = qual_values.mean()
                                 if pd.notna(avg_qual):
-                                    ui.label(f"{avg_qual:.1f}").classes("text-2xl font-bold text-purple-600")
+                                    ui.label(f"{avg_qual:.1f}").classes(
+                                        "text-2xl font-bold text-purple-600"
+                                    )
                                 else:
-                                    ui.label("N/A").classes("text-2xl font-bold text-gray-400")
-                            except:
-                                ui.label("N/A").classes("text-2xl font-bold text-gray-400")
+                                    ui.label("N/A").classes(
+                                        "text-2xl font-bold text-gray-400"
+                                    )
+                            except Exception as e:
+                                logging.debug(f"   Coverage: <access denied>: {e}")
+                                ui.label("N/A").classes(
+                                    "text-2xl font-bold text-gray-400"
+                                )
                         else:
                             ui.label("N/A").classes("text-2xl font-bold text-gray-400")
-                
+
                 # Add filtering controls
                 with ui.row().classes("w-full gap-4 mb-4"):
                     # Quality filter
                     quality_threshold = ui.input(
-                        value="0",
-                        label="Min Quality"
+                        value="0", label="Min Quality"
                     ).classes("w-32")
-                    
+
                     # Filter status
                     filter_status = ui.select(
-                        options=["All", "PASS", "NonSomatic", "LowQual", "LowAltBQ", "LowAltMQ"],
+                        options=[
+                            "All",
+                            "PASS",
+                            "NonSomatic",
+                            "LowQual",
+                            "LowAltBQ",
+                            "LowAltMQ",
+                        ],
                         value="All",
-                        label="Filter Status"
+                        label="Filter Status",
                     ).classes("w-40")
-                    
+
                     # Apply filters button
-                    filter_button = ui.button("Apply Filters", icon="filter_list").classes("w-32")
-                
+                    filter_button = ui.button(
+                        "Apply Filters", icon="filter_list"
+                    ).classes("w-32")
+
                 # Create filtered dataframe
                 filtered_df = df.copy()
-                
+
                 def apply_filters():
                     nonlocal filtered_df
                     filtered_df = df.copy()
-                    
+
                     # Apply quality filter
                     try:
                         quality_val = float(quality_threshold.value)
-                        if quality_val > 0 and 'QUAL' in filtered_df.columns:
+                        if quality_val > 0 and "QUAL" in filtered_df.columns:
                             # Filter by quality in QUAL column
-                            qual_values = pd.to_numeric(filtered_df['QUAL'], errors='coerce')
+                            qual_values = pd.to_numeric(
+                                filtered_df["QUAL"], errors="coerce"
+                            )
                             quality_mask = qual_values >= quality_val
                             filtered_df = filtered_df[quality_mask]
                     except (ValueError, TypeError):
                         pass  # Invalid quality value, skip filtering
-                    
+
                     # Apply filter status
-                    if filter_status.value != "All" and 'FILTER' in filtered_df.columns:
+                    if filter_status.value != "All" and "FILTER" in filtered_df.columns:
                         # Filter by status in FILTER column
-                        filter_mask = filtered_df['FILTER'] == filter_status.value
+                        filter_mask = filtered_df["FILTER"] == filter_status.value
                         filtered_df = filtered_df[filter_mask]
-                    
+
                     # Update table
                     if variant_table:
                         variant_table.clear()
                         new_table = _create_variant_table(filtered_df, variant_type)
                         if new_table:
                             variant_table.replace(new_table)
-                    
+
                     # Update summary
-                    ui.notify(f"Showing {len(filtered_df)} of {len(df)} {variant_type}s")
-                
+                    ui.notify(
+                        f"Showing {len(filtered_df)} of {len(df)} {variant_type}s"
+                    )
+
                 filter_button.on_click(apply_filters)
-                
+
                 # Create conventional table using ui.table.from_pandas
                 def _create_variant_table(data_df, v_type):
                     """Create a conventional table from pandas DataFrame"""
                     if data_df.empty:
-                        ui.label(f"No {v_type}s match the current filters").classes("text-sm text-gray-500")
+                        ui.label(f"No {v_type}s match the current filters").classes(
+                            "text-sm text-gray-500"
+                        )
                         return None
-                    
+
                     # Prepare DataFrame for display
                     display_df = data_df.copy()
-                    
+
                     # The DataFrame already has proper VCF column names
                     # Select relevant columns for display
-                    display_columns = ['CHROM', 'POS', 'REF', 'ALT', 'QUAL', 'FILTER', 'INFO']
+                    display_columns = [
+                        "CHROM",
+                        "POS",
+                        "REF",
+                        "ALT",
+                        "QUAL",
+                        "FILTER",
+                        "INFO",
+                    ]
                     if all(col in display_df.columns for col in display_columns):
                         display_df = display_df[display_columns]
                     else:
-                        ui.label(f"Invalid VCF format for {v_type}s").classes("text-sm text-red-500")
+                        ui.label(f"Invalid VCF format for {v_type}s").classes(
+                            "text-sm text-red-500"
+                        )
                         return None
-                        
+
                     # Clean up data
                     display_df = display_df.replace({np.nan: None})
-                    
+
                     # Add quality color coding
                     def color_quality(qual):
                         try:
@@ -1315,29 +1456,30 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 return f"<span style='color: #d97706; font-weight: bold;'>{qual_val:.1f}</span>"
                             else:
                                 return f"<span style='color: #dc2626; font-weight: bold;'>{qual_val:.1f}</span>"
-                        except:
+                        except Exception as e:
+                            logging.debug(f"   Coverage: <access denied>: {e}")
                             return str(qual)
-                    
+
                     # Apply quality formatting
-                    display_df['QUAL'] = display_df['QUAL'].apply(color_quality)
-                    
+                    display_df["QUAL"] = display_df["QUAL"].apply(color_quality)
+
                     # Add filter color coding
                     def color_filter(filter_val):
-                        if filter_val == 'PASS':
+                        if filter_val == "PASS":
                             return f"<span style='color: #059669; font-weight: bold;'>{filter_val}</span>"
                         else:
                             return f"<span style='color: #dc2626; font-weight: bold;'>{filter_val}</span>"
-                    
-                    display_df['FILTER'] = display_df['FILTER'].apply(color_filter)
-                    
+
+                    display_df["FILTER"] = display_df["FILTER"].apply(color_filter)
+
                     # Truncate INFO field for display
                     def truncate_info(info_val):
                         if info_val and len(str(info_val)) > 50:
                             return str(info_val)[:50] + "..."
                         return str(info_val)
-                    
-                    display_df['INFO'] = display_df['INFO'].apply(truncate_info)
-                    
+
+                    display_df["INFO"] = display_df["INFO"].apply(truncate_info)
+
                     # Create table
                     variant_table = (
                         ui.table.from_pandas(display_df, pagination=25)
@@ -1345,13 +1487,14 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         .style("height: 600px")
                         .style("font-size: 90%; font-weight: 300")
                     )
-                    
+
                     # Make all columns sortable
                     for col in variant_table.columns:
                         col["sortable"] = True
-                    
+
                     # Add table controls
                     with variant_table.add_slot("top-left"):
+
                         def toggle_fs():
                             variant_table.toggle_fullscreen()
                             fs_button.props(
@@ -1359,13 +1502,13 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 if variant_table.is_fullscreen
                                 else "icon=fullscreen"
                             )
-                        
+
                         fs_button = ui.button(
                             "Toggle fullscreen",
                             icon="fullscreen",
                             on_click=toggle_fs,
                         ).props("flat")
-                        
+
                         # Column visibility toggle
                         with ui.button(icon="menu").props("flat"):
                             with ui.menu(), ui.column().classes("gap-0 p-2"):
@@ -1373,47 +1516,56 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                     ui.switch(
                                         column["label"],
                                         value=True,
-                                        on_change=lambda e, column=column: toggle_column(column, e.value)
+                                        on_change=lambda e, column=column: toggle_column(
+                                            column, e.value
+                                        ),
                                     )
-                    
+
                     # Add search functionality
                     with variant_table.add_slot("top-right"):
-                        with ui.input(placeholder=f"Search {v_type}s...").props("type=search").bind_value(variant_table, "filter").add_slot("append"):
+                        with ui.input(placeholder=f"Search {v_type}s...").props(
+                            "type=search"
+                        ).bind_value(variant_table, "filter").add_slot("append"):
                             ui.icon("search")
-                    
+
                     # Column toggle function
                     def toggle_column(column: dict, visible: bool) -> None:
                         column["classes"] = "" if visible else "hidden"
                         column["headerClasses"] = "" if visible else "hidden"
                         variant_table.update()
-                    
+
                     return variant_table
-                    
-                
+
                 # Create and display the table
                 variant_table = _create_variant_table(filtered_df, variant_type)
-                
+
                 # Add export functionality
                 with ui.row().classes("w-full mt-4"):
                     ui.button(
                         f"Export {variant_type}s to CSV",
                         icon="download",
-                        on_click=lambda: _export_variants(filtered_df, variant_type)
+                        on_click=lambda: _export_variants(filtered_df, variant_type),
                     ).classes("w-full")
-                    
+
                     # Add row count display
-                    ui.label(f"Showing {len(filtered_df)} of {len(df)} {variant_type}s").classes("text-sm text-gray-600 ml-auto")
-                
+                    ui.label(
+                        f"Showing {len(filtered_df)} of {len(df)} {variant_type}s"
+                    ).classes("text-sm text-gray-600 ml-auto")
+
             except Exception as e:
-                ui.label(f"Error displaying {variant_type} table: {e}").classes("text-sm text-red-500")
-        
+                ui.label(f"Error displaying {variant_type} table: {e}").classes(
+                    "text-sm text-red-500"
+                )
+
         # Function to show variant details
         def _show_variant_details(variant_row, variant_type, clair_dir):
             """Show detailed information for a specific variant"""
             try:
                 with ui.dialog() as dialog, ui.card():
-                    ui.label(f"{variant_type} Details").classes("text-lg font-semibold mb-4")
-                    
+                    ui.label(f"{variant_type} Details").classes(
+                        "text-lg font-semibold mb-4"
+                    )
+
                     # Display variant information
                     with ui.column().classes("gap-2"):
                         for col, val in variant_row.items():
@@ -1421,64 +1573,72 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 with ui.row().classes("w-full"):
                                     ui.label(f"{col}:").classes("font-medium w-32")
                                     ui.label(str(val)).classes("flex-1")
-                    
+
                     # Add close button
                     ui.button("Close", on_click=dialog.close).classes("w-full mt-4")
-                    
+
             except Exception as e:
                 ui.notify(f"Error showing variant details: {e}", type="error")
-        
+
         # Function to export variants
         def _export_variants(data_df, variant_type):
             """Export filtered variants to CSV"""
             try:
                 import tempfile
                 import os
-                
+
                 # Create temporary file
-                with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".csv", delete=False
+                ) as f:
                     data_df.to_csv(f.name, index=False)
                     temp_path = f.name
-                
+
                 # Download the file
                 ui.download(temp_path, filename=f"{variant_type.lower()}_variants.csv")
-                
+
                 # Clean up
                 os.unlink(temp_path)
-                
+
                 ui.notify(f"{variant_type} variants exported successfully!")
-                
+
             except Exception as e:
                 ui.notify(f"Export failed: {e}", type="error")
-        
+
         # Check for existing results (after all functions are defined)
         _check_snp_results()
-        
+
         # Function to check file availability
         def _check_snp_file_availability():
             try:
                 target_bam = sample_dir / "target.bam"
                 targets_bed = sample_dir / "targets_exceeding_threshold.bed"
-                
+
                 if not target_bam.exists():
-                    snp_files_status.set_text("❌ Missing target.bam - run target analysis first")
+                    snp_files_status.set_text(
+                        "❌ Missing target.bam - run target analysis first"
+                    )
                     snp_files_status.classes(replace="text-xs text-red-500")
                     snp_analysis_button.disable()
                     return False
-                
+
                 if not targets_bed.exists():
-                    snp_files_status.set_text("❌ Missing targets_exceeding_threshold.bed - run target analysis first")
+                    snp_files_status.set_text(
+                        "❌ Missing targets_exceeding_threshold.bed - run target analysis first"
+                    )
                     snp_files_status.classes(replace="text-xs text-red-500")
                     snp_analysis_button.disable()
                     return False
-                
+
                 # Check if BED file has content
                 try:
-                    with open(targets_bed, 'r') as f:
+                    with open(targets_bed, "r") as f:
                         bed_content = f.read().strip()
-                    
+
                     if not bed_content:
-                        snp_files_status.set_text("⚠️ BED file is empty - no regions exceed threshold")
+                        snp_files_status.set_text(
+                            "⚠️ BED file is empty - no regions exceed threshold"
+                        )
                         snp_files_status.classes(replace="text-xs text-yellow-500")
                         snp_analysis_button.disable()
                         return False
@@ -1487,206 +1647,275 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         snp_files_status.classes(replace="text-xs text-green-500")
                         snp_analysis_button.enable()
                         return True
-                        
+
                 except Exception as e:
                     snp_files_status.set_text(f"❌ Error reading BED file: {e}")
                     snp_files_status.classes(replace="text-xs text-red-500")
                     snp_analysis_button.disable()
                     return False
-                    
+
             except Exception as e:
                 snp_files_status.set_text(f"❌ Error checking files: {e}")
                 snp_files_status.classes(replace="text-xs text-red-500")
                 snp_analysis_button.disable()
                 return False
-        
+
         # Check file availability initially
         _check_snp_file_availability()
-        
+
         # Function to trigger SNP analysis
         def _trigger_snp_analysis():
             try:
                 # Check prerequisites
                 target_bam = sample_dir / "target.bam"
                 targets_bed = sample_dir / "targets_exceeding_threshold.bed"
-                
+
                 if not target_bam.exists():
-                    ui.notify("Missing target.bam file. Please run target analysis first.", type="warning")
+                    ui.notify(
+                        "Missing target.bam file. Please run target analysis first.",
+                        type="warning",
+                    )
                     return
-                
+
                 if not targets_bed.exists():
-                    ui.notify("Missing targets_exceeding_threshold.bed file. Please run target analysis first.", type="warning")
+                    ui.notify(
+                        "Missing targets_exceeding_threshold.bed file. Please run target analysis first.",
+                        type="warning",
+                    )
                     return
-                
+
                 # Check if BED file has content (not empty)
                 try:
-                    with open(targets_bed, 'r') as f:
+                    with open(targets_bed, "r") as f:
                         bed_content = f.read().strip()
-                    
+
                     if not bed_content:
-                        ui.notify("targets_exceeding_threshold.bed file is empty. No regions exceed coverage threshold.", type="warning")
+                        ui.notify(
+                            "targets_exceeding_threshold.bed file is empty. No regions exceed coverage threshold.",
+                            type="warning",
+                        )
                         return
-                        
+
                 except Exception as e:
-                    ui.notify(f"Error reading targets_exceeding_threshold.bed file: {e}", type="error")
+                    ui.notify(
+                        f"Error reading targets_exceeding_threshold.bed file: {e}",
+                        type="error",
+                    )
                     return
-                
+
                 # Check for reference genome
                 # Remove the unnecessary fallback reference check since we get it from CLI
                 # The reference genome is passed via CLI and stored in workflow_runner.reference
-                
+
                 # Update UI state
                 snp_analysis_button.disable()
                 snp_status_label.set_text("Starting SNP analysis...")
                 snp_status_label.classes(replace="text-sm text-blue-600")
-                
+
                 # Create and submit SNP analysis job
                 try:
                     # Import required modules
                     from robin.analysis.target_analysis import snp_analysis_handler
                     from robin.workflow_simple import Job, WorkflowContext
-                    
+
                     # Create job metadata with reference genome
                     # Get reference genome from workflow runner (set by CLI)
                     reference_genome = None
-                    
+
                     # Try to get reference from workflow runner
-                    print(f"=== REFERENCE GENOME DEBUGGING ===")
+                    print("=== REFERENCE GENOME DEBUGGING ===")
                     print(f"launcher type: {type(launcher)}")
-                    print(f"launcher dir: {[attr for attr in dir(launcher) if not attr.startswith('_')]}")
-                    print(f"hasattr(launcher, 'workflow_runner'): {hasattr(launcher, 'workflow_runner')}")
-                    
-                    if hasattr(launcher, 'workflow_runner'):
+                    print(
+                        f"launcher dir: {[attr for attr in dir(launcher) if not attr.startswith('_')]}"
+                    )
+                    print(
+                        f"hasattr(launcher, 'workflow_runner'): {hasattr(launcher, 'workflow_runner')}"
+                    )
+
+                    if hasattr(launcher, "workflow_runner"):
                         print(f"launcher.workflow_runner: {launcher.workflow_runner}")
                         if launcher.workflow_runner:
-                            print(f"workflow_runner type: {type(launcher.workflow_runner)}")
-                            print(f"workflow_runner dir: {[attr for attr in dir(launcher.workflow_runner) if not attr.startswith('_')]}")
-                            print(f"hasattr(workflow_runner, 'reference'): {hasattr(launcher.workflow_runner, 'reference')}")
-                            
-                            if hasattr(launcher.workflow_runner, 'reference'):
+                            print(
+                                f"workflow_runner type: {type(launcher.workflow_runner)}"
+                            )
+                            print(
+                                f"workflow_runner dir: {[attr for attr in dir(launcher.workflow_runner) if not attr.startswith('_')]}"
+                            )
+                            print(
+                                f"hasattr(workflow_runner, 'reference'): {hasattr(launcher.workflow_runner, 'reference')}"
+                            )
+
+                            if hasattr(launcher.workflow_runner, "reference"):
                                 reference_genome = launcher.workflow_runner.reference
                                 print(f"workflow_runner.reference: {reference_genome}")
                                 if reference_genome:
-                                    print(f"✅ SUCCESS: Using reference genome from workflow runner: {reference_genome}")
+                                    print(
+                                        f"✅ SUCCESS: Using reference genome from workflow runner: {reference_genome}"
+                                    )
                                 else:
-                                    print("❌ FAILED: No reference genome in workflow runner")
+                                    print(
+                                        "❌ FAILED: No reference genome in workflow runner"
+                                    )
                             else:
                                 print("❌ Workflow runner has no reference attribute")
                         else:
                             print("❌ Workflow runner is None")
                     else:
                         print("❌ No workflow runner attribute found")
-                    
-                    print(f"=== END REFERENCE GENOME DEBUGGING ===")
-                    
+
+                    print("=== END REFERENCE GENOME DEBUGGING ===")
+
                     # Fallback to environment variable
                     if not reference_genome:
                         env_reference = os.environ.get("robin_REFERENCE")
                         if env_reference and os.path.exists(env_reference):
                             reference_genome = env_reference
-                            print(f"Using reference genome from environment: {reference_genome}")
-                    
+                            print(
+                                f"Using reference genome from environment: {reference_genome}"
+                            )
+
                     if not reference_genome:
-                        ui.notify("No reference genome found. SNP calling may fail. Please ensure --reference is provided via CLI.", type="warning")
+                        ui.notify(
+                            "No reference genome found. SNP calling may fail. Please ensure --reference is provided via CLI.",
+                            type="warning",
+                        )
                     else:
-                        ui.notify(f"✅ Reference genome found: {os.path.basename(reference_genome)}", type="positive")
-                    
+                        ui.notify(
+                            f"✅ Reference genome found: {os.path.basename(reference_genome)}",
+                            type="positive",
+                        )
+
                     # Use monitored_directory as work_dir, or fall back to sample_dir if not available
-                    work_dir = launcher.monitored_directory if launcher.monitored_directory else str(sample_dir)
-                    
+                    work_dir = (
+                        launcher.monitored_directory
+                        if launcher.monitored_directory
+                        else str(sample_dir)
+                    )
+
                     metadata = {
                         "work_dir": work_dir,
                         "threads": 4,
                         "force_regenerate": force_regenerate_checkbox.value,
-                        "reference": reference_genome
+                        "reference": reference_genome,
                     }
-                    
-                    print(f"=== JOB METADATA DEBUGGING ===")
+
+                    print("=== JOB METADATA DEBUGGING ===")
                     print(f"Created metadata: {metadata}")
                     print(f"reference_genome value: {reference_genome}")
-                    print(f"=== END JOB METADATA DEBUGGING ===")
-                    
+                    print("=== END JOB METADATA DEBUGGING ===")
+
                     # Create workflow context
                     context = WorkflowContext(
-                        filepath=str(sample_dir),
-                        metadata=metadata
+                        filepath=str(sample_dir), metadata=metadata
                     )
-                    
+
                     # Add sample_id method
                     def get_sample_id():
                         return sample_dir.name
-                    
+
                     context.get_sample_id = get_sample_id
                     context.add_result = lambda key, value: None  # Mock for now
-                    context.add_error = lambda key, value: None   # Mock for now
-                    
+                    context.add_error = lambda key, value: None  # Mock for now
+
                     # Create job
                     job = Job(
-                        job_id=hash(f"snp_analysis_{sample_dir.name}") % 1000000,  # Simple hash-based ID
+                        job_id=hash(f"snp_analysis_{sample_dir.name}")
+                        % 1000000,  # Simple hash-based ID
                         job_type="snp_analysis",
                         context=context,
                         origin="fast",
-                        workflow=["fast:snp_analysis"]
+                        workflow=["fast:snp_analysis"],
                     )
-                    
+
                     # Submit SNP analysis as a workflow job (non-blocking)
                     try:
                         # Get the workflow runner from the launcher
-                        if hasattr(launcher, 'workflow_runner') and launcher.workflow_runner is not None:
+                        if (
+                            hasattr(launcher, "workflow_runner")
+                            and launcher.workflow_runner is not None
+                        ):
                             workflow_runner = launcher.workflow_runner
-                            
+
                             # Submit the job through the workflow system
-                            if hasattr(workflow_runner, 'submit_snp_analysis_job'):
+                            if hasattr(workflow_runner, "submit_snp_analysis_job"):
                                 # Use the dedicated SNP analysis method
                                 success = workflow_runner.submit_snp_analysis_job(
                                     sample_dir=work_dir,
                                     sample_id=sample_id,
-                                    reference=str(reference_genome) if reference_genome else None,
+                                    reference=(
+                                        str(reference_genome)
+                                        if reference_genome
+                                        else None
+                                    ),
                                     threads=4,
-                                    force_regenerate=False
+                                    force_regenerate=False,
                                 )
-                                
+
                                 if success:
-                                    ui.notify("SNP analysis job submitted to workflow queue", type="info")
-                                    snp_status_label.set_text("Job submitted to workflow queue")
-                                    snp_status_label.classes(replace="text-sm text-blue-600")
+                                    ui.notify(
+                                        "SNP analysis job submitted to workflow queue",
+                                        type="info",
+                                    )
+                                    snp_status_label.set_text(
+                                        "Job submitted to workflow queue"
+                                    )
+                                    snp_status_label.classes(
+                                        replace="text-sm text-blue-600"
+                                    )
                                 else:
-                                    raise Exception("Failed to submit SNP analysis job to workflow")
-                                    
-                            elif hasattr(workflow_runner, 'submit_sample_job'):
+                                    raise Exception(
+                                        "Failed to submit SNP analysis job to workflow"
+                                    )
+
+                            elif hasattr(workflow_runner, "submit_sample_job"):
                                 # Fallback to generic job submission
                                 success = workflow_runner.submit_sample_job(
                                     sample_dir=work_dir,
                                     job_type="snp_analysis",
-                                    sample_id=sample_id
+                                    sample_id=sample_id,
                                 )
-                                
+
                                 if success:
-                                    ui.notify("SNP analysis job submitted to workflow queue", type="info")
-                                    snp_status_label.set_text("Job submitted to workflow queue")
-                                    snp_status_label.classes(replace="text-sm text-blue-600")
+                                    ui.notify(
+                                        "SNP analysis job submitted to workflow queue",
+                                        type="info",
+                                    )
+                                    snp_status_label.set_text(
+                                        "Job submitted to workflow queue"
+                                    )
+                                    snp_status_label.classes(
+                                        replace="text-sm text-blue-600"
+                                    )
                                 else:
-                                    raise Exception("Failed to submit SNP analysis job to workflow")
+                                    raise Exception(
+                                        "Failed to submit SNP analysis job to workflow"
+                                    )
                             else:
-                                raise Exception("Workflow runner does not support SNP analysis job submission")
+                                raise Exception(
+                                    "Workflow runner does not support SNP analysis job submission"
+                                )
                         else:
                             raise Exception("No workflow runner available")
-                            
+
                     except Exception as e:
                         # Fallback to direct handler call if workflow submission fails
-                        ui.notify(f"Workflow submission failed, falling back to direct execution: {e}", type="warning")
-                        
+                        ui.notify(
+                            f"Workflow submission failed, falling back to direct execution: {e}",
+                            type="warning",
+                        )
+
                         def run_snp_analysis_fallback():
                             try:
                                 # Use the work_dir variable we calculated earlier
                                 snp_analysis_handler(job, work_dir=work_dir)
-                                
+
                                 # Update UI on completion using the main thread
                                 print("SNP analysis completed successfully!")
-                                
+
                             except Exception as e:
                                 # Log error instead of trying to update UI from background thread
-                                ui.run_javascript(f"""
+                                ui.run_javascript(
+                                    f"""
                                     // Update status
                                     var statusElement = document.querySelector('{snp_status_label.id}');
                                     if (statusElement) {{
@@ -1699,21 +1928,25 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                     if (buttonElement) {{
                                         buttonElement.disabled = false;
                                     }}
-                                """)
-                        
+                                """
+                                )
+
                         # Run in background thread as fallback
                         import threading
-                        thread = threading.Thread(target=run_snp_analysis_fallback, daemon=True)
+
+                        thread = threading.Thread(
+                            target=run_snp_analysis_fallback, daemon=True
+                        )
                         thread.start()
-                    
+
                     ui.notify("SNP analysis started in background", type="info")
-                    
+
                 except Exception as e:
                     ui.notify(f"Failed to start SNP analysis: {e}", type="error")
                     snp_analysis_button.enable()
                     snp_status_label.set_text("Failed to start SNP analysis")
                     snp_status_label.classes(replace="text-sm text-red-600")
-                    
+
             except Exception as e:
                 ui.notify(f"Error triggering SNP analysis: {e}", type="error")
                 snp_analysis_button.enable()
@@ -1722,725 +1955,1083 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
     # Lightweight Gene Analysis section
     with ui.card().classes("w-full"):
-        ui.label("🧬 Lightweight Variant Analysis").classes("text-lg font-semibold mb-2")
-        
+        ui.label("🧬 Lightweight Variant Analysis").classes(
+            "text-lg font-semibold mb-2"
+        )
+
         # Lightweight Variant Analysis controls and status
         with ui.row().classes("w-full items-center justify-between mb-4"):
             with ui.column().classes("gap-2"):
                 ui.label("Variant Analysis").classes("text-sm font-medium")
-                lga_status_label = ui.label("Ready to run lightweight variant analysis").classes(
-                    "text-sm text-gray-600"
-                )
-                
+                lga_status_label = ui.label(
+                    "Ready to run lightweight variant analysis"
+                ).classes("text-sm text-gray-600")
+
                 # Add file availability status
                 lga_files_status = ui.label("Checking required files...").classes(
                     "text-xs text-gray-500"
                 )
-            
+
             with ui.column().classes("gap-2 items-end"):
                 # Lightweight Variant Analysis button
                 lga_analysis_button = ui.button(
                     "Run Variant Analysis",
                     icon="dna",
-                    on_click=lambda: _trigger_lightweight_gene_analysis()
+                    on_click=lambda: _trigger_lightweight_gene_analysis(),
                 ).props("color=primary data-lga-analysis-button")
-                
+
                 # Force regenerate checkbox
                 lga_force_regenerate_checkbox = ui.checkbox(
-                    "Force regenerate",
-                    value=False
+                    "Force regenerate", value=False
                 ).props("dense")
-        
+
         # Lightweight Variant Analysis requirements check
         with ui.expansion().classes("w-full").props("icon=info"):
             ui.label("Requirements").classes("text-sm font-medium mb-2")
             with ui.column().classes("gap-1 text-sm"):
-                ui.label("• target.bam - Target regions BAM file (generated by target analysis)")
-                ui.label("• targets_exceeding_threshold.bed - BED file defining regions (auto-generated by target analysis)")
-                ui.label("• ClinVar VCF file - Pathogenic variants database (optional, will use default)")
+                ui.label(
+                    "• target.bam - Target regions BAM file (generated by target analysis)"
+                )
+                ui.label(
+                    "• targets_exceeding_threshold.bed - BED file defining regions (auto-generated by target analysis)"
+                )
+                ui.label(
+                    "• ClinVar VCF file - Pathogenic variants database (optional, will use default)"
+                )
                 ui.label("• Reference genome (optional) - for enhanced analysis")
-            
+
             # Add helpful note about file generation
             with ui.row().classes("w-full mt-2 p-2 bg-blue-50 rounded"):
                 ui.icon("info").classes("text-blue-600")
-                ui.label("Note: This analysis automatically finds ClinVar pathogenic variants that intersect with your BED regions and analyzes coverage at those sites. It's much faster than full variant calling.").classes("text-sm text-blue-800")
-        
+                ui.label(
+                    "Note: This analysis automatically finds ClinVar pathogenic variants that intersect with your BED regions and analyzes coverage at those sites. It's much faster than full variant calling."
+                ).classes("text-sm text-blue-800")
+
         # Lightweight Variant Analysis results display
         with ui.expansion().classes("w-full").props("icon=assessment"):
             ui.label("Results").classes("text-sm font-medium mb-2")
-            
+
             # Results status
-            lga_results_status = ui.label("No lightweight variant analysis results yet").classes(
-                "text-sm text-gray-600"
-            ).props("data-lga-results-status")
-            
+            lga_results_status = (
+                ui.label("No lightweight variant analysis results yet")
+                .classes("text-sm text-gray-600")
+                .props("data-lga-results-status")
+            )
+
             # Results container
             lga_results_container = ui.column().classes("w-full")
-            
+
             # Function to check and display lightweight gene analysis results
             def _check_lga_results():
                 try:
                     # Check for JSON results file in the correct location
                     # The JSON file is written to {sample_dir}/{sample_id}/lightweight_gene_analysis_results.json
                     sample_id = sample_dir.name
-                    json_report = sample_dir / sample_id / "lightweight_gene_analysis_results.json"
-                    
+                    json_report = (
+                        sample_dir
+                        / sample_id
+                        / "lightweight_gene_analysis_results.json"
+                    )
+
                     # Also check the old location as fallback
-                    json_report_fallback = sample_dir / "lightweight_gene_analysis_results.json"
-                    
+                    json_report_fallback = (
+                        sample_dir / "lightweight_gene_analysis_results.json"
+                    )
+
                     if json_report.exists():
-                        lga_results_status.set_text("Lightweight variant analysis completed successfully!")
+                        lga_results_status.set_text(
+                            "Lightweight variant analysis completed successfully!"
+                        )
                         _display_lga_results(json_report)
                     elif json_report_fallback.exists():
-                        lga_results_status.set_text("Lightweight variant analysis completed successfully! (legacy location)")
+                        lga_results_status.set_text(
+                            "Lightweight variant analysis completed successfully! (legacy location)"
+                        )
                         _display_lga_results(json_report_fallback)
                     else:
-                        lga_results_status.set_text("No lightweight variant analysis results found")
-                        
+                        lga_results_status.set_text(
+                            "No lightweight variant analysis results found"
+                        )
+
                 except Exception as e:
                     lga_results_status.set_text(f"Error checking results: {e}")
                     import traceback
+
                     traceback.print_exc()
-            
+
             def _display_lga_results(json_report):
                 """Display the results interface when JSON file is found"""
                 # Clear previous results
                 lga_results_container.clear()
-                
+
                 # Display results summary
                 with lga_results_container:
                     with ui.row().classes("w-full gap-4"):
                         with ui.card().classes("flex-1"):
                             ui.label("JSON Results").classes("text-sm font-medium")
                             ui.label("Available").classes("text-xs text-green-600")
-                        
+
                         with ui.card().classes("flex-1"):
                             ui.label("Analysis Complete").classes("text-sm font-medium")
                             ui.label("Ready to view").classes("text-xs text-green-600")
-                    
+
                     # Add view results button
                     with ui.row().classes("w-full mt-4"):
                         view_button = ui.button(
                             "View Analysis Results",
                             icon="analytics",
-                            on_click=lambda: _view_lga_json_results_inline(str(json_report))
+                            on_click=lambda: _view_lga_json_results_inline(
+                                str(json_report)
+                            ),
                         ).classes("flex-1")
-                        
+
                         # Add debug info
                         print(f"🔧 GUI: Created view button with path: {json_report}")
                         print(f"🔧 GUI: Button object: {view_button}")
-                
+
                 # Update button state
                 lga_analysis_button.set_text("Rerun Variant Analysis")
                 lga_analysis_button.props("color=secondary")
-            
+
             # Function to view JSON analysis results inline
             def _view_lga_json_results_inline(json_path):
                 try:
                     import json
-                    
+
                     print(f"🔧 GUI: Function called with path: {json_path}")
                     print(f"🔧 GUI: Path type: {type(json_path)}")
-                    
+
                     # Convert to Path object if it's a string
                     if isinstance(json_path, str):
                         json_path = Path(json_path)
-                    
+
                     print(f"🔧 GUI: Attempting to load JSON from: {json_path}")
                     print(f"🔧 GUI: File exists: {json_path.exists()}")
-                    print(f"🔧 GUI: File size: {json_path.stat().st_size if json_path.exists() else 'N/A'} bytes")
-                    
+                    print(
+                        f"🔧 GUI: File size: {json_path.stat().st_size if json_path.exists() else 'N/A'} bytes"
+                    )
+
                     # Read and parse JSON
-                    with open(json_path, 'r') as f:
+                    with open(json_path, "r") as f:
                         data = json.load(f)
-                    
-                    print(f"🔧 GUI: Successfully loaded JSON with {len(data.get('genes', {}))} genes")
-                    
+
+                    print(
+                        f"🔧 GUI: Successfully loaded JSON with {len(data.get('genes', {}))} genes"
+                    )
+
                     # Clear previous results and display inline
                     lga_results_container.clear()
-                    
+
                     with lga_results_container:
                         # Header
-                        ui.label("🧬 Lightweight Variant Analysis Results").classes("text-2xl font-bold mb-6")
-                        
+                        ui.label("🧬 Lightweight Variant Analysis Results").classes(
+                            "text-2xl font-bold mb-6"
+                        )
+
                         # Metadata summary
                         with ui.card().classes("w-full mb-6"):
-                            ui.label("📊 Analysis Summary").classes("text-xl font-semibold mb-4")
-                            metadata = data.get('metadata', {})
-                            
+                            ui.label("📊 Analysis Summary").classes(
+                                "text-xl font-semibold mb-4"
+                            )
+                            metadata = data.get("metadata", {})
+
                             # Linear layout - each metric on its own row
                             with ui.column().classes("w-full gap-4"):
-                                with ui.row().classes("w-full items-center justify-between p-4 bg-blue-50 rounded"):
-                                    ui.label("Total Genes Analyzed").classes("text-lg font-medium text-gray-700")
-                                    ui.label(f"{metadata.get('total_genes_analyzed', 0)}").classes("text-3xl font-bold text-blue-600")
-                                
-                                with ui.row().classes("w-full items-center justify-between p-4 bg-purple-50 rounded"):
-                                    ui.label("Total Pathogenic Variants Found").classes("text-lg font-medium text-gray-700")
-                                    ui.label(f"{metadata.get('total_variants_found', 0):,}").classes("text-3xl font-bold text-purple-600")
-                                
-                                with ui.row().classes("w-full items-center justify-between p-4 bg-green-50 rounded"):
-                                    ui.label("Genes with Good Coverage (≥10x)").classes("text-lg font-medium text-gray-700")
-                                    ui.label(f"{metadata.get('genes_with_good_coverage_variants', 0)}").classes("text-3xl font-bold text-green-600")
-                                
-                                with ui.row().classes("w-full items-center justify-between p-4 bg-orange-50 rounded"):
-                                    ui.label("Genes with Low Coverage (<10x)").classes("text-lg font-medium text-gray-700")
-                                    low_coverage = metadata.get('total_genes_analyzed', 0) - metadata.get('genes_with_good_coverage_variants', 0)
-                                    ui.label(f"{low_coverage}").classes("text-3xl font-bold text-orange-600")
-                        
+                                with ui.row().classes(
+                                    "w-full items-center justify-between p-4 bg-blue-50 rounded"
+                                ):
+                                    ui.label("Total Genes Analyzed").classes(
+                                        "text-lg font-medium text-gray-700"
+                                    )
+                                    ui.label(
+                                        f"{metadata.get('total_genes_analyzed', 0)}"
+                                    ).classes("text-3xl font-bold text-blue-600")
+
+                                with ui.row().classes(
+                                    "w-full items-center justify-between p-4 bg-purple-50 rounded"
+                                ):
+                                    ui.label("Total Pathogenic Variants Found").classes(
+                                        "text-lg font-medium text-gray-700"
+                                    )
+                                    ui.label(
+                                        f"{metadata.get('total_variants_found', 0):,}"
+                                    ).classes("text-3xl font-bold text-purple-600")
+
+                                with ui.row().classes(
+                                    "w-full items-center justify-between p-4 bg-green-50 rounded"
+                                ):
+                                    ui.label("Genes with Good Coverage (≥10x)").classes(
+                                        "text-lg font-medium text-gray-700"
+                                    )
+                                    ui.label(
+                                        f"{metadata.get('genes_with_good_coverage_variants', 0)}"
+                                    ).classes("text-3xl font-bold text-green-600")
+
+                                with ui.row().classes(
+                                    "w-full items-center justify-between p-4 bg-orange-50 rounded"
+                                ):
+                                    ui.label("Genes with Low Coverage (<10x)").classes(
+                                        "text-lg font-medium text-gray-700"
+                                    )
+                                    low_coverage = metadata.get(
+                                        "total_genes_analyzed", 0
+                                    ) - metadata.get(
+                                        "genes_with_good_coverage_variants", 0
+                                    )
+                                    ui.label(f"{low_coverage}").classes(
+                                        "text-3xl font-bold text-orange-600"
+                                    )
+
                         # Gene analysis sections - linear layout, no tabs
-                        ui.label("📊 Gene Analysis Results").classes("text-2xl font-bold mt-8 mb-6")
-                        
+                        ui.label("📊 Gene Analysis Results").classes(
+                            "text-2xl font-bold mt-8 mb-6"
+                        )
+
                         # Display each section sequentially
                         _display_gene_overview(data)
                         _display_high_coverage_genes(data)
                         _display_low_coverage_genes(data)
                         _display_gene_details(data)
-                        
+
                         # Add hide results button
                         with ui.row().classes("w-full mt-6 justify-center"):
                             ui.button(
                                 "Hide Results",
                                 icon="visibility_off",
-                                on_click=lambda: _hide_lga_results()
+                                on_click=lambda: _hide_lga_results(),
                             ).props("color=secondary")
-                    
-                    print(f"🔧 GUI: Results displayed inline successfully")
-                    
+
+                    print("🔧 GUI: Results displayed inline successfully")
+
                 except Exception as e:
                     ui.notify(f"Error viewing results: {e}", type="error")
                     import traceback
+
                     print(f"Error in _view_lga_json_results_inline: {e}")
                     traceback.print_exc()
-            
+
             # Function to hide results and restore original view
             def _hide_lga_results():
                 """Hide the inline results and restore the original simple view"""
                 try:
                     print("🔧 GUI: Hiding results...")
-                    
+
                     # Clear the results container
                     lga_results_container.clear()
-                    
+
                     # Restore the original simple view
                     with lga_results_container:
                         with ui.row().classes("w-full gap-4"):
                             with ui.card().classes("flex-1"):
                                 ui.label("JSON Results").classes("text-sm font-medium")
                                 ui.label("Available").classes("text-xs text-green-600")
-                            
+
                             with ui.card().classes("flex-1"):
-                                ui.label("Analysis Complete").classes("text-sm font-medium")
-                                ui.label("Ready to view").classes("text-xs text-green-600")
-                        
+                                ui.label("Analysis Complete").classes(
+                                    "text-sm font-medium"
+                                )
+                                ui.label("Ready to view").classes(
+                                    "text-xs text-green-600"
+                                )
+
                         # Add view results button
                         with ui.row().classes("w-full mt-4"):
                             ui.button(
                                 "View Analysis Results",
                                 icon="analytics",
-                                on_click=lambda: _view_lga_json_results_inline(str(Path(sample_dir) / sample_dir.name / "lightweight_gene_analysis_results.json"))
+                                on_click=lambda: _view_lga_json_results_inline(
+                                    str(
+                                        Path(sample_dir)
+                                        / sample_dir.name
+                                        / "lightweight_gene_analysis_results.json"
+                                    )
+                                ),
                             ).classes("flex-1")
-                    
+
                     print("🔧 GUI: Results hidden successfully")
-                    
+
                 except Exception as e:
                     print(f"🔧 GUI: Error hiding results: {e}")
                     import traceback
+
                     traceback.print_exc()
-            
+
             # Helper functions for displaying JSON results
             def _display_gene_overview(data):
                 """Display gene overview with statistics and charts"""
                 try:
-                    metadata = data.get('metadata', {})
-                    genes = data.get('genes', {})
-                    
+                    metadata = data.get("metadata", {})
+                    genes = data.get("genes", {})
+
                     # Coverage distribution chart
                     coverage_data = []
                     for gene_name, gene_data in genes.items():
-                        coverage_stats = gene_data.get('coverage_statistics', {})
-                        mean_cov = coverage_stats.get('mean_coverage', 0)
-                        coverage_data.append({
-                            'gene': gene_name,
-                            'mean_coverage': mean_cov,
-                            'total_variants': gene_data.get('summary', {}).get('total_variants', 0),
-                            'high_coverage_variants': gene_data.get('summary', {}).get('high_coverage_variants', 0)
-                        })
-                    
+                        coverage_stats = gene_data.get("coverage_statistics", {})
+                        mean_cov = coverage_stats.get("mean_coverage", 0)
+                        coverage_data.append(
+                            {
+                                "gene": gene_name,
+                                "mean_coverage": mean_cov,
+                                "total_variants": gene_data.get("summary", {}).get(
+                                    "total_variants", 0
+                                ),
+                                "high_coverage_variants": gene_data.get(
+                                    "summary", {}
+                                ).get("high_coverage_variants", 0),
+                            }
+                        )
+
                     # Sort by mean coverage
-                    coverage_data.sort(key=lambda x: x['mean_coverage'], reverse=True)
-                    
+                    coverage_data.sort(key=lambda x: x["mean_coverage"], reverse=True)
+
                     # Create coverage distribution chart
                     with ui.card().classes("w-full mb-4"):
-                        ui.label("📈 Coverage Distribution by Gene").classes("text-lg font-semibold mb-2")
-                        
+                        ui.label("📈 Coverage Distribution by Gene").classes(
+                            "text-lg font-semibold mb-2"
+                        )
+
                         # Top 20 genes by coverage
                         top_genes = coverage_data[:20]
-                        gene_names = [g['gene'] for g in top_genes]
-                        coverage_values = [g['mean_coverage'] for g in top_genes]
-                        
-                                            # Create enhanced bar chart using echart
-                    coverage_chart = ui.echart({
-                        "backgroundColor": "transparent",
-                        "title": {
-                            "text": "Top 20 Genes by Mean Coverage",
-                            "left": "center",
-                            "top": 10,
-                            "textStyle": {"fontSize": 16, "color": "#000", "fontWeight": "bold"},
-                            "subtext": "Higher coverage = More reliable variant detection",
-                            "subtextStyle": {"fontSize": 12, "color": "#666"}
-                        },
-                        "tooltip": {
-                            "trigger": "axis",
-                            "formatter": "Gene: {b}<br/>Coverage: {c}x"
-                        },
-                        "grid": {
-                            "left": "12%",
-                            "right": "8%",
-                            "bottom": "20%",
-                            "top": "30%",
-                            "containLabel": True
-                        },
-                        "xAxis": {
-                            "type": "category",
-                            "data": gene_names,
-                            "axisLabel": {"rotate": 45, "fontSize": 11, "fontWeight": "bold"},
-                            "name": "Gene Names",
-                            "nameLocation": "middle",
-                            "nameGap": 50
-                        },
-                        "yAxis": {
-                            "type": "value", 
-                            "name": "Mean Coverage (x)",
-                            "nameLocation": "middle",
-                            "nameGap": 40,
-                            "axisLabel": {"fontSize": 12, "fontWeight": "bold"},
-                            "splitLine": {"show": True, "lineStyle": {"color": "#eee"}}
-                        },
-                        "series": [{
-                            "type": "bar",
-                            "data": coverage_values,
-                            "itemStyle": {
-                                "color": "#3b82f6"
+                        gene_names = [g["gene"] for g in top_genes]
+                        coverage_values = [g["mean_coverage"] for g in top_genes]
+
+                        # Create enhanced bar chart using echart
+                    coverage_chart = ui.echart(
+                        {
+                            "backgroundColor": "transparent",
+                            "title": {
+                                "text": "Top 20 Genes by Mean Coverage",
+                                "left": "center",
+                                "top": 10,
+                                "textStyle": {
+                                    "fontSize": 16,
+                                    "color": "#000",
+                                    "fontWeight": "bold",
+                                },
+                                "subtext": "Higher coverage = More reliable variant detection",
+                                "subtextStyle": {"fontSize": 12, "color": "#666"},
                             },
-                            "barWidth": "60%",
-                            "emphasis": {
-                                "itemStyle": {
-                                    "shadowBlur": 10,
-                                    "shadowColor": "rgba(0,0,0,0.3)"
+                            "tooltip": {
+                                "trigger": "axis",
+                                "formatter": "Gene: {b}<br/>Coverage: {c}x",
+                            },
+                            "grid": {
+                                "left": "12%",
+                                "right": "8%",
+                                "bottom": "20%",
+                                "top": "30%",
+                                "containLabel": True,
+                            },
+                            "xAxis": {
+                                "type": "category",
+                                "data": gene_names,
+                                "axisLabel": {
+                                    "rotate": 45,
+                                    "fontSize": 11,
+                                    "fontWeight": "bold",
+                                },
+                                "name": "Gene Names",
+                                "nameLocation": "middle",
+                                "nameGap": 50,
+                            },
+                            "yAxis": {
+                                "type": "value",
+                                "name": "Mean Coverage (x)",
+                                "nameLocation": "middle",
+                                "nameGap": 40,
+                                "axisLabel": {"fontSize": 12, "fontWeight": "bold"},
+                                "splitLine": {
+                                    "show": True,
+                                    "lineStyle": {"color": "#eee"},
+                                },
+                            },
+                            "series": [
+                                {
+                                    "type": "bar",
+                                    "data": coverage_values,
+                                    "itemStyle": {"color": "#3b82f6"},
+                                    "barWidth": "60%",
+                                    "emphasis": {
+                                        "itemStyle": {
+                                            "shadowBlur": 10,
+                                            "shadowColor": "rgba(0,0,0,0.3)",
+                                        }
+                                    },
                                 }
-                            }
-                        }],
-                        "dataZoom": [{
-                            "type": "slider",
-                            "show": True,
-                            "xAxisIndex": [0],
-                            "start": 0,
-                            "end": 100
-                        }]
-                    }).classes("w-full h-80")
-                    
+                            ],
+                            "dataZoom": [
+                                {
+                                    "type": "slider",
+                                    "show": True,
+                                    "xAxisIndex": [0],
+                                    "start": 0,
+                                    "end": 100,
+                                }
+                            ],
+                        }
+                    ).classes("w-full h-80")
+
                     # Add coverage threshold indicators
                     with ui.column().classes("w-full mt-3 gap-2"):
-                        ui.label("Coverage Thresholds:").classes("text-sm font-medium text-gray-600")
-                        
-                        with ui.row().classes("items-center gap-3 p-2 bg-green-50 rounded"):
+                        ui.label("Coverage Thresholds:").classes(
+                            "text-sm font-medium text-gray-600"
+                        )
+
+                        with ui.row().classes(
+                            "items-center gap-3 p-2 bg-green-50 rounded"
+                        ):
                             ui.element("div").classes("w-4 h-4 bg-green-500 rounded")
-                            ui.label("≥10x (Good Coverage) - Reliable variant detection").classes("text-sm text-gray-700")
-                        
-                        with ui.row().classes("items-center gap-3 p-2 bg-orange-50 rounded"):
+                            ui.label(
+                                "≥10x (Good Coverage) - Reliable variant detection"
+                            ).classes("text-sm text-gray-700")
+
+                        with ui.row().classes(
+                            "items-center gap-3 p-2 bg-orange-50 rounded"
+                        ):
                             ui.element("div").classes("w-4 h-4 bg-orange-500 rounded")
-                            ui.label("5-10x (Moderate Coverage) - Limited reliability").classes("text-sm text-gray-700")
-                        
-                        with ui.row().classes("items-center gap-3 p-2 bg-red-50 rounded"):
+                            ui.label(
+                                "5-10x (Moderate Coverage) - Limited reliability"
+                            ).classes("text-sm text-gray-700")
+
+                        with ui.row().classes(
+                            "items-center gap-3 p-2 bg-red-50 rounded"
+                        ):
                             ui.element("div").classes("w-4 h-4 bg-red-500 rounded")
-                            ui.label("<5x (Low Coverage) - Poor reliability").classes("text-sm text-gray-700")
-                    
+                            ui.label("<5x (Low Coverage) - Poor reliability").classes(
+                                "text-sm text-gray-700"
+                            )
+
                     # Summary statistics
                     with ui.card().classes("w-full mb-4"):
-                        ui.label("📊 Summary Statistics").classes("text-lg font-semibold mb-2")
-                        
+                        ui.label("📊 Summary Statistics").classes(
+                            "text-lg font-semibold mb-2"
+                        )
+
                         # Calculate additional statistics
-                        total_coverage = sum(g['mean_coverage'] for g in coverage_data)
-                        avg_coverage = total_coverage / len(coverage_data) if coverage_data else 0
-                        high_coverage_count = sum(1 for g in coverage_data if g['mean_coverage'] >= 10)
-                        low_coverage_count = sum(1 for g in coverage_data if g['mean_coverage'] < 10)
-                        
+                        total_coverage = sum(g["mean_coverage"] for g in coverage_data)
+                        avg_coverage = (
+                            total_coverage / len(coverage_data) if coverage_data else 0
+                        )
+                        high_coverage_count = sum(
+                            1 for g in coverage_data if g["mean_coverage"] >= 10
+                        )
+                        low_coverage_count = sum(
+                            1 for g in coverage_data if g["mean_coverage"] < 10
+                        )
+
                         # Linear layout for statistics
                         with ui.column().classes("w-full gap-3"):
-                            with ui.row().classes("w-full items-center justify-between p-3 bg-blue-50 rounded"):
-                                ui.label("Average Coverage Across All Genes").classes("text-base font-medium text-gray-700")
-                                ui.label(f"{avg_coverage:.1f}x").classes("text-2xl font-bold text-blue-600")
-                            
-                            with ui.row().classes("w-full items-center justify-between p-3 bg-green-50 rounded"):
-                                ui.label("Genes with High Coverage (≥10x)").classes("text-base font-medium text-gray-700")
-                                ui.label(f"{high_coverage_count}").classes("text-2xl font-bold text-green-600")
-                            
-                            with ui.row().classes("w-full items-center justify-between p-3 bg-orange-50 rounded"):
-                                ui.label("Genes with Low Coverage (<10x)").classes("text-base font-medium text-gray-700")
-                                ui.label(f"{low_coverage_count}").classes("text-2xl font-bold text-orange-600")
-                            
-                            with ui.row().classes("w-full items-center justify-between p-3 bg-purple-50 rounded"):
-                                ui.label("Total Pathogenic Variants").classes("text-base font-medium text-gray-700")
-                                ui.label(f"{metadata.get('total_variants_found', 0):,}").classes("text-2xl font-bold text-purple-600")
-                    
+                            with ui.row().classes(
+                                "w-full items-center justify-between p-3 bg-blue-50 rounded"
+                            ):
+                                ui.label("Average Coverage Across All Genes").classes(
+                                    "text-base font-medium text-gray-700"
+                                )
+                                ui.label(f"{avg_coverage:.1f}x").classes(
+                                    "text-2xl font-bold text-blue-600"
+                                )
+
+                            with ui.row().classes(
+                                "w-full items-center justify-between p-3 bg-green-50 rounded"
+                            ):
+                                ui.label("Genes with High Coverage (≥10x)").classes(
+                                    "text-base font-medium text-gray-700"
+                                )
+                                ui.label(f"{high_coverage_count}").classes(
+                                    "text-2xl font-bold text-green-600"
+                                )
+
+                            with ui.row().classes(
+                                "w-full items-center justify-between p-3 bg-orange-50 rounded"
+                            ):
+                                ui.label("Genes with Low Coverage (<10x)").classes(
+                                    "text-base font-medium text-gray-700"
+                                )
+                                ui.label(f"{low_coverage_count}").classes(
+                                    "text-2xl font-bold text-orange-600"
+                                )
+
+                            with ui.row().classes(
+                                "w-full items-center justify-between p-3 bg-purple-50 rounded"
+                            ):
+                                ui.label("Total Pathogenic Variants").classes(
+                                    "text-base font-medium text-gray-700"
+                                )
+                                ui.label(
+                                    f"{metadata.get('total_variants_found', 0):,}"
+                                ).classes("text-2xl font-bold text-purple-600")
+
                     # Gene list with quick stats
                     with ui.card().classes("w-full"):
-                        ui.label("🧬 Gene List with Coverage Status").classes("text-lg font-semibold mb-2")
-                        
+                        ui.label("🧬 Gene List with Coverage Status").classes(
+                            "text-lg font-semibold mb-2"
+                        )
+
                         # Create searchable table
                         gene_table_data = []
                         for gene_name, gene_data in genes.items():
-                            summary = gene_data.get('summary', {})
-                            coverage_stats = gene_data.get('coverage_statistics', {})
-                            
-                            gene_table_data.append({
-                                'gene': gene_name,
-                                'mean_coverage': f"{coverage_stats.get('mean_coverage', 0):.1f}x",
-                                'total_variants': summary.get('total_variants', 0),
-                                'high_coverage_variants': summary.get('high_coverage_variants', 0),
-                                'low_coverage_variants': summary.get('low_coverage_variants', 0),
-                                'status': summary.get('pathogenic_status', 'unknown').replace('_', ' ').title()
-                            })
-                        
+                            summary = gene_data.get("summary", {})
+                            coverage_stats = gene_data.get("coverage_statistics", {})
+
+                            gene_table_data.append(
+                                {
+                                    "gene": gene_name,
+                                    "mean_coverage": f"{coverage_stats.get('mean_coverage', 0):.1f}x",
+                                    "total_variants": summary.get("total_variants", 0),
+                                    "high_coverage_variants": summary.get(
+                                        "high_coverage_variants", 0
+                                    ),
+                                    "low_coverage_variants": summary.get(
+                                        "low_coverage_variants", 0
+                                    ),
+                                    "status": summary.get(
+                                        "pathogenic_status", "unknown"
+                                    )
+                                    .replace("_", " ")
+                                    .title(),
+                                }
+                            )
+
                         # Sort by mean coverage
-                        gene_table_data.sort(key=lambda x: float(x['mean_coverage'].replace('x', '')), reverse=True)
-                        
+                        gene_table_data.sort(
+                            key=lambda x: float(x["mean_coverage"].replace("x", "")),
+                            reverse=True,
+                        )
+
                         # Create table
-                        gene_table = ui.table.from_pandas(
-                            pd.DataFrame(gene_table_data),
-                            pagination=25
-                        ).props("dense").style("height: 400px")
-                        
+                        gene_table = (
+                            ui.table.from_pandas(
+                                pd.DataFrame(gene_table_data), pagination=25
+                            )
+                            .props("dense")
+                            .style("height: 400px")
+                        )
+
                         # Add search functionality
                         with gene_table.add_slot("top-right"):
-                            with ui.input(placeholder="Search genes...").props("type=search").bind_value(gene_table, "filter").add_slot("append"):
+                            with ui.input(placeholder="Search genes...").props(
+                                "type=search"
+                            ).bind_value(gene_table, "filter").add_slot("append"):
                                 ui.icon("search")
-                        
+
                         # Make columns sortable
                         for col in gene_table.columns:
                             col["sortable"] = True
-                            
+
                 except Exception as e:
-                    ui.label(f"Error displaying gene overview: {e}").classes("text-sm text-red-500")
+                    ui.label(f"Error displaying gene overview: {e}").classes(
+                        "text-sm text-red-500"
+                    )
                     import traceback
+
                     traceback.print_exc()
-            
+
             def _display_high_coverage_genes(data):
                 """Display genes with high coverage variants"""
                 try:
-                    genes = data.get('genes', {})
-                    
+                    genes = data.get("genes", {})
+
                     # Filter for genes with high coverage variants
                     high_coverage_genes = {}
                     for gene_name, gene_data in genes.items():
-                        summary = gene_data.get('summary', {})
-                        if summary.get('high_coverage_variants', 0) > 0:
+                        summary = gene_data.get("summary", {})
+                        if summary.get("high_coverage_variants", 0) > 0:
                             high_coverage_genes[gene_name] = gene_data
-                    
+
                     if not high_coverage_genes:
-                        ui.label("No genes with high coverage variants found.").classes("text-sm text-gray-500")
+                        ui.label("No genes with high coverage variants found.").classes(
+                            "text-sm text-gray-500"
+                        )
                         return
-                    
-                    ui.label(f"🔍 Found {len(high_coverage_genes)} genes with high coverage variants").classes("text-lg font-semibold mb-4")
-                    
+
+                    ui.label(
+                        f"🔍 Found {len(high_coverage_genes)} genes with high coverage variants"
+                    ).classes("text-lg font-semibold mb-4")
+
                     # Display each gene with its high coverage variants
                     for gene_name, gene_data in high_coverage_genes.items():
-                        with ui.expansion().classes("w-full mb-2").props(f"icon=dna label={gene_name}"):
-                            summary = gene_data.get('summary', {})
-                            coverage_stats = gene_data.get('coverage_statistics', {})
-                            variants = gene_data.get('variants', [])
-                            
+                        with ui.expansion().classes("w-full mb-2").props(
+                            f"icon=dna label={gene_name}"
+                        ):
+                            summary = gene_data.get("summary", {})
+                            coverage_stats = gene_data.get("coverage_statistics", {})
+                            variants = gene_data.get("variants", [])
+
                             # Gene summary
                             with ui.row().classes("w-full gap-4 mb-2"):
                                 with ui.card().classes("flex-1"):
-                                    ui.label("Mean Coverage").classes("text-sm text-gray-600")
-                                    ui.label(f"{coverage_stats.get('mean_coverage', 0):.1f}x").classes("text-lg font-bold")
-                                
+                                    ui.label("Mean Coverage").classes(
+                                        "text-sm text-gray-600"
+                                    )
+                                    ui.label(
+                                        f"{coverage_stats.get('mean_coverage', 0):.1f}x"
+                                    ).classes("text-lg font-bold")
+
                                 with ui.card().classes("flex-1"):
-                                    ui.label("High Coverage Variants").classes("text-sm text-gray-600")
-                                    ui.label(f"{summary.get('high_coverage_variants', 0)}").classes("text-lg font-bold text-green-600")
-                                
+                                    ui.label("High Coverage Variants").classes(
+                                        "text-sm text-gray-600"
+                                    )
+                                    ui.label(
+                                        f"{summary.get('high_coverage_variants', 0)}"
+                                    ).classes("text-lg font-bold text-green-600")
+
                                 with ui.card().classes("flex-1"):
-                                    ui.label("Total Variants").classes("text-sm text-gray-600")
-                                    ui.label(f"{summary.get('total_variants', 0)}").classes("text-lg font-bold")
-                            
+                                    ui.label("Total Variants").classes(
+                                        "text-sm text-gray-600"
+                                    )
+                                    ui.label(
+                                        f"{summary.get('total_variants', 0)}"
+                                    ).classes("text-lg font-bold")
+
                             # High coverage variants table - only show variants where alternate allele is detected
-                            high_cov_variants = [v for v in variants if v.get('coverage_at_variant', 0) >= 10 and v.get('evidence_analysis', {}).get('alternate_support', 0) > 0]
-                            
+                            high_cov_variants = [
+                                v
+                                for v in variants
+                                if v.get("coverage_at_variant", 0) >= 10
+                                and v.get("evidence_analysis", {}).get(
+                                    "alternate_support", 0
+                                )
+                                > 0
+                            ]
+
                             if high_cov_variants:
-                                ui.label("✅ High Coverage Variants (≥10x):").classes("text-sm font-medium mb-2")
-                                
+                                ui.label("✅ High Coverage Variants (≥10x):").classes(
+                                    "text-sm font-medium mb-2"
+                                )
+
                                 # Create table for high coverage variants
                                 variant_data = []
-                                for variant in high_cov_variants[:20]:  # Limit to first 20
-                                    evidence = variant.get('evidence_analysis', {})
+                                for variant in high_cov_variants[
+                                    :20
+                                ]:  # Limit to first 20
+                                    evidence = variant.get("evidence_analysis", {})
                                     # Create genomic locus in format chr1:119,915,631
-                                    chromosome = variant.get('chromosome', 'N')
-                                    position = variant.get('position', 0)
-                                    genomic_locus = f"{chromosome}:{position:,}" if chromosome != 'N' and position else 'N/A'
-                                    
-                                    variant_data.append({
-                                        'genomic_locus': genomic_locus,
-                                        'position': f"{position:,}",
-                                        'reference': variant.get('reference', 'N'),
-                                        'alternate': variant.get('alternate', 'N'),
-                                        'variant_type': evidence.get('variant_type', 'unknown').upper(),
-                                        'clinical_significance': variant.get('clinical_significance', 'unknown').replace('_', ' ').title(),
-                                        'disease': variant.get('disease_name', 'unknown')[:50] + ('...' if len(variant.get('disease_name', '')) > 50 else ''),
-                                        'coverage': f"{variant.get('coverage_at_variant', 0)}x",
-                                        'alt_support': evidence.get('alternate_support', 0),
-                                        'vaf': f"{evidence.get('variant_allele_frequency', 0):.1%}" if evidence.get('variant_allele_frequency') is not None else 'N/A',
-                                        'evidence_level': evidence.get('evidence_level', 'unknown').replace('_', ' ').title()
-                                    })
-                                
+                                    chromosome = variant.get("chromosome", "N")
+                                    position = variant.get("position", 0)
+                                    genomic_locus = (
+                                        f"{chromosome}:{position:,}"
+                                        if chromosome != "N" and position
+                                        else "N/A"
+                                    )
+
+                                    variant_data.append(
+                                        {
+                                            "genomic_locus": genomic_locus,
+                                            "position": f"{position:,}",
+                                            "reference": variant.get("reference", "N"),
+                                            "alternate": variant.get("alternate", "N"),
+                                            "variant_type": evidence.get(
+                                                "variant_type", "unknown"
+                                            ).upper(),
+                                            "clinical_significance": variant.get(
+                                                "clinical_significance", "unknown"
+                                            )
+                                            .replace("_", " ")
+                                            .title(),
+                                            "disease": variant.get(
+                                                "disease_name", "unknown"
+                                            )[:50]
+                                            + (
+                                                "..."
+                                                if len(variant.get("disease_name", ""))
+                                                > 50
+                                                else ""
+                                            ),
+                                            "coverage": f"{variant.get('coverage_at_variant', 0)}x",
+                                            "alt_support": evidence.get(
+                                                "alternate_support", 0
+                                            ),
+                                            "vaf": (
+                                                f"{evidence.get('variant_allele_frequency', 0):.1%}"
+                                                if evidence.get(
+                                                    "variant_allele_frequency"
+                                                )
+                                                is not None
+                                                else "N/A"
+                                            ),
+                                            "evidence_level": evidence.get(
+                                                "evidence_level", "unknown"
+                                            )
+                                            .replace("_", " ")
+                                            .title(),
+                                        }
+                                    )
+
                                 if variant_data:
                                     # Create table with proper columns using pandas DataFrame
                                     df = pd.DataFrame(variant_data)
-                                    variant_table = ui.table.from_pandas(
-                                        df,
-                                        pagination=10
-                                    ).props("dense").style("height: 300px")
-                                    
+                                    variant_table = (
+                                        ui.table.from_pandas(df, pagination=10)
+                                        .props("dense")
+                                        .style("height: 300px")
+                                    )
+
                                     # Make columns sortable
                                     for col in variant_table.columns:
                                         col["sortable"] = True
-                                    
+
                                     if len(high_cov_variants) > 20:
-                                        ui.label(f"Showing first 20 of {len(high_cov_variants)} high coverage variants").classes("text-xs text-gray-500 mt-2")
-                            
+                                        ui.label(
+                                            f"Showing first 20 of {len(high_cov_variants)} high coverage variants"
+                                        ).classes("text-xs text-gray-500 mt-2")
+
                 except Exception as e:
-                    ui.label(f"Error displaying high coverage genes: {e}").classes("text-sm text-red-500")
+                    ui.label(f"Error displaying high coverage genes: {e}").classes(
+                        "text-sm text-red-500"
+                    )
                     import traceback
+
                     traceback.print_exc()
-            
+
             def _display_low_coverage_genes(data):
                 """Display genes with only low coverage variants"""
                 try:
-                    genes = data.get('genes', {})
-                    
+                    genes = data.get("genes", {})
+
                     # Filter for genes with only low coverage variants
                     low_coverage_genes = {}
                     for gene_name, gene_data in genes.items():
-                        summary = gene_data.get('summary', {})
-                        if summary.get('high_coverage_variants', 0) == 0 and summary.get('total_variants', 0) > 0:
+                        summary = gene_data.get("summary", {})
+                        if (
+                            summary.get("high_coverage_variants", 0) == 0
+                            and summary.get("total_variants", 0) > 0
+                        ):
                             low_coverage_genes[gene_name] = gene_data
-                    
+
                     if not low_coverage_genes:
-                        ui.label("No genes with only low coverage variants found.").classes("text-sm text-gray-500")
+                        ui.label(
+                            "No genes with only low coverage variants found."
+                        ).classes("text-sm text-gray-500")
                         return
-                    
-                    ui.label(f"⚠️ Found {len(low_coverage_genes)} genes with only low coverage variants").classes("text-lg font-semibold mb-4")
-                    
+
+                    ui.label(
+                        f"⚠️ Found {len(low_coverage_genes)} genes with only low coverage variants"
+                    ).classes("text-lg font-semibold mb-4")
+
                     # Create summary table
                     low_cov_data = []
                     for gene_name, gene_data in low_coverage_genes.items():
-                        summary = gene_data.get('summary', {})
-                        coverage_stats = gene_data.get('coverage_statistics', {})
-                        
-                        low_cov_data.append({
-                            'gene': gene_name,
-                            'mean_coverage': f"{coverage_stats.get('mean_coverage', 0):.1f}x",
-                            'total_variants': summary.get('total_variants', 0),
-                            'low_coverage_variants': summary.get('low_coverage_variants', 0),
-                            'status': summary.get('pathogenic_status', 'unknown').replace('_', ' ').title()
-                        })
-                    
+                        summary = gene_data.get("summary", {})
+                        coverage_stats = gene_data.get("coverage_statistics", {})
+
+                        low_cov_data.append(
+                            {
+                                "gene": gene_name,
+                                "mean_coverage": f"{coverage_stats.get('mean_coverage', 0):.1f}x",
+                                "total_variants": summary.get("total_variants", 0),
+                                "low_coverage_variants": summary.get(
+                                    "low_coverage_variants", 0
+                                ),
+                                "status": summary.get("pathogenic_status", "unknown")
+                                .replace("_", " ")
+                                .title(),
+                            }
+                        )
+
                     # Sort by mean coverage (lowest first)
-                    low_cov_data.sort(key=lambda x: float(x['mean_coverage'].replace('x', '')))
-                    
+                    low_cov_data.sort(
+                        key=lambda x: float(x["mean_coverage"].replace("x", ""))
+                    )
+
                     # Create table
-                    low_cov_table = ui.table.from_pandas(
-                        pd.DataFrame(low_cov_data),
-                        pagination=25
-                    ).props("dense").style("height: 400px")
-                    
+                    low_cov_table = (
+                        ui.table.from_pandas(pd.DataFrame(low_cov_data), pagination=25)
+                        .props("dense")
+                        .style("height: 400px")
+                    )
+
                     # Add search functionality
                     with low_cov_table.add_slot("top-right"):
-                        with ui.input(placeholder="Search genes...").props("type=search").bind_value(low_cov_table, "filter").add_slot("append"):
+                        with ui.input(placeholder="Search genes...").props(
+                            "type=search"
+                        ).bind_value(low_cov_table, "filter").add_slot("append"):
                             ui.icon("search")
-                    
+
                     # Make columns sortable
                     for col in low_cov_table.columns:
                         col["sortable"] = True
-                        
+
                 except Exception as e:
-                    ui.label(f"Error displaying low coverage genes: {e}").classes("text-sm text-red-500")
+                    ui.label(f"Error displaying low coverage genes: {e}").classes(
+                        "text-sm text-red-500"
+                    )
                     import traceback
+
                     traceback.print_exc()
-            
+
             def _display_gene_details(data):
                 """Display detailed gene information with variant analysis"""
                 try:
-                    genes = data.get('genes', {})
-                    
+                    genes = data.get("genes", {})
+
                     # Gene selector
                     with ui.row().classes("w-full items-center gap-4 mb-4"):
                         ui.label("Select Gene:").classes("text-sm font-medium")
                         gene_selector = ui.select(
                             options=list(genes.keys()),
                             value=list(genes.keys())[0] if genes else None,
-                            label="Gene"
+                            label="Gene",
                         ).classes("w-64")
-                    
+
                     # Gene details display
                     gene_details_container = ui.column().classes("w-full")
-                    
+
                     def update_gene_details():
                         gene_details_container.clear()
-                        
+
                         selected_gene = gene_selector.value
                         if not selected_gene or selected_gene not in genes:
                             return
-                        
+
                         gene_data = genes[selected_gene]
-                        summary = gene_data.get('summary', {})
-                        coverage_stats = gene_data.get('coverage_statistics', {})
-                        variants = gene_data.get('variants', [])
-                        
+                        summary = gene_data.get("summary", {})
+                        coverage_stats = gene_data.get("coverage_statistics", {})
+                        variants = gene_data.get("variants", [])
+
                         with gene_details_container:
                             # Gene header
                             with ui.card().classes("w-full mb-4"):
-                                ui.label(f"🧬 {selected_gene} - Gene Analysis Details").classes("text-xl font-semibold mb-2")
-                                
+                                ui.label(
+                                    f"🧬 {selected_gene} - Gene Analysis Details"
+                                ).classes("text-xl font-semibold mb-2")
+
                                 # Linear layout for gene stats
                                 with ui.column().classes("w-full gap-3"):
-                                    with ui.row().classes("w-full items-center justify-between p-3 bg-blue-50 rounded"):
-                                        ui.label("Mean Coverage").classes("text-base font-medium text-gray-700")
-                                        ui.label(f"{coverage_stats.get('mean_coverage', 0):.1f}x").classes("text-2xl font-bold text-blue-600")
-                                    
-                                    with ui.row().classes("w-full items-center justify-between p-3 bg-purple-50 rounded"):
-                                        ui.label("Total Variants").classes("text-base font-medium text-gray-700")
-                                        ui.label(f"{summary.get('total_variants', 0)}").classes("text-2xl font-bold text-purple-600")
-                                    
-                                    with ui.row().classes("w-full items-center justify-between p-3 bg-green-50 rounded"):
-                                        ui.label("High Coverage Variants (≥10x)").classes("text-base font-medium text-gray-700")
-                                        ui.label(f"{summary.get('high_coverage_variants', 0)}").classes("text-2xl font-bold text-green-600")
-                                    
-                                    with ui.row().classes("w-full items-center justify-between p-3 bg-orange-50 rounded"):
-                                        ui.label("Low Coverage Variants (<10x)").classes("text-base font-medium text-gray-700")
-                                        ui.label(f"{summary.get('low_coverage_variants', 0)}").classes("text-2xl font-bold text-orange-600")
-                            
+                                    with ui.row().classes(
+                                        "w-full items-center justify-between p-3 bg-blue-50 rounded"
+                                    ):
+                                        ui.label("Mean Coverage").classes(
+                                            "text-base font-medium text-gray-700"
+                                        )
+                                        ui.label(
+                                            f"{coverage_stats.get('mean_coverage', 0):.1f}x"
+                                        ).classes("text-2xl font-bold text-blue-600")
+
+                                    with ui.row().classes(
+                                        "w-full items-center justify-between p-3 bg-purple-50 rounded"
+                                    ):
+                                        ui.label("Total Variants").classes(
+                                            "text-base font-medium text-gray-700"
+                                        )
+                                        ui.label(
+                                            f"{summary.get('total_variants', 0)}"
+                                        ).classes("text-2xl font-bold text-purple-600")
+
+                                    with ui.row().classes(
+                                        "w-full items-center justify-between p-3 bg-green-50 rounded"
+                                    ):
+                                        ui.label(
+                                            "High Coverage Variants (≥10x)"
+                                        ).classes("text-base font-medium text-gray-700")
+                                        ui.label(
+                                            f"{summary.get('high_coverage_variants', 0)}"
+                                        ).classes("text-2xl font-bold text-green-600")
+
+                                    with ui.row().classes(
+                                        "w-full items-center justify-between p-3 bg-orange-50 rounded"
+                                    ):
+                                        ui.label(
+                                            "Low Coverage Variants (<10x)"
+                                        ).classes("text-base font-medium text-gray-700")
+                                        ui.label(
+                                            f"{summary.get('low_coverage_variants', 0)}"
+                                        ).classes("text-2xl font-bold text-orange-600")
+
                             # Variants table
                             if variants:
-                                ui.label("🔍 Variant Details").classes("text-lg font-semibold mb-2")
-                                
+                                ui.label("🔍 Variant Details").classes(
+                                    "text-lg font-semibold mb-2"
+                                )
+
                                 # Create comprehensive variants table - only show variants where alternate allele is detected
                                 variant_data = []
                                 for variant in variants:
-                                    evidence = variant.get('evidence_analysis', {})
+                                    evidence = variant.get("evidence_analysis", {})
                                     # Only include variants where alternate allele is actually detected
-                                    if evidence.get('alternate_support', 0) > 0:
+                                    if evidence.get("alternate_support", 0) > 0:
                                         # Create genomic locus in format chr1:119,915,631
-                                        chromosome = variant.get('chromosome', 'N')
-                                        position = variant.get('position', 0)
-                                        genomic_locus = f"{chromosome}:{position:,}" if chromosome != 'N' and position else 'N/A'
-                                        
-                                        variant_data.append({
-                                            'genomic_locus': genomic_locus,
-                                            'position': f"{position:,}",
-                                            'chromosome': chromosome,
-                                            'reference': variant.get('reference', 'N'),
-                                            'alternate': variant.get('alternate', 'N'),
-                                            'variant_type': evidence.get('variant_type', 'unknown').upper(),
-                                            'clinical_significance': variant.get('clinical_significance', 'unknown').replace('_', ' ').title(),
-                                            'disease': variant.get('disease_name', 'unknown')[:40] + ('...' if len(variant.get('disease_name', '')) > 40 else ''),
-                                            'coverage': f"{variant.get('coverage_at_variant', 0)}x",
-                                            'coverage_status': 'High' if variant.get('coverage_at_variant', 0) >= 10 else 'Low',
-                                            'alt_support': evidence.get('alternate_support', 0),
-                                            'evidence_level': evidence.get('evidence_level', 'unknown').replace('_', ' ').title(),
-                                            'zygosity': evidence.get('zygosity', 'unknown').replace('_', ' ').title(),
-                                            'vaf': f"{evidence.get('variant_allele_frequency', 0):.1%}" if evidence.get('variant_allele_frequency') is not None else 'N/A'
-                                        })
-                                
+                                        chromosome = variant.get("chromosome", "N")
+                                        position = variant.get("position", 0)
+                                        genomic_locus = (
+                                            f"{chromosome}:{position:,}"
+                                            if chromosome != "N" and position
+                                            else "N/A"
+                                        )
+
+                                        variant_data.append(
+                                            {
+                                                "genomic_locus": genomic_locus,
+                                                "position": f"{position:,}",
+                                                "chromosome": chromosome,
+                                                "reference": variant.get(
+                                                    "reference", "N"
+                                                ),
+                                                "alternate": variant.get(
+                                                    "alternate", "N"
+                                                ),
+                                                "variant_type": evidence.get(
+                                                    "variant_type", "unknown"
+                                                ).upper(),
+                                                "clinical_significance": variant.get(
+                                                    "clinical_significance", "unknown"
+                                                )
+                                                .replace("_", " ")
+                                                .title(),
+                                                "disease": variant.get(
+                                                    "disease_name", "unknown"
+                                                )[:40]
+                                                + (
+                                                    "..."
+                                                    if len(
+                                                        variant.get("disease_name", "")
+                                                    )
+                                                    > 40
+                                                    else ""
+                                                ),
+                                                "coverage": f"{variant.get('coverage_at_variant', 0)}x",
+                                                "coverage_status": (
+                                                    "High"
+                                                    if variant.get(
+                                                        "coverage_at_variant", 0
+                                                    )
+                                                    >= 10
+                                                    else "Low"
+                                                ),
+                                                "alt_support": evidence.get(
+                                                    "alternate_support", 0
+                                                ),
+                                                "evidence_level": evidence.get(
+                                                    "evidence_level", "unknown"
+                                                )
+                                                .replace("_", " ")
+                                                .title(),
+                                                "zygosity": evidence.get(
+                                                    "zygosity", "unknown"
+                                                )
+                                                .replace("_", " ")
+                                                .title(),
+                                                "vaf": (
+                                                    f"{evidence.get('variant_allele_frequency', 0):.1%}"
+                                                    if evidence.get(
+                                                        "variant_allele_frequency"
+                                                    )
+                                                    is not None
+                                                    else "N/A"
+                                                ),
+                                            }
+                                        )
+
                                 # Create table with proper columns using pandas DataFrame
                                 df = pd.DataFrame(variant_data)
-                                detailed_variant_table = ui.table.from_pandas(
-                                    df,
-                                    pagination=20
-                                ).props("dense").style("height: 500px")
-                                
+                                detailed_variant_table = (
+                                    ui.table.from_pandas(df, pagination=20)
+                                    .props("dense")
+                                    .style("height: 500px")
+                                )
+
                                 # Add search functionality
                                 with detailed_variant_table.add_slot("top-right"):
-                                    with ui.input(placeholder="Search variants...").props("type=search").bind_value(detailed_variant_table, "filter").add_slot("append"):
+                                    with ui.input(
+                                        placeholder="Search variants..."
+                                    ).props("type=search").bind_value(
+                                        detailed_variant_table, "filter"
+                                    ).add_slot(
+                                        "append"
+                                    ):
                                         ui.icon("search")
-                                
+
                                 # Make columns sortable
                                 for col in detailed_variant_table.columns:
                                     col["sortable"] = True
-                                
+
                                 # Add export functionality
                                 with ui.row().classes("w-full mt-4"):
                                     ui.button(
                                         "Export Gene Variants to CSV",
                                         icon="download",
-                                        on_click=lambda: _export_gene_variants(variant_data, selected_gene)
+                                        on_click=lambda: _export_gene_variants(
+                                            variant_data, selected_gene
+                                        ),
                                     ).classes("w-full")
                             else:
-                                ui.label("No variants found for this gene.").classes("text-sm text-gray-500")
-                    
+                                ui.label("No variants found for this gene.").classes(
+                                    "text-sm text-gray-500"
+                                )
+
                     # Initial display
                     update_gene_details()
-                    
+
                     # Update when gene selection changes
-                    gene_selector.on('change', update_gene_details)
-                    
+                    gene_selector.on("change", update_gene_details)
+
                 except Exception as e:
-                    ui.label(f"Error displaying gene details: {e}").classes("text-sm text-red-500")
+                    ui.label(f"Error displaying gene details: {e}").classes(
+                        "text-sm text-red-500"
+                    )
                     import traceback
+
                     traceback.print_exc()
-            
+
             # Helper function to export gene variants
             def _export_gene_variants(variant_data, gene_name):
                 """Export gene variants to CSV"""
                 try:
                     import tempfile
                     import os
-                    
+
                     # Create temporary file
-                    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+                    with tempfile.NamedTemporaryFile(
+                        mode="w", suffix=".csv", delete=False
+                    ) as f:
                         df = pd.DataFrame(variant_data)
                         df.to_csv(f.name, index=False)
                         temp_path = f.name
-                    
+
                     # Download the file
                     ui.download(temp_path, filename=f"{gene_name}_variants.csv")
-                    
+
                     # Clean up
                     os.unlink(temp_path)
-                    
+
                     ui.notify(f"{gene_name} variants exported successfully!")
-                    
+
                 except Exception as e:
                     ui.notify(f"Export failed: {e}", type="error")
-            
+
             # Check for existing results
             _check_lga_results()
-        
+
         # Function to check file availability for lightweight variant analysis
         def _check_lga_file_availability():
             try:
                 target_bam = sample_dir / "target.bam"
                 targets_bed = sample_dir / "targets_exceeding_threshold.bed"
-                
+
                 if not target_bam.exists():
-                    lga_files_status.set_text("❌ Missing target.bam - run target analysis first")
+                    lga_files_status.set_text(
+                        "❌ Missing target.bam - run target analysis first"
+                    )
                     lga_files_status.classes(replace="text-xs text-red-500")
                     lga_analysis_button.disable()
                     return False
-                
+
                 if not targets_bed.exists():
-                    lga_files_status.set_text("❌ Missing targets_exceeding_threshold.bed - run target analysis first")
+                    lga_files_status.set_text(
+                        "❌ Missing targets_exceeding_threshold.bed - run target analysis first"
+                    )
                     lga_files_status.classes(replace="text-xs text-red-500")
                     lga_analysis_button.disable()
                     return False
-                
+
                 # Check if BED file has content
                 try:
-                    with open(targets_bed, 'r') as f:
+                    with open(targets_bed, "r") as f:
                         bed_content = f.read().strip()
-                    
+
                     if not bed_content:
-                        lga_files_status.set_text("⚠️ BED file is empty - no regions exceed threshold")
+                        lga_files_status.set_text(
+                            "⚠️ BED file is empty - no regions exceed threshold"
+                        )
                         lga_files_status.classes(replace="text-xs text-yellow-500")
                         lga_analysis_button.disable()
                         return False
@@ -2449,153 +3040,185 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         lga_files_status.classes(replace="text-xs text-green-500")
                         lga_analysis_button.enable()
                         return True
-                        
+
                 except Exception as e:
                     lga_files_status.set_text(f"❌ Error reading BED file: {e}")
                     lga_files_status.classes(replace="text-xs text-red-500")
                     lga_analysis_button.disable()
                     return False
-                    
+
             except Exception as e:
                 lga_files_status.set_text(f"❌ Error checking files: {e}")
                 lga_files_status.classes(replace="text-xs text-red-500")
                 lga_analysis_button.disable()
                 return False
-        
+
         # Check file availability initially
         _check_lga_file_availability()
-        
+
         # Function to trigger lightweight variant analysis
         def _trigger_lightweight_gene_analysis():
             try:
                 # Check prerequisites
                 target_bam = sample_dir / "target.bam"
                 targets_bed = sample_dir / "targets_exceeding_threshold.bed"
-                
+
                 if not target_bam.exists():
-                    ui.notify("Missing target.bam file. Please run target analysis first.", type="warning")
+                    ui.notify(
+                        "Missing target.bam file. Please run target analysis first.",
+                        type="warning",
+                    )
                     return
-                
+
                 if not targets_bed.exists():
-                    ui.notify("Missing targets_exceeding_threshold.bed file. Please run target analysis first.", type="warning")
+                    ui.notify(
+                        "Missing targets_exceeding_threshold.bed file. Please run target analysis first.",
+                        type="warning",
+                    )
                     return
-                
+
                 # Check if BED file has content (not empty)
                 try:
-                    with open(targets_bed, 'r') as f:
+                    with open(targets_bed, "r") as f:
                         bed_content = f.read().strip()
-                    
+
                     if not bed_content:
-                        ui.notify("targets_exceeding_threshold.bed file is empty. No regions exceed coverage threshold.", type="warning")
+                        ui.notify(
+                            "targets_exceeding_threshold.bed file is empty. No regions exceed coverage threshold.",
+                            type="warning",
+                        )
                         return
-                        
+
                 except Exception as e:
-                    ui.notify(f"Error reading targets_exceeding_threshold.bed file: {e}", type="error")
+                    ui.notify(
+                        f"Error reading targets_exceeding_threshold.bed file: {e}",
+                        type="error",
+                    )
                     return
-                
+
                 # Update UI state
                 lga_analysis_button.disable()
                 lga_status_label.set_text("Starting lightweight variant analysis...")
                 lga_status_label.classes(replace="text-sm text-blue-600")
-                
+
                 print("🔧 GUI: Starting lightweight variant analysis...")
-                
+
                 # Create and submit lightweight variant analysis job
                 try:
                     # Import required modules
                     print("🔧 GUI: Importing required modules...")
-                    from robin.analysis.lightweight_gene_analysis import lightweight_gene_analysis_handler
+                    from robin.analysis.lightweight_gene_analysis import (
+                        lightweight_gene_analysis_handler,
+                    )
                     from robin.workflow_simple import Job, WorkflowContext
-                    
+
                     # Get reference genome from workflow runner (set by CLI)
                     reference_genome = None
-                    
-                    if hasattr(launcher, 'workflow_runner') and launcher.workflow_runner:
-                        if hasattr(launcher.workflow_runner, 'reference'):
+
+                    if (
+                        hasattr(launcher, "workflow_runner")
+                        and launcher.workflow_runner
+                    ):
+                        if hasattr(launcher.workflow_runner, "reference"):
                             reference_genome = launcher.workflow_runner.reference
-                    
+
                     # Fallback to environment variable
                     if not reference_genome:
                         env_reference = os.environ.get("robin_REFERENCE")
                         if env_reference and os.path.exists(env_reference):
                             reference_genome = env_reference
-                    
+
                     print(f"🔧 GUI: Reference genome: {reference_genome}")
-                    
+
                     # Use monitored_directory as work_dir, or fall back to sample_dir if not available
-                    work_dir = launcher.monitored_directory if launcher.monitored_directory else str(sample_dir)
+                    work_dir = (
+                        launcher.monitored_directory
+                        if launcher.monitored_directory
+                        else str(sample_dir)
+                    )
                     print(f"🔧 GUI: Work directory: {work_dir}")
-                    
+
                     metadata = {
                         "work_dir": work_dir,
                         "bed_path": str(targets_bed),
                         "reference": reference_genome,
-                        "force_regenerate": lga_force_regenerate_checkbox.value
+                        "force_regenerate": lga_force_regenerate_checkbox.value,
                     }
-                    
+
                     print(f"🔧 GUI: Job metadata: {metadata}")
-                    
+
                     # Create workflow context
                     print("🔧 GUI: Creating workflow context...")
                     context = WorkflowContext(
-                        filepath=str(sample_dir),
-                        metadata=metadata
+                        filepath=str(sample_dir), metadata=metadata
                     )
-                    
+
                     # Add sample_id method
                     def get_sample_id():
                         return sample_dir.name
-                    
+
                     context.get_sample_id = get_sample_id
                     context.add_result = lambda key, value: None  # Mock for now
-                    context.add_error = lambda key, value: None   # Mock for now
-                    
+                    context.add_error = lambda key, value: None  # Mock for now
+
                     # Create job
                     print("🔧 GUI: Creating job object...")
                     job = Job(
-                        job_id=hash(f"lightweight_gene_analysis_{sample_dir.name}") % 1000000,  # Simple hash-based ID
+                        job_id=hash(f"lightweight_gene_analysis_{sample_dir.name}")
+                        % 1000000,  # Simple hash-based ID
                         job_type="lightweight_gene_analysis",
                         context=context,
                         origin="fast",
-                        workflow=["fast:lightweight_gene_analysis"]
+                        workflow=["fast:lightweight_gene_analysis"],
                     )
-                    
+
                     print(f"🔧 GUI: Job created with ID: {job.job_id}")
-                    
+
                     # For now, let's force direct execution to see our debug prints
                     # TODO: Re-enable workflow submission once we understand how it works
                     print("🔧 Forcing direct execution to see debug output...")
-                    
+
                     # Use a shared variable to communicate between threads
                     lga_status = {"status": "running", "message": "", "error": None}
-                    
+
                     def run_lga_analysis_direct():
                         try:
-                            print("🚀 Starting lightweight gene analysis in background thread...")
+                            print(
+                                "🚀 Starting lightweight gene analysis in background thread..."
+                            )
                             # Use the work_dir variable we calculated earlier
                             lightweight_gene_analysis_handler(job, work_dir=work_dir)
-                            
+
                             # Update UI on completion using the main thread
-                            print("✅ Lightweight variant analysis completed successfully!")
+                            print(
+                                "✅ Lightweight variant analysis completed successfully!"
+                            )
                             lga_status["status"] = "completed"
-                            lga_status["message"] = "Lightweight variant analysis completed successfully!"
-                            
+                            lga_status["message"] = (
+                                "Lightweight variant analysis completed successfully!"
+                            )
+
                         except Exception as e:
                             print(f"❌ Error in background thread: {e}")
                             lga_status["status"] = "error"
                             lga_status["error"] = str(e)
-                    
+
                     # Run in background thread
                     import threading
-                    thread = threading.Thread(target=run_lga_analysis_direct, daemon=True)
+
+                    thread = threading.Thread(
+                        target=run_lga_analysis_direct, daemon=True
+                    )
                     thread.start()
-                    
+
                     # Check for completion status periodically
                     def check_lga_status():
                         if lga_status["status"] == "completed":
                             try:
                                 lga_status_label.set_text(lga_status["message"])
-                                lga_status_label.classes(replace="text-sm text-green-600")
+                                lga_status_label.classes(
+                                    replace="text-sm text-green-600"
+                                )
                                 lga_analysis_button.enable()
                                 lga_analysis_button.set_text("Rerun Variant Analysis")
                                 lga_analysis_button.props("color=secondary")
@@ -2604,36 +3227,48 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             return False  # Stop checking
                         elif lga_status["status"] == "error":
                             try:
-                                lga_status_label.set_text(f"Lightweight variant analysis failed: {lga_status['error']}")
+                                lga_status_label.set_text(
+                                    f"Lightweight variant analysis failed: {lga_status['error']}"
+                                )
                                 lga_status_label.classes(replace="text-sm text-red-600")
                                 lga_analysis_button.enable()
                             except Exception as e:
                                 print(f"❌ Error updating UI: {e}")
                             return False  # Stop checking
                         return True  # Keep checking
-                    
+
                     # Start checking status every 0.5 seconds
                     ui.timer(0.5, check_lga_status, active=True)
-                    
-                    ui.notify("Lightweight variant analysis started in background (direct execution)", type="info")
-                    
+
+                    ui.notify(
+                        "Lightweight variant analysis started in background (direct execution)",
+                        type="info",
+                    )
+
                     # Comment out the old workflow submission code for now
                     # TODO: Re-enable workflow submission once we understand how it works
                     pass
-                    
-                except Exception as e:
-                    ui.notify(f"Failed to start lightweight variant analysis: {e}", type="error")
-                    lga_analysis_button.enable()
-                    lga_status_label.set_text("Failed to start lightweight variant analysis")
-                    lga_status_label.classes(replace="text-sm text-red-600")
-                    
-            except Exception as e:
-                ui.notify(f"Error triggering lightweight variant analysis: {e}", type="error")
-                lga_analysis_button.enable()
-                lga_status_label.set_text("Error triggering lightweight variant analysis")
-                lga_status_label.classes(replace="text-sm text-red-600")
-        
 
+                except Exception as e:
+                    ui.notify(
+                        f"Failed to start lightweight variant analysis: {e}",
+                        type="error",
+                    )
+                    lga_analysis_button.enable()
+                    lga_status_label.set_text(
+                        "Failed to start lightweight variant analysis"
+                    )
+                    lga_status_label.classes(replace="text-sm text-red-600")
+
+            except Exception as e:
+                ui.notify(
+                    f"Error triggering lightweight variant analysis: {e}", type="error"
+                )
+                lga_analysis_button.enable()
+                lga_status_label.set_text(
+                    "Error triggering lightweight variant analysis"
+                )
+                lga_status_label.classes(replace="text-sm text-red-600")
 
     # Helpers
     def _log_notify(message: str, level: str = "warning", notify: bool = False) -> None:
@@ -3001,30 +3636,38 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     notify=False,
                 )
             launcher._coverage_state[key] = state
-            
+
             # SNP Analysis results check - only update if necessary
             try:
-                if state.get("last_snp_check", 0) < time.time() - 30:  # Check every 30 seconds
+                if (
+                    state.get("last_snp_check", 0) < time.time() - 30
+                ):  # Check every 30 seconds
                     # Check for SNP analysis results
                     clair_dir = sample_dir / "clair3"
                     snp_vcf = clair_dir / "snpsift_output.vcf"
                     indel_vcf = clair_dir / "snpsift_indel_output.vcf"
-                    
+
                     if snp_vcf.exists() and indel_vcf.exists():
                         # Update SNP results status if it exists
                         try:
                             # Find the SNP results status label and update it
-                            snp_results_elements = document.querySelectorAll('[data-snp-results-status]')
+                            snp_results_elements = document.querySelectorAll(
+                                "[data-snp-results-status]"
+                            )
                             if snp_results_elements.length > 0:
                                 for element in snp_results_elements:
-                                    element.textContent = "SNP analysis completed successfully!"
+                                    element.textContent = (
+                                        "SNP analysis completed successfully!"
+                                    )
                                     element.className = "text-sm text-green-600"
                         except Exception:
                             pass
-                        
+
                         # Update button state if it exists
                         try:
-                            snp_button_elements = document.querySelectorAll('[data-snp-analysis-button]')
+                            snp_button_elements = document.querySelectorAll(
+                                "[data-snp-analysis-button]"
+                            )
                             if snp_button_elements.length > 0:
                                 for element in snp_button_elements:
                                     element.textContent = "Rerun SNP Analysis"
@@ -3032,108 +3675,68 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                     element.className = "q-btn q-btn--standard q-btn--rectangle q-btn--secondary"
                         except Exception:
                             pass
-                    
+
                     # Also check file availability for SNP analysis
                     try:
                         target_bam = sample_dir / "target.bam"
                         targets_bed = sample_dir / "targets_exceeding_threshold.bed"
-                        
+
                         if target_bam.exists() and targets_bed.exists():
                             # Check if BED file has content
                             try:
-                                with open(targets_bed, 'r') as f:
+                                with open(targets_bed, "r") as f:
                                     bed_content = f.read().strip()
-                                
+
                                 if bed_content:
                                     # Files are available, enable button if not already enabled
                                     try:
-                                        snp_button_elements = document.querySelectorAll('[data-snp-analysis-button]')
+                                        snp_button_elements = document.querySelectorAll(
+                                            "[data-snp-analysis-button]"
+                                        )
                                         if snp_button_elements.length > 0:
                                             for element in snp_button_elements:
                                                 if element.disabled:
-                                                    element.disabled = false;
-                                                    element.className = "q-btn q-btn--standard q-btn--rectangle q-btn--primary";
+                                                    element.disabled = false
+                                                    element.className = "q-btn q-btn--standard q-btn--rectangle q-btn--primary"
                                     except Exception:
                                         pass
                             except Exception:
                                 pass
                     except Exception:
                         pass
-                    
+
                     state["last_snp_check"] = time.time()
             except Exception:
                 # Never let SNP logic break coverage refresh
                 pass
-            
+
             # Lightweight Variant Analysis results check - only update if necessary
             try:
-                if state.get("last_lga_check", 0) < time.time() - 30:  # Check every 30 seconds
-                    # Check for lightweight variant analysis results (JSON format)
-                    # Check both the correct location and fallback location
-                    sample_id = sample_dir.name
-                    json_report = sample_dir / sample_id / "lightweight_gene_analysis_results.json"
-                    json_report_fallback = sample_dir / "lightweight_gene_analysis_results.json"
-                    
-                    if json_report.exists() or json_report_fallback.exists():
-                        # Update LGA results status if it exists
-                        try:
-                            # Find the LGA results status label and update it
-                            lga_results_elements = document.querySelectorAll('[data-lga-results-status]')
-                            if lga_results_elements.length > 0:
-                                for element in lga_results_elements:
-                                    element.textContent = "Lightweight variant analysis completed successfully!"
-                                    element.className = "text-sm text-green-600"
-                        except Exception:
-                            pass
-                        
-                        # Update button state if it exists
-                        try:
-                            lga_button_elements = document.querySelectorAll('[data-lga-analysis-button]')
-                            if lga_button_elements.length > 0:
-                                for element in lga_button_elements:
-                                    element.textContent = "Rerun Variant Analysis"
-                                    element.disabled = false;
-                                    element.className = "q-btn q-btn--standard q-btn--rectangle q-btn--secondary"
-                        except Exception:
-                            pass
-                    
+                if (
+                    state.get("last_lga_check", 0) < time.time() - 30
+                ):  # Check every 30 seconds
                     # Also check file availability for lightweight variant analysis
                     try:
                         target_bam = sample_dir / "target.bam"
                         targets_bed = sample_dir / "targets_exceeding_threshold.bed"
-                        
-                        if target_bam.exists() and targets_bed.exists():
-                            # Check if BED file has content
-                            try:
-                                with open(targets_bed, 'r') as f:
-                                    bed_content = f.read().strip()
-                                
-                                if bed_content:
-                                    # Files are available, enable button if not already enabled
-                                    try:
-                                        lga_button_elements = document.querySelectorAll('[data-lga-analysis-button]')
-                                        if lga_button_elements.length > 0:
-                                            for element in lga_button_elements:
-                                                if element.disabled:
-                                                    element.disabled = false;
-                                                    element.className = "q-btn q-btn--standard q-btn--rectangle q-btn--primary";
-                                    except Exception:
-                                        pass
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
+
                     
+                    except Exception as e:
+                        logging.debug(f"   LGA: <access denied>: {e}")
+                        pass
+
                     state["last_lga_check"] = time.time()
             except Exception:
                 # Never let LGA logic break coverage refresh
                 pass
-            
+
             # IGV management - only update status if already ready, don't auto-load
             try:
                 if _is_igv_ready():
                     # IGV is ready, just update status occasionally
-                    if state.get("last_igv_status_update", 0) < time.time() - 60:  # Update status every minute
+                    if (
+                        state.get("last_igv_status_update", 0) < time.time() - 60
+                    ):  # Update status every minute
                         try:
                             igv_status.set_text("IGV is ready and loaded.")
                             state["last_igv_status_update"] = time.time()
@@ -3142,7 +3745,6 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             except Exception:
                 # Never let IGV logic break coverage refresh
                 pass
-                
 
             except Exception:
                 # Never let IGV logic break coverage refresh
@@ -3151,8 +3753,6 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             _log_notify(
                 f"Unexpected coverage refresh error: {e}", level="error", notify=True
             )
-
-
 
     # Trigger an immediate refresh on page load, then continue with periodic refreshes
     ui.timer(0.5, _refresh_coverage, once=True)

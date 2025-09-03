@@ -44,7 +44,9 @@ def header_footer_canvas_factory(sample_id, centreID, styles, fonts_dir):
 
             # Header
             # Draw header divider line with ROBIN green theme (M3 primary color)
-            self.setStrokeColor(colors.HexColor("#4F9153"))  # ROBIN theme green (M3 primary)
+            self.setStrokeColor(
+                colors.HexColor("#4F9153")
+            )  # ROBIN theme green (M3 primary)
             self.setLineWidth(4)
             # Calculate margins for 90% width
             margin = self.width * 0.05  # 5% margin on each side
@@ -118,7 +120,9 @@ def header_footer_canvas_factory(sample_id, centreID, styles, fonts_dir):
                     )
 
             # Footer divider line
-            self.setStrokeColor(colors.HexColor("#4F9153"))  # ROBIN theme green (M3 primary)
+            self.setStrokeColor(
+                colors.HexColor("#4F9153")
+            )  # ROBIN theme green (M3 primary)
             self.setLineWidth(2)
             self.line(
                 margin, 0.4 * inch, self.width - margin, 0.4 * inch

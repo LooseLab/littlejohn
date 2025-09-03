@@ -133,9 +133,7 @@ def run_cnv_analysis_subprocess(
     # Ensure temp directory exists
     os.makedirs(temp_dir, exist_ok=True)
 
-    # In multi-sample mode we can avoid writing per-sample copy_numbers
-    copy_numbers_path = None
-
+    
     # Determine reference CNV dict path: if provided a path, use it; otherwise serialize dict
     if isinstance(ref_cnv_dict, str) and os.path.exists(ref_cnv_dict):
         ref_cnv_dict_path = ref_cnv_dict
@@ -229,6 +227,7 @@ class Result:
     def __init__(self, cnv_dict: dict) -> None:
         self.cnv = cnv_dict
 
+
 @dataclass
 class CNVMetadata:
     """Container for CNV analysis metadata and results"""
@@ -278,7 +277,8 @@ def run_ruptures(
         (cp * bin_width - bin_width, cp * bin_width + bin_width)
         for cp in ruptures_result
     ]
-    
+
+
 class CNV_Difference:
     """
     A class to store CNV difference data.

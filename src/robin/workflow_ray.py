@@ -321,10 +321,10 @@ def _wrap_real_handler(
                 sig = inspect.signature(py_handler)
                 # Check if handler accepts reference parameter
                 accepts_reference = "reference" in sig.parameters
-                
+
                 # Get reference from job metadata if available
                 reference = job.context.metadata.get("reference")
-                
+
                 # Call handler with appropriate parameters
                 if (
                     "work_dir" in sig.parameters
@@ -428,7 +428,12 @@ class TypeProcessor:
 
 @ray.remote
 class Coordinator:
-    def __init__(self, analysis_workers: int = 1, preset: Optional[str] = None, reference: Optional[str] = None):
+    def __init__(
+        self,
+        analysis_workers: int = 1,
+        preset: Optional[str] = None,
+        reference: Optional[str] = None,
+    ):
         # dedup maps
         self.pending: Dict[Tuple[str, str], int] = {}
         self.running: Dict[Tuple[str, str], int] = {}
@@ -473,16 +478,16 @@ class Coordinator:
         # None -> legacy per-type actors; otherwise use grouped Pool actors
         self.preset: Optional[str] = preset
         self.using_pools: bool = False
-        
+
         # Reference genome for SNP calling and other analyses
         self.reference: Optional[str] = reference
-        
+
         # Reference genome status (logged at INFO level)
         if self.reference:
             pass  # Reference genome available
         else:
             pass  # No reference genome
-        
+
         # Keep references to any CPU limiter actors
         self._cpu_limiters: List[Any] = []
 
@@ -512,7 +517,10 @@ class Coordinator:
             ("pannanodx", pannanodx_handler_remote),
             ("random_forest", random_forest_handler_remote),
             ("igv_bam", ray.remote(_wrap_real_handler(_igv_bam_handler, "igv_bam"))),
-            ("snp_analysis", ray.remote(_wrap_real_handler(_snp_analysis_handler, "snp_analysis"))),
+            (
+                "snp_analysis",
+                ray.remote(_wrap_real_handler(_snp_analysis_handler, "snp_analysis")),
+            ),
         ]
 
         preset = (self.preset or "").lower().strip()
@@ -549,7 +557,10 @@ class Coordinator:
                 "analysis": ["mgmt", "cnv", "target", "fusion"],
                 "classif": ["sturgeon", "nanodx", "pannanodx"],
                 "rf": ["random_forest"],
-                "slow": ["igv_bam", "snp_analysis"],  # Add slow pool for igv_bam and snp_analysis jobs
+                "slow": [
+                    "igv_bam",
+                    "snp_analysis",
+                ],  # Add slow pool for igv_bam and snp_analysis jobs
             }
 
             # Determine concurrency per pool based on preset
@@ -730,39 +741,45 @@ class Coordinator:
             self.inflight_by_type[job.job_type] = inflight_for_type + 1
 
     async def submit_sample_job(
-        self, sample_dir: str, job_type: str, sample_id: str = None, force_regenerate: bool = False
+        self,
+        sample_dir: str,
+        job_type: str,
+        sample_id: str = None,
+        force_regenerate: bool = False,
     ) -> bool:
         """
         Submit a job for an existing sample directory.
-        
+
         This allows users to manually trigger specific job types for samples
         that have already been processed or need reprocessing.
-        
+
         Args:
             sample_dir: Path to the sample directory
             job_type: Type of job to run (e.g., 'igv_bam')
             sample_id: Optional sample ID (defaults to directory name)
             force_regenerate: If True, force regeneration even if output exists
-            
+
         Returns:
             True if job was successfully submitted, False otherwise
         """
         try:
             if sample_id is None:
                 sample_id = Path(sample_dir).name
-            
+
             # Create a context for this sample
             context = WorkflowContext(
                 filepath=sample_dir,
                 metadata={
                     "sample_id": sample_id,
                     "sample_dir": sample_dir,
-                    "work_dir": os.path.dirname(sample_dir),  # Set the work_dir to parent directory
+                    "work_dir": os.path.dirname(
+                        sample_dir
+                    ),  # Set the work_dir to parent directory
                     "force_regenerate": force_regenerate,  # Add force_regenerate flag
-                    "bam_metadata": {"sample_id": sample_id}
-                }
+                    "bam_metadata": {"sample_id": sample_id},
+                },
             )
-            
+
             # Create a job
             job = Job(
                 job_id=next(_job_id_counter),
@@ -770,59 +787,63 @@ class Coordinator:
                 origin="manual",  # Use 'origin' instead of 'queue'
                 workflow=[f"slow:{job_type}"],
                 step=0,
-                context=context
+                context=context,
             )
-            
+
             # Submit the job
             await self.submit_jobs([job])
-            
+
             return True
-            
-        except Exception as e:
+
+        except Exception:
             return False
 
     async def submit_snp_analysis_job(
-        self, sample_dir: str, sample_id: str = None, reference: str = None, threads: int = 4, force_regenerate: bool = False
+        self,
+        sample_dir: str,
+        sample_id: str = None,
+        reference: str = None,
+        threads: int = 4,
+        force_regenerate: bool = False,
     ) -> bool:
         """
         Submit a SNP analysis job for an existing sample directory.
-        
+
         This is a convenience method specifically for SNP analysis that ensures
         all required metadata is properly set up.
-        
+
         Args:
             sample_dir: Path to the sample directory
             sample_id: Optional sample ID (defaults to directory name)
             reference: Path to reference genome (optional, will auto-detect if not provided)
             threads: Number of threads to use for processing (default: 4)
             force_regenerate: Whether to force regeneration of existing results (default: False)
-            
+
         Returns:
             True if job was successfully submitted, False otherwise
         """
         try:
             if sample_id is None:
                 sample_id = Path(sample_dir).name
-            
+
             # Create a context for this sample with SNP-specific metadata
             metadata = {
                 "sample_id": sample_id,
                 "sample_dir": sample_dir,
-                "work_dir": os.path.dirname(sample_dir),  # Set the work_dir to parent directory
+                "work_dir": os.path.dirname(
+                    sample_dir
+                ),  # Set the work_dir to parent directory
                 "threads": threads,
                 "force_regenerate": force_regenerate,
-                "bam_metadata": {"sample_id": sample_id}
+                "bam_metadata": {"sample_id": sample_id},
             }
-            
+
             # Add reference genome if provided
             if reference:
                 metadata["reference"] = reference
-            
-            context = WorkflowContext(
-                filepath=sample_dir,
-                metadata=metadata
-            )
-            
+
+            context = WorkflowContext(filepath=sample_dir, metadata=metadata)
+
             # Create a job
             job = Job(
                 job_id=next(_job_id_counter),
@@ -830,39 +851,38 @@ class Coordinator:
                 origin="manual",  # Use 'origin' instead of 'queue'
                 workflow=["slow:snp_analysis"],
                 step=0,
-                context=context
+                context=context,
             )
-            
+
             # Submit the job
             await self.submit_jobs([job])
-            
+
             return True
-            
-        except Exception as e:
+
+        except Exception:
             return False
 
-    def is_sample_ready_for_snp_analysis(self, sample_dir: str) -> tuple[bool, list[str]]:
+    def is_sample_ready_for_snp_analysis(
+        self, sample_dir: str
+    ) -> tuple[bool, list[str]]:
         """
         Check if a sample directory is ready for SNP analysis.
-        
+
         Args:
             sample_dir: Path to the sample directory
-            
+
         Returns:
             Tuple of (is_ready, missing_files) where is_ready is a boolean
             and missing_files is a list of missing required files
         """
-        required_files = [
-            "target.bam",
-            "targets_exceeding_threshold.bed"
-        ]
-        
+        required_files = ["target.bam", "targets_exceeding_threshold.bed"]
+
         missing_files = []
         for filename in required_files:
             file_path = os.path.join(sample_dir, filename)
             if not os.path.exists(file_path):
                 missing_files.append(filename)
-        
+
         is_ready = len(missing_files) == 0
         return is_ready, missing_files
 
@@ -1637,7 +1657,6 @@ async def tqdm_monitor(coord, continuous: bool = False) -> None:
     )
 
     try:
-        last_completed = 0
         while True:
             s = await coord.stats.remote()
             # Build completed per queue (completed + failed)
@@ -1785,6 +1804,7 @@ class RayFileWatcher(FileSystemEventHandler):
 # Global coordinator reference for external access
 _GLOBAL_COORDINATOR = None
 
+
 async def _get_coordinator():
     """Get the global coordinator reference for external job submission."""
     global _GLOBAL_COORDINATOR
@@ -1795,6 +1815,7 @@ async def _get_coordinator():
         except Exception:
             pass
     return _GLOBAL_COORDINATOR
+
 
 def get_coordinator_sync():
     """Get the global coordinator reference synchronously."""
@@ -1807,10 +1828,12 @@ def get_coordinator_sync():
             pass
     return _GLOBAL_COORDINATOR
 
+
 def set_coordinator(coord):
     """Set the global coordinator reference from outside."""
     global _GLOBAL_COORDINATOR
     _GLOBAL_COORDINATOR = coord
+
 
 async def run(
     plan: List[str],
@@ -1827,36 +1850,40 @@ async def run(
     preset: Optional[str] = None,
     workflow_runner: Any = None,
     reference: Optional[str] = None,
+    gui_host: str = "0.0.0.0",
+    gui_port: int = 8081,
 ):
     global GLOBAL_LOG_LEVEL
     GLOBAL_LOG_LEVEL = (log_level or "INFO").upper()
-    
+
     # Configure Ray logging to reduce verbose output
     import logging
+
     ray_logger = logging.getLogger("ray")
     ray_logger.setLevel(logging.WARNING)
-    
+
     # Also reduce Raylet logging
     raylet_logger = logging.getLogger("raylet")
     raylet_logger.setLevel(logging.WARNING)
-    
+
     # Reduce other Ray-related logging
     logging.getLogger("ray.worker").setLevel(logging.WARNING)
     logging.getLogger("ray.remote").setLevel(logging.WARNING)
     logging.getLogger("ray.actor").setLevel(logging.WARNING)
     logging.getLogger("ray.util").setLevel(logging.WARNING)
-    
+
     # Set Ray environment variables to reduce verbose output
     import os
+
     os.environ["RAY_DISABLE_IMPORT_WARNING"] = "1"
     os.environ["RAY_DISABLE_DEPRECATION_WARNING"] = "1"
-    
+
     # Reference genome status (minimal logging)
     if reference:
         pass  # Reference genome provided
     else:
         pass  # No reference genome provided
-    
+
     # Ensure any previous coordinator is terminated to avoid stale-code actors
     try:
         old = ray.get_actor("robin_coordinator")
@@ -1875,11 +1902,11 @@ async def run(
         coord = Coordinator.options(name="robin_coordinator").remote(
             analysis_workers=analysis_workers, preset=preset, reference=reference
         )
-    
+
     # Set global coordinator reference for external access
     global _GLOBAL_COORDINATOR
     _GLOBAL_COORDINATOR = coord
-    
+
     # run async setup without blocking the event loop
     try:
         await coord.setup.remote()
@@ -1926,7 +1953,11 @@ async def run(
             print("GUI not launched: --work-dir not provided.")
         else:
             launcher = _gui_launch(
-                workflow_runner=workflow_runner, workflow_steps=plan, monitored_directory=work_dir
+                host=gui_host,
+                port=gui_port,
+                workflow_runner=workflow_runner,
+                workflow_steps=plan,
+                monitored_directory=work_dir,
             )
             try:
                 url = (
@@ -1949,7 +1980,6 @@ async def run(
                         )
                         completed = int(s.get("completed", 0) or 0)
                         failed = int(s.get("failed", 0) or 0)
-                        active = int(s.get("active_count", 0) or 0)
                         progress = (completed + failed) / total if total > 0 else 0.0
                         _gui_send_update(
                             _GUIUpdateType.WORKFLOW_STATUS,
@@ -2222,13 +2252,15 @@ if __name__ == "__main__":
     try:
         # Expose dashboard on all interfaces when supported
         init_kwargs = {"address": args.ray_address}
-        
+
         if not args.no_ray_dashboard:
-            init_kwargs.update({
-                "include_dashboard": True,
-                "dashboard_host": os.environ.get("RAY_DASHBOARD_HOST", "0.0.0.0"),
-            })
-            
+            init_kwargs.update(
+                {
+                    "include_dashboard": True,
+                    "dashboard_host": os.environ.get("RAY_DASHBOARD_HOST", "0.0.0.0"),
+                }
+            )
+
         ray.init(**init_kwargs)
     except TypeError:
         # Older Ray versions may not support dashboard args

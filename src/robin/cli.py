@@ -82,6 +82,7 @@ QUEUE_MAPPING = {
 JOBS_REQUIRING_BED_CONVERSION = {"sturgeon", "nanodx", "pannanodx", "random_forest"}
 
 from robin.reporting.sections.disclaimer_text import EXTENDED_DISCLAIMER_TEXT
+
 # Disclaimer text for user acknowledgment
 DISCLAIMER_TEXT = EXTENDED_DISCLAIMER_TEXT
 
@@ -313,10 +314,12 @@ def _create_ray_workflow_runner(
 
         class _RayCoreWrapper:
             def __init__(self, reference: Optional[Path] = None):
-                self.manager = type("_DummyManager", (), {"get_priority_info": lambda _self: {}})()
+                self.manager = type(
+                    "_DummyManager", (), {"get_priority_info": lambda _self: {}}
+                )()
                 self.coordinator = None  # Will be set when workflow starts
                 self.reference = reference  # Store reference genome for GUI access
-                
+
                 # Debug logging for reference genome (only in verbose mode)
                 if self.reference:
                     pass  # Reference genome stored successfully
@@ -330,16 +333,22 @@ def _create_ray_workflow_runner(
             def register_command_handler(self, *args, **kwargs):
                 return None
 
-            def submit_sample_job(self, sample_dir: str, job_type: str, sample_id: str = None, force_regenerate: bool = False) -> bool:
+            def submit_sample_job(
+                self,
+                sample_dir: str,
+                job_type: str,
+                sample_id: str = None,
+                force_regenerate: bool = False,
+            ) -> bool:
                 """Submit a job for an existing sample directory using Ray workflow."""
                 try:
                     # Try to get coordinator with retries
                     import time
                     from robin import workflow_ray as wrn
-                    
+
                     max_retries = 5
                     retry_delay = 1.0
-                    
+
                     for attempt in range(max_retries):
                         # Try to get coordinator
                         if self.coordinator is None:
@@ -347,42 +356,52 @@ def _create_ray_workflow_runner(
                                 self.coordinator = wrn.get_coordinator_sync()
                             except Exception:
                                 pass
-                        
+
                         if self.coordinator is not None:
                             break
-                        
+
                         if attempt < max_retries - 1:
                             time.sleep(retry_delay)
                             retry_delay *= 1.5  # Exponential backoff
-                    
+
                     if self.coordinator is None:
                         return False
-                    
+
                     # Submit the job using the coordinator
                     # Ray remote calls are synchronous from the caller's perspective
-                    result = self.coordinator.submit_sample_job.remote(sample_dir, job_type, sample_id, force_regenerate)
-                    
+                    result = self.coordinator.submit_sample_job.remote(
+                        sample_dir, job_type, sample_id, force_regenerate
+                    )
+
                     # Wait for the result (this is the actual async part)
                     import ray
+
                     try:
                         final_result = ray.get(result, timeout=30.0)
                         return final_result
-                    except Exception as e:
+                    except Exception:
                         return False
-                        
-                except Exception as e:
+
+                except Exception:
                     return False
 
-            def submit_snp_analysis_job(self, sample_dir: str, sample_id: str = None, reference: str = None, threads: int = 4, force_regenerate: bool = False) -> bool:
+            def submit_snp_analysis_job(
+                self,
+                sample_dir: str,
+                sample_id: str = None,
+                reference: str = None,
+                threads: int = 4,
+                force_regenerate: bool = False,
+            ) -> bool:
                 """Submit a SNP analysis job for an existing sample directory using Ray workflow."""
                 try:
                     # Try to get coordinator with retries
                     import time
                     from robin import workflow_ray as wrn
-                    
+
                     max_retries = 5
                     retry_delay = 1.0
-                    
+
                     for attempt in range(max_retries):
                         # Try to get coordinator
                         if self.coordinator is None:
@@ -390,46 +409,49 @@ def _create_ray_workflow_runner(
                                 self.coordinator = wrn.get_coordinator_sync()
                             except Exception:
                                 pass
-                        
+
                         if self.coordinator is None:
                             break
-                        
+
                         if attempt < max_retries - 1:
                             time.sleep(retry_delay)
                             retry_delay *= 1.5  # Exponential backoff
-                    
+
                     if self.coordinator is None:
                         return False
-                    
+
                     # Submit the SNP analysis job using the coordinator
                     # Ray remote calls are synchronous from the caller's perspective
-                    result = self.coordinator.submit_snp_analysis_job.remote(sample_dir, sample_id, reference, threads, force_regenerate)
-                    
+                    result = self.coordinator.submit_snp_analysis_job.remote(
+                        sample_dir, sample_id, reference, threads, force_regenerate
+                    )
+
                     # Wait for the result (this is the actual async part)
                     import ray
+
                     try:
                         final_result = ray.get(result, timeout=30.0)
                         return final_result
-                    except Exception as e:
+                    except Exception:
                         return False
-                        
-                except Exception as e:
+
+                except Exception:
                     return False
 
-            def is_sample_ready_for_snp_analysis(self, sample_dir: str) -> tuple[bool, list[str]]:
+            def is_sample_ready_for_snp_analysis(
+                self, sample_dir: str
+            ) -> tuple[bool, list[str]]:
                 """Check if a sample directory is ready for SNP analysis."""
                 import os
-                required_files = [
-                    "target.bam",
-                    "targets_exceeding_threshold.bed"
-                ]
-                
+
+                required_files = ["target.bam", "targets_exceeding_threshold.bed"]
+
                 missing_files = []
                 for filename in required_files:
                     file_path = os.path.join(sample_dir, filename)
                     if not os.path.exists(file_path):
                         missing_files.append(filename)
-                
+
                 is_ready = len(missing_files) == 0
                 return is_ready, missing_files
 
@@ -446,11 +468,9 @@ def _create_ray_workflow_runner(
             ) -> None:
                 # Store reference to self for coordinator access
                 self_ref = self
-                
+
                 async def _run_with_coordinator():
-                    import asyncio
-                    from robin import workflow_ray as wrn
-                    
+
                     # Run the workflow first to create the coordinator
                     await wrn.run(
                         plan=workflow_steps,
@@ -468,7 +488,7 @@ def _create_ray_workflow_runner(
                         workflow_runner=self_ref,
                         reference=str(reference) if reference else None,
                     )
-                    
+
                     # After the workflow starts, try to get the coordinator reference
                     try:
                         coord = wrn.get_coordinator_sync()
@@ -476,7 +496,7 @@ def _create_ray_workflow_runner(
                             self_ref.coordinator = coord
                     except Exception:
                         pass
-                
+
                 asyncio.run(_run_with_coordinator())
 
         return _RayCoreWrapper(reference=reference)
@@ -516,7 +536,7 @@ def _initialize_ray(num_cpus: Optional[int], include_dashboard: bool = True) -> 
                 os.environ["RAY_DISABLE_IMPORT_WARNING"] = "1"
                 os.environ["RAY_DISABLE_DEPRECATION_WARNING"] = "1"
                 os.environ["RAY_OBJECT_STORE_ALLOW_SLOW_STORAGE"] = "1"
-                
+
                 # Bind dashboard to 0.0.0.0 when supported so it's reachable off-host
                 init_kwargs = {
                     "num_cpus": num_cpus,
@@ -524,24 +544,28 @@ def _initialize_ray(num_cpus: Optional[int], include_dashboard: bool = True) -> 
                     "object_store_memory": 1000000000,  # 1GB object store
                     "temp_dir": "/tmp/ray",  # Use /tmp for temporary files
                     "_system_config": {
-                        "object_spilling_config": json.dumps({
-                            "type": "filesystem",
-                            "params": {
-                                "directory_path": "/tmp/ray/spill"
+                        "object_spilling_config": json.dumps(
+                            {
+                                "type": "filesystem",
+                                "params": {"directory_path": "/tmp/ray/spill"},
                             }
-                        }),
+                        ),
                         "max_direct_call_object_size": 1000000,  # 1MB
                         "object_store_full_delay_ms": 100,
-                        "object_store_full_max_retries": 0
-                    }
+                        "object_store_full_max_retries": 0,
+                    },
                 }
-                
+
                 if include_dashboard:
-                    init_kwargs.update({
-                        "include_dashboard": True,
-                        "dashboard_host": os.environ.get("RAY_DASHBOARD_HOST", "0.0.0.0"),
-                    })
-                    
+                    init_kwargs.update(
+                        {
+                            "include_dashboard": True,
+                            "dashboard_host": os.environ.get(
+                                "RAY_DASHBOARD_HOST", "0.0.0.0"
+                            ),
+                        }
+                    )
+
                 try:
                     ray.init(**init_kwargs)
                 except TypeError:
@@ -646,7 +670,10 @@ def _create_workflow_runner(
 
 
 def _register_handlers(
-    runner: Any, legacy_analysis_queue: bool, work_dir: Optional[Path], reference: Optional[Path] = None
+    runner: Any,
+    legacy_analysis_queue: bool,
+    work_dir: Optional[Path],
+    reference: Optional[Path] = None,
 ) -> None:
     """Register all workflow handlers with the runner."""
     for (
@@ -667,18 +694,27 @@ def _register_handlers(
         if work_dir and needs_work_dir:
             if reference and job_type == "target":
                 # Special handling for target analysis with reference genome
-                def create_handler_with_work_dir_and_ref(handler, work_dir_path, ref_path):
-                    return lambda job: handler(job, work_dir=str(work_dir_path), reference=str(ref_path))
-                final_handler = create_handler_with_work_dir_and_ref(handler_func, work_dir, reference)
+                def create_handler_with_work_dir_and_ref(
+                    handler, work_dir_path, ref_path
+                ):
+                    return lambda job: handler(
+                        job, work_dir=str(work_dir_path), reference=str(ref_path)
+                    )
+
+                final_handler = create_handler_with_work_dir_and_ref(
+                    handler_func, work_dir, reference
+                )
             else:
                 # Standard work directory handling
                 def create_handler_with_work_dir(handler, work_dir_path):
                     return lambda job: handler(job, work_dir=str(work_dir_path))
+
                 final_handler = create_handler_with_work_dir(handler_func, work_dir)
         elif reference and job_type == "target":
             # Reference genome only (no work_dir needed)
             def create_handler_with_ref(handler, ref_path):
                 return lambda job: handler(job, reference=str(ref_path))
+
             final_handler = create_handler_with_ref(handler_func, reference)
         else:
             final_handler = handler_func
@@ -1064,7 +1100,7 @@ def workflow(
 
         # Ray Core engine path (default when --use-ray is used)
         if use_ray:
-            # Debug: Log reference genome status        
+            # Debug: Log reference genome status
             # Ensure Ray is initialized if CPUs not specified
             try:
                 import ray
@@ -1074,15 +1110,17 @@ def workflow(
                     init_kwargs = {
                         "ignore_reinit_error": True,
                     }
-                    
+
                     if ray_dashboard:
-                        init_kwargs.update({
-                            "include_dashboard": True,
-                            "dashboard_host": os.environ.get(
-                                "RAY_DASHBOARD_HOST", "0.0.0.0"
-                            ),
-                        })
-                    
+                        init_kwargs.update(
+                            {
+                                "include_dashboard": True,
+                                "dashboard_host": os.environ.get(
+                                    "RAY_DASHBOARD_HOST", "0.0.0.0"
+                                ),
+                            }
+                        )
+
                     if preset in {"p2i", "standard"}:
                         init_kwargs["num_cpus"] = 2 if preset == "p2i" else 4
                     try:
@@ -1147,6 +1185,8 @@ def workflow(
                         preset=preset,
                         workflow_runner=runner,
                         reference=str(reference) if reference else None,
+                        gui_host=gui_host,
+                        gui_port=gui_port,
                     )
                 )
             except KeyboardInterrupt:

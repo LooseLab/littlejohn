@@ -4,11 +4,16 @@ from pathlib import Path
 from typing import Any, Dict, List
 import csv
 
-
 try:
     from nicegui import ui
 except ImportError:  # pragma: no cover
     ui = None
+
+# Import centralized classification configuration
+try:
+    from robin.classification_config import get_classifier_thresholds
+except ImportError:  # pragma: no cover
+    get_classifier_thresholds = None
 
 
 def add_classification_section(sample_dir: Path) -> None:
@@ -290,35 +295,55 @@ def add_classification_section(sample_dir: Path) -> None:
                             "data": [y for _, y in data["series"][k]],
                         }
                     )
-            # Inline thresholds where required
-            if tool_name == "Sturgeon":
-                ts.options.setdefault("series", [])
-                ts.options["series"].append(
-                    {
-                        "name": "thresholds",
-                        "type": "line",
-                        "data": [],
-                        "markLine": {
-                            "silent": True,
-                            "lineStyle": {"type": "dashed", "color": "#999"},
-                            "data": [{"yAxis": 60}, {"yAxis": 80}],
-                        },
-                    }
-                )
-            if tool_name == "Random Forest":
-                ts.options.setdefault("series", [])
-                ts.options["series"].append(
-                    {
-                        "name": "thresholds",
-                        "type": "line",
-                        "data": [],
-                        "markLine": {
-                            "silent": True,
-                            "lineStyle": {"type": "dashed", "color": "#999"},
-                            "data": [{"yAxis": 65}, {"yAxis": 85}],
-                        },
-                    }
-                )
+            # Add thresholds for all classification tools using centralized configuration
+            if get_classifier_thresholds:
+                # Map tool names to classifier config keys
+                classifier_key_map = {
+                    "Sturgeon": "sturgeon",
+                    "NanoDX": "nanodx", 
+                    "PanNanoDX": "pannanodx",
+                    "Random Forest": "random_forest"
+                }
+                
+                classifier_key = classifier_key_map.get(tool_name)
+                if classifier_key:
+                    thresholds = get_classifier_thresholds(classifier_key)
+                    if thresholds and thresholds.get("medium") and thresholds.get("high"):
+                        ts.options.setdefault("series", [])
+                        ts.options["series"].append(
+                            {
+                                "name": "thresholds",
+                                "type": "line",
+                                "data": [],
+                                "markLine": {
+                                    "silent": True,
+                                    "lineStyle": {"type": "dashed", "color": "#999"},
+                                    "label": {
+                                        "show": True,
+                                        "formatter": "Medium Confidence",
+                                        "position": "insideEndTop"
+                                    },
+                                    "data": [
+                                        {
+                                            "yAxis": thresholds["medium"],
+                                            "label": {
+                                                "show": True,
+                                                "formatter": f"Medium Confidence ({thresholds['medium']:.0f}%)",
+                                                "position": "insideEndTop"
+                                            }
+                                        }, 
+                                        {
+                                            "yAxis": thresholds["high"],
+                                            "label": {
+                                                "show": True,
+                                                "formatter": f"High Confidence ({thresholds['high']:.0f}%)",
+                                                "position": "insideEndTop"
+                                            }
+                                        }
+                                    ],
+                                },
+                            }
+                        )
             ts.update()
             # Summaries
             if charts[tool_name].get("summary"):

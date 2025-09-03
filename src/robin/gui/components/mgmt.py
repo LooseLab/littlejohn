@@ -6,7 +6,6 @@ from typing import Any, Dict, List
 import pandas as pd
 
 
-
 try:
     from nicegui import ui
 except ImportError:  # pragma: no cover
@@ -26,9 +25,7 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                     "text-sm font-semibold text-blue-800"
                 )
                 mgmt_avg = ui.label("Average: --%").classes("text-sm text-gray-700")
-                mgmt_pred = ui.label("Prediction: --%").classes(
-                    "text-sm text-gray-700"
-                )
+                mgmt_pred = ui.label("Prediction: --%").classes("text-sm text-gray-700")
         ui.label("MGMT methylation plot").classes("text-sm text-gray-700")
         # mgmt_img = ui.image('')
         # Persistent Matplotlib element (NiceGUI integration)
@@ -46,9 +43,7 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
             class_size="table-xs",
         )
         ui.separator()
-        ui.label("MGMT CpG Site Methylation Data").classes(
-            "text-sm text-gray-700 mt-2"
-        )
+        ui.label("MGMT CpG Site Methylation Data").classes("text-sm text-gray-700 mt-2")
         _, mgmt_sites_table = styled_table(
             columns=[
                 {"name": "site", "label": "Site", "field": "site"},
@@ -183,10 +178,7 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                 mgmt_results_table.update()
             except Exception:
                 pass
-            try:
-                mgmt_exp.props(f'label="MGMT — {status} ({pred:.2f}%)"')
-            except Exception:
-                pass
+            
             """
             img_path = sample_dir / f"{current_count}_mgmt.png"
             if img_path.exists():

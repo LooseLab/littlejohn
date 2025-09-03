@@ -17,12 +17,13 @@ except ImportError:  # pragma: no cover
 
 from robin.gui.theme import styled_table
 
+
 def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
     """Build the CNV UI section and attach refresh timers.
 
     Uses `launcher._cnv_state` for per-sample cache/state.
     Expects CNV.npy, CNV3.npy, CNV_dict.npy, XYestimate.pkl, cnv_data_array.npy in sample folder.
-    
+
     Controls now trigger immediate refresh instead of waiting for timer updates.
     """
     with ui.card().classes("w-full"):
@@ -327,7 +328,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 return
             # Allocate budgets proportional to visible counts with a small floor
             budgets = []
-            remaining = max_points
+            
             for sub in vis_data:
                 share = int(max(1, round((len(sub) / total) * max_points)))
                 budgets.append(share)
@@ -393,9 +394,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
     @lru_cache(maxsize=1)
     def _load_cytobands_df() -> pd.DataFrame:
         try:
-            res_path = (
-                importlib_resources.files("robin.resources") / "cytoBand.txt"
-            )
+            res_path = importlib_resources.files("robin.resources") / "cytoBand.txt"
             df = pd.read_csv(
                 res_path,
                 sep="\t",
@@ -444,7 +443,6 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             import numpy as _np
             import pandas as _pd
 
-            logger = logging.getLogger(__name__)
             if not cnv_data or chromosome not in cnv_data:
                 return _pd.DataFrame()
             if bin_width > 10_000_000:
@@ -1037,7 +1035,9 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                     "data"
                                 ] = band_lines
                                 # Disable animation for marker lines so they appear instantly
-                                chart.options["series"][idx_cyto]["markLine"]["animation"] = False
+                                chart.options["series"][idx_cyto]["markLine"][
+                                    "animation"
+                                ] = False
                             # Do not show centromeres in All view
                             if idx_centro is not None:
                                 chart.options["series"][idx_centro]["markArea"][
@@ -1371,9 +1371,10 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 return
             key = str(sample_dir)
             state = launcher._cnv_state.get(key, {})
-            
+
             # Simple debouncing to prevent rapid successive calls
             import time
+
             current_time = time.time()
             last_refresh = state.get("_last_refresh", 0)
             if current_time - last_refresh < 0.1:  # 100ms debounce

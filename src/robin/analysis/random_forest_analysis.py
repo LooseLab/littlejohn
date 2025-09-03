@@ -37,6 +37,8 @@ from typing import Dict, Any, Optional, List
 
 import pandas as pd
 
+from robin.logging_config import get_job_logger
+
 # Import robin utilities
 try:
     from robin.analysis.utilities.merge_bedmethyl import (
@@ -66,7 +68,7 @@ def _compute_hvpath() -> Optional[str]:
 
 HVPATH = _compute_hvpath()
 
-from robin.logging_config import get_job_logger
+
 
 
 @dataclass

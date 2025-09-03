@@ -25,7 +25,8 @@ try:
     from robin.analysis.utilities.merge_bedmethyl import collapse_minimal_bedmethyl
     from robin.submodules.nanoDX.workflow.scripts.NN_model import NN_classifier
     from robin import resources
-    #ToDo: Resolve models into robin
+
+    # ToDo: Resolve models into robin
     from robin import models
     from robin.analysis.utilities.merge_bedmethyl import load_modkit_data
 except ImportError as e:

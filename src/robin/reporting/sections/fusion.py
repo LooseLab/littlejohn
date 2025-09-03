@@ -358,11 +358,21 @@ class FusionSection(ReportSection):
             # Build export DataFrames
             try:
                 import pandas as pd
+
                 # Summaries
                 networks_rows = []
-                for scope, nets in (("target", master_networks), ("genome_wide", all_networks)):
+                for scope, nets in (
+                    ("target", master_networks),
+                    ("genome_wide", all_networks),
+                ):
                     for net in nets:
-                        networks_rows.append({"Scope": scope, "Network": " - ".join(net), "Genes": ", ".join(net)})
+                        networks_rows.append(
+                            {
+                                "Scope": scope,
+                                "Network": " - ".join(net),
+                                "Genes": ", ".join(net),
+                            }
+                        )
                 if networks_rows:
                     self.export_frames["fusions_networks"] = pd.DataFrame(networks_rows)
 
@@ -378,26 +388,32 @@ class FusionSection(ReportSection):
                             for i in range(len(genes) - 1):
                                 for j in range(i + 1, len(genes)):
                                     gene_pair = f"{genes[i]}-{genes[j]}"
-                                    gene_pair_reads.setdefault(gene_pair, set()).add(read_id)
+                                    gene_pair_reads.setdefault(gene_pair, set()).add(
+                                        read_id
+                                    )
                     rows = []
                     for gene_pair, reads in gene_pair_reads.items():
                         if len(reads) >= 3:
                             g1, g2 = gene_pair.split("-")
                             g1row = df[df["Gene"] == g1].iloc[0]
                             g2row = df[df["Gene"] == g2].iloc[0]
-                            rows.append({
-                                "FusionPair": gene_pair,
-                                "Chrom1": g1row["chromBED"],
-                                "Chrom2": g2row["chromBED"],
-                                "Gene1Pos": f"{g1row['BS']}-{g1row['BE']}",
-                                "Gene2Pos": f"{g2row['BS']}-{g2row['BE']}",
-                                "SupportingReads": len(reads),
-                            })
+                            rows.append(
+                                {
+                                    "FusionPair": gene_pair,
+                                    "Chrom1": g1row["chromBED"],
+                                    "Chrom2": g2row["chromBED"],
+                                    "Gene1Pos": f"{g1row['BS']}-{g1row['BE']}",
+                                    "Gene2Pos": f"{g2row['BS']}-{g2row['BE']}",
+                                    "SupportingReads": len(reads),
+                                }
+                            )
                     return rows
 
                 master_rows = _fusion_rows(fusion_data["master_candidates"])
                 if master_rows:
-                    self.export_frames["fusions_target_panel"] = pd.DataFrame(master_rows)
+                    self.export_frames["fusions_target_panel"] = pd.DataFrame(
+                        master_rows
+                    )
 
                 all_rows = _fusion_rows(fusion_data["all_candidates"])
                 if all_rows:

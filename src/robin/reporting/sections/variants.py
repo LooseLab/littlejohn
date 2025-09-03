@@ -327,6 +327,7 @@ class VariantsSection(ReportSection):
             # Build empty export frames for consistency
             try:
                 import pandas as pd
+
                 self.export_frames["variants_detailed"] = pd.DataFrame(
                     columns=[
                         "Type",
@@ -351,7 +352,9 @@ class VariantsSection(ReportSection):
                 )
             except Exception as ex:
                 logger.error(
-                    "Error creating empty variant export frames: %s", str(ex), exc_info=True
+                    "Error creating empty variant export frames: %s",
+                    str(ex),
+                    exc_info=True,
                 )
             return
 
@@ -512,17 +515,21 @@ class VariantsSection(ReportSection):
             if rows:
                 df = pd.DataFrame(rows)
                 if not df.empty:
-                    df["Change"] = df["reference"].astype(str) + ">" + df["alternate"].astype(str)
-                    detailed = df[[
-                        "type",
-                        "chromosome",
-                        "position",
-                        "gene",
-                        "Change",
-                        "filter",
-                        "hgvs_c",
-                        "hgvs_p",
-                    ]].rename(
+                    df["Change"] = (
+                        df["reference"].astype(str) + ">" + df["alternate"].astype(str)
+                    )
+                    detailed = df[
+                        [
+                            "type",
+                            "chromosome",
+                            "position",
+                            "gene",
+                            "Change",
+                            "filter",
+                            "hgvs_c",
+                            "hgvs_p",
+                        ]
+                    ].rename(
                         columns={
                             "type": "Type",
                             "chromosome": "Chr",
@@ -568,7 +575,9 @@ class VariantsSection(ReportSection):
                         "PathogenicSNPs": len(self.variant_result.snp_data),
                         "PathogenicIndels": len(self.variant_result.indel_data),
                         "AffectedGenes": len(self.variant_result.affected_genes),
-                        "GenesList": ", ".join(sorted(self.variant_result.affected_genes)),
+                        "GenesList": ", ".join(
+                            sorted(self.variant_result.affected_genes)
+                        ),
                     }
                 ]
             )

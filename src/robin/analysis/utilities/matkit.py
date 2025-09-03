@@ -11,8 +11,7 @@ from pathlib import Path
 import pandas as pd
 import polars as pl
 
-# Suppress pkg_resources deprecation warnings from sorted_nearest
-warnings.filterwarnings("ignore", message="pkg_resources is deprecated", category=UserWarning)
+
 
 import pyranges as pr
 import pysam
@@ -23,6 +22,10 @@ from robin.analysis.utilities.mnp_flex import APIClient as MnpFlexClient
 from robin import resources
 import json
 
+# Suppress pkg_resources deprecation warnings from sorted_nearest
+warnings.filterwarnings(
+    "ignore", message="pkg_resources is deprecated", category=UserWarning
+)
 
 def merge_modkit_files(
     new_files: List[str],

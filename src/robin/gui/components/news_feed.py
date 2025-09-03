@@ -146,9 +146,7 @@ class NewsFeed:
         """Create the news feed UI element."""
         try:
             # Header section with title and last update
-            with ui.row().classes(
-                "w-full"
-            ):
+            with ui.row().classes("w-full"):
                 with ui.row().classes("items-center gap-2"):
                     ui.icon("feed", color="primary").classes("text-xl")
                     ui.label("ROBIN News").classes(
@@ -246,7 +244,9 @@ class NewsFeed:
                                                 "justify-center items-center"
                                             ):
                                                 # Create image with responsive dimensions and proper scaling
-                                                img = ui.image(item.image_url).classes("w-full max-w-md h-auto rounded-lg")
+                                                img = ui.image(item.image_url).classes(
+                                                    "w-full max-w-md h-auto rounded-lg"
+                                                )
 
                                             # Add error handling for image load failure
                                             def on_error(e):

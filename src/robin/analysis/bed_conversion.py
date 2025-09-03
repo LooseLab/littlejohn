@@ -225,7 +225,8 @@ class BedConversionAnalysis:
                 # Clean up the temporary file
                 try:
                     os.remove(temp_file.name)
-                except:
+                except Exception as e:
+                    logger.error(f"Failed to delete temporary file {temp_file.name}: {e}")
                     pass
                 raise
 

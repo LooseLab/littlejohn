@@ -252,7 +252,6 @@ def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
             # Only track unique reads up to a reasonable limit
             reads_with_supplementary = set()
             barcode_found = False
-            barcode_detection_count = 0  # Counter for early termination
             last_start = None
 
             # Step 3.5: Initialize MGMT read detection

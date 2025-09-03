@@ -16,6 +16,7 @@ import pandas as pd
 import polars as pl
 from contextlib import contextmanager
 import tempfile
+import json
 
 # Suppress pkg_resources deprecation warnings from sorted_nearest
 warnings.filterwarnings(
@@ -24,16 +25,11 @@ warnings.filterwarnings(
 
 try:
     import pyranges as pr
-    import pysam
-    from alive_progress import alive_bar
-    from tqdm import tqdm
-    from robin.analysis.utilities.ReadBam import ReadBam
-    from robin.analysis.utilities.mnp_flex import APIClient as MnpFlexClient
-    from robin import resources
+    from robin.analysis.utilities.mnp_flex import APIClient as MnpFlexClient #ToDo: Maintain to future integration.
 except ImportError as e:
     logging.warning(f"Some dependencies not available: {e}")
 
-import json
+
 
 # Simple cross-process file lock using POSIX flock when available (no-op on unsupported platforms)
 try:
