@@ -24,22 +24,110 @@ robin is a specialized bioinformatics workflow engine designed for processing BA
 - **Progress Tracking**: Real-time progress bars and worker monitoring
 - **File Watching**: Monitor directories for new BAM files
 - **Master CSV Tracking**: Automatic sample-level statistics aggregation
+- **Ray Distributed Computing**: Optional distributed processing support
+- **GUI Workflow Monitor**: Built-in NiceGUI-based monitoring interface
 
 ## Installation
 
-### From Source
+**We strongly recommend installing robin in a conda environment to ensure all dependencies are properly managed.**
 
-1. Clone the repository:
+### Prerequisites
+
+1. **Git LFS**: This repository uses Git Large File Storage (LFS) for model files. Ensure you have Git LFS installed:
+   ```bash
+   # Install Git LFS
+   git lfs install
+   ```
+
+2. **Conda**: Install Miniconda or Anaconda if you haven't already.
+
+### Installation Steps
+
+1. **Clone the repository with submodules**:
+   ```bash
+   git clone --recursive https://github.com/yourusername/robin.git
+   cd robin
+   ```
+
+2. **Create and activate conda environment**:
+   ```bash
+   # For Linux/Windows
+   conda env create -f robin.yml
+   conda activate robin_0_5
+   
+   # For macOS
+   conda env create -f robin_osx.yml
+   conda activate robin_0_5
+   ```
+
+3. **Install robin in development mode**:
+   ```bash
+   pip install -e .
+   ```
+
+### Alternative Installation (without conda)
+
+If you prefer not to use conda, you can install from source, but you'll need to manually install the system dependencies:
+
+1. **Install system dependencies**:
+   ```bash
+   # Ubuntu/Debian
+   sudo apt-get install git-lfs samtools bedtools r-base
+   
+   # macOS
+   brew install git-lfs samtools bedtools r
+   ```
+
+2. **Clone with submodules**:
+   ```bash
+   git clone --recursive https://github.com/yourusername/robin.git
+   cd robin
+   ```
+
+3. **Install Python dependencies**:
+   ```bash
+   pip install -e .
+   ```
+
+## Main Usage
+
+The primary command for running robin workflows is:
+
 ```bash
-git clone https://github.com/yourusername/robin.git
-cd robin
+robin workflow <data_folder> --work-dir <output_folder> -w target,cnv,fusion,mgmt,sturgeon,nanodx,pannanodx,random_forest --reference ~/references/hg38_simple.fa
 ```
 
-2. Install in development mode:
-```bash
-pip install -e .
-```
+### Command Breakdown
 
+- `robin workflow`: The main workflow command
+- `<data_folder>`: Directory containing your BAM files
+- `--work-dir <output_folder>`: Directory where results will be saved
+- `-w`: Workflow specification (comma-separated list of analysis types)
+- `--reference`: Path to reference genome (required for some analyses)
+
+### Example Usage
+
+```bash
+# Basic workflow with all analysis types
+robin workflow ~/data/bam_files \
+  --work-dir ~/results \
+  -w target,cnv,fusion,mgmt,sturgeon,nanodx,pannanodx,random_forest \
+  --reference ~/references/hg38_simple.fa
+
+# Simplified workflow with just a few analyses
+robin workflow ~/data/bam_files \
+  --work-dir ~/results \
+  -w mgmt,sturgeon \
+  --reference ~/references/hg38_simple.fa
+
+# With verbose output and custom logging
+robin workflow ~/data/bam_files \
+  --work-dir ~/results \
+  -w mgmt,cnv,sturgeon \
+  --reference ~/references/hg38_simple.fa \
+  --verbose \
+  --log-level INFO
+```
 
 ## Available Commands
 
@@ -57,19 +145,6 @@ robin list-job-types
 - **Classification Queue**: `sturgeon`, `nanodx`, `pannanodx`
 - **Slow Queue**: `random_forest`
 
-### `watch`
-Watch a directory for BAM file changes:
-
-```bash
-robin watch /path/to/directory [OPTIONS]
-```
-
-**Options:**
-- `--command, -c`: Command to run when files change
-- `--verbose, -v`: Enable verbose output
-- `--no-process-existing`: Skip processing existing files, only watch for new changes
-- `--no-progress`: Disable progress bars for file processing
-
 ### `workflow`
 Run an async workflow on BAM files in a directory:
 
@@ -78,18 +153,23 @@ robin workflow /path/to/directory --workflow "workflow_plan" [OPTIONS]
 ```
 
 **Required Options:**
-- `--workflow, -w`: Workflow plan (e.g., 'preprocessing:bed_conversion,analysis:mgmt,classification:sturgeon')
+- `--workflow, -w`: Workflow plan (e.g., 'mgmt,sturgeon' or 'preprocessing:bed_conversion,analysis:mgmt,classification:sturgeon')
 
 **Optional Options:**
-- `--commands, -c`: Command mappings (e.g., 'index:samtools index {file}')
-- `--verbose, -v`: Enable verbose output
-- `--no-process-existing`: Skip processing existing files, only watch for new changes
 - `--work-dir, -d`: Base output directory for analysis results
-- `--log-level`: Global log level (DEBUG|INFO|WARNING|ERROR, default: INFO)
+- `--reference, -r`: Path to reference genome (FASTA format)
+- `--verbose, -v`: Enable verbose output and detailed error traces
+- `--no-process-existing`: Skip processing existing files, only watch for new changes
+- `--log-level`: Global log level (DEBUG|INFO|WARNING|ERROR, default: ERROR)
 - `--job-log-level`: Set log level for specific job (e.g., 'preprocessing:DEBUG', 'mgmt:WARNING')
 - `--deduplicate-jobs`: Job types to deduplicate by sample ID (e.g., 'sturgeon', 'mgmt')
 - `--no-progress`: Disable progress bars for file processing
+- `--use-ray/--no-use-ray`: Enable Ray distributed computing (default: on)
+- `--with-gui/--no-gui`: Launch NiceGUI workflow monitor (default: on)
 
+
+
+<!-- 
 ### `list-files`
 List BAM files in a directory recursively:
 
@@ -132,20 +212,27 @@ robin uses a sophisticated multi-queue workflow system with four specialized que
 
 ### Workflow Syntax
 
-Workflows are specified using the format `queue:job_type`:
+Workflows can be specified in two formats:
 
+#### Simplified Format (Recommended)
 ```bash
-# Simple workflow: preprocessing + MGMT analysis
-robin workflow /path/to/bam/files --workflow "preprocessing:bed_conversion,analysis:mgmt"
+# Simple workflow: MGMT analysis + Sturgeon classification
+robin workflow /path/to/bam/files -w "mgmt,sturgeon"
 
-# Full pipeline: preprocessing + multiple analyses + classification
-robin workflow /path/to/bam/files --workflow "preprocessing:bed_conversion,analysis:mgmt,analysis:cnv,classification:sturgeon"
-
-# Multiple analyses for the same sample
-robin workflow /path/to/bam/files --workflow "preprocessing:bed_conversion,analysis:mgmt,analysis:cnv,analysis:fusion"
+# Full pipeline: all analysis types
+robin workflow /path/to/bam/files -w "target,cnv,fusion,mgmt,sturgeon,nanodx,pannanodx,random_forest"
 ```
 
-**Note**: The `preprocessing:preprocessing` step is automatically added as the first step if not specified, ensuring metadata extraction for all workflows.
+#### Legacy Format (with queue prefixes)
+```bash
+# Simple workflow: preprocessing + MGMT analysis
+robin workflow /path/to/bam/files -w "preprocessing:bed_conversion,analysis:mgmt"
+
+# Full pipeline: preprocessing + multiple analyses + classification
+robin workflow /path/to/bam/files -w "preprocessing:bed_conversion,analysis:mgmt,analysis:cnv,classification:sturgeon"
+```
+
+**Note**: The `preprocessing` step is automatically added as the first step if not specified, ensuring metadata extraction for all workflows. The `bed_conversion` step is automatically added when needed for classification jobs.
 
 ## Analysis Modules
 
@@ -153,7 +240,7 @@ robin workflow /path/to/bam/files --workflow "preprocessing:bed_conversion,analy
 MGMT (O6-methylguanine-DNA methyltransferase) promoter methylation analysis:
 
 ```bash
-robin workflow /path/to/bam/files --workflow "analysis:mgmt" --verbose
+robin workflow /path/to/bam/files -w "mgmt" --verbose
 ```
 
 **Features:**
@@ -167,7 +254,7 @@ robin workflow /path/to/bam/files --workflow "analysis:mgmt" --verbose
 Copy number variation analysis with breakpoint detection:
 
 ```bash
-robin workflow /path/to/bam/files --workflow "analysis:cnv" --verbose
+robin workflow /path/to/bam/files -w "cnv" --verbose
 ```
 
 **Features:**
@@ -182,7 +269,7 @@ robin workflow /path/to/bam/files --workflow "analysis:cnv" --verbose
 Fusion detection analysis:
 
 ```bash
-robin workflow /path/to/bam/files --workflow "analysis:fusion" --verbose
+robin workflow /path/to/bam/files -w "fusion" --verbose
 ```
 
 **Features:**
@@ -194,29 +281,29 @@ robin workflow /path/to/bam/files --workflow "analysis:fusion" --verbose
 Target-specific analysis:
 
 ```bash
-robin workflow /path/to/bam/files --workflow "analysis:target" --verbose
+robin workflow /path/to/bam/files -w "target" --verbose
 ```
 
 ### Classification Modules
 
 #### Sturgeon Classification
 ```bash
-robin workflow /path/to/bam/files --workflow "classification:sturgeon" --verbose
+robin workflow /path/to/bam/files -w "sturgeon" --verbose
 ```
 
 #### NanoDX Analysis
 ```bash
-robin workflow /path/to/bam/files --workflow "classification:nanodx" --verbose
+robin workflow /path/to/bam/files -w "nanodx" --verbose
 ```
 
 #### PanNanoDX Analysis
 ```bash
-robin workflow /path/to/bam/files --workflow "classification:pannanodx" --verbose
+robin workflow /path/to/bam/files -w "pannanodx" --verbose
 ```
 
 #### Random Forest Analysis
 ```bash
-robin workflow /path/to/bam/files --workflow "slow:random_forest" --verbose
+robin workflow /path/to/bam/files -w "random_forest" --verbose
 ```
 
 ## Advanced Features
@@ -226,7 +313,7 @@ Prevent redundant processing when multiple upstream jobs complete simultaneously
 
 ```bash
 robin workflow /path/to/bam/files \
-  --workflow "preprocessing:bed_conversion,classification:sturgeon" \
+  -w "mgmt,sturgeon" \
   --deduplicate-jobs sturgeon \
   --verbose
 ```
@@ -236,20 +323,32 @@ Fine-grained control over output verbosity:
 
 ```bash
 robin workflow /path/to/bam/files \
-  --workflow "preprocessing:bed_conversion,analysis:mgmt" \
+  -w "mgmt,cnv" \
   --log-level WARNING \
   --job-log-level preprocessing:DEBUG \
   --job-log-level mgmt:INFO \
   --verbose
 ```
 
-### Custom Output Directory
-Specify a custom output directory for all analysis results:
+### Ray Distributed Computing
+Enable distributed processing for improved performance:
 
 ```bash
 robin workflow /path/to/bam/files \
-  --workflow "analysis:mgmt,analysis:cnv" \
-  --work-dir /path/to/output \
+  -w "mgmt,cnv,sturgeon" \
+  --use-ray \
+  --ray-num-cpus 8 \
+  --verbose
+```
+
+### GUI Workflow Monitor
+Launch the built-in NiceGUI workflow monitor:
+
+```bash
+robin workflow /path/to/bam/files \
+  -w "mgmt,sturgeon" \
+  --with-gui \
+  --gui-port 8081 \
   --verbose
 ```
 
@@ -258,7 +357,7 @@ Real-time progress monitoring with multiple progress bars:
 
 ```bash
 robin workflow /path/to/bam/files \
-  --workflow "preprocessing:bed_conversion,analysis:mgmt,classification:sturgeon" \
+  -w "mgmt,cnv,sturgeon" \
   --verbose
 ```
 
@@ -281,14 +380,14 @@ Automatic creation and updating of `master.csv` files for each sample:
 ### Basic MGMT Analysis
 ```bash
 # Run MGMT analysis on all BAM files in a directory
-robin workflow /path/to/bam/files --workflow "analysis:mgmt" --verbose
+robin workflow /path/to/bam/files -w "mgmt" --verbose
 ```
 
 ### Full Bioinformatics Pipeline
 ```bash
 # Run comprehensive analysis pipeline
 robin workflow /path/to/bam/files \
-  --workflow "preprocessing:bed_conversion,analysis:mgmt,analysis:cnv,classification:sturgeon" \
+  -w "mgmt,cnv,sturgeon" \
   --work-dir /path/to/results \
   --deduplicate-jobs sturgeon \
   --log-level INFO \
@@ -297,7 +396,7 @@ robin workflow /path/to/bam/files \
 # Complete workflow with all analysis modules
 robin workflow ~/datasets/Demo_Run \
   --work-dir test_out2 \
-  --workflow "preprocessing:bed_conversion,analysis:fusion,analysis:mgmt,analysis:cnv,analysis:target,classification:sturgeon,classification:nanodx,classification:pannanodx,slow:random_forest" \
+  -w "target,cnv,fusion,mgmt,sturgeon,nanodx,pannanodx,random_forest" \
   --verbose \
   --log-level WARNING
 ```
@@ -306,24 +405,16 @@ robin workflow ~/datasets/Demo_Run \
 ```bash
 # Process existing files first, then watch for new ones
 robin workflow /path/to/bam/files \
-  --workflow "analysis:mgmt" \
+  -w "mgmt" \
   --verbose
 
 # Only watch for new files (skip existing)
 robin workflow /path/to/bam/files \
-  --workflow "analysis:mgmt" \
+  -w "mgmt" \
   --no-process-existing \
   --verbose
 ```
-
-### Custom Commands
-```bash
-# Add custom commands to the workflow
-robin workflow /path/to/bam/files \
-  --workflow "preprocessing:bed_conversion,analysis:mgmt" \
-  --commands "notify:echo 'Processing complete for {file}'" \
-  --verbose
-```
+-->
 
 ## Dependencies
 
@@ -336,13 +427,21 @@ robin workflow /path/to/bam/files \
 - `scipy>=1.7.0`: Scientific computing
 - `ruptures>=1.1.0`: Change point detection
 - `tqdm>=4.64.0`: Progress bars
+- `ray[default]>=2.0.0`: Distributed computing
+- `nicegui>=1.4.0`: GUI framework
 
 ### External Dependencies
 - `bedtools`: For region extraction and BED file operations
-- `robin` package: For methylation calling and R scripts
+- `samtools`: For BAM file manipulation
 - `R` and `Rscript`: For statistical analysis and classification
-- `samtools`: For BAM file manipulation (optional)
+- `git-lfs`: For large file storage (model files)
 
+### Git Submodules
+- `nanoDX`: NanoDX analysis tools
+- `hv_rapidCNS2`: Rapid CNS analysis tools
+
+
+<!--
 ## Development
 
 ### Running Tests
@@ -374,14 +473,17 @@ flake8 src/ tests/
 4. Add tests for new functionality
 5. Run the test suite
 6. Submit a pull request
+-->
+
 
 ## License
 
-The license type to develop is not yet applied.
+MIT License
 
 ## Acknowledgments
 
 - [Click](https://click.palletsprojects.com/) - Python package for creating command line interfaces
 - [Watchdog](https://python-watchdog.readthedocs.io/) - Python library for monitoring file system events
 - [pysam](https://pysam.readthedocs.io/) - Python interface for SAM/BAM files
-- [robin](https://github.com/yourusername/robin) - Bioinformatics analysis package 
+- [Ray](https://ray.io/) - Distributed computing framework
+- [NiceGUI](https://nicegui.io/) - Web-based GUI framework 
