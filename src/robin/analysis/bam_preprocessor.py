@@ -567,7 +567,7 @@ def extract_bam_metadata(bam_path: str) -> BamMetadata:
 # ============================================================================
 
 
-def bam_preprocessing_handler(job):
+def bam_preprocessing_handler(job, center: str = None):
     """
     Handler function for BAM preprocessing jobs.
     This is the main entry point that orchestrates the entire preprocessing workflow.
@@ -599,6 +599,11 @@ def bam_preprocessing_handler(job):
         job.context.add_metadata("file_size", metadata.file_size)
         job.context.add_metadata("creation_time", metadata.creation_time)
         job.context.add_metadata("processing_steps", metadata.processing_steps)
+        
+        # Store center information
+        if center:
+            job.context.add_metadata("center", center)
+            logger.info(f"Center set to: {center}")
 
         # Check read count threshold and deliberately skip large BAMs
         try:

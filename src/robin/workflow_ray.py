@@ -22,6 +22,12 @@ file watcher, call submit_jobs() on the Coordinator in your event handlers inste
 
 from __future__ import annotations
 
+# Suppress pkg_resources deprecation warnings from sorted_nearest
+import warnings
+warnings.filterwarnings(
+    "ignore", message="pkg_resources is deprecated", category=UserWarning
+)
+
 import os
 import time
 import asyncio
@@ -1852,6 +1858,7 @@ async def run(
     reference: Optional[str] = None,
     gui_host: str = "0.0.0.0",
     gui_port: int = 8081,
+    center: str = None,
 ):
     global GLOBAL_LOG_LEVEL
     GLOBAL_LOG_LEVEL = (log_level or "INFO").upper()
@@ -1958,6 +1965,7 @@ async def run(
                 workflow_runner=workflow_runner,
                 workflow_steps=plan,
                 monitored_directory=work_dir,
+                center=center,
             )
             try:
                 url = (
@@ -2244,6 +2252,11 @@ def parse_args():
         action="store_true",
         help="Disable Ray dashboard (default: dashboard enabled)",
     )
+    p.add_argument(
+        "--center",
+        required=True,
+        help="Center ID running the analysis (e.g., 'Oxford', 'Cambridge', 'London')",
+    )
     return p.parse_args()
 
 
@@ -2289,6 +2302,7 @@ if __name__ == "__main__":
                 recursive=not args.no_recursive,
                 preset=args.preset,
                 workflow_runner=None,
+                center=args.center,
             )
         )
     except KeyboardInterrupt:

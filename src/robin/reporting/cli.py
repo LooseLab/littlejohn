@@ -16,6 +16,11 @@ from robin.reporting.report import create_pdf
 @click.argument("filename", type=str)
 @click.argument("output", type=str)
 @click.option(
+    "--center",
+    required=True,
+    help="Center ID running the analysis (e.g., 'Oxford', 'Cambridge', 'London')",
+)
+@click.option(
     "--export-csv-dir",
     type=str,
     default=None,
@@ -26,7 +31,7 @@ from robin.reporting.report import create_pdf
 )
 @click.option("--debug", is_flag=True, help="Enable debug logging")
 def main(
-    filename: str, output: str, export_csv_dir: str | None, zip: bool, debug: bool
+    filename: str, output: str, center: str, export_csv_dir: str | None, zip: bool, debug: bool
 ):
     """Create a PDF report from ROBIN analysis results.
 
@@ -56,6 +61,7 @@ def main(
         pdf_file = create_pdf(
             filename,
             output,
+            center=center,
             export_csv_dir=export_csv_dir,
             export_xlsx=False,
             export_zip=zip,

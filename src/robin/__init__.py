@@ -1,5 +1,11 @@
 """ROBIN and robin - A Python CLI tool with file watching capabilities."""
 
+# Suppress pkg_resources deprecation warnings from sorted_nearest
+import warnings
+warnings.filterwarnings(
+    "ignore", message="pkg_resources is deprecated", category=UserWarning
+)
+
 __version__ = "0.1.1"
 __author__ = "Matt Loose"
 __email__ = "matt.loose@nottingham.ac.uk"

@@ -24,6 +24,12 @@ Code Quality Improvements:
 - Proper cleanup on interruption
 """
 
+# Suppress pkg_resources deprecation warnings from sorted_nearest
+import warnings
+warnings.filterwarnings(
+    "ignore", message="pkg_resources is deprecated", category=UserWarning
+)
+
 import os
 import sys
 from pathlib import Path
@@ -625,6 +631,7 @@ def _create_workflow_runner(
     preprocessing_workers: int = 1,
     bed_workers: int = 1,
     reference: Optional[Path] = None,
+    center: str = None,
 ) -> Any:
     """Create the appropriate workflow runner based on configuration."""
     if analysis_workers < 1:
@@ -654,6 +661,8 @@ def _create_workflow_runner(
                 use_separate_analysis_queues=not legacy_analysis_queue,
                 preprocessing_workers=preprocessing_workers,
                 bed_workers=bed_workers,
+                reference=reference,
+                center=center,
             )
         return runner
     else:
@@ -666,6 +675,7 @@ def _create_workflow_runner(
             preprocessing_workers=preprocessing_workers,
             bed_workers=bed_workers,
             reference=reference,
+            center=center,
         )
 
 
@@ -674,6 +684,7 @@ def _register_handlers(
     legacy_analysis_queue: bool,
     work_dir: Optional[Path],
     reference: Optional[Path] = None,
+    center: str = None,
 ) -> None:
     """Register all workflow handlers with the runner."""
     for (
@@ -695,27 +706,33 @@ def _register_handlers(
             if reference and job_type == "target":
                 # Special handling for target analysis with reference genome
                 def create_handler_with_work_dir_and_ref(
-                    handler, work_dir_path, ref_path
+                    handler, work_dir_path, ref_path, center_param
                 ):
                     return lambda job: handler(
                         job, work_dir=str(work_dir_path), reference=str(ref_path)
                     )
 
                 final_handler = create_handler_with_work_dir_and_ref(
-                    handler_func, work_dir, reference
+                    handler_func, work_dir, reference, center
                 )
             else:
                 # Standard work directory handling
-                def create_handler_with_work_dir(handler, work_dir_path):
+                def create_handler_with_work_dir(handler, work_dir_path, center_param):
                     return lambda job: handler(job, work_dir=str(work_dir_path))
 
-                final_handler = create_handler_with_work_dir(handler_func, work_dir)
+                final_handler = create_handler_with_work_dir(handler_func, work_dir, center)
         elif reference and job_type == "target":
             # Reference genome only (no work_dir needed)
-            def create_handler_with_ref(handler, ref_path):
+            def create_handler_with_ref(handler, ref_path, center_param):
                 return lambda job: handler(job, reference=str(ref_path))
 
-            final_handler = create_handler_with_ref(handler_func, reference)
+            final_handler = create_handler_with_ref(handler_func, reference, center)
+        elif job_type == "preprocessing":
+            # Special handling for preprocessing to pass center
+            def create_preprocessing_handler(handler, center_param):
+                return lambda job: handler(job, center=center_param)
+
+            final_handler = create_preprocessing_handler(handler_func, center)
         else:
             final_handler = handler_func
 
@@ -801,6 +818,7 @@ def _validate_inputs(
 
 def _display_workflow_config(
     path: Path,
+    center: str,
     work_dir: Optional[Path],
     workflow_steps: List[str],
     command_map: dict,
@@ -817,6 +835,8 @@ def _display_workflow_config(
     queue_priority: tuple = (),
 ) -> None:
     """Display workflow configuration information."""
+    click.echo(f"Center: {center}")
+    
     if no_process_existing:
         click.echo(
             f"Starting workflow on {path} for BAM files (skipping existing files)..."
@@ -828,6 +848,8 @@ def _display_workflow_config(
 
     if work_dir:
         click.echo(f"Output directory: {work_dir}")
+    else:
+        click.echo("Output directory: Not specified (using input directory)")
 
     if uses_simplified_format:
         # Extract job types from the final workflow steps
@@ -836,14 +858,15 @@ def _display_workflow_config(
         click.echo(f"Auto-assigned queues: {workflow_steps}")
 
         # Check if bed_conversion was auto-added
-        original_jobs = [step.strip() for step in original_workflow.split(",")]
-        if (
-            "bed_conversion" in final_job_types
-            and "bed_conversion" not in original_jobs
-        ):
-            click.echo(
-                "Note: bed_conversion was automatically added as it's required for other jobs"
-            )
+        if original_workflow and isinstance(original_workflow, str):
+            original_jobs = [step.strip() for step in original_workflow.split(",")]
+            if (
+                "bed_conversion" in final_job_types
+                and "bed_conversion" not in original_jobs
+            ):
+                click.echo(
+                    "Note: bed_conversion was automatically added as it's required for other jobs"
+                )
     else:
         click.echo(f"Workflow plan: {workflow_steps}")
 
@@ -897,6 +920,11 @@ def _display_workflow_config(
     "-w",
     required=True,
     help="Workflow plan. Can be specified in two formats:\n1. With queue prefixes: 'preprocessing:bed_conversion,mgmt:mgmt,classification:sturgeon'\n2. Simplified (auto-queue): 'mgmt,sturgeon' - system automatically determines appropriate queue for each job type and adds bed_conversion when needed",
+)
+@click.option(
+    "--center",
+    required=True,
+    help="Center ID running the analysis (e.g., 'Sherwood', 'Auckland', 'New York')",
 )
 @click.option(
     "--commands",
@@ -1032,6 +1060,7 @@ def _display_workflow_config(
 def workflow(
     path: Path,
     workflow: str,
+    center: str,
     commands: tuple[str, ...],
     verbose: bool,
     no_process_existing: bool,
@@ -1074,6 +1103,7 @@ def workflow(
         configure_logging(global_level=log_level, job_levels=job_levels)
 
         # Parse workflow plan and convert to standard format if needed
+        original_workflow_string = workflow  # Store the original workflow string
         workflow_steps = [step.strip() for step in workflow.split(",")]
 
         # Validate and clean workflow steps
@@ -1135,21 +1165,22 @@ def workflow(
 
             # Display configuration
             _display_workflow_config(
-                path,
-                work_dir,
-                workflow_steps,
-                command_map,
-                log_level,
-                job_levels,
-                deduplicate_jobs,
-                legacy_analysis_queue,
-                analysis_workers,
-                no_process_existing,
-                uses_simplified_format,
-                workflow,
-                True,
-                ray_num_cpus,
-                queue_priority,
+                path=path,
+                center=center,
+                work_dir=work_dir,
+                workflow_steps=workflow_steps,
+                command_map=command_map,
+                log_level=log_level,
+                job_levels=job_levels,
+                deduplicate_jobs=deduplicate_jobs,
+                legacy_analysis_queue=legacy_analysis_queue,
+                analysis_workers=analysis_workers,
+                no_process_existing=no_process_existing,
+                uses_simplified_format=uses_simplified_format,
+                original_workflow=workflow,
+                use_ray=True,
+                ray_num_cpus=ray_num_cpus,
+                queue_priority=queue_priority,
             )
 
             # Create workflow runner for Ray workflow (needed for GUI integration)
@@ -1162,6 +1193,7 @@ def workflow(
                 preprocessing_workers=preprocessing_workers,
                 bed_workers=bed_workers,
                 reference=reference,  # Add reference parameter for Ray workflow too
+                center=center,
             )
 
             # Run Ray Core implementation
@@ -1187,6 +1219,7 @@ def workflow(
                         reference=str(reference) if reference else None,
                         gui_host=gui_host,
                         gui_port=gui_port,
+                        center=center,
                     )
                 )
             except KeyboardInterrupt:
@@ -1217,6 +1250,7 @@ def workflow(
             preprocessing_workers=preprocessing_workers,
             bed_workers=bed_workers,
             reference=reference,
+            center=center,
         )
 
         # Handle Ray-specific configuration
@@ -1255,7 +1289,7 @@ def workflow(
                 click.echo(f"Job deduplication enabled for: {valid_dedup_jobs}")
 
         # Register handlers and command handlers
-        _register_handlers(runner, legacy_analysis_queue, work_dir, reference)
+        _register_handlers(runner, legacy_analysis_queue, work_dir, reference, center)
         _register_command_handlers(runner, command_map, legacy_analysis_queue)
 
         # For Ray workflow, reinitialize processors after handlers are registered
@@ -1274,21 +1308,22 @@ def workflow(
 
         # Display configuration
         _display_workflow_config(
-            path,
-            work_dir,
-            workflow_steps,
-            command_map,
-            log_level,
-            job_levels,
-            deduplicate_jobs,
-            legacy_analysis_queue,
-            analysis_workers,
-            no_process_existing,
-            uses_simplified_format,
-            workflow,
-            use_ray,
-            ray_num_cpus,
-            queue_priority,
+            path=path,
+            center=center,
+            work_dir=work_dir,
+            workflow_steps=workflow_steps,
+            command_map=command_map,
+            log_level=log_level,
+            job_levels=job_levels,
+            deduplicate_jobs=deduplicate_jobs,
+            legacy_analysis_queue=legacy_analysis_queue,
+            analysis_workers=analysis_workers,
+            no_process_existing=no_process_existing,
+            uses_simplified_format=uses_simplified_format,
+            original_workflow=original_workflow_string,
+            use_ray=use_ray,
+            ray_num_cpus=ray_num_cpus,
+            queue_priority=queue_priority,
         )
 
         # Launch GUI if requested
@@ -1309,6 +1344,7 @@ def workflow(
                         workflow_runner=runner,
                         workflow_steps=workflow_steps,
                         monitored_directory=str(work_dir) if work_dir else str(path),
+                        center=center,
                     )
 
                     # Now install workflow hooks for real-time monitoring

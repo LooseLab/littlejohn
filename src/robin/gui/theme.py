@@ -225,7 +225,7 @@ M3_COMPONENTS_CSS = (Path(__file__).parent / "static" / "m3-components.css").rea
 
 
 @contextmanager
-def frame(navtitle: str, batphone=False, smalltitle=None):
+def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
     """
     Context manager to create a custom page frame with Material Design 3 styling and consistent behavior across all pages.
 
@@ -233,6 +233,7 @@ def frame(navtitle: str, batphone=False, smalltitle=None):
         navtitle (str): The title to display in the navigation header.
         batphone (bool): Whether to show the BATMAN mode title.
         smalltitle (str): The title to display on small screens.
+        center (str): Center ID running the analysis.
 
     Yields:
         None
@@ -240,6 +241,10 @@ def frame(navtitle: str, batphone=False, smalltitle=None):
     global quitdialog
     if batphone:
         navtitle = f"BATMAN & {navtitle}"
+
+    # Store center in app storage if provided
+    if center:
+        app.storage.general["center"] = center
 
     # Add custom HTML and CSS to the head of the page
     ui.add_head_html(
@@ -492,6 +497,9 @@ def frame(navtitle: str, batphone=False, smalltitle=None):
         )
         ui.label("Not for diagnostic use.").classes(
             f"min-[{MENU_BREAKPOINT+1}px]:hidden text-body-small text-weight-italic"
+        )
+        ui.label(f"Center: {app.storage.general.get('center', 'Not set')}").classes(
+            f"max-[{MENU_BREAKPOINT}px]:hidden text-body-small text-weight-medium"
         )
 
     with main_content:

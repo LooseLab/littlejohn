@@ -6,6 +6,12 @@ that runs in a separate thread but is completely isolated from
 workflow execution to avoid any blocking.
 """
 
+# Suppress pkg_resources deprecation warnings from sorted_nearest
+import warnings
+warnings.filterwarnings(
+    "ignore", message="pkg_resources is deprecated", category=UserWarning
+)
+
 import threading
 import time
 import logging
@@ -70,6 +76,7 @@ class GUILauncher:
         self.workflow_steps = []
         self.monitored_directory = ""
         self.reload = reload
+        self.center = None  # Center ID for the analysis
         # Message queue for non-blocking communication
         self.update_queue = queue.PriorityQueue()
         self.gui_ready = threading.Event()
@@ -116,6 +123,7 @@ class GUILauncher:
         workflow_steps: list = None,
         monitored_directory: str = "",
         reload: bool = False,
+        center: str = None,
     ) -> bool:
         """Launch the GUI in a completely isolated background thread."""
         if ui is None:
@@ -124,6 +132,9 @@ class GUILauncher:
 
         self.workflow_runner = workflow_runner
         self.workflow_steps = workflow_steps or []
+        self.center = center
+
+        # Store absolute monitored directory to avoid relative path issues
 
         # Store absolute monitored directory to avoid relative path issues
         try:
@@ -593,6 +604,7 @@ class GUILauncher:
             "<strong>R</strong>apid nanop<strong>O</strong>re <strong>B</strong>rain intraoperat<strong>I</strong>ve classificatio<strong>N</strong>",
             smalltitle="<strong>R.O.B.I.N</strong>",
             batphone=False,
+            center=self.center,
         ):
             # Main content container with full width and proper centering
             with ui.column().classes("w-full min-h-screen p-4 md:p-8"):
@@ -663,6 +675,7 @@ class GUILauncher:
             "R.O.B.I.N - Sample Tracking Overview",
             smalltitle="Samples",
             batphone=False,
+            center=self.center,
         ):
             # Main content area
             with ui.column().classes("w-full p-4 gap-4"):
@@ -1383,6 +1396,7 @@ class GUILauncher:
             f"R.O.B.I.N - Sample {sample_id}",
             smalltitle="Samples",
             batphone=False,
+            center=self.center,
         ):
             # Guard: unknown sample -> show message and back button; also redirect
             if self._known_sample_ids and sample_id not in self._known_sample_ids:
@@ -1868,6 +1882,7 @@ class GUILauncher:
             "R.O.B.I.N - robin Workflow Monitor",
             smalltitle="Samples",
             batphone=False,
+            center=self.center,
         ):
             # Page title and navigation
             with ui.row().classes("w-full p-4 items-center justify-between"):
@@ -2529,6 +2544,7 @@ def launch_gui(
     workflow_runner: Any = None,
     workflow_steps: list = None,
     monitored_directory: str = "",
+    center: str = None,
 ) -> GUILauncher:
     """Legacy launch function (kept for backward compatibility).
 
@@ -2544,6 +2560,7 @@ def launch_gui(
         workflow_runner=workflow_runner,
         workflow_steps=workflow_steps,
         monitored_directory=monitored_directory,
+        center=center,
     )
 
 

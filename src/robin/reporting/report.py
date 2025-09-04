@@ -21,15 +21,17 @@ logger = logging.getLogger(__name__)
 class RobinReport:
     """Main class for generating ROBIN PDF reports."""
 
-    def __init__(self, filename, output):
+    def __init__(self, filename, output, center: str):
         """Initialize the report generator.
 
         Args:
             filename: Output PDF filename
             output: Directory containing analysis output files
+            center: Center ID running the analysis
         """
         self.filename = filename
         self.output = output
+        self.center = center
         self.sample_id = os.path.basename(os.path.normpath(output))
 
         # Handle filename with None prefix
@@ -66,13 +68,8 @@ class RobinReport:
         return None
 
     def _get_centre_id(self):
-        """Get the centre ID from master data."""
-        try:
-            return (
-                self.masterdf.loc["centreID"][1] if self.masterdf is not None else None
-            )
-        except KeyError:
-            return None
+        """Get the centre ID from the provided center parameter."""
+        return self.center
 
     def _create_document(self):
         """Create the PDF document with enhanced M3 margins and settings."""
@@ -345,6 +342,7 @@ class RobinReport:
 def create_pdf(
     filename,
     output,
+    center: str,
     report_type="detailed",
     export_csv_dir=None,
     export_xlsx=False,
@@ -360,7 +358,7 @@ def create_pdf(
     Returns:
         Path to the generated PDF file
     """
-    report = RobinReport(filename, output)
+    report = RobinReport(filename, output, center)
     return report.generate_report(
         report_type=report_type,
         export_csv_dir=export_csv_dir,

@@ -1451,6 +1451,7 @@ class WorkflowRunner:
         preprocessing_workers: int = 1,
         bed_workers: int = 1,
         reference: Optional[Path] = None,
+        center: str = None,
     ):
         self.manager = WorkflowManager(
             verbose=verbose,
@@ -1461,6 +1462,9 @@ class WorkflowRunner:
         )
         self.verbose = verbose
         self.reference = reference
+        self.center = center
+
+        # Log reference genome status
 
         # Log reference genome status
         if self.reference:
