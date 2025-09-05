@@ -94,7 +94,7 @@ If you prefer not to use conda, you can install from source, but you'll need to 
 The primary command for running robin workflows is:
 
 ```bash
-robin workflow <data_folder> --work-dir <output_folder> -w target,cnv,fusion,mgmt,sturgeon,nanodx,pannanodx,random_forest --reference ~/references/hg38_simple.fa
+robin workflow <data_folder> --work-dir <output_folder> -w target,cnv,fusion,mgmt,sturgeon,nanodx,pannanodx,random_forest --reference ~/references/hg38_simple.fa --center <center_id>
 ```
 
 ### Command Breakdown
@@ -104,6 +104,7 @@ robin workflow <data_folder> --work-dir <output_folder> -w target,cnv,fusion,mgm
 - `--work-dir <output_folder>`: Directory where results will be saved
 - `-w`: Workflow specification (comma-separated list of analysis types)
 - `--reference`: Path to reference genome (required for some analyses)
+- `--center <center_id>`: Center ID running the analysis (e.g., 'Sherwood', 'Auckland', 'New York')
 
 ### Example Usage
 
@@ -112,19 +113,22 @@ robin workflow <data_folder> --work-dir <output_folder> -w target,cnv,fusion,mgm
 robin workflow ~/data/bam_files \
   --work-dir ~/results \
   -w target,cnv,fusion,mgmt,sturgeon,nanodx,pannanodx,random_forest \
-  --reference ~/references/hg38_simple.fa
+  --reference ~/references/hg38_simple.fa \
+  --center Sherwood
 
 # Simplified workflow with just a few analyses
 robin workflow ~/data/bam_files \
   --work-dir ~/results \
   -w mgmt,sturgeon \
-  --reference ~/references/hg38_simple.fa
+  --reference ~/references/hg38_simple.fa \
+  --center Auckland
 
 # With verbose output and custom logging
 robin workflow ~/data/bam_files \
   --work-dir ~/results \
   -w mgmt,cnv,sturgeon \
   --reference ~/references/hg38_simple.fa \
+  --center New_York \
   --verbose \
   --log-level INFO
 ```
@@ -154,6 +158,7 @@ robin workflow /path/to/directory --workflow "workflow_plan" [OPTIONS]
 
 **Required Options:**
 - `--workflow, -w`: Workflow plan (e.g., 'mgmt,sturgeon' or 'preprocessing:bed_conversion,analysis:mgmt,classification:sturgeon')
+- `--center`: Center ID running the analysis (e.g., 'Sherwood', 'Auckland', 'New York')
 
 **Optional Options:**
 - `--work-dir, -d`: Base output directory for analysis results
@@ -217,19 +222,19 @@ Workflows can be specified in two formats:
 #### Simplified Format (Recommended)
 ```bash
 # Simple workflow: MGMT analysis + Sturgeon classification
-robin workflow /path/to/bam/files -w "mgmt,sturgeon"
+robin workflow /path/to/bam/files -w "mgmt,sturgeon" --center Birmingham
 
 # Full pipeline: all analysis types
-robin workflow /path/to/bam/files -w "target,cnv,fusion,mgmt,sturgeon,nanodx,pannanodx,random_forest"
+robin workflow /path/to/bam/files -w "target,cnv,fusion,mgmt,sturgeon,nanodx,pannanodx,random_forest" --center Coventry
 ```
 
 #### Legacy Format (with queue prefixes)
 ```bash
 # Simple workflow: preprocessing + MGMT analysis
-robin workflow /path/to/bam/files -w "preprocessing:bed_conversion,analysis:mgmt"
+robin workflow /path/to/bam/files -w "preprocessing:bed_conversion,analysis:mgmt" --center Derby
 
 # Full pipeline: preprocessing + multiple analyses + classification
-robin workflow /path/to/bam/files -w "preprocessing:bed_conversion,analysis:mgmt,analysis:cnv,classification:sturgeon"
+robin workflow /path/to/bam/files -w "preprocessing:bed_conversion,analysis:mgmt,analysis:cnv,classification:sturgeon" --center Plymouth
 ```
 
 **Note**: The `preprocessing` step is automatically added as the first step if not specified, ensuring metadata extraction for all workflows. The `bed_conversion` step is automatically added when needed for classification jobs.
@@ -240,7 +245,7 @@ robin workflow /path/to/bam/files -w "preprocessing:bed_conversion,analysis:mgmt
 MGMT (O6-methylguanine-DNA methyltransferase) promoter methylation analysis:
 
 ```bash
-robin workflow /path/to/bam/files -w "mgmt" --verbose
+robin workflow /path/to/bam/files -w "mgmt" --center Sherwood --verbose
 ```
 
 **Features:**
@@ -254,7 +259,7 @@ robin workflow /path/to/bam/files -w "mgmt" --verbose
 Copy number variation analysis with breakpoint detection:
 
 ```bash
-robin workflow /path/to/bam/files -w "cnv" --verbose
+robin workflow /path/to/bam/files -w "cnv" --center Auckland --verbose
 ```
 
 **Features:**
@@ -269,7 +274,7 @@ robin workflow /path/to/bam/files -w "cnv" --verbose
 Fusion detection analysis:
 
 ```bash
-robin workflow /path/to/bam/files -w "fusion" --verbose
+robin workflow /path/to/bam/files -w "fusion" --center New_York --verbose
 ```
 
 **Features:**
@@ -281,29 +286,29 @@ robin workflow /path/to/bam/files -w "fusion" --verbose
 Target-specific analysis:
 
 ```bash
-robin workflow /path/to/bam/files -w "target" --verbose
+robin workflow /path/to/bam/files -w "target" --center Oxford --verbose
 ```
 
 ### Classification Modules
 
 #### Sturgeon Classification
 ```bash
-robin workflow /path/to/bam/files -w "sturgeon" --verbose
+robin workflow /path/to/bam/files -w "sturgeon" --center Cambridge --verbose
 ```
 
 #### NanoDX Analysis
 ```bash
-robin workflow /path/to/bam/files -w "nanodx" --verbose
+robin workflow /path/to/bam/files -w "nanodx" --center London --verbose
 ```
 
 #### PanNanoDX Analysis
 ```bash
-robin workflow /path/to/bam/files -w "pannanodx" --verbose
+robin workflow /path/to/bam/files -w "pannanodx" --center Edinburgh --verbose
 ```
 
 #### Random Forest Analysis
 ```bash
-robin workflow /path/to/bam/files -w "random_forest" --verbose
+robin workflow /path/to/bam/files -w "random_forest" --center Glasgow --verbose
 ```
 
 ## Advanced Features
@@ -314,6 +319,7 @@ Prevent redundant processing when multiple upstream jobs complete simultaneously
 ```bash
 robin workflow /path/to/bam/files \
   -w "mgmt,sturgeon" \
+  --center Manchester \
   --deduplicate-jobs sturgeon \
   --verbose
 ```
@@ -324,6 +330,7 @@ Fine-grained control over output verbosity:
 ```bash
 robin workflow /path/to/bam/files \
   -w "mgmt,cnv" \
+  --center Bristol \
   --log-level WARNING \
   --job-log-level preprocessing:DEBUG \
   --job-log-level mgmt:INFO \
@@ -336,6 +343,7 @@ Enable distributed processing for improved performance:
 ```bash
 robin workflow /path/to/bam/files \
   -w "mgmt,cnv,sturgeon" \
+  --center Cardiff \
   --use-ray \
   --ray-num-cpus 8 \
   --verbose
@@ -347,6 +355,7 @@ Launch the built-in NiceGUI workflow monitor:
 ```bash
 robin workflow /path/to/bam/files \
   -w "mgmt,sturgeon" \
+  --center Belfast \
   --with-gui \
   --gui-port 8081 \
   --verbose
@@ -358,6 +367,7 @@ Real-time progress monitoring with multiple progress bars:
 ```bash
 robin workflow /path/to/bam/files \
   -w "mgmt,cnv,sturgeon" \
+  --center Dublin \
   --verbose
 ```
 
@@ -380,7 +390,7 @@ Automatic creation and updating of `master.csv` files for each sample:
 ### Basic MGMT Analysis
 ```bash
 # Run MGMT analysis on all BAM files in a directory
-robin workflow /path/to/bam/files -w "mgmt" --verbose
+robin workflow /path/to/bam/files -w "mgmt" --center Nottingham --verbose
 ```
 
 ### Full Bioinformatics Pipeline
@@ -389,6 +399,7 @@ robin workflow /path/to/bam/files -w "mgmt" --verbose
 robin workflow /path/to/bam/files \
   -w "mgmt,cnv,sturgeon" \
   --work-dir /path/to/results \
+  --center Liverpool \
   --deduplicate-jobs sturgeon \
   --log-level INFO \
   --verbose
@@ -397,6 +408,7 @@ robin workflow /path/to/bam/files \
 robin workflow ~/datasets/Demo_Run \
   --work-dir test_out2 \
   -w "target,cnv,fusion,mgmt,sturgeon,nanodx,pannanodx,random_forest" \
+  --center Sheffield \
   --verbose \
   --log-level WARNING
 ```
@@ -406,11 +418,13 @@ robin workflow ~/datasets/Demo_Run \
 # Process existing files first, then watch for new ones
 robin workflow /path/to/bam/files \
   -w "mgmt" \
+  --center York \
   --verbose
 
 # Only watch for new files (skip existing)
 robin workflow /path/to/bam/files \
   -w "mgmt" \
+  --center Leeds \
   --no-process-existing \
   --verbose
 ```
