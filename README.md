@@ -49,7 +49,19 @@ robin is a specialized bioinformatics workflow engine designed for processing BA
    cd robin
    ```
 
-2. **Create and activate conda environment**:
+2. **Initialize Git LFS and pull large files**:
+   ```bash
+   git lfs pull
+   ```
+   *This downloads the large model files stored in Git LFS*
+
+3. **Update and initialize submodules**:
+   ```bash
+   git submodule update --init --recursive
+   ```
+   *This ensures all submodules (nanoDX, hv_rapidCNS2) are properly initialized*
+
+4. **Create and activate conda environment**:
    ```bash
    # For Linux/Windows
    conda env create -f robin.yml
@@ -60,7 +72,7 @@ robin is a specialized bioinformatics workflow engine designed for processing BA
    conda activate robin_0_5
    ```
 
-3. **Install robin in development mode**:
+5. **Install robin in development mode**:
    ```bash
    pip install -e .
    ```
@@ -84,7 +96,19 @@ If you prefer not to use conda, you can install from source, but you'll need to 
    cd robin
    ```
 
-3. **Install Python dependencies**:
+3. **Initialize Git LFS and pull large files**:
+   ```bash
+   git lfs pull
+   ```
+   *This downloads the large model files stored in Git LFS*
+
+4. **Update and initialize submodules**:
+   ```bash
+   git submodule update --init --recursive
+   ```
+   *This ensures all submodules (nanoDX, hv_rapidCNS2) are properly initialized*
+
+5. **Install Python dependencies**:
    ```bash
    pip install -e .
    ```
