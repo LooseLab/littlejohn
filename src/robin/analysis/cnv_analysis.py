@@ -95,8 +95,6 @@ import robin.resources as resources
 
 os.environ["CI"] = "1"
 
-# Cache for reference CNV data to avoid repeated loading
-_REF_CNV_CACHE = {}
 
 # Global configuration for performance tuning
 CHUNK_SIZE = 1000  # For processing large arrays in chunks
@@ -729,37 +727,6 @@ def save_cnv_files(
         logger.error(f"Error saving CNV files: {e}")
 
 
-def load_reference_cnv_data(logger):
-    """
-    Load reference CNV data with caching for better performance.
-
-    Args:
-        logger: Logger instance
-
-    Returns:
-        Reference CNV dictionary
-    """
-    global _REF_CNV_CACHE
-
-    if _REF_CNV_CACHE:
-        logger.debug("Using cached reference CNV data")
-        return _REF_CNV_CACHE
-
-    try:
-        ref_cnv_path = os.path.join(
-            os.path.dirname(os.path.abspath(resources.__file__)),
-            "HG01280_control_new.pkl",
-        )
-        with open(ref_cnv_path, "rb") as f:
-            ref_cnv_dict = pickle.load(f)
-        _REF_CNV_CACHE = ref_cnv_dict
-        logger.debug(f"Loaded reference CNV data from: {ref_cnv_path}")
-        return ref_cnv_dict
-    except Exception as e:
-        logger.error(f"Could not load reference CNV data from robin module: {e}")
-        raise RuntimeError(
-            f"Reference CNV data is required but could not be loaded: {e}"
-        )
 
 
 def process_single_bam(bam_path, metadata, work_dir, logger):

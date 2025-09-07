@@ -822,8 +822,8 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                         with ui.row().classes("w-full"):
                             state["target"]["card"] = ui.card()
                             with state["target"]["card"]:
-                                ui.label("Select gene pair to see results.").tailwind(
-                                    "drop-shadow", "font-bold"
+                                ui.label("Select gene pair to see results.").classes(
+                                    "drop-shadow font-bold"
                                 )
 
             # Update genome-wide UI
@@ -873,8 +873,8 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                         with ui.row().classes("w-full"):
                             state["genome"]["card"] = ui.card()
                             with state["genome"]["card"]:
-                                ui.label("Select gene pair to see results.").tailwind(
-                                    "drop-shadow", "font-bold"
+                                ui.label("Select gene pair to see results.").classes(
+                                    "drop-shadow font-bold"
                                 )
         except Exception as e:
             logging.exception(f"[Fusion] Refresh failed: {e}")

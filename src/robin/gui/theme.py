@@ -111,8 +111,12 @@ async def check_version():
     Shows a notification or dialog to the user about their version status.
     """
     # Check if version has already been checked in this session
-    if app.storage.tab.get("version_checked", False):
-        return
+    try:
+        if app.storage.tab.get("version_checked", False):
+            return
+    except RuntimeError:
+        # Tab storage not available in this context, continue with version check
+        pass
 
     try:
         remote_version_str = await run.io_bound(get_version_from_github)
@@ -203,7 +207,11 @@ async def check_version():
         dialog.open()
 
     # Mark version as checked for this session
-    app.storage.tab["version_checked"] = True
+    try:
+        app.storage.tab["version_checked"] = True
+    except RuntimeError:
+        # Tab storage not available in this context, skip setting the flag
+        pass
 
 
 # Define the path to the image file used in the header and footer
@@ -270,7 +278,13 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
 
     # Create disclaimer dialog that appears on first visit with M3 styling
     async def show_disclaimer():
-        if not app.storage.tab.get("disclaimer_acknowledged", False):
+        try:
+            disclaimer_acknowledged = app.storage.tab.get("disclaimer_acknowledged", False)
+        except RuntimeError:
+            # Tab storage not available in this context, show disclaimer
+            disclaimer_acknowledged = False
+        
+        if not disclaimer_acknowledged:
             with ui.dialog().props(
                 "persistent"
             ) as disclaimer_dialog, ui.card().classes("w-160 elevation-4 rounded-xl"):
@@ -299,7 +313,11 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
                     ).classes("text-body-medium")
 
                 def acknowledge():
-                    app.storage.tab["disclaimer_acknowledged"] = True
+                    try:
+                        app.storage.tab["disclaimer_acknowledged"] = True
+                    except RuntimeError:
+                        # Tab storage not available in this context, skip setting the flag
+                        pass
                     disclaimer_dialog.close()
 
                 ui.button("I agree", on_click=acknowledge).classes(
@@ -343,17 +361,17 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
     with ui.header(elevated=True).classes(header_classes):
         with ui.grid(columns=2).style("width: 100%"):
             with ui.row().classes(
-                f"max-[{MENU_BREAKPOINT}px]:hidden items-center align-left"
+                f"max-[{MENU_BREAKPOINT}px]:hidden items-center align-left px-4"
             ):
-                ui.html(navtitle).classes("text-headline-medium").style(
+                ui.html(navtitle).classes("text-headline-medium drop-shadow font-bold").style(
                     "font-weight: 600; font-family: var(--font-primary)"
-                ).tailwind("drop-shadow", "font-bold")
+                )
             with ui.row().classes(
-                f"min-[{MENU_BREAKPOINT+1}px]:hidden items-center align-left"
+                f"min-[{MENU_BREAKPOINT+1}px]:hidden items-center align-left px-4"
             ):
-                ui.html(smalltitle).classes("text-headline-medium").style(
+                ui.html(smalltitle).classes("text-headline-medium drop-shadow font-bold").style(
                     "font-weight: 600; font-family: var(--font-primary)"
-                ).tailwind("drop-shadow", "font-bold")
+                )
             with ui.row().classes("ml-auto align-top"):
                 with ui.row().classes("items-center m-auto gap-3"):
                     ui.label(f"Viewing: {platform.node()}").classes(
@@ -693,7 +711,7 @@ flowchart TD
                 "look": "neo",
                 "flowchart": {"curve": "basis", "defaultRenderer": "elk"},
             },
-        ).classes("w-full elevation-2 rounded-lg")
+        ).classes("w-full elevation-2 rounded-xl")
 
 
 def get_modkit_version():

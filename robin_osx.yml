@@ -1,4 +1,4 @@
-name: robin_0_5
+name: robin_0_6
 channels:
   - bioconda
   - conda-forge

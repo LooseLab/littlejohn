@@ -16,6 +16,8 @@ except ImportError:  # pragma: no cover
     ui = None
 
 from robin.gui.theme import styled_table
+from robin.analysis.cnv_classification import detect_cnv_events, get_cnv_summary, CNVEvent
+from robin.classification_config import get_cnv_thresholds
 
 
 def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
@@ -161,11 +163,30 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             }
         ).classes("w-full h-72")
 
-        # Cytoband analysis table (updated when a single chromosome is selected)
-        ui.label("CNV Cytoband Analysis").classes("text-md font-semibold mt-4")
-        cyto_summary = ui.label("Select a chromosome to view cytoband events").classes(
-            "text-gray-600 mb-1"
+        # CNV Events Summary
+        ui.label("CNV Events Summary").classes("text-md font-semibold mt-4")
+        cnv_events_summary = ui.label("No CNV events detected").classes("text-gray-600 mb-2")
+        
+        # CNV Events Table
+        cnv_events_columns = [
+            {"name": "chromosome", "label": "Chr", "field": "chromosome", "sortable": True},
+            {"name": "event_type", "label": "Event Type", "field": "event_type", "sortable": True},
+            {"name": "arm", "label": "Arm", "field": "arm", "sortable": True},
+            {"name": "start_mb", "label": "Start (Mb)", "field": "start_mb", "sortable": True, "align": "right"},
+            {"name": "end_mb", "label": "End (Mb)", "field": "end_mb", "sortable": True, "align": "right"},
+            {"name": "length_mb", "label": "Length (Mb)", "field": "length_mb", "sortable": True, "align": "right"},
+            {"name": "mean_cnv_str", "label": "Mean CNV", "field": "mean_cnv_str", "sortable": True, "align": "right"},
+            {"name": "confidence", "label": "Confidence", "field": "confidence", "sortable": True, "align": "center"},
+            {"name": "proportion_affected", "label": "% Affected", "field": "proportion_affected", "sortable": True, "align": "right"},
+            {"name": "genes_str", "label": "Genes", "field": "genes_str"},
+        ]
+        _, cnv_events_table = styled_table(
+            columns=cnv_events_columns, rows=[], pagination=20, class_size="table-xs"
         )
+        try:
+            cnv_events_table.props('multi-sort rows-per-page-options="[10,20,50,0]"')
+        except Exception:
+            pass
         cyto_columns = [
             {"name": "chrom", "label": "Chr", "field": "chrom", "sortable": True},
             {"name": "region", "label": "Region", "field": "region", "sortable": True},
@@ -768,6 +789,78 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             return rows
         return rows
 
+    def _update_cnv_events_analysis(state: Dict[str, Any]) -> None:
+        """Update CNV events analysis using centralized classification rules."""
+        try:
+            cnv_map = state.get("cnv")
+            cnv3_map = state.get("cnv3")
+            if isinstance(cnv_map, dict) and "cnv" in cnv_map:
+                cnv_map = cnv_map["cnv"]
+            if isinstance(cnv3_map, dict) and "cnv" in cnv3_map:
+                cnv3_map = cnv3_map["cnv"]
+            
+            if not cnv_map:
+                cnv_events_table.rows = []
+                cnv_events_summary.set_text("No CNV data available")
+                return
+            
+            binw = state.get("cnv_dict", {}).get("bin_width", 1000000)
+            sex_lbl = _sex_label(state.get("xy"))
+            
+            # Use difference map (CNV3) for calling if available, otherwise absolute
+            data = cnv3_map if isinstance(cnv3_map, dict) else cnv_map
+            
+            if data and binw:
+                # Load cytobands and genes
+                cyto_df = _load_cytobands_df()
+                gene_df = _load_gene_bed()
+                
+                # Detect CNV events using centralized rules
+                events = detect_cnv_events(
+                    cnv_data=data,
+                    bin_width=int(binw),
+                    sex_estimate=sex_lbl,
+                    cytobands_df=cyto_df,
+                    gene_df=gene_df
+                )
+                
+                # Update events table
+                events_rows = []
+                for event in events:
+                    event_dict = event.to_dict()
+                    # Format proportion as percentage
+                    event_dict["proportion_affected"] = f"{event.proportion_affected:.1%}"
+                    events_rows.append(event_dict)
+                
+                cnv_events_table.rows = events_rows
+                try:
+                    cnv_events_table.update()
+                except Exception:
+                    pass
+                
+                # Update summary
+                summary = get_cnv_summary(events)
+                if summary["total_events"] > 0:
+                    summary_text = f"Detected {summary['total_events']} CNV events: "
+                    parts = []
+                    if summary["whole_chromosome_events"]:
+                        parts.append(f"{len(summary['whole_chromosome_events'])} whole chromosome")
+                    if summary["arm_events"]:
+                        parts.append(f"{len(summary['arm_events'])} arm-specific")
+                    if summary["gene_containing_events"]:
+                        parts.append(f"{summary['total_genes_affected']} genes affected")
+                    summary_text += ", ".join(parts)
+                    cnv_events_summary.set_text(summary_text)
+                else:
+                    cnv_events_summary.set_text("No significant CNV events detected")
+            else:
+                cnv_events_table.rows = []
+                cnv_events_summary.set_text("CNV data not available")
+        except Exception as e:
+            logging.error(f"Error updating CNV events analysis: {e}")
+            cnv_events_table.rows = []
+            cnv_events_summary.set_text("Error analyzing CNV events")
+
     def _render_cnv_from_state(state: Dict[str, Any]) -> None:
         try:
             cnv_map = state.get("cnv")
@@ -1124,6 +1217,28 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                     else np.array([])
                                 )
                                 band_areas = []
+                                
+                                # Get CNV events for this chromosome to highlight significant events
+                                events = []
+                                try:
+                                    sex_lbl = _sex_label(state.get("xy"))
+                                    gene_df = _load_gene_bed()
+                                    events = detect_cnv_events(
+                                        cnv_data={selected: vals},
+                                        bin_width=int(binw),
+                                        sex_estimate=sex_lbl,
+                                        cytobands_df=cyto_df,
+                                        gene_df=gene_df
+                                    )
+                                except Exception:
+                                    pass
+                                
+                                # Create event lookup for highlighting
+                                event_regions = {}
+                                for event in events:
+                                    key = f"{event.start_pos}-{event.end_pos}"
+                                    event_regions[key] = event
+                                
                                 for _, row in bands.iterrows():
                                     s_bp, e_bp = int(row["start"]), int(row["end"])
                                     s_bin = max(0, s_bp // binw)
@@ -1134,12 +1249,28 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                         )
                                     else:
                                         mean_val = 0.0
-                                    if mean_val > 0.5:
-                                        color = "rgba(52, 199, 89, 0.12)"
-                                    elif mean_val < -0.5:
-                                        color = "rgba(255, 45, 85, 0.12)"
+                                    
+                                    # Check if this region has a significant CNV event
+                                    region_key = f"{s_bp}-{e_bp}"
+                                    event = event_regions.get(region_key)
+                                    
+                                    if event:
+                                        # Highlight significant events with stronger colors
+                                        if event.event_type in ("GAIN", "WHOLE_CHR_GAIN"):
+                                            color = "rgba(52, 199, 89, 0.3)"  # Stronger green for gains
+                                        elif event.event_type in ("LOSS", "WHOLE_CHR_LOSS"):
+                                            color = "rgba(255, 45, 85, 0.3)"  # Stronger red for losses
+                                        else:
+                                            color = "rgba(0, 0, 0, 0.03)"
                                     else:
-                                        color = "rgba(0, 0, 0, 0.03)"
+                                        # Standard cytoband coloring
+                                        if mean_val > 0.5:
+                                            color = "rgba(52, 199, 89, 0.12)"
+                                        elif mean_val < -0.5:
+                                            color = "rgba(255, 45, 85, 0.12)"
+                                        else:
+                                            color = "rgba(0, 0, 0, 0.03)"
+                                    
                                     band_areas.append(
                                         [
                                             {
@@ -1487,6 +1618,9 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 if changed or ui_changed or not state.get("_rendered_once"):
                     _render_cnv_from_state(state)
                     state["_rendered_once"] = True
+                
+                # Update CNV events analysis
+                _update_cnv_events_analysis(state)
             # Breakpoint density overlay
             if data_array_npy.exists():
                 try:

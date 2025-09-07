@@ -497,24 +497,32 @@ class GUILauncher:
             @ui.page("/")
             def welcome_page():
                 """Welcome page at root route."""
+                _setup_global_resources()
+                _setup_global_timers()
                 self._create_welcome_page()
 
             # Create the workflow monitoring page
             @ui.page("/robin")
             def workflow_monitor():
                 """Workflow monitoring page under /robin route."""
+                _setup_global_resources()
+                _setup_global_timers()
                 self._create_workflow_monitor()
 
             # Create the samples overview page
             @ui.page("/live_data")
             def samples_overview():
                 """Samples overview page showing all tracked samples."""
+                _setup_global_resources()
+                _setup_global_timers()
                 self._create_samples_overview()
 
             # Create individual sample detail pages
             @ui.page("/live_data/{sample_id}")
             def sample_detail(sample_id: str):
                 """Individual sample detail page."""
+                _setup_global_resources()
+                _setup_global_timers()
 
                 # Add a page visit handler to refresh plots
                 def on_page_visit():
@@ -540,37 +548,43 @@ class GUILauncher:
 
                 self._create_sample_detail_page(sample_id)
 
-            # Enable global update processing regardless of which page is open
-            try:
-                self.gui_ready.set()
-                ui.timer(0.3, self._drain_updates_on_ui, active=True)
-                # Seed pre-existing samples shortly after startup, then poll for new ones
-                ui.timer(
-                    0.5,
-                    lambda: self._scan_and_seed_samples(preexisting=True),
-                    once=True,
-                )
-                ui.timer(3.0, self._scan_for_new_samples, active=True)
-            except Exception:
-                pass
-            ui.add_css(
+            # Setup global CSS and static files - moved to a helper function
+            def _setup_global_resources():
+                """Setup global CSS and static file resources."""
+                ui.add_css(
+                    """
+                    .shadows-into light-regular {
+                        font-family: "Shadows Into Light", cursive;
+                        font-weight: 800;
+                        font-style: normal;
+                    }
                 """
-                .shadows-into light-regular {
-                    font-family: "Shadows Into Light", cursive;
-                    font-weight: 800;
-                    font-style: normal;
-                }
-            """
-            )
-            # Register fonts from the GUI package if available
-            try:
-                fonts_dir = Path(__file__).parent / "gui" / "fonts"
-                if fonts_dir.exists():
-                    app.add_static_files("/fonts", str(fonts_dir))
-                else:
-                    logging.debug(f"Fonts directory not found: {fonts_dir}")
-            except Exception as e:
-                logging.debug(f"Could not register fonts static dir: {e}")
+                )
+                # Register fonts from the GUI package if available
+                try:
+                    fonts_dir = Path(__file__).parent / "gui" / "fonts"
+                    if fonts_dir.exists():
+                        app.add_static_files("/fonts", str(fonts_dir))
+                    else:
+                        logging.debug(f"Fonts directory not found: {fonts_dir}")
+                except Exception as e:
+                    logging.debug(f"Could not register fonts static dir: {e}")
+
+            # Setup global timers and processing - moved to a helper function
+            def _setup_global_timers():
+                """Setup global timers and update processing."""
+                try:
+                    self.gui_ready.set()
+                    ui.timer(0.3, self._drain_updates_on_ui, active=True)
+                    # Seed pre-existing samples shortly after startup, then poll for new ones
+                    ui.timer(
+                        0.5,
+                        lambda: self._scan_and_seed_samples(preexisting=True),
+                        once=True,
+                    )
+                    ui.timer(3.0, self._scan_for_new_samples, active=True)
+                except Exception:
+                    pass
 
             try:
                 iconfile = os.path.join(
