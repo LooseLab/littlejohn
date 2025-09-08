@@ -1406,6 +1406,115 @@ class GUILauncher:
 
     def _create_sample_detail_page(self, sample_id: str):
         """Create the individual sample detail page."""
+        async def confirm_report_generation():
+            """Show a confirmation dialog before generating the report."""
+            report_types = {
+                "summary": "Summary Only",
+                "detailed": "Detailed",
+            }
+            state: Dict[str, Any] = {
+                "type": "detailed",
+                "export_csv": False,
+            }
+
+            with ui.dialog() as dialog, ui.card().classes("w-96 p-4"):
+                ui.label("Generate Report").classes(
+                    "text-h6 font-bold mb-4"
+                )
+
+                # Report type selector
+                with ui.column().classes("mb-4"):
+                    ui.label("Report Type").classes("font-bold mb-2")
+                    ui.toggle(
+                        report_types,
+                        value="detailed",
+                        on_change=lambda e: state.update({"type": e.value}),
+                    )
+
+                # Disclaimer section
+                with ui.column().classes("mb-4"):
+                    ui.label("Disclaimer").classes("font-bold mb-2")
+                    formatted_text = EXTENDED_DISCLAIMER_TEXT.replace(
+                        "\n\n", "<br><br>"
+                    ).replace("\n", " ")
+                    ui.label(formatted_text).classes(
+                        "text-sm text-gray-600 mb-4"
+                    )
+
+                # Data export options
+                with ui.column().classes("mb-4"):
+                    ui.label("Include Data").classes("font-bold mb-2")
+                    ui.checkbox(
+                        "CSV data (ZIP)",
+                        value=False,
+                        on_change=lambda e: state.update(
+                            {"export_csv": bool(e.value)}
+                        ),
+                    )
+
+                ui.label(
+                    "Are you sure you want to generate a report?"
+                ).classes("mb-4")
+
+                # Buttons
+                with ui.row().classes("justify-end gap-2"):
+                    ui.button(
+                        "No", on_click=lambda: dialog.submit(("No", None))
+                    ).props("flat")
+                    ui.button(
+                        "Yes",
+                        on_click=lambda: dialog.submit(("Yes", state)),
+                    ).props("color=primary")
+
+            dialog_result = await dialog
+            if dialog_result is None:
+                return
+            result, state_val = dialog_result
+            if result == "Yes" and isinstance(state_val, dict):
+                await download_report(state_val)
+
+        async def download_report(state: Dict[str, Any]):
+            """Generate and download the report for this sample."""
+            try:
+                # Import here to avoid global dependency if GUI isn't used
+                from nicegui import run as ng_run  # type: ignore
+
+                if not sample_dir or not sample_dir.exists():
+                    ui.notify(
+                        "Output directory not available for this sample",
+                        type="warning",
+                    )
+                    return
+                ui.notify("Generating report…")
+                filename = f"{sample_id}_run_report.pdf"
+                pdf_path = os.path.join(str(sample_dir), filename)
+                os.makedirs(str(sample_dir), exist_ok=True)
+                export_csv_dir = None
+                if bool(state.get("export_csv", False)):
+                    export_csv_dir = os.path.join(
+                        str(sample_dir), "report_csv"
+                    )
+                pdf_file = await ng_run.io_bound(
+                    create_pdf,
+                    pdf_path,
+                    str(sample_dir),
+                    state.get("type", "detailed"),
+                    export_csv_dir=export_csv_dir,
+                    export_xlsx=False,
+                    export_zip=bool(state.get("export_csv", False)),
+                )
+                ui.download(pdf_file)
+                # Also offer CSV ZIP if requested
+                if bool(state.get("export_csv", False)) and export_csv_dir:
+                    zip_path = os.path.join(
+                        export_csv_dir, f"{sample_id}_report_data.zip"
+                    )
+                    if os.path.exists(zip_path):
+                        ui.download(zip_path)
+                ui.notify("Report downloaded")
+            except Exception as e:
+                ui.notify(f"Report generation failed: {e}", type="error")
+                
         with theme.frame(
             f"R.O.B.I.N - Sample {sample_id}",
             smalltitle="Samples",
@@ -1451,444 +1560,330 @@ class GUILauncher:
                 except Exception:
                     pass
 
-            # Page title and navigation
-            with ui.row().classes(
-                "w-full"
-            ):  #'w-full bg-blue-600 text-white p-4 items-center justify-between'):
-                with ui.row().classes("items-center"):
-                    ui.label(f"{sample_id}").classes("text-2xl font-bold")
-                    ui.label("Detailed sample information.").classes(
-                        "text-sm ml-4 opacity-80"
+            with ui.card().classes("w-full").style("border: 2px solid var(--md-primary)"):
+                with ui.row().classes("w-full flex justify-between items-center"):
+                    with ui.column():
+                        ui.label(f"{sample_id}").classes("text-2xl font-bold")
+                        ui.label("Detailed sample information.").classes(
+                            "text-sm ml-4 opacity-80"
+                        )
+                    with ui.column():
+                        ui.button(
+                            "Generate Report", on_click=confirm_report_generation
+                        ).classes(
+                            "object-right ml-auto text-sm font-semibold px-3 py-1 rounded"
+                        )
+                ui.separator().classes().style("border: 1px solid var(--md-primary)")
+                # Main content area with loading state
+                with ui.column().classes("w-full p-4 gap-4"):
+                    # Loading container that will be hidden when data is ready
+                    loading_container = ui.column().classes(
+                        "w-full items-center justify-center p-8"
                     )
-                with ui.row().classes("w-full"):
-                    # ui.link('📋 Sample Overview', '/live_data').classes('text-white hover:text-blue-200 text-sm')
-                    # ui.link('📊 Workflow Monitor', '/robin').classes('text-white hover:text-blue-200 text-sm')
-                    # Report generation (confirmation dialog + download)
-                    async def confirm_report_generation():
-                        """Show a confirmation dialog before generating the report."""
-                        report_types = {
-                            "summary": "Summary Only",
-                            "detailed": "Detailed",
-                        }
-                        state: Dict[str, Any] = {
-                            "type": "detailed",
-                            "export_csv": False,
-                        }
+                    with loading_container:
+                        ui.spinner("bars", size="4em").classes("mb-4")
+                        ui.label("Loading sample data...").classes("text-lg text-gray-600")
+                        ui.label("This may take a moment for large datasets").classes(
+                            "text-sm text-gray-500"
+                        )
 
-                        with ui.dialog() as dialog, ui.card().classes("w-96 p-4"):
-                            ui.label("Generate Report").classes(
-                                "text-h6 font-bold mb-4"
-                            )
+                    # Content container that will be shown when data is ready
+                    content_container = (
+                        ui.column().classes("w-full gap-4").style("display: none")
+                    )
 
-                            # Report type selector
-                            with ui.column().classes("mb-4"):
-                                ui.label("Report Type").classes("font-bold mb-2")
-                                ui.toggle(
-                                    report_types,
-                                    value="detailed",
-                                    on_change=lambda e: state.update({"type": e.value}),
-                                )
-
-                            # Disclaimer section
-                            with ui.column().classes("mb-4"):
-                                ui.label("Disclaimer").classes("font-bold mb-2")
-                                formatted_text = EXTENDED_DISCLAIMER_TEXT.replace(
-                                    "\n\n", "<br><br>"
-                                ).replace("\n", " ")
-                                ui.label(formatted_text).classes(
-                                    "text-sm text-gray-600 mb-4"
-                                )
-
-                            # Data export options
-                            with ui.column().classes("mb-4"):
-                                ui.label("Include Data").classes("font-bold mb-2")
-                                ui.checkbox(
-                                    "CSV data (ZIP)",
-                                    value=False,
-                                    on_change=lambda e: state.update(
-                                        {"export_csv": bool(e.value)}
-                                    ),
-                                )
-
-                            ui.label(
-                                "Are you sure you want to generate a report?"
-                            ).classes("mb-4")
-
-                            # Buttons
-                            with ui.row().classes("justify-end gap-2"):
-                                ui.button(
-                                    "No", on_click=lambda: dialog.submit(("No", None))
-                                ).props("flat")
-                                ui.button(
-                                    "Yes",
-                                    on_click=lambda: dialog.submit(("Yes", state)),
-                                ).props("color=primary")
-
-                        dialog_result = await dialog
-                        if dialog_result is None:
-                            return
-                        result, state_val = dialog_result
-                        if result == "Yes" and isinstance(state_val, dict):
-                            await download_report(state_val)
-
-                    async def download_report(state: Dict[str, Any]):
-                        """Generate and download the report for this sample."""
+                    with content_container:
+                        # Summary section (new component)
                         try:
-                            # Import here to avoid global dependency if GUI isn't used
-                            from nicegui import run as ng_run  # type: ignore
+                            try:
+                                from .gui.components.summary import add_summary_section  # type: ignore
+                            except ImportError:
+                                # Try absolute import if relative fails
+                                from robin.gui.components.summary import add_summary_section
 
-                            if not sample_dir or not sample_dir.exists():
-                                ui.notify(
-                                    "Output directory not available for this sample",
-                                    type="warning",
-                                )
-                                return
-                            ui.notify("Generating report…")
-                            filename = f"{sample_id}_run_report.pdf"
-                            pdf_path = os.path.join(str(sample_dir), filename)
-                            os.makedirs(str(sample_dir), exist_ok=True)
-                            export_csv_dir = None
-                            if bool(state.get("export_csv", False)):
-                                export_csv_dir = os.path.join(
-                                    str(sample_dir), "report_csv"
-                                )
-                            pdf_file = await ng_run.io_bound(
-                                create_pdf,
-                                pdf_path,
-                                str(sample_dir),
-                                state.get("type", "detailed"),
-                                export_csv_dir=export_csv_dir,
-                                export_xlsx=False,
-                                export_zip=bool(state.get("export_csv", False)),
-                            )
-                            ui.download(pdf_file)
-                            # Also offer CSV ZIP if requested
-                            if bool(state.get("export_csv", False)) and export_csv_dir:
-                                zip_path = os.path.join(
-                                    export_csv_dir, f"{sample_id}_report_data.zip"
-                                )
-                                if os.path.exists(zip_path):
-                                    ui.download(zip_path)
-                            ui.notify("Report downloaded")
+                            add_summary_section(sample_dir, sample_id)
                         except Exception as e:
-                            ui.notify(f"Report generation failed: {e}", type="error")
+                            logging.exception(f"[GUI] Summary section failed: {e}")
+                            try:
+                                ui.notify(f"Summary section failed: {e}", type="warning")
+                            except Exception:
+                                pass
 
-                    ui.button(
-                        "Generate Report", on_click=confirm_report_generation
-                    ).classes(
-                        "object-right ml-auto text-sm font-semibold px-3 py-1 rounded"
-                    )
-
-            # Main content area with loading state
-            with ui.column().classes("w-full p-4 gap-4"):
-                # Loading container that will be hidden when data is ready
-                loading_container = ui.column().classes(
-                    "w-full items-center justify-center p-8"
-                )
-                with loading_container:
-                    ui.spinner("bars", size="4em").classes("mb-4")
-                    ui.label("Loading sample data...").classes("text-lg text-gray-600")
-                    ui.label("This may take a moment for large datasets").classes(
-                        "text-sm text-gray-500"
-                    )
-
-                # Content container that will be shown when data is ready
-                content_container = (
-                    ui.column().classes("w-full gap-4").style("display: none")
-                )
-
-                with content_container:
-                    # Summary section (new component)
-                    try:
+                        # Classification section (refactored component)
                         try:
-                            from .gui.components.summary import add_summary_section  # type: ignore
-                        except ImportError:
-                            # Try absolute import if relative fails
-                            from robin.gui.components.summary import add_summary_section
+                            try:
+                                from .gui.components.classification import add_classification_section  # type: ignore
+                            except ImportError:
+                                # Try absolute import if relative fails
+                                from robin.gui.components.classification import (
+                                    add_classification_section,
+                                )
 
-                        add_summary_section(sample_dir, sample_id)
-                    except Exception as e:
-                        logging.exception(f"[GUI] Summary section failed: {e}")
-                        try:
-                            ui.notify(f"Summary section failed: {e}", type="warning")
-                        except Exception:
-                            pass
-
-                    # Classification section (refactored component)
-                    try:
-                        try:
-                            from .gui.components.classification import add_classification_section  # type: ignore
-                        except ImportError:
-                            # Try absolute import if relative fails
-                            from robin.gui.components.classification import (
-                                add_classification_section,
-                            )
-
-                        add_classification_section(sample_dir)
-                    except Exception as e:
-                        logging.exception(f"[GUI] Classification section failed: {e}")
-                        try:
-                            ui.notify(
-                                f"Classification section failed: {e}", type="warning"
-                            )
-                        except Exception:
-                            pass
-
-                    # Coverage section (refactored component)
-                    try:
-                        try:
-                            from .gui.components.coverage import add_coverage_section  # type: ignore
-                        except ImportError:
-                            # Try absolute import if relative fails
-                            from robin.gui.components.coverage import (
-                                add_coverage_section,
-                            )
-
-                        add_coverage_section(self, sample_dir)
-                    except Exception as e:
-                        try:
-                            ui.notify(f"Coverage section failed: {e}", type="warning")
-                        except Exception:
-                            pass
-
-                    # MGMT section (refactored component)
-                    try:
-                        try:
-                            from .gui.components.mgmt import add_mgmt_section  # type: ignore
-                        except ImportError:
-                            # Try absolute import if relative fails
-                            from robin.gui.components.mgmt import add_mgmt_section
-
-                        add_mgmt_section(self, sample_dir)
-                    except Exception as e:
-                        logging.exception(f"[GUI] MGMT section failed: {e}")
-                        try:
-                            ui.notify(f"MGMT section failed: {e}", type="warning")
-                        except Exception:
-                            pass
-
-                    # CNV section (refactored component)
-                    try:
-                        try:
-                            from .gui.components.cnv import add_cnv_section  # type: ignore
-                        except ImportError:
-                            # Try absolute import if relative fails
-                            from robin.gui.components.cnv import add_cnv_section
-
-                        # Pass launcher for shared state access (launcher._cnv_state)
-                        add_cnv_section(self, sample_dir)
-                    except Exception as e:
-                        logging.exception(f"[GUI] CNV section failed: {e}")
-                        try:
-                            ui.notify(f"CNV section failed: {e}", type="warning")
-                        except Exception:
-                            pass
-
-                    # Fusion section (target and genome-wide; excludes full SV UI)
-                    try:
-                        try:
-                            from .gui.components.fusion import add_fusion_section  # type: ignore
-                        except ImportError:
-                            # Try absolute import if relative fails
-                            from robin.gui.components.fusion import add_fusion_section
-
-                        add_fusion_section(self, sample_dir)
-                    except Exception as e:
-                        logging.exception(f"[GUI] Fusion section failed: {e}")
-                        try:
-                            ui.notify(f"Fusion section failed: {e}", type="warning")
-                        except Exception:
-                            pass
-
-                    # Files in output directory
-                    with ui.card().classes("w-full"):
-                        ui.label("📁 Output Files").classes(
-                            "text-lg font-semibold mb-2"
-                        )
-                        with ui.row().classes("items-center gap-3 mb-2"):
-                            files_search = ui.input("Search files…").props(
-                                "borderless dense clearable"
-                            )
-                        from robin.gui.theme import styled_table
-
-                        _files_container, files_table = styled_table(
-                            columns=[
-                                {
-                                    "name": "name",
-                                    "label": "File",
-                                    "field": "name",
-                                    "sortable": True,
-                                },
-                                {
-                                    "name": "size",
-                                    "label": "Size (bytes)",
-                                    "field": "size",
-                                    "sortable": True,
-                                },
-                                {
-                                    "name": "mtime",
-                                    "label": "Last Modified",
-                                    "field": "mtime",
-                                    "sortable": True,
-                                },
-                            ],
-                            rows=[],
-                            pagination=20,
-                            class_size="table-xs",
-                        )
-                        try:
-                            files_table.props(
-                                'multi-sort rows-per-page-options="[10,20,50,0]"'
-                            )
-                            files_search.bind_value(files_table, "filter")
-                        except Exception:
-                            pass
-
-                    # master.csv summary
-                    with ui.card().classes("w-full"):
-                        ui.label("📊 master.csv Summary").classes(
-                            "text-lg font-semibold mb-2"
-                        )
-                        with ui.row().classes("items-center gap-3 mb-2"):
-                            summary_search = ui.input("Search fields…").props(
-                                "borderless dense clearable"
-                            )
-                        from robin.gui.theme import styled_table
-
-                        _summary_container, summary_table = styled_table(
-                            columns=[
-                                {
-                                    "name": "key",
-                                    "label": "Field",
-                                    "field": "key",
-                                    "sortable": True,
-                                },
-                                {
-                                    "name": "value",
-                                    "label": "Value",
-                                    "field": "value",
-                                    "sortable": True,
-                                },
-                            ],
-                            rows=[],
-                            pagination=0,
-                            class_size="table-xs",
-                        )
-                        try:
-                            summary_table.props("multi-sort")
-                            summary_search.bind_value(summary_table, "filter")
-                        except Exception:
-                            pass
-
-                # Periodic refresher for files table and master.csv summary
-                _notify_state = {"files_error": False, "csv_error": False}
-
-                def _refresh_sample_detail() -> None:
-                    # Refresh files list
-                    try:
-                        rows = []
-                        if sample_dir and sample_dir.exists():
-                            for f in sorted(sample_dir.iterdir()):
-                                if f.is_file():
-                                    try:
-                                        stat = f.stat()
-                                        rows.append(
-                                            {
-                                                "name": f.name,
-                                                "size": stat.st_size,
-                                                "mtime": time.strftime(
-                                                    "%Y-%m-%d %H:%M:%S",
-                                                    time.localtime(stat.st_mtime),
-                                                ),
-                                            }
-                                        )
-                                    except Exception:
-                                        continue
-                        files_table.rows = rows
-                        files_table.update()
-                    except Exception as e:
-                        if not _notify_state["files_error"]:
+                            add_classification_section(sample_dir)
+                        except Exception as e:
+                            logging.exception(f"[GUI] Classification section failed: {e}")
                             try:
                                 ui.notify(
-                                    f"Failed to list output files for {sample_id}: {e}",
-                                    type="warning",
+                                    f"Classification section failed: {e}", type="warning"
                                 )
                             except Exception:
                                 pass
-                            _notify_state["files_error"] = True
 
-                    # Refresh master.csv summary
-                    try:
-                        if sample_dir:
-                            csv_path = sample_dir / "master.csv"
-                            if csv_path.exists():
-                                with csv_path.open("r", newline="") as fh:
-                                    reader = csv.DictReader(fh)
-                                    first_row = next(reader, None)
-                                if first_row:
-                                    preferred_keys = [
-                                        "counter_bam_passed",
-                                        "counter_bam_failed",
-                                        "counter_bases_count",
-                                        "counter_mapped_count",
-                                        "counter_unmapped_count",
-                                        "run_info_run_time",
-                                        "run_info_device",
-                                        "run_info_model",
-                                        "run_info_flow_cell",
-                                        "bam_tracking_counter",
-                                        "bam_tracking_total_files",
-                                    ]
-                                    rows2 = []
-                                    for k in preferred_keys:
-                                        if k in first_row:
-                                            rows2.append(
+                        # Coverage section (refactored component)
+                        try:
+                            try:
+                                from .gui.components.coverage import add_coverage_section  # type: ignore
+                            except ImportError:
+                                # Try absolute import if relative fails
+                                from robin.gui.components.coverage import (
+                                    add_coverage_section,
+                                )
+
+                            add_coverage_section(self, sample_dir)
+                        except Exception as e:
+                            try:
+                                ui.notify(f"Coverage section failed: {e}", type="warning")
+                            except Exception:
+                                pass
+
+                        # MGMT section (refactored component)
+                        try:
+                            try:
+                                from .gui.components.mgmt import add_mgmt_section  # type: ignore
+                            except ImportError:
+                                # Try absolute import if relative fails
+                                from robin.gui.components.mgmt import add_mgmt_section
+
+                            add_mgmt_section(self, sample_dir)
+                        except Exception as e:
+                            logging.exception(f"[GUI] MGMT section failed: {e}")
+                            try:
+                                ui.notify(f"MGMT section failed: {e}", type="warning")
+                            except Exception:
+                                pass
+
+                        # CNV section (refactored component)
+                        try:
+                            try:
+                                from .gui.components.cnv import add_cnv_section  # type: ignore
+                            except ImportError:
+                                # Try absolute import if relative fails
+                                from robin.gui.components.cnv import add_cnv_section
+
+                            # Pass launcher for shared state access (launcher._cnv_state)
+                            add_cnv_section(self, sample_dir)
+                        except Exception as e:
+                            logging.exception(f"[GUI] CNV section failed: {e}")
+                            try:
+                                ui.notify(f"CNV section failed: {e}", type="warning")
+                            except Exception:
+                                pass
+
+                        # Fusion section (target and genome-wide; excludes full SV UI)
+                        try:
+                            try:
+                                from .gui.components.fusion import add_fusion_section  # type: ignore
+                            except ImportError:
+                                # Try absolute import if relative fails
+                                from robin.gui.components.fusion import add_fusion_section
+
+                            add_fusion_section(self, sample_dir)
+                        except Exception as e:
+                            logging.exception(f"[GUI] Fusion section failed: {e}")
+                            try:
+                                ui.notify(f"Fusion section failed: {e}", type="warning")
+                            except Exception:
+                                pass
+
+                        # Files in output directory
+                        with ui.card().classes("w-full"):
+                            ui.label("📁 Output Files").classes(
+                                "text-lg font-semibold mb-2"
+                            )
+                            with ui.row().classes("items-center gap-3 mb-2"):
+                                files_search = ui.input("Search files…").props(
+                                    "borderless dense clearable"
+                                )
+                            from robin.gui.theme import styled_table
+
+                            _files_container, files_table = styled_table(
+                                columns=[
+                                    {
+                                        "name": "name",
+                                        "label": "File",
+                                        "field": "name",
+                                        "sortable": True,
+                                    },
+                                    {
+                                        "name": "size",
+                                        "label": "Size (bytes)",
+                                        "field": "size",
+                                        "sortable": True,
+                                    },
+                                    {
+                                        "name": "mtime",
+                                        "label": "Last Modified",
+                                        "field": "mtime",
+                                        "sortable": True,
+                                    },
+                                ],
+                                rows=[],
+                                pagination=20,
+                                class_size="table-xs",
+                            )
+                            try:
+                                files_table.props(
+                                    'multi-sort rows-per-page-options="[10,20,50,0]"'
+                                )
+                                files_search.bind_value(files_table, "filter")
+                            except Exception:
+                                pass
+
+                        # master.csv summary
+                        with ui.card().classes("w-full"):
+                            ui.label("📊 master.csv Summary").classes(
+                                "text-lg font-semibold mb-2"
+                            )
+                            with ui.row().classes("items-center gap-3 mb-2"):
+                                summary_search = ui.input("Search fields…").props(
+                                    "borderless dense clearable"
+                                )
+                            from robin.gui.theme import styled_table
+
+                            _summary_container, summary_table = styled_table(
+                                columns=[
+                                    {
+                                        "name": "key",
+                                        "label": "Field",
+                                        "field": "key",
+                                        "sortable": True,
+                                    },
+                                    {
+                                        "name": "value",
+                                        "label": "Value",
+                                        "field": "value",
+                                        "sortable": True,
+                                    },
+                                ],
+                                rows=[],
+                                pagination=0,
+                                class_size="table-xs",
+                            )
+                            try:
+                                summary_table.props("multi-sort")
+                                summary_search.bind_value(summary_table, "filter")
+                            except Exception:
+                                pass
+
+                    # Periodic refresher for files table and master.csv summary
+                    _notify_state = {"files_error": False, "csv_error": False}
+
+                    def _refresh_sample_detail() -> None:
+                        # Refresh files list
+                        try:
+                            rows = []
+                            if sample_dir and sample_dir.exists():
+                                for f in sorted(sample_dir.iterdir()):
+                                    if f.is_file():
+                                        try:
+                                            stat = f.stat()
+                                            rows.append(
                                                 {
-                                                    "key": k,
-                                                    "value": first_row.get(k, ""),
+                                                    "name": f.name,
+                                                    "size": stat.st_size,
+                                                    "mtime": time.strftime(
+                                                        "%Y-%m-%d %H:%M:%S",
+                                                        time.localtime(stat.st_mtime),
+                                                    ),
                                                 }
                                             )
-                                    if not rows2:
-                                        rows2 = [
-                                            {"key": k, "value": v}
-                                            for k, v in first_row.items()
+                                        except Exception:
+                                            continue
+                            files_table.rows = rows
+                            files_table.update()
+                        except Exception as e:
+                            if not _notify_state["files_error"]:
+                                try:
+                                    ui.notify(
+                                        f"Failed to list output files for {sample_id}: {e}",
+                                        type="warning",
+                                    )
+                                except Exception:
+                                    pass
+                                _notify_state["files_error"] = True
+
+                        # Refresh master.csv summary
+                        try:
+                            if sample_dir:
+                                csv_path = sample_dir / "master.csv"
+                                if csv_path.exists():
+                                    with csv_path.open("r", newline="") as fh:
+                                        reader = csv.DictReader(fh)
+                                        first_row = next(reader, None)
+                                    if first_row:
+                                        preferred_keys = [
+                                            "counter_bam_passed",
+                                            "counter_bam_failed",
+                                            "counter_bases_count",
+                                            "counter_mapped_count",
+                                            "counter_unmapped_count",
+                                            "run_info_run_time",
+                                            "run_info_device",
+                                            "run_info_model",
+                                            "run_info_flow_cell",
+                                            "bam_tracking_counter",
+                                            "bam_tracking_total_files",
                                         ]
-                                    summary_table.rows = rows2
+                                        rows2 = []
+                                        for k in preferred_keys:
+                                            if k in first_row:
+                                                rows2.append(
+                                                    {
+                                                        "key": k,
+                                                        "value": first_row.get(k, ""),
+                                                    }
+                                                )
+                                        if not rows2:
+                                            rows2 = [
+                                                {"key": k, "value": v}
+                                                for k, v in first_row.items()
+                                            ]
+                                        summary_table.rows = rows2
+                                        summary_table.update()
+                                else:
+                                    summary_table.rows = [
+                                        {"key": "Status", "value": "master.csv not found"}
+                                    ]
                                     summary_table.update()
-                            else:
-                                summary_table.rows = [
-                                    {"key": "Status", "value": "master.csv not found"}
-                                ]
-                                summary_table.update()
-                    except Exception as e:
-                        if not _notify_state["csv_error"]:
-                            try:
-                                ui.notify(
-                                    f"Failed to read master.csv for {sample_id}: {e}",
-                                    type="warning",
-                                )
-                            except Exception:
-                                pass
-                            _notify_state["csv_error"] = True
+                        except Exception as e:
+                            if not _notify_state["csv_error"]:
+                                try:
+                                    ui.notify(
+                                        f"Failed to read master.csv for {sample_id}: {e}",
+                                        type="warning",
+                                    )
+                                except Exception:
+                                    pass
+                                _notify_state["csv_error"] = True
 
-                # Show content and hide loading after initial data load
-                def _show_content():
-                    loading_container.style("display: none")
-                    content_container.style("display: flex")
+                    # Show content and hide loading after initial data load
+                    def _show_content():
+                        loading_container.style("display: none")
+                        content_container.style("display: flex")
 
-                # Initial data load with loading state
-                try:
-                    # Use a timer to simulate async loading and then show content
-                    ui.timer(0.1, _show_content, once=True)
-                except Exception:
-                    # Fallback: show content immediately if timer fails
-                    _show_content()
+                    # Initial data load with loading state
+                    try:
+                        # Use a timer to simulate async loading and then show content
+                        ui.timer(0.1, _show_content, once=True)
+                    except Exception:
+                        # Fallback: show content immediately if timer fails
+                        _show_content()
 
-                # Start periodic refresh
-                try:
-                    ui.timer(5.0, _refresh_sample_detail)
-                except Exception:
-                    pass
+                    # Start periodic refresh
+                    try:
+                        ui.timer(5.0, _refresh_sample_detail)
+                    except Exception:
+                        pass
 
     def _create_workflow_monitor(self):
         """Create the main workflow monitoring page."""

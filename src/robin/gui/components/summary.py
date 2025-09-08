@@ -36,8 +36,8 @@ def add_summary_section(sample_dir: Path, sample_id: str) -> None:
     # Run Information Section
     with ui.card().classes("w-full bg-gradient-to-r from-blue-50 to-indigo-50"):
         ui.label("Run Information").classes("text-lg font-semibold mb-3 text-blue-800")
-
-        with ui.row().classes("w-full gap-8 items-center flex-wrap"):
+        ui.separator().classes().style("border: 1px solid var(--md-primary)")
+        with ui.row().classes("w-full flex justify-between items-center"):
             state["run_info_labels"]["run"] = _create_info_item(
                 "Run", "Loading...", "schedule"
             )
@@ -56,9 +56,9 @@ def add_summary_section(sample_dir: Path, sample_id: str) -> None:
 
     # Classification Summary Section
     with ui.card().classes("w-full"):
-        ui.label("Classification Summary").classes("text-lg font-semibold mb-3")
-
-        with ui.row().classes("w-full gap-4 flex-wrap"):
+        ui.label("Classification Results").classes("text-lg font-semibold mb-3 text-blue-800")
+        ui.separator().classes().style("border: 1px solid var(--md-primary)")
+        with ui.row().classes("w-full flex justify-between items-center"):
             state["classification_labels"]["sturgeon"] = _create_classification_card(
                 "Sturgeon classification",
                 "Loading...",
@@ -98,9 +98,9 @@ def add_summary_section(sample_dir: Path, sample_id: str) -> None:
 
     # Analysis Details Section
     with ui.card().classes("w-full"):
-        ui.label("Analysis Details").classes("text-lg font-semibold mb-3")
-
-        with ui.row().classes("w-full gap-4 flex-wrap"):
+        ui.label("Analysis Details").classes("text-lg font-semibold mb-3 text-blue-800")
+        ui.separator().classes().style("border: 1px solid var(--md-primary)")
+        with ui.row().classes("w-full flex justify-between items-center"):
             state["coverage_labels"] = _create_coverage_analysis_card()
             state["cnv_labels"] = _create_cnv_analysis_card()
             state["mgmt_labels"] = _create_mgmt_analysis_card()
@@ -163,31 +163,17 @@ def _create_classification_card(
 ) -> Dict[str, Any]:
     """Create a classification summary card. Returns labels for updating."""
     labels = {}
-
-    with ui.card().classes("flex-1 min-w-64 bg-gray-50"):
-        ui.label(title).classes("text-sm font-semibold text-gray-800 mb-1")
-        # Display the current top classification for this classifier
-        labels["classification"] = ui.label(classification).classes(
-            "text-base font-semibold text-gray-900 mb-2"
-        )
-
-        if model:
-            ui.label(f"Model: {model}").classes("text-xs text-gray-600 mb-1")
-
-        if features and features_label:
-            labels["features"] = ui.label(f"{features_label}: {features}").classes(
-                "text-xs text-gray-600 mb-2"
-            )
-
-        # Confidence percentage with color coding
+    with ui.card().classes("flex-1 elevation-4 rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50 border-l-4 border-blue-500"):
+        ui.label(f"{title}").classes("font-bold text-blue-800 mb-2")
+        ui.separator().classes().style("border: 1px solid var(--md-primary)")
+        labels["classification"] = ui.label(f"Class: {classification}").classes("font-bold text-medium text-blue-600")
         confidence_color = _get_confidence_color(confidence_level)
-        labels["confidence"] = ui.label(confidence).classes(
-            f"text-2xl font-bold {confidence_color} mb-1"
-        )
-
-        labels["confidence_level"] = ui.label(confidence_level).classes(
-            "text-xs text-gray-600"
-        )
+        labels["confidence"] = ui.label(f"Confidence: {confidence}%").classes(f"text-sm text-{confidence_color}-600")
+        labels["confidence_level"] = ui.label(confidence_level).classes(f"text-sm text-{confidence_color}-600")
+        if model:
+            ui.label(f"Model: {model}").classes("text-sm text-blue-600")
+        if features and features_label:
+            labels["features"] = ui.label(f"Features: {features_label}").classes("text-sm text-blue-600")
 
     return labels
 
@@ -196,8 +182,9 @@ def _create_coverage_analysis_card() -> Dict[str, Any]:
     """Create the coverage analysis card. Returns labels for updating."""
     labels = {}
 
-    with ui.card().classes("flex-1 min-w-64"):
-        # Header with quality status
+    with ui.card().classes("flex-1 elevation-4 rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50 border-l-4 border-blue-500"):
+        ui.label(f"Coverage Analysis").classes("font-bold text-blue-800 mb-2")
+        ui.separator().classes().style("border: 1px solid var(--md-primary)")
         with ui.row().classes("items-center justify-between mb-2"):
             labels["quality"] = ui.label("Quality: Loading...").classes(
                 "text-sm font-semibold text-gray-600"
@@ -231,7 +218,9 @@ def _create_cnv_analysis_card() -> Dict[str, Any]:
     """Create the CNV analysis card. Returns labels for updating."""
     labels = {}
 
-    with ui.card().classes("flex-1 min-w-64"):
+    with ui.card().classes("flex-1 elevation-4 rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50 border-l-4 border-blue-500"):
+        ui.label(f"Copy Number Analysis").classes("font-bold text-blue-800 mb-2")
+        ui.separator().classes().style("border: 1px solid var(--md-primary)")
         with ui.row().classes("items-center gap-2 mb-2"):
             ui.icon("person").classes("text-blue-600")
             labels["genetic_sex"] = ui.label("Genetic Sex: Loading...").classes(
@@ -263,7 +252,9 @@ def _create_mgmt_analysis_card() -> Dict[str, Any]:
     """Create the MGMT analysis card. Returns labels for updating."""
     labels = {}
 
-    with ui.card().classes("flex-1 min-w-64"):
+    with ui.card().classes("flex-1 elevation-4 rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50 border-l-4 border-blue-500"):
+        ui.label(f"MGMT Analysis").classes("font-bold text-blue-800 mb-2")
+        ui.separator().classes().style("border: 1px solid var(--md-primary)")
         # Header with methylation status
         with ui.row().classes("items-center justify-between mb-2"):
             labels["status"] = ui.label("Status: Loading...").classes(
@@ -292,7 +283,9 @@ def _create_fusion_analysis_card() -> Dict[str, Any]:
     """Create the fusion analysis card. Returns labels for updating."""
     labels = {}
 
-    with ui.card().classes("flex-1 min-w-64"):
+    with ui.card().classes("flex-1 elevation-4 rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50 border-l-4 border-blue-500"):
+        ui.label(f"Fusion Analysis").classes("font-bold text-blue-800 mb-2")
+        ui.separator().classes().style("border: 1px solid var(--md-primary)")
         with ui.row().classes("items-center justify-between mb-2"):
             ui.label("Panel: rCNS2").classes("text-sm font-semibold text-gray-800")
             labels["target_fusions"] = ui.badge("-- between target fusions").props(
@@ -385,14 +378,14 @@ def _update_classification_data(state: Dict[str, Any]) -> None:
             labels = state["classification_labels"]["sturgeon"]
             data = classification_data.get("sturgeon", {})
             if "classification" in labels:
-                labels["classification"].text = data.get("classification", "Unknown")
+                labels["classification"].text = f"Class: {data.get('classification', 'Unknown')}"
             if "confidence" in labels:
-                labels["confidence"].text = f"{data.get('confidence', 0):.1f}%"
+                labels["confidence"].text = f"Confidence: {data.get('confidence', 0):.1f}%"
                 # Update confidence color
                 confidence_level = data.get("confidence_level", "Unknown")
                 confidence_color = _get_confidence_color(confidence_level)
                 labels["confidence"].classes(
-                    f"text-2xl font-bold {confidence_color} mb-1"
+                    f"text-sm font-bold {confidence_color} mb-1"
                 )
             if "confidence_level" in labels:
                 labels["confidence_level"].text = data.get(
@@ -406,13 +399,13 @@ def _update_classification_data(state: Dict[str, Any]) -> None:
             labels = state["classification_labels"]["nanodx"]
             data = classification_data.get("nanodx", {})
             if "classification" in labels:
-                labels["classification"].text = data.get("classification", "Unknown")
+                labels["classification"].text = f"Class: {data.get('classification', 'Unknown')}"
             if "confidence" in labels:
-                labels["confidence"].text = f"{data.get('confidence', 0):.1f}%"
+                labels["confidence"].text = f"Confidence: {data.get('confidence', 0):.1f}%" 
                 confidence_level = data.get("confidence_level", "Unknown")
                 confidence_color = _get_confidence_color(confidence_level)
                 labels["confidence"].classes(
-                    f"text-2xl font-bold {confidence_color} mb-1"
+                    f"text-sm font-bold {confidence_color} mb-1"
                 )
             if "confidence_level" in labels:
                 labels["confidence_level"].text = data.get(
@@ -426,13 +419,13 @@ def _update_classification_data(state: Dict[str, Any]) -> None:
             labels = state["classification_labels"]["pannanodx"]
             data = classification_data.get("pannanodx", {})
             if "classification" in labels:
-                labels["classification"].text = data.get("classification", "Unknown")
+                labels["classification"].text = f"Class: {data.get('classification', 'Unknown')}"
             if "confidence" in labels:
-                labels["confidence"].text = f"{data.get('confidence', 0):.1f}%"
+                labels["confidence"].text = f"Confidence: {data.get('confidence', 0):.1f}%"
                 confidence_level = data.get("confidence_level", "Unknown")
                 confidence_color = _get_confidence_color(confidence_level)
                 labels["confidence"].classes(
-                    f"text-2xl font-bold {confidence_color} mb-1"
+                        f"text-sm font-bold {confidence_color} mb-1"
                 )
             if "confidence_level" in labels:
                 labels["confidence_level"].text = data.get(
@@ -446,13 +439,13 @@ def _update_classification_data(state: Dict[str, Any]) -> None:
             labels = state["classification_labels"]["random_forest"]
             data = classification_data.get("random_forest", {})
             if "classification" in labels:
-                labels["classification"].text = data.get("classification", "Unknown")
+                labels["classification"].text = f"Class: {data.get('classification', 'Unknown')}"
             if "confidence" in labels:
-                labels["confidence"].text = f"{data.get('confidence', 0):.1f}%"
+                labels["confidence"].text = f"Confidence: {data.get('confidence', 0):.1f}%"
                 confidence_level = data.get("confidence_level", "Unknown")
                 confidence_color = _get_confidence_color(confidence_level)
                 labels["confidence"].classes(
-                    f"text-2xl font-bold {confidence_color} mb-1"
+                    f"text-sm font-bold {confidence_color} mb-1"
                 )
             if "confidence_level" in labels:
                 labels["confidence_level"].text = data.get(
