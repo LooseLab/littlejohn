@@ -211,31 +211,14 @@ def analyze_cytoband_cnv(
                 region_cnv = cnv_data[chromosome][start_bin : end_bin + 1]
                 mean_cnv = np.mean(region_cnv) if len(region_cnv) > 0 else 0
 
-                # Determine cytoband state relative to whole chromosome state
-                if whole_chr_event:
-                    # For whole chromosome events, only report significant deviations in opposite direction
-                    if whole_chr_state == "GAIN":
-                        if mean_cnv < chr_mean - (
-                            2.0 * chr_std
-                        ):  # More stringent threshold for opposite changes
-                            state = "LOSS"  # Only report significant losses within gained chromosomes
-                        else:
-                            state = "NORMAL"  # Don't duplicate gains
-                    elif whole_chr_state == "LOSS":
-                        if mean_cnv > chr_mean + (
-                            2.0 * chr_std
-                        ):  # More stringent threshold for opposite changes
-                            state = "GAIN"  # Only report significant gains within lost chromosomes
-                        else:
-                            state = "NORMAL"  # Don't duplicate losses
+                # Determine cytoband state - always use standard thresholds for regional analysis
+                # This ensures we capture all significant regional variations regardless of whole chromosome events
+                if mean_cnv > cytoband_gain_threshold:
+                    state = "GAIN"
+                elif mean_cnv < cytoband_loss_threshold:
+                    state = "LOSS"
                 else:
-                    # Normal threshold-based state determination
-                    if mean_cnv > cytoband_gain_threshold:
-                        state = "GAIN"
-                    elif mean_cnv < cytoband_loss_threshold:
-                        state = "LOSS"
-                    else:
-                        state = "NORMAL"
+                    state = "NORMAL"
             else:
                 mean_cnv = 0
                 state = "NO_DATA"
@@ -280,10 +263,9 @@ def analyze_cytoband_cnv(
                     current_group["end_pos"] - current_group["start_pos"]
                 )
 
-                # Only add significant changes relative to whole chromosome state
-                if (not whole_chr_event) or (
-                    current_group["cnv_state"] != whole_chr_state
-                ):
+                # Add all significant changes (GAIN, LOSS, HIGH_GAIN, DEEP_LOSS)
+                # Only filter out NORMAL and NO_DATA states
+                if current_group["cnv_state"] not in ["NORMAL", "NO_DATA"]:
                     merged_cytobands[merged_idx] = current_group
                     merged_idx += 1
 
@@ -323,8 +305,9 @@ def analyze_cytoband_cnv(
                 current_group["end_pos"] - current_group["start_pos"]
             )
 
-            # Only add significant changes relative to whole chromosome state
-            if (not whole_chr_event) or (current_group["cnv_state"] != whole_chr_state):
+            # Add all significant changes (GAIN, LOSS, HIGH_GAIN, DEEP_LOSS)
+            # Only filter out NORMAL and NO_DATA states
+            if current_group["cnv_state"] not in ["NORMAL", "NO_DATA"]:
                 merged_cytobands[merged_idx] = current_group
                 merged_idx += 1
 

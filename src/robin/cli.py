@@ -37,6 +37,9 @@ from typing import Optional, List, Dict, Tuple, Any
 
 import click
 
+# Check if we're in development mode
+is_development_mode = os.environ.get("ROBIN_DEV_MODE", "").lower() in ("1", "true", "yes", "on")
+
 from robin.workflow_simple import default_file_classifier, Job
 from robin.analysis.bam_preprocessor import bam_preprocessing_handler
 from robin.analysis.mgmt_analysis import mgmt_handler
@@ -114,6 +117,10 @@ def _get_user_acknowledgment() -> bool:
     Returns:
         bool: True if the user types 'I agree' exactly, otherwise False.
     """
+    # Skip disclaimer in development mode
+    if is_development_mode:
+        return True
+        
     click.echo("\nDISCLAIMER:")
     click.echo(DISCLAIMER_TEXT)
     click.echo("\nTo proceed, please type 'I agree' (exactly as shown):")

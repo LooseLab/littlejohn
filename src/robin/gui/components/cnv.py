@@ -502,29 +502,13 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             means_mean = float(_np.mean(chrom_means)) if chrom_means else 0.0
             means_std = float(_np.std(chrom_means)) if chrom_means else 1.0
 
-            # Thresholds
-            sex_lbl = sex_estimate
-            if chromosome.startswith("chr") and chromosome[3:].isdigit():
-                gain_threshold = means_mean + (1.0 * means_std)
-                loss_threshold = means_mean - (1.0 * means_std)
-                cyto_gain_th = chr_mean + (1.0 * chr_std)
-                cyto_loss_th = chr_mean - (1.0 * chr_std)
-            elif chromosome == "chrX":
-                gain_threshold = means_mean + (1.0 * means_std)
-                loss_threshold = means_mean - (1.0 * means_std)
-                cyto_gain_th = chr_mean + (1.0 * chr_std)
-                cyto_loss_th = chr_mean - (1.0 * chr_std)
-            else:  # chrY
-                if sex_lbl in ("Male", "XY"):
-                    gain_threshold = means_mean + (1.0 * means_std)
-                    loss_threshold = means_mean - (1.0 * means_std)
-                    cyto_gain_th = chr_mean + (1.0 * chr_std)
-                    cyto_loss_th = chr_mean - (1.0 * chr_std)
-                else:
-                    gain_threshold = means_mean + (1.2 * means_std)
-                    loss_threshold = means_mean - (1.2 * means_std)
-                    cyto_gain_th = chr_mean + (1.2 * chr_std)
-                    cyto_loss_th = chr_mean - (1.2 * chr_std)
+            # Use the same thresholds as centralized CNV detection for consistency
+            from robin.classification_config import get_cnv_thresholds
+            gain_threshold, loss_threshold = get_cnv_thresholds(chromosome, sex_estimate)
+            
+            # Use the same thresholds for cytoband-level analysis
+            cyto_gain_th = gain_threshold
+            cyto_loss_th = loss_threshold
 
             # Whole chromosome event detection
             bins_above_gain = float(
@@ -577,25 +561,13 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                     else _np.array([])
                 )
                 mean_val = float(_np.mean(region)) if region.size else 0.0
-                if whole_chr_event:
-                    if whole_chr_state == "GAIN":
-                        state = (
-                            "LOSS"
-                            if mean_val < (chr_mean - 2.0 * chr_std)
-                            else "NORMAL"
-                        )
-                    else:
-                        state = (
-                            "GAIN"
-                            if mean_val > (chr_mean + 2.0 * chr_std)
-                            else "NORMAL"
-                        )
-                else:
-                    state = (
-                        "GAIN"
-                        if mean_val > cyto_gain_th
-                        else ("LOSS" if mean_val < cyto_loss_th else "NORMAL")
-                    )
+                # Determine cytoband state - always use standard thresholds for regional analysis
+                # This ensures we capture all significant regional variations regardless of whole chromosome events
+                state = (
+                    "GAIN"
+                    if mean_val > cyto_gain_th
+                    else ("LOSS" if mean_val < cyto_loss_th else "NORMAL")
+                )
 
                 if current_group is None:
                     current_group = {

@@ -28,7 +28,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
     is_development_mode = os.environ.get("ROBIN_DEV_MODE", "").lower() in ("1", "true", "yes", "on")
     
     with ui.card().classes("w-full"):
-        ui.label("🧫 Coverage").classes("text-lg font-semibold mb-2")
+        ui.label("Coverage").classes("text-lg font-semibold mb-2")
         # Summary row (quality + metrics)
         with ui.row().classes("w-full items-center justify-between mb-2"):
             with ui.column().classes("gap-1"):
@@ -108,7 +108,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 ).classes("w-full h-64")
 
         with ui.card().classes("w-full"):
-            ui.label("📈 Coverage Over Time").classes("text-lg font-semibold mb-2")
+            ui.label("Coverage Over Time").classes("text-lg font-semibold mb-2")
             echart_time = ui.echart(
                 {
                     "backgroundColor": "transparent",
@@ -133,7 +133,139 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             ).classes("w-full h-64")
 
         with ui.card().classes("w-full"):
-            ui.label("🎯 Target Coverage").classes("text-lg font-semibold mb-2")
+            with ui.row().classes("w-full items-center justify-between mb-2"):
+                ui.label("Target Coverage").classes("text-lg font-semibold")
+                target_coverage_back_button = ui.button(
+                    "← Back to Overview", 
+                    on_click=lambda: _show_target_coverage_overview()
+                ).props("flat dense").classes("hidden")
+            
+            # Define helper functions before chart creation
+            def _show_chromosome_scatter(chromosome: str) -> None:
+                """Show scatter plot for individual genes on a specific chromosome"""
+                try:
+                    # Get the bed coverage data
+                    bed_cov = sample_dir / "bed_coverage_main.csv"
+                    if not bed_cov.exists():
+                        ui.notify("No coverage data available", type="warning")
+                        return
+                    
+                    # Read the data
+                    df = pd.read_csv(bed_cov)
+                    if "coverage" not in df.columns:
+                        df["length"] = (df["endpos"] - df["startpos"] + 1).astype(float)
+                        df["coverage"] = df["bases"] / df["length"]
+                    
+                    # Filter for the selected chromosome
+                    chrom_data = df[df["chrom"].astype(str) == chromosome].copy()
+                    
+                    if chrom_data.empty:
+                        ui.notify(f"No data found for chromosome {chromosome}", type="warning")
+                        return
+                    
+                    # Sort by position for better visualization
+                    chrom_data = chrom_data.sort_values("startpos")
+                    
+                    # Create scatter plot data
+                    scatter_data = []
+                    for _, row in chrom_data.iterrows():
+                        scatter_data.append([
+                            row["name"],
+                            row["coverage"],
+                            row["startpos"],
+                            row["endpos"]
+                        ])
+                    
+                    # Update chart to show scatter plot
+                    target_boxplot.options["title"]["text"] = f"Gene Coverage - {chromosome}"
+                    target_boxplot.options["title"]["subtext"] = f"{len(scatter_data)} genes"
+                    
+                    # Update x-axis to show gene names
+                    gene_names = chrom_data["name"].tolist()
+                    target_boxplot.options["xAxis"]["data"] = gene_names
+                    target_boxplot.options["xAxis"]["axisLabel"]["rotate"] = 45
+                    target_boxplot.options["xAxis"]["axisLabel"]["interval"] = 0
+                    
+                    # Update series to show scatter plot
+                    target_boxplot.options["series"] = [
+                        {
+                            "name": "Gene Coverage",
+                            "type": "scatter",
+                            "id": "coverage_data",  # Add ID for universal transition
+                            "data": scatter_data,
+                            "symbolSize": 8,
+                            "universalTransition": True,  # Enable universal transition
+                            "animationDurationUpdate": 1000,  # Set transition duration
+                            "itemStyle": {
+                                "color": "#3b82f6",
+                                "opacity": 0.7
+                            },
+                            "emphasis": {
+                                "itemStyle": {
+                                    "color": "#1d4ed8",
+                                    "opacity": 1,
+                                    "borderColor": "#000",
+                                    "borderWidth": 2
+                                }
+                            },
+                            "label": {
+                                "show": True,
+                                "position": "top",
+                                "formatter": "{@[1]:.2f}x",
+                                "fontSize": 10
+                            },
+                            "tooltip": {
+                                "formatter": "function(params) { const data = params.data; return `Gene: ${data[0]}<br/>Coverage: ${data[1].toFixed(2)}x<br/>Position: ${data[2].toLocaleString()}-${data[3].toLocaleString()}`; }"
+                            }
+                        }
+                    ]
+                    
+                    # Hide legend for scatter view
+                    target_boxplot.options["legend"]["show"] = False
+                    
+                    # Update chart
+                    target_boxplot.update()
+                    
+                    # Show back button
+                    target_coverage_back_button.classes("", replace="")
+                    
+                    _log_notify(f"Showing gene coverage for {chromosome}", level="info", notify=False)
+                    
+                except Exception as e:
+                    _log_notify(f"Failed to show chromosome scatter: {e}", level="error", notify=True)
+            
+            def _show_target_coverage_overview() -> None:
+                """Return to the original box plot overview"""
+                try:
+                    # Reload the original box plot data by calling _update_boxplot
+                    bed_cov = sample_dir / "bed_coverage_main.csv"
+                    if bed_cov.exists():
+                        df = pd.read_csv(bed_cov)
+                        _update_boxplot(df)
+                    else:
+                        ui.notify("No coverage data available", type="warning")
+                        return
+                    
+                    # Hide back button
+                    target_coverage_back_button.classes("hidden", replace="")
+                    
+                    _log_notify("Returned to target coverage overview", level="info", notify=False)
+                    
+                except Exception as e:
+                    _log_notify(f"Failed to show overview: {e}", level="error", notify=True)
+            
+            # Define click handler function before chart creation
+            def handle_boxplot_click(params):
+                """Handle clicks on the ECharts box plot and show chromosome scatter"""
+                try:
+                    if params.series_name == 'box plot' and params.data:
+                        chromosome = params.name
+                        ui.notify(f"Showing coverage for chromosome: {chromosome}", type="info")
+                        _log_notify(f"User clicked on chromosome: {chromosome}", level="info", notify=False)
+                        _show_chromosome_scatter(chromosome)
+                except Exception as e:
+                    _log_notify(f"Error handling chart click: {e}", level="warning", notify=False)
+            
             target_boxplot = ui.echart(
                 {
                     "backgroundColor": "transparent",
@@ -243,7 +375,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             },
                         },
                     ],
-                }
+                },
+                on_point_click=handle_boxplot_click
             ).classes("w-full h-80")
         with ui.card().classes("w-full"):
             with ui.row().classes("items-center gap-3"):
@@ -307,7 +440,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
             # IGV viewer section
             with ui.card().classes("w-full"):
-                ui.label("🧬 IGV").classes("text-lg font-semibold mb-2")
+                ui.label("IGV").classes("text-lg font-semibold mb-2")
                 igv_div = ui.element("div").classes("w-full h-[600px] border")
                 igv_div._props["id"] = "igv-container"
                 igv_status = ui.label("Checking for IGV-ready BAM files...").classes(
@@ -1070,7 +1203,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
     # SNP Analysis section (only shown in development mode)
     if is_development_mode:
         with ui.card().classes("w-full"):
-            ui.label("🧬 SNP Analysis").classes("text-lg font-semibold mb-2")
+            ui.label("SNP Analysis").classes("text-lg font-semibold mb-2")
 
             # SNP Analysis controls and status
             with ui.row().classes("w-full items-center justify-between mb-4"):
@@ -1641,13 +1774,13 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                         if not bed_content:
                             snp_files_status.set_text(
-                                "⚠️ BED file is empty - no regions exceed threshold"
+                                "BED file is empty - no regions exceed threshold"
                             )
                             snp_files_status.classes(replace="text-xs text-yellow-500")
                             snp_analysis_button.disable()
                             return False
                         else:
-                            snp_files_status.set_text("✅ All required files available")
+                            snp_files_status.set_text("All required files available")
                             snp_files_status.classes(replace="text-xs text-green-500")
                             snp_analysis_button.enable()
                             return True
@@ -1754,7 +1887,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                     print(f"workflow_runner.reference: {reference_genome}")
                                     if reference_genome:
                                         print(
-                                            f"✅ SUCCESS: Using reference genome from workflow runner: {reference_genome}"
+                                            f"SUCCESS: Using reference genome from workflow runner: {reference_genome}"
                                         )
                                     else:
                                         print(
@@ -1785,7 +1918,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             )
                         else:
                             ui.notify(
-                                f"✅ Reference genome found: {os.path.basename(reference_genome)}",
+                                f"Reference genome found: {os.path.basename(reference_genome)}",
                                 type="positive",
                             )
 
@@ -1960,7 +2093,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
     # Lightweight Gene Analysis section (only shown in development mode)
     if is_development_mode:
         with ui.card().classes("w-full"):
-            ui.label("🧬 Lightweight Variant Analysis").classes(
+            ui.label("Lightweight Variant Analysis").classes(
                 "text-lg font-semibold mb-2"
             )
 
@@ -2129,13 +2262,13 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                         with lga_results_container:
                             # Header
-                            ui.label("🧬 Lightweight Variant Analysis Results").classes(
+                            ui.label("Lightweight Variant Analysis Results").classes(
                                 "text-2xl font-bold mb-6"
                             )
 
                             # Metadata summary
                             with ui.card().classes("w-full mb-6"):
-                                ui.label("📊 Analysis Summary").classes(
+                                ui.label("Analysis Summary").classes(
                                     "text-xl font-semibold mb-4"
                                 )
                                 metadata = data.get("metadata", {})
@@ -2188,7 +2321,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                         )
 
                             # Gene analysis sections - linear layout, no tabs
-                            ui.label("📊 Gene Analysis Results").classes(
+                            ui.label("Gene Analysis Results").classes(
                                 "text-2xl font-bold mt-8 mb-6"
                             )
 
@@ -2291,7 +2424,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                         # Create coverage distribution chart
                         with ui.card().classes("w-full mb-4"):
-                            ui.label("📈 Coverage Distribution by Gene").classes(
+                            ui.label("Coverage Distribution by Gene").classes(
                                 "text-lg font-semibold mb-2"
                             )
 
@@ -2408,7 +2541,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                         # Summary statistics
                         with ui.card().classes("w-full mb-4"):
-                            ui.label("📊 Summary Statistics").classes(
+                            ui.label("Summary Statistics").classes(
                                 "text-lg font-semibold mb-2"
                             )
 
@@ -2468,7 +2601,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                         # Gene list with quick stats
                         with ui.card().classes("w-full"):
-                            ui.label("🧬 Gene List with Coverage Status").classes(
+                            ui.label("Gene List with Coverage Status").classes(
                                 "text-lg font-semibold mb-2"
                             )
 
@@ -2550,7 +2683,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             return
 
                         ui.label(
-                            f"🔍 Found {len(high_coverage_genes)} genes with high coverage variants"
+                            f"Found {len(high_coverage_genes)} genes with high coverage variants"
                         ).classes("text-lg font-semibold mb-4")
 
                         # Display each gene with its high coverage variants
@@ -2600,7 +2733,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 ]
 
                                 if high_cov_variants:
-                                    ui.label("✅ High Coverage Variants (≥10x):").classes(
+                                    ui.label("High Coverage Variants (≥10x):").classes(
                                         "text-sm font-medium mb-2"
                                     )
 
@@ -2710,7 +2843,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             return
 
                         ui.label(
-                            f"⚠️ Found {len(low_coverage_genes)} genes with only low coverage variants"
+                            f"Found {len(low_coverage_genes)} genes with only low coverage variants"
                         ).classes("text-lg font-semibold mb-4")
 
                         # Create summary table
@@ -2797,7 +2930,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 # Gene header
                                 with ui.card().classes("w-full mb-4"):
                                     ui.label(
-                                        f"🧬 {selected_gene} - Gene Analysis Details"
+                                        f"{selected_gene} - Gene Analysis Details"
                                     ).classes("text-xl font-semibold mb-2")
 
                                     # Linear layout for gene stats
@@ -2844,7 +2977,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                                 # Variants table
                                 if variants:
-                                    ui.label("🔍 Variant Details").classes(
+                                    ui.label("Variant Details").classes(
                                         "text-lg font-semibold mb-2"
                                     )
 
@@ -3035,13 +3168,13 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                     if not bed_content:
                         lga_files_status.set_text(
-                            "⚠️ BED file is empty - no regions exceed threshold"
+                            "BED file is empty - no regions exceed threshold"
                         )
                         lga_files_status.classes(replace="text-xs text-yellow-500")
                         lga_analysis_button.disable()
                         return False
                     else:
-                        lga_files_status.set_text("✅ All required files available")
+                        lga_files_status.set_text("All required files available")
                         lga_files_status.classes(replace="text-xs text-green-500")
                         lga_analysis_button.enable()
                         return True
@@ -3196,7 +3329,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                             # Update UI on completion using the main thread
                             print(
-                                "✅ Lightweight variant analysis completed successfully!"
+                                "Lightweight variant analysis completed successfully!"
                             )
                             lga_status["status"] = "completed"
                             lga_status["message"] = (
@@ -3437,6 +3570,64 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             target_boxplot.options["dataset"][2]["source"] = out_rows
             target_boxplot.options["dataset"][3]["source"] = glob_rows
             target_boxplot.options["xAxis"]["data"] = chroms
+            
+            # Restore original series configuration
+            target_boxplot.options["series"] = [
+                {
+                    "name": "box plot",
+                    "type": "boxplot",
+                    "id": "coverage_data",  # Add ID for universal transition
+                    "datasetId": "raw",
+                    "universalTransition": True,  # Enable universal transition
+                    "animationDurationUpdate": 1000,  # Set transition duration
+                    "encode": {
+                        "x": "chrom",
+                        "y": ["min", "Q1", "median", "Q3", "max"],
+                        "itemName": ["chrom"],
+                        "tooltip": ["min", "Q1", "median", "Q3", "max"],
+                    },
+                },
+                {
+                    "name": "outliers",
+                    "type": "scatter",
+                    "datasetId": "outliers",
+                    "symbolSize": 6,
+                    "label": {
+                        "show": True,
+                        "position": "right",
+                        "formatter": "{@name}",
+                    },
+                    "encode": {
+                        "x": "chrom",
+                        "y": "coverage",
+                        "label": ["name"],
+                        "tooltip": ["name", "coverage"],
+                    },
+                },
+                {
+                    "name": "global outliers",
+                    "type": "scatter",
+                    "datasetId": "globaloutliers",
+                    "symbolSize": 6,
+                    "label": {
+                        "show": True,
+                        "position": "right",
+                        "formatter": "{@name}",
+                    },
+                    "encode": {
+                        "x": "chrom",
+                        "y": "coverage",
+                        "label": ["name"],
+                        "tooltip": ["name", "coverage"],
+                    },
+                },
+            ]
+            
+            # Restore original title and legend
+            target_boxplot.options["title"]["text"] = "Target Coverage"
+            target_boxplot.options["title"]["subtext"] = ""
+            target_boxplot.options["legend"]["show"] = True
+            
             target_boxplot.update()
         except Exception as e:
             _log_notify(

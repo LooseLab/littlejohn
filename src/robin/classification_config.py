@@ -123,7 +123,7 @@ CNV_EVENT_RULES = {
         "single_arm_multiplier": 1.5,  # For single-arm chromosomes, use 1.5x threshold
     },
     "arm_specific": {
-        "min_proportion_affected": 0.7,  # 70% of arm must be affected
+        "min_proportion_affected": 0.4,  # 40% of arm must be affected (reduced from 70%)
     },
     "resolution": {
         "max_bin_width": 10_000_000,  # 10Mb - resolution too low for accurate CNV calling

@@ -11,15 +11,15 @@ except ImportError:  # pragma: no cover
 
 # Import centralized classification configuration
 try:
-    from robin.classification_config import get_classifier_thresholds
+    from robin.classification_config import CLASSIFIER_CONFIDENCE_THRESHOLDS
 except ImportError:  # pragma: no cover
-    get_classifier_thresholds = None
+    CLASSIFIER_CONFIDENCE_THRESHOLDS = None
 
 
 def add_classification_section(sample_dir: Path) -> None:
     """Build the Classification section (Sturgeon, NanoDX, PanNanoDX, RF)."""
     with ui.card().classes("w-full"):
-        ui.label("🧪 Classification").classes("text-lg font-semibold mb-2")
+        ui.label("Classification").classes("text-lg font-semibold mb-2")
         tool_to_file = {
             "Sturgeon": {"file": "sturgeon_scores.csv", "mode": "fraction"},
             "NanoDX": {"file": "NanoDX_scores.csv", "mode": "fraction"},
@@ -269,6 +269,44 @@ def add_classification_section(sample_dir: Path) -> None:
             values = [round(v, 2) for _, v in top][::-1]
             bar.options["yAxis"]["data"] = labels
             bar.options["series"][0]["data"] = values
+            
+            # Add thresholds to bar chart as well
+            if CLASSIFIER_CONFIDENCE_THRESHOLDS:
+                classifier_key_map = {
+                    "Sturgeon": "sturgeon",
+                    "NanoDX": "nanodx", 
+                    "PanNanoDX": "pannanodx",
+                    "Random Forest": "random_forest"
+                }
+                
+                classifier_key = classifier_key_map.get(tool_name)
+                if classifier_key and classifier_key in CLASSIFIER_CONFIDENCE_THRESHOLDS:
+                    thresholds = CLASSIFIER_CONFIDENCE_THRESHOLDS[classifier_key]
+                    if thresholds and thresholds.get("medium") and thresholds.get("high"):
+                        # Add markLine to bar chart
+                        bar.options["series"][0]["markLine"] = {
+                            "silent": True,
+                            "lineStyle": {"type": "dashed", "color": "#999"},
+                            "data": [
+                                {
+                                    "xAxis": thresholds["medium"],
+                                    "label": {
+                                        "show": True,
+                                        "formatter": f"Medium ({thresholds['medium']:.0f}%)",
+                                        "position": "insideEndTop"
+                                    }
+                                },
+                                {
+                                    "xAxis": thresholds["high"],
+                                    "label": {
+                                        "show": True,
+                                        "formatter": f"High ({thresholds['high']:.0f}%)",
+                                        "position": "insideEndTop"
+                                    }
+                                }
+                            ]
+                        }
+            
             bar.update()
             ts.options["series"] = []
             if data.get("has_time"):
@@ -296,7 +334,7 @@ def add_classification_section(sample_dir: Path) -> None:
                         }
                     )
             # Add thresholds for all classification tools using centralized configuration
-            if get_classifier_thresholds:
+            if CLASSIFIER_CONFIDENCE_THRESHOLDS:
                 # Map tool names to classifier config keys
                 classifier_key_map = {
                     "Sturgeon": "sturgeon",
@@ -306,8 +344,8 @@ def add_classification_section(sample_dir: Path) -> None:
                 }
                 
                 classifier_key = classifier_key_map.get(tool_name)
-                if classifier_key:
-                    thresholds = get_classifier_thresholds(classifier_key)
+                if classifier_key and classifier_key in CLASSIFIER_CONFIDENCE_THRESHOLDS:
+                    thresholds = CLASSIFIER_CONFIDENCE_THRESHOLDS[classifier_key]
                     if thresholds and thresholds.get("medium") and thresholds.get("high"):
                         ts.options.setdefault("series", [])
                         ts.options["series"].append(

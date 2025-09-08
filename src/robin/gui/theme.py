@@ -59,6 +59,9 @@ import os
 import psutil
 import platform
 
+# Check if we're in development mode
+is_development_mode = os.environ.get("ROBIN_DEV_MODE", "").lower() in ("1", "true", "yes", "on")
+
 
 def get_imagefile():
     """Get the path to the ROBIN logo image file."""
@@ -142,6 +145,10 @@ async def check_version():
     Check the current version against the remote version on GitHub.
     Shows a notification or dialog to the user about their version status.
     """
+    # Skip version check in development mode
+    if is_development_mode:
+        return
+        
     # Check if version has already been checked in this session
     try:
         if app.storage.tab.get("version_checked", False):
@@ -307,6 +314,10 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
 
     # Create disclaimer dialog that appears on first visit with M3 styling
     async def show_disclaimer():
+        # Skip disclaimer in development mode
+        if is_development_mode:
+            return
+            
         try:
             disclaimer_acknowledged = app.storage.tab.get("disclaimer_acknowledged", False)
         except RuntimeError:

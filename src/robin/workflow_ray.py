@@ -43,6 +43,12 @@ from tqdm import tqdm
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+# Import memory management
+try:
+    from robin.memory_manager import MemoryManager
+except ImportError:
+    MemoryManager = None
+
 # Optional GUI hook integration
 try:
     from robin.gui_launcher import (
@@ -294,6 +300,22 @@ def _wrap_real_handler(
     py_handler: Optional[Callable[[Job], None]], job_type: str
 ) -> Callable[[Job], WorkflowContext]:
     def _impl(job: Job) -> WorkflowContext:
+        # Initialize memory manager for this handler execution
+        memory_manager = None
+        if MemoryManager is not None:
+            try:
+                # Configure memory management based on job type
+                gc_every = 10 if job_type in {"mgmt", "cnv", "target", "fusion"} else 25
+                rss_trigger = 512 if job_type in {"mgmt", "cnv", "target", "fusion"} else 1024
+                memory_manager = MemoryManager(
+                    gc_every=gc_every,
+                    rss_trigger_mb=rss_trigger,
+                    enable_malloc_trim=True
+                )
+            except Exception:
+                # Fallback if memory manager fails to initialize
+                pass
+        
         # Ensure per-process logging honors global level
         try:
             _configure_logging(global_level=GLOBAL_LOG_LEVEL)
@@ -380,6 +402,18 @@ def _wrap_real_handler(
             # Mark result if user handler didn't
             if job_type not in job.context.results:
                 job.context.add_result(job_type, f"{job_type}_ok")
+            
+            # Trigger memory cleanup after handler execution
+            if memory_manager is not None:
+                try:
+                    cleanup_stats = memory_manager.check_and_cleanup(force=True)
+                    # Log memory cleanup if it was triggered
+                    if cleanup_stats.get('gc_triggered', False):
+                        logger.debug(f"Memory cleanup: {cleanup_stats}")
+                except Exception:
+                    # Silently continue if memory management fails
+                    pass
+        
         return job.context
 
     return _impl
@@ -416,6 +450,22 @@ class TypeProcessor:
         self.job_type = job_type
         self.remote_func = remote_func
         self.resource_options = resource_options or {}
+        
+        # Initialize memory manager for long-running actor
+        self.memory_manager = None
+        if MemoryManager is not None:
+            try:
+                # Configure memory management based on job type
+                gc_every = 25 if job_type in {"mgmt", "cnv", "target", "fusion"} else 50
+                rss_trigger = 1024 if job_type in {"mgmt", "cnv", "target", "fusion"} else 2048
+                self.memory_manager = MemoryManager(
+                    gc_every=gc_every,
+                    rss_trigger_mb=rss_trigger,
+                    enable_malloc_trim=True
+                )
+            except Exception as e:
+                # Fallback if memory manager fails to initialize
+                pass
 
     def update_handler(self, remote_func, resource_options: Dict[str, Any]):
         self.remote_func = remote_func
@@ -429,6 +479,18 @@ class TypeProcessor:
         except Exception:
             # Propagate error to coordinator; it will handle ok=False
             raise
+        
+        # Trigger memory cleanup after processing
+        if self.memory_manager is not None:
+            try:
+                cleanup_stats = self.memory_manager.check_and_cleanup()
+                # Log memory cleanup if it was triggered
+                if cleanup_stats.get('gc_triggered', False):
+                    pass  # Memory cleanup performed
+            except Exception:
+                # Silently continue if memory management fails
+                pass
+        
         return ctx
 
 
@@ -1463,6 +1525,22 @@ class Pool:
         self._coordinator_name: Optional[str] = None
         self._inflight: Set[ray.ObjectRef] = set()
         self._running_count: int = 0
+        
+        # Initialize memory manager for long-running pool actor
+        self.memory_manager = None
+        if MemoryManager is not None:
+            try:
+                # Configure memory management based on queue type
+                gc_every = 30 if queue_name in {"analysis", "classif"} else 50
+                rss_trigger = 1536 if queue_name in {"analysis", "classif"} else 2048
+                self.memory_manager = MemoryManager(
+                    gc_every=gc_every,
+                    rss_trigger_mb=rss_trigger,
+                    enable_malloc_trim=True
+                )
+            except Exception as e:
+                # Fallback if memory manager fails to initialize
+                pass
 
     async def set_coordinator_name(self, coord_name: str):
         # store Coordinator actor name; resolve handle lazily
@@ -1528,6 +1606,17 @@ class Pool:
             self._inflight.discard(r)
             if self._running_count > 0:
                 self._running_count -= 1
+            
+            # Trigger memory cleanup after job completion
+            if self.memory_manager is not None:
+                try:
+                    cleanup_stats = self.memory_manager.check_and_cleanup()
+                    # Log memory cleanup if it was triggered
+                    if cleanup_stats.get('gc_triggered', False):
+                        pass  # Memory cleanup performed
+                except Exception:
+                    # Silently continue if memory management fails
+                    pass
 
         asyncio.create_task(_wait(ref))
 
