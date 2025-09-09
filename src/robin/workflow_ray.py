@@ -459,7 +459,7 @@ class TypeProcessor:
                 # Configure memory management based on job type
                 gc_every = 25 if job_type in {"mgmt", "cnv", "target", "fusion"} else 50
                 rss_trigger = 1024 if job_type in {"mgmt", "cnv", "target", "fusion"} else 2048
-                restart_every = 500 if job_type in {"mgmt", "cnv", "target", "fusion"} else 1000
+                restart_every = 5000 if job_type in {"mgmt", "cnv", "target", "fusion"} else 10000
                 restart_rss_trigger = 2048 if job_type in {"mgmt", "cnv", "target", "fusion"} else 4096
                 self.memory_manager = MemoryManager(
                     gc_every=gc_every,
@@ -505,15 +505,8 @@ class TypeProcessor:
                 if cleanup_stats.get('gc_triggered', False):
                     pass  # Memory cleanup performed
                 
-                # Check if restart is requested
-                if cleanup_stats.get('restart_requested', False):
-                    restart_reason = cleanup_stats.get('restart_reason', 'unknown')
-                    # Raise a special exception to signal restart needed
-                    raise RuntimeError(f"Actor restart requested: {restart_reason}")
+                # Actor restart mechanism disabled - no restart checks
             except Exception as e:
-                # Check if this is a restart request
-                if "Actor restart requested" in str(e):
-                    raise  # Re-raise restart requests
                 # Silently continue if memory management fails
                 pass
         
@@ -1559,7 +1552,7 @@ class Pool:
                 # Configure memory management based on queue type
                 gc_every = 30 if queue_name in {"analysis", "classif"} else 50
                 rss_trigger = 1536 if queue_name in {"analysis", "classif"} else 2048
-                restart_every = 750 if queue_name in {"analysis", "classif"} else 1000
+                restart_every = 7500 if queue_name in {"analysis", "classif"} else 10000
                 restart_rss_trigger = 3072 if queue_name in {"analysis", "classif"} else 4096
                 self.memory_manager = MemoryManager(
                     gc_every=gc_every,
@@ -1659,15 +1652,8 @@ class Pool:
                     if cleanup_stats.get('gc_triggered', False):
                         pass  # Memory cleanup performed
                     
-                    # Check if restart is requested
-                    if cleanup_stats.get('restart_requested', False):
-                        restart_reason = cleanup_stats.get('restart_reason', 'unknown')
-                        # Raise a special exception to signal restart needed
-                        raise RuntimeError(f"Actor restart requested: {restart_reason}")
+                    # Actor restart mechanism disabled - no restart checks
                 except Exception as e:
-                    # Check if this is a restart request
-                    if "Actor restart requested" in str(e):
-                        raise  # Re-raise restart requests
                     # Silently continue if memory management fails
                     pass
 
