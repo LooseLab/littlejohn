@@ -712,10 +712,10 @@ class GUILauncher:
                         ui.label("📋 All Tracked Samples").classes(
                             "text-lg font-semibold"
                         )
-                        ui.button(
-                            "🔄 Refresh All Plots",
-                            on_click=lambda: self._refresh_all_sample_plots(),
-                        ).classes("q-btn--secondary")
+                        #ui.button(
+                        #    "🔄 Refresh All Plots",
+                        #    on_click=lambda: self._refresh_all_sample_plots(),
+                        #).classes("q-btn--secondary")
 
                     # Filters row
                     with ui.row().classes("items-center gap-2 mb-2"):
@@ -852,7 +852,15 @@ class GUILauncher:
                     
                     # Set default sorting by last activity in reverse chronological order
                     try:
+                        # Try multiple approaches to set default sorting
                         self.samples_table.props("default-sort=last_seen desc")
+                        # Alternative approach using sort property
+                        self.samples_table.props("sort=last_seen desc")
+                        # Set initial sort on the column
+                        for col in self.samples_table.columns:
+                            if col.get("field") == "last_seen":
+                                col["sort"] = "desc"
+                                break
                     except Exception:
                         pass
 
@@ -1341,6 +1349,16 @@ class GUILauncher:
                 except Exception:
                     r["export"] = False
 
+            # Sort rows by last activity in reverse chronological order (newest first)
+            try:
+                rows.sort(key=lambda r: float(r.get("_last_seen_raw", 0)), reverse=True)
+            except Exception:
+                # Fallback to sorting by last_seen string if _last_seen_raw is not available
+                try:
+                    rows.sort(key=lambda r: r.get("last_seen", ""), reverse=True)
+                except Exception:
+                    pass
+
             self.samples_table.rows = rows
             self.samples_table.update()
         except Exception:
@@ -1384,6 +1402,7 @@ class GUILauncher:
         except Exception as e:
             logging.debug(f"Failed to refresh sample plots for {sample_id}: {e}")
 
+    '''
     def _refresh_all_sample_plots(self):
         """Refresh all sample plots by resetting modification time caches."""
         try:
@@ -1409,7 +1428,8 @@ class GUILauncher:
         except Exception as e:
             ui.notify(f"Failed to refresh all plots: {e}", type="negative")
             logging.exception("Failed to refresh all sample plots")
-
+    '''
+    
     def _create_sample_detail_page(self, sample_id: str):
         """Create the individual sample detail page."""
         async def confirm_report_generation():
@@ -2328,6 +2348,16 @@ class GUILauncher:
                 for r in rows:
                     existing[r["sample_id"]] = r
                 merged = list(existing.values())
+                # Sort rows by last activity in reverse chronological order (newest first)
+                try:
+                    merged.sort(key=lambda r: float(r.get("_last_seen_raw", 0)), reverse=True)
+                except Exception:
+                    # Fallback to sorting by last_seen string if _last_seen_raw is not available
+                    try:
+                        merged.sort(key=lambda r: r.get("last_seen", ""), reverse=True)
+                    except Exception:
+                        pass
+                
                 if hasattr(self, "samples_table"):
                     try:
                         self.samples_table.rows = merged
