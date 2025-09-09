@@ -65,8 +65,23 @@ def _load_processed_pickle(file_path: Path) -> Optional[Dict[str, Any]]:
     try:
         if not file_path.exists() or file_path.stat().st_size == 0:
             return None
+        
+        # Try to load the pickle with better error handling
         with open(file_path, "rb") as f:
-            data = pickle.load(f)
+            try:
+                data = pickle.load(f)
+            except (pickle.UnpicklingError, EOFError) as e:
+                # If pickle is truncated, try to load what we can
+                logging.warning(f"[Fusion] Pickle file appears truncated, attempting recovery: {file_path}")
+                f.seek(0)
+                try:
+                    # Try loading with protocol 0 which is more forgiving
+                    data = pickle.load(f)
+                except:
+                    # If all else fails, return None and let the system regenerate
+                    logging.error(f"[Fusion] Could not recover truncated pickle: {file_path}")
+                    return None
+        
         # Expected keys: annotated_data (DataFrame), goodpairs (Series), gene_groups (list), candidate_count (int)
         return data if isinstance(data, dict) else None
     except Exception as e:

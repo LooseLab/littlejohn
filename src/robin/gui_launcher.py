@@ -849,6 +849,12 @@ class GUILauncher:
                         self.samples_table.props("rows-per-page-options=[10,20,50,0]")
                     except Exception:
                         pass
+                    
+                    # Set default sorting by last activity in reverse chronological order
+                    try:
+                        self.samples_table.props("default-sort=last_seen desc")
+                    except Exception:
+                        pass
 
                     # Per-row action button to view sample
                     try:
@@ -1124,7 +1130,7 @@ class GUILauncher:
                 if not existing or last_seen >= existing.get("_last_seen_raw", 0):
                     origin_value = (
                         "Pre-existing"
-                        if sid in self._preexisting_sample_ids
+                        if sid in self._preexisting_sample_ids and (time.time() - last_seen) >= 3600
                         else "Live"
                     )
                     # Flip Live samples to Complete if inactive for 60 minutes
@@ -1150,7 +1156,7 @@ class GUILauncher:
                             else str(s.get("job_types", ""))
                         ),
                         "last_seen": time.strftime(
-                            "%H:%M:%S", time.localtime(last_seen)
+                            "%Y-%m-%d %H:%M:%S", time.localtime(last_seen)
                         ),
                         "actions": "View",
                         "_last_seen_raw": last_seen,
@@ -2290,7 +2296,7 @@ class GUILauncher:
                         pass
                     origin_value = (
                         "Pre-existing"
-                        if sid in self._preexisting_sample_ids
+                        if sid in self._preexisting_sample_ids and (time.time() - last_seen) >= 3600
                         else "Live"
                     )
                     try:
@@ -2311,7 +2317,7 @@ class GUILauncher:
                             "failed_jobs": ov_failed,
                             "job_types": ov_job_types,
                             "last_seen": time.strftime(
-                                "%H:%M:%S", time.localtime(last_seen)
+                                "%Y-%m-%d %H:%M:%S", time.localtime(last_seen)
                             ),
                             "_last_seen_raw": last_seen,
                         }
