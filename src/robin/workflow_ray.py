@@ -404,9 +404,10 @@ def _wrap_real_handler(
                 job.context.add_result(job_type, f"{job_type}_ok")
             
             # Trigger memory cleanup after handler execution
+            # Handlers are always idle after completion, so force cleanup
             if memory_manager is not None:
                 try:
-                    cleanup_stats = memory_manager.check_and_cleanup(force=True)
+                    cleanup_stats = memory_manager.check_and_cleanup(force=True, is_idle=True)
                     # Log memory cleanup if it was triggered
                     if cleanup_stats.get('gc_triggered', False):
                         logger.debug(f"Memory cleanup: {cleanup_stats}")
@@ -480,10 +481,10 @@ class TypeProcessor:
             # Propagate error to coordinator; it will handle ok=False
             raise
         
-        # Trigger memory cleanup after processing
+        # Trigger memory cleanup after processing (actor is idle after job completion)
         if self.memory_manager is not None:
             try:
-                cleanup_stats = self.memory_manager.check_and_cleanup()
+                cleanup_stats = self.memory_manager.check_and_cleanup(is_idle=True)
                 # Log memory cleanup if it was triggered
                 if cleanup_stats.get('gc_triggered', False):
                     pass  # Memory cleanup performed
@@ -1608,9 +1609,11 @@ class Pool:
                 self._running_count -= 1
             
             # Trigger memory cleanup after job completion
+            # Check if pool is idle (no running jobs) before cleanup
             if self.memory_manager is not None:
                 try:
-                    cleanup_stats = self.memory_manager.check_and_cleanup()
+                    is_idle = self._running_count == 0
+                    cleanup_stats = self.memory_manager.check_and_cleanup(is_idle=is_idle)
                     # Log memory cleanup if it was triggered
                     if cleanup_stats.get('gc_triggered', False):
                         pass  # Memory cleanup performed
