@@ -64,7 +64,18 @@ class MasterCSVManager:
             try:
                 df = pd.read_csv(csv_path)
                 if not df.empty:
-                    return df.iloc[0].to_dict()
+                    data = df.iloc[0].to_dict()
+                    # Ensure string fields are properly converted to strings
+                    # to prevent float objects from being passed to split() methods
+                    string_fields = [
+                        "devices", "basecall_models", "run_time", "flowcell_ids",
+                        "run_info_run_time", "run_info_device", "run_info_model", 
+                        "run_info_flow_cell", "samples_overview_job_types"
+                    ]
+                    for field in string_fields:
+                        if field in data and data[field] is not None:
+                            data[field] = str(data[field])
+                    return data
             except Exception as e:
                 print(f"Warning: Error reading existing CSV: {e}")
 
@@ -162,7 +173,8 @@ class MasterCSVManager:
         # Update devices
         if bam_info.get("device_position"):
             device_str = str(bam_info["device_position"])
-            devices = data["devices"].split(",") if data["devices"] else []
+            devices_str = str(data.get("devices", ""))
+            devices = devices_str.split(",") if devices_str else []
             if device_str not in devices:
                 devices.append(device_str)
             data["devices"] = ",".join(devices)
@@ -171,9 +183,8 @@ class MasterCSVManager:
         # Update basecall models
         if bam_info.get("basecall_model"):
             model_str = str(bam_info["basecall_model"])
-            models = (
-                data["basecall_models"].split(",") if data["basecall_models"] else []
-            )
+            models_str = str(data.get("basecall_models", ""))
+            models = models_str.split(",") if models_str else []
             if model_str not in models:
                 models.append(model_str)
             data["basecall_models"] = ",".join(models)
@@ -182,7 +193,8 @@ class MasterCSVManager:
         # Update flow cell IDs
         if bam_info.get("flow_cell_id"):
             flowcell_str = str(bam_info["flow_cell_id"])
-            flowcells = data["flowcell_ids"].split(",") if data["flowcell_ids"] else []
+            flowcells_str = str(data.get("flowcell_ids", ""))
+            flowcells = flowcells_str.split(",") if flowcells_str else []
             if flowcell_str not in flowcells:
                 flowcells.append(flowcell_str)
             data["flowcell_ids"] = ",".join(flowcells)
@@ -192,7 +204,8 @@ class MasterCSVManager:
         if bam_info.get("time_of_run"):
             # Convert to string if it's a float or other type
             time_str = str(bam_info["time_of_run"])
-            run_times = data["run_time"].split(",") if data["run_time"] else []
+            run_times_str = str(data.get("run_time", ""))
+            run_times = run_times_str.split(",") if run_times_str else []
             if time_str not in run_times:
                 run_times.append(time_str)
             data["run_time"] = ",".join(run_times)

@@ -459,10 +459,14 @@ class TypeProcessor:
                 # Configure memory management based on job type
                 gc_every = 25 if job_type in {"mgmt", "cnv", "target", "fusion"} else 50
                 rss_trigger = 1024 if job_type in {"mgmt", "cnv", "target", "fusion"} else 2048
+                restart_every = 500 if job_type in {"mgmt", "cnv", "target", "fusion"} else 1000
+                restart_rss_trigger = 2048 if job_type in {"mgmt", "cnv", "target", "fusion"} else 4096
                 self.memory_manager = MemoryManager(
                     gc_every=gc_every,
                     rss_trigger_mb=rss_trigger,
-                    enable_malloc_trim=True
+                    enable_malloc_trim=True,
+                    restart_every=restart_every,
+                    restart_rss_trigger_mb=restart_rss_trigger
                 )
             except Exception as e:
                 # Fallback if memory manager fails to initialize
@@ -471,6 +475,18 @@ class TypeProcessor:
     def update_handler(self, remote_func, resource_options: Dict[str, Any]):
         self.remote_func = remote_func
         self.resource_options = resource_options or {}
+    
+    def should_restart(self) -> bool:
+        """Check if actor should restart due to memory management."""
+        if self.memory_manager is not None:
+            return self.memory_manager.is_restart_requested()
+        return False
+    
+    def get_restart_reason(self) -> Optional[str]:
+        """Get the reason for restart request."""
+        if self.memory_manager is not None:
+            return self.memory_manager.get_restart_reason()
+        return None
 
     async def process(self, job: Job):
         # Submit the real handler task and await the result to avoid nested ObjectRefs
@@ -488,7 +504,16 @@ class TypeProcessor:
                 # Log memory cleanup if it was triggered
                 if cleanup_stats.get('gc_triggered', False):
                     pass  # Memory cleanup performed
-            except Exception:
+                
+                # Check if restart is requested
+                if cleanup_stats.get('restart_requested', False):
+                    restart_reason = cleanup_stats.get('restart_reason', 'unknown')
+                    # Raise a special exception to signal restart needed
+                    raise RuntimeError(f"Actor restart requested: {restart_reason}")
+            except Exception as e:
+                # Check if this is a restart request
+                if "Actor restart requested" in str(e):
+                    raise  # Re-raise restart requests
                 # Silently continue if memory management fails
                 pass
         
@@ -1534,10 +1559,14 @@ class Pool:
                 # Configure memory management based on queue type
                 gc_every = 30 if queue_name in {"analysis", "classif"} else 50
                 rss_trigger = 1536 if queue_name in {"analysis", "classif"} else 2048
+                restart_every = 750 if queue_name in {"analysis", "classif"} else 1000
+                restart_rss_trigger = 3072 if queue_name in {"analysis", "classif"} else 4096
                 self.memory_manager = MemoryManager(
                     gc_every=gc_every,
                     rss_trigger_mb=rss_trigger,
-                    enable_malloc_trim=True
+                    enable_malloc_trim=True,
+                    restart_every=restart_every,
+                    restart_rss_trigger_mb=restart_rss_trigger
                 )
             except Exception as e:
                 # Fallback if memory manager fails to initialize
@@ -1559,6 +1588,18 @@ class Pool:
             except Exception:
                 self._coordinator = None
         return self._coordinator
+    
+    def should_restart(self) -> bool:
+        """Check if actor should restart due to memory management."""
+        if self.memory_manager is not None:
+            return self.memory_manager.is_restart_requested()
+        return False
+    
+    def get_restart_reason(self) -> Optional[str]:
+        """Get the reason for restart request."""
+        if self.memory_manager is not None:
+            return self.memory_manager.get_restart_reason()
+        return None
 
     async def register_handler(
         self, job_type: str, remote_func, resource_options: Dict[str, Any]
@@ -1617,7 +1658,16 @@ class Pool:
                     # Log memory cleanup if it was triggered
                     if cleanup_stats.get('gc_triggered', False):
                         pass  # Memory cleanup performed
-                except Exception:
+                    
+                    # Check if restart is requested
+                    if cleanup_stats.get('restart_requested', False):
+                        restart_reason = cleanup_stats.get('restart_reason', 'unknown')
+                        # Raise a special exception to signal restart needed
+                        raise RuntimeError(f"Actor restart requested: {restart_reason}")
+                except Exception as e:
+                    # Check if this is a restart request
+                    if "Actor restart requested" in str(e):
+                        raise  # Re-raise restart requests
                     # Silently continue if memory management fails
                     pass
 
