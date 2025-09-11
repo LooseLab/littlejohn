@@ -61,8 +61,8 @@ class CNVEvent:
             "confidence": self.confidence,
             "arm": self.arm,
             "proportion_affected": self.proportion_affected,
-            "start_mb": f"{self.start_pos/1e6:.2f}",
-            "end_mb": f"{self.end_pos/1e6:.2f}",
+            "start_pos_mb": f"{self.start_pos/1e6:.2f}",
+            "end_pos_mb": f"{self.end_pos/1e6:.2f}",
             "length_mb": f"{self.length/1e6:.2f}",
             "mean_cnv_str": f"{self.mean_cnv:.3f}",
             "genes_str": ", ".join(self.genes) if self.genes else "",
@@ -103,7 +103,7 @@ def analyze_chromosome_arms(
     # Debug: log cytoband names for troubleshooting
     logger.debug(f"{chromosome} cytoband names: {chr_cytobands['name'].tolist()}")
     
-    # Analyze p arm - cytoband names start with 'p' (e.g., p36.33, p36.32)
+    # Analyze p arm - cytoband names start_pos with 'p' (e.g., p36.33, p36.32)
     p_arm_cytobands = chr_cytobands[
         chr_cytobands["name"].str.startswith("p", na=False)
     ]
@@ -114,10 +114,10 @@ def analyze_chromosome_arms(
     if not p_arm_cytobands.empty:
         p_arm_values = []
         for _, band in p_arm_cytobands.iterrows():
-            start_bin = max(0, int(band["start"] // bin_width))
-            end_bin = min(len(cnv_data[chromosome]) - 1, int(band["end"] // bin_width))
-            if end_bin >= start_bin:
-                region_values = cnv_data[chromosome][start_bin:end_bin + 1]
+            start_pos_bin = max(0, int(band["start_pos"] // bin_width))
+            end_pos_bin = min(len(cnv_data[chromosome]) - 1, int(band["end_pos"] // bin_width))
+            if end_pos_bin >= start_pos_bin:
+                region_values = cnv_data[chromosome][start_pos_bin:end_pos_bin + 1]
                 p_arm_values.extend(region_values)
         
         if p_arm_values:
@@ -128,7 +128,7 @@ def analyze_chromosome_arms(
     
     logger.debug(f"{chromosome} p-arm: {len(p_arm_cytobands)} bands found, mean={p_arm_mean}, prop={p_arm_proportion:.3f}")
     
-    # Analyze q arm - cytoband names start with 'q' (e.g., q11, q12, q21.1)
+    # Analyze q arm - cytoband names start_pos with 'q' (e.g., q11, q12, q21.1)
     q_arm_cytobands = chr_cytobands[
         chr_cytobands["name"].str.startswith("q", na=False)
     ]
@@ -139,10 +139,10 @@ def analyze_chromosome_arms(
     if not q_arm_cytobands.empty:
         q_arm_values = []
         for _, band in q_arm_cytobands.iterrows():
-            start_bin = max(0, int(band["start"] // bin_width))
-            end_bin = min(len(cnv_data[chromosome]) - 1, int(band["end"] // bin_width))
-            if end_bin >= start_bin:
-                region_values = cnv_data[chromosome][start_bin:end_bin + 1]
+            start_pos_bin = max(0, int(band["start_pos"] // bin_width))
+            end_pos_bin = min(len(cnv_data[chromosome]) - 1, int(band["end_pos"] // bin_width))
+            if end_pos_bin >= start_pos_bin:
+                region_values = cnv_data[chromosome][start_pos_bin:end_pos_bin + 1]
                 q_arm_values.extend(region_values)
         
         if q_arm_values:
@@ -218,8 +218,8 @@ def detect_cnv_events(
                 # Create whole chromosome event
                 chr_cytobands = cytobands_df[cytobands_df["chrom"] == chromosome]
                 if not chr_cytobands.empty:
-                    start_pos = int(chr_cytobands["start"].min())
-                    end_pos = int(chr_cytobands["end"].max())
+                    start_pos = int(chr_cytobands["start_pos"].min())
+                    end_pos = int(chr_cytobands["end_pos"].max())
                     length = end_pos - start_pos
                     
                     # Get genes in chromosome
@@ -256,8 +256,8 @@ def detect_cnv_events(
                         chr_cytobands = cytobands_df[cytobands_df["chrom"] == chromosome]
                         p_bands = chr_cytobands[chr_cytobands["name"].str.startswith("p", na=False)]
                         if not p_bands.empty:
-                            start_pos = int(p_bands["start"].min())
-                            end_pos = int(p_bands["end"].max())
+                            start_pos = int(p_bands["start_pos"].min())
+                            end_pos = int(p_bands["end_pos"].max())
                             length = end_pos - start_pos
                             
                             # Get genes in p arm
@@ -265,8 +265,8 @@ def detect_cnv_events(
                             if gene_df is not None:
                                 genes = gene_df[
                                     (gene_df["chrom"] == chromosome) &
-                                    (gene_df["start"] <= end_pos) &
-                                    (gene_df["end"] >= start_pos)
+                                    (gene_df["start_pos"] <= end_pos) &
+                                    (gene_df["end_pos"] >= start_pos)
                                 ]["gene"].astype(str).tolist()
                             
                             event = CNVEvent(
@@ -293,8 +293,8 @@ def detect_cnv_events(
                         chr_cytobands = cytobands_df[cytobands_df["chrom"] == chromosome]
                         q_bands = chr_cytobands[chr_cytobands["name"].str.startswith("q", na=False)]
                         if not q_bands.empty:
-                            start_pos = int(q_bands["start"].min())
-                            end_pos = int(q_bands["end"].max())
+                            start_pos = int(q_bands["start_pos"].min())
+                            end_pos = int(q_bands["end_pos"].max())
                             length = end_pos - start_pos
                             
                             # Get genes in q arm
@@ -302,8 +302,8 @@ def detect_cnv_events(
                             if gene_df is not None:
                                 genes = gene_df[
                                     (gene_df["chrom"] == chromosome) &
-                                    (gene_df["start"] <= end_pos) &
-                                    (gene_df["end"] >= start_pos)
+                                    (gene_df["start_pos"] <= end_pos) &
+                                    (gene_df["end_pos"] >= start_pos)
                                 ]["gene"].astype(str).tolist()
                             
                             event = CNVEvent(
@@ -332,8 +332,8 @@ def detect_cnv_events(
             if abs(whole_chr_mean) > abs(gain_threshold) * single_arm_multiplier:
                 chr_cytobands = cytobands_df[cytobands_df["chrom"] == chromosome]
                 if not chr_cytobands.empty:
-                    start_pos = int(chr_cytobands["start"].min())
-                    end_pos = int(chr_cytobands["end"].max())
+                    start_pos = int(chr_cytobands["start_pos"].min())
+                    end_pos = int(chr_cytobands["end_pos"].max())
                     length = end_pos - start_pos
                     
                     # Get genes in chromosome
