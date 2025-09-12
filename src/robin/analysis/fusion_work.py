@@ -3,6 +3,13 @@ Fusion detection and processing module for BAM files.
 
 This module provides functionality to detect gene fusions from BAM files by analyzing
 supplementary alignments and identifying reads that map to multiple gene regions.
+
+IMPORTANT: This module now uses strict criteria to avoid false positives:
+1. Only processes reads with supplementary alignments (SA tag)
+2. Filters out reads where primary and supplementary alignments overlap >100 bases in read coordinates
+3. Filters out reads where the same genomic alignment is annotated with multiple overlapping genes
+4. This prevents false positives from long reads spanning nearby genes and mapping artifacts
+5. True fusions require reads to map to multiple genomic locations (supplementary alignments)
 """
 
 # Standard library imports
@@ -21,10 +28,34 @@ import pandas as pd
 import pysam
 import networkx as nx
 
-from robin.analysis.fusion_analysis import FusionMetadata
+# FusionMetadata is now defined in this file
 
 # Module-level logger
 logger = logging.getLogger("robin.analysis.fusion_work")
+
+
+@dataclass
+class FusionMetadata:
+    """Container for fusion analysis metadata and results"""
+
+    sample_id: str
+    file_path: str
+    analysis_timestamp: float
+    target_fusion_path: Optional[str] = None
+    genome_wide_fusion_path: Optional[str] = None
+    analysis_results: Optional[Dict] = None
+    processing_steps: List[str] = None
+    error_message: Optional[str] = None
+    fusion_data: Optional[Dict] = None
+    target_panel: Optional[str] = None
+
+    def __post_init__(self):
+        if self.processing_steps is None:
+            self.processing_steps = []
+        if self.analysis_results is None:
+            self.analysis_results = {}
+        if self.fusion_data is None:
+            self.fusion_data = {}
 
 
 # Minimal helpers to avoid NameError if SV pre-processing is used without utilities
@@ -282,6 +313,63 @@ def find_reads_with_supplementary(bamfile: str) -> Set[str]:
     return reads_with_supp
 
 
+def _check_read_alignments_overlap(read_rows: List[Dict]) -> bool:
+    """
+    Check for various types of false positives in read alignments:
+    1. Read coordinate overlaps >100 bases
+    2. Same genomic alignment annotated with multiple genes (overlapping gene regions)
+    
+    Args:
+        read_rows: List of alignment dictionaries for the same read
+        
+    Returns:
+        True if any false positive pattern is detected, False otherwise
+    """
+    if len(read_rows) < 2:
+        return False
+    
+    # Check 1: Read coordinate overlaps >100 bases
+    for i in range(len(read_rows)):
+        for j in range(i + 1, len(read_rows)):
+            align1 = read_rows[i]
+            align2 = read_rows[j]
+            
+            # Get read coordinate ranges
+            read1_start = align1['read_start']
+            read1_end = align1['read_end']
+            read2_start = align2['read_start']
+            read2_end = align2['read_end']
+            
+            # Calculate overlap in read coordinates
+            overlap_start = max(read1_start, read2_start)
+            overlap_end = min(read1_end, read2_end)
+            
+            if overlap_end > overlap_start:
+                overlap_length = overlap_end - overlap_start
+                
+                # If overlap is >100 bases in read coordinates,
+                # consider it a false positive (not a true fusion)
+                if overlap_length > 100:
+                    return True
+    
+    # Check 2: Same genomic alignment annotated with multiple genes
+    # Group by genomic coordinates (chr:start-end)
+    genomic_alignments = {}
+    for row in read_rows:
+        genomic_key = f"{row['reference_id']}:{row['reference_start']}-{row['reference_end']}"
+        if genomic_key not in genomic_alignments:
+            genomic_alignments[genomic_key] = []
+        genomic_alignments[genomic_key].append(row)
+    
+    # If any genomic alignment has multiple gene annotations, it's a false positive
+    for genomic_key, alignments in genomic_alignments.items():
+        if len(alignments) > 1:
+            # Same genomic coordinates with multiple gene annotations = false positive
+            return True
+    
+    return False
+
+
 def _find_gene_intersections(
     read: pysam.AlignedSegment,
     ref_name: str,
@@ -291,7 +379,7 @@ def _find_gene_intersections(
 ) -> List[Dict]:
     """
     Find intersections between a read and gene regions.
-    This method generates the EXACT column structure expected by the original fusion code.
+    Only processes reads that have supplementary alignments (true fusion candidates).
 
     Args:
         read: Pysam aligned segment
@@ -304,6 +392,11 @@ def _find_gene_intersections(
         List of intersection dictionaries with the exact column structure
     """
     read_rows = []
+
+    # Only process reads that have supplementary alignments (SA tag)
+    # This ensures we only look at reads that actually map to multiple locations
+    if not read.has_tag("SA"):
+        return read_rows
 
     for gene_region in gene_regions:
         if gene_region.overlaps_with(ref_start, ref_end, min_overlap=100):
@@ -338,7 +431,7 @@ def _process_reads_for_fusions(
 ) -> Optional[pd.DataFrame]:
     """
     Process reads to find gene intersections and create fusion candidates.
-    This function matches the original fusion code exactly.
+    Now includes overlap filtering to remove false positives.
 
     Args:
         bamfile: Path to BAM file
@@ -348,7 +441,8 @@ def _process_reads_for_fusions(
     Returns:
         DataFrame with fusion candidates or None if no candidates found
     """
-    rows = []
+    # Collect all alignments per read first
+    read_alignments = {}  # read_id -> list of alignment rows
 
     try:
         with pysam.AlignmentFile(bamfile, "rb") as bam:
@@ -379,17 +473,27 @@ def _process_reads_for_fusions(
                         read, ref_name, ref_start, ref_end, gene_regions[ref_name]
                     )
                     if read_rows:
-                        rows.extend(read_rows)
+                        read_id = read.query_name
+                        if read_id not in read_alignments:
+                            read_alignments[read_id] = []
+                        read_alignments[read_id].extend(read_rows)
 
     except Exception as e:
         logger.error(f"Error processing reads for fusions: {str(e)}")
         raise
 
-    if not rows:
+    # Now filter out reads with overlapping alignments
+    filtered_rows = []
+    for read_id, alignments in read_alignments.items():
+        # Check for overlaps between alignments of the same read
+        if not _check_read_alignments_overlap(alignments):
+            filtered_rows.extend(alignments)
+
+    if not filtered_rows:
         return None
 
     # Create DataFrame with the EXACT column structure expected by the original code
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(filtered_rows)
 
     # Apply memory optimizations
     df = _optimize_fusion_dataframe(df)
@@ -438,7 +542,7 @@ def _optimize_fusion_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
 def _filter_fusion_candidates(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     """
-    Filter fusion candidates using the EXACT logic from the original fusion code.
+    Filter fusion candidates to only include reads with supplementary alignments.
 
     Args:
         df: DataFrame with fusion candidates
@@ -461,7 +565,7 @@ def _filter_fusion_candidates(df: pd.DataFrame) -> Optional[pd.DataFrame]:
         # Count unique genes per read_id
         counts = doubles.groupby("read_id", observed=True)["col4"].transform("nunique")
 
-        # Filter for reads that map to more than 1 gene (this matches the original code logic exactly)
+        # Filter for reads that map to more than 1 gene
         result = doubles[counts > 1]
 
         if result.empty:

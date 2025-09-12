@@ -420,11 +420,11 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 res_path,
                 sep="\t",
                 header=None,
-                names=["chrom", "start", "end", "name", "stain"],
+                names=["chrom", "start_pos", "end_pos", "name", "stain"],
             )
             return df
         except Exception:
-            return pd.DataFrame(columns=["chrom", "start", "end", "name", "stain"])
+            return pd.DataFrame(columns=["chrom", "start_pos", "end_pos", "name", "stain"])
 
     @lru_cache(maxsize=1)
     def _load_gene_bed() -> pd.DataFrame:
@@ -437,11 +437,11 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                         res_path,
                         sep="\t",
                         header=None,
-                        names=["chrom", "start", "end", "gene"],
+                        names=["chrom", "start_pos", "end_pos", "gene"],
                     )
             except Exception:
                 continue
-        return pd.DataFrame(columns=["chrom", "start", "end", "gene"])
+        return pd.DataFrame(columns=["chrom", "start_pos", "end_pos", "gene"])
 
     def _sex_label(xy_val: Any) -> str:
         try:
@@ -536,13 +536,13 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 merged_rows.append(
                     {
                         "chrom": chromosome,
-                        "start_pos": int(chromosome_cytobands["start"].min()),
-                        "end_pos": int(chromosome_cytobands["end"].max()),
+                        "start_pos": int(chromosome_cytobands["start_pos"].min()),
+                        "end_pos": int(chromosome_cytobands["end_pos"].max()),
                         "name": f"{chromosome} WHOLE CHROMOSOME {whole_chr_state}",
                         "mean_cnv": chr_mean,
                         "cnv_state": whole_chr_state,
-                        "length": int(chromosome_cytobands["end"].max())
-                        - int(chromosome_cytobands["start"].min()),
+                        "length": int(chromosome_cytobands["end_pos"].max())
+                        - int(chromosome_cytobands["start_pos"].min()),
                         "genes": genes_in_chr,
                     }
                 )
@@ -551,8 +551,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             current_group = None
             vals = _np.asarray(cnv_data[chromosome])
             for _, band in chromosome_cytobands.iterrows():
-                s_bp = int(band["start"])
-                e_bp = int(band["end"])
+                s_bp = int(band["start_pos"])
+                e_bp = int(band["end_pos"])
                 s_bin = max(0, s_bp // bin_width)
                 e_bin = min(len(vals) - 1, max(0, e_bp // bin_width))
                 region = (
@@ -604,8 +604,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                         genes = (
                             gene_df[
                                 (gene_df["chrom"] == row["chrom"])
-                                & (gene_df["start"] <= row["end_pos"])
-                                & (gene_df["end"] >= row["start_pos"])
+                                & (gene_df["start_pos"] <= row["end_pos"])
+                                & (gene_df["end_pos"] >= row["start_pos"])
                             ]["gene"]
                             .astype(str)
                             .tolist()
@@ -643,8 +643,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                     genes = (
                         gene_df[
                             (gene_df["chrom"] == row["chrom"])
-                            & (gene_df["start"] <= row["end_pos"])
-                            & (gene_df["end"] >= row["start_pos"])
+                            & (gene_df["start_pos"] <= row["end_pos"])
+                            & (gene_df["end_pos"] >= row["start_pos"])
                         ]["gene"]
                         .astype(str)
                         .tolist()
@@ -1212,7 +1212,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                     event_regions[key] = event
                                 
                                 for _, row in bands.iterrows():
-                                    s_bp, e_bp = int(row["start"]), int(row["end"])
+                                    s_bp, e_bp = int(row["start_pos"]), int(row["end_pos"])
                                     s_bin = max(0, s_bp // binw)
                                     e_bin = min(len(vals) - 1, max(0, e_bp // binw))
                                     if len(vals) > 0 and e_bin >= s_bin:
@@ -1286,14 +1286,14 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                         [
                                             {
                                                 "name": str(gr["gene"]),
-                                                "xAxis": float(gr["start"]),
+                                                "xAxis": float(gr["start_pos"]),
                                                 "label": {
                                                     "position": "insideTop",
                                                     "color": "#000",
                                                     "fontSize": 11,
                                                 },
                                             },
-                                            {"xAxis": float(gr["end"])},
+                                            {"xAxis": float(gr["end_pos"])},
                                         ]
                                     )
                                 main.setdefault("markArea", {"data": []})
@@ -1309,8 +1309,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                             if sel_gene and sel_gene != "All":
                                 row = gchr[gchr["gene"] == sel_gene]
                                 if not row.empty:
-                                    s_bp = int(row.iloc[0]["start"])
-                                    e_bp = int(row.iloc[0]["end"])
+                                    s_bp = int(row.iloc[0]["start_pos"])
+                                    e_bp = int(row.iloc[0]["end_pos"])
                                     pad = int(0.1 * (e_bp - s_bp + 1))
                                     for chart in (cnv_abs, cnv_diff):
                                         try:
@@ -1340,7 +1340,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                             ):
                                 arr = state["bp_array"]
                                 pos = [
-                                    int(r["end"]) for r in arr if r["name"] == selected
+                                    int(r["end_pos"]) for r in arr if r["name"] == selected
                                 ]
                                 lines = [
                                     {
@@ -1602,7 +1602,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                         state["bp_array"] = arr
                         dens: Dict[int, int] = {}
                         for r in arr:
-                            end = int(r["end"])
+                            end = int(r["end_pos"])
                             bin_idx = end // binw
                             dens[bin_idx] = dens.get(bin_idx, 0) + 1
                         dens_pts = [[k * binw, v] for k, v in sorted(dens.items())]
