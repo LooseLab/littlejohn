@@ -2048,45 +2048,17 @@ async def run(
     except Exception:
         pass
 
-    if process_existing and paths:
-        await submit_existing_paths(
-            coord,
-            paths,
-            plan,
-            patterns=patterns,
-            ignore_patterns=ignore_patterns,
-            recursive=recursive,
-            work_dir=work_dir,
-        )
-
-    observer = None
-    watcher = None
-    if watch and paths:
-        observer = Observer()
-        watcher = RayFileWatcher(
-            coord,
-            plan,
-            patterns=patterns,
-            ignore_patterns=ignore_patterns,
-            recursive=recursive,
-            work_dir=work_dir,
-        )
-        for p in paths:
-            if Path(p).is_dir():
-                observer.schedule(watcher, p, recursive=recursive)
-        observer.start()
-
-    tasks = []
-    if monitor:
-        tasks.append(asyncio.create_task(tqdm_monitor(coord, continuous=watch)))
-
-    # Optional GUI integration
+    # Launch GUI early - immediately after coordinator setup but before job submission
+    # This ensures the GUI is available as soon as possible, before any jobs start
+    gui_launcher = None
+    gui_publish_task = None
     try:
         if _GUIUpdateType is None:
             print("GUI not launched: GUI modules unavailable on this environment.")
         elif not work_dir:
             print("GUI not launched: --work-dir not provided.")
         else:
+            print("🚀 Launching GUI early to ensure immediate availability...")
             launcher = _gui_launch(
                 host=gui_host,
                 port=gui_port,
@@ -2095,16 +2067,18 @@ async def run(
                 monitored_directory=work_dir,
                 center=center,
             )
+            gui_launcher = launcher
             try:
                 url = (
                     launcher.get_gui_url()
                     if hasattr(launcher, "get_gui_url")
                     else "http://localhost:8081"
                 )
-                print(f"NiceGUI ready to go on {url}")
+                print(f"✅ GUI launched successfully on {url}")
             except Exception:
-                print("NiceGUI launched.")
+                print("✅ GUI launched successfully")
 
+            # Start GUI update publishing task immediately
             async def _publish_gui():
                 while True:
                     try:
@@ -2300,9 +2274,46 @@ async def run(
                     except Exception:
                         await asyncio.sleep(1.0)
 
-            tasks.append(asyncio.create_task(_publish_gui()))
+            gui_publish_task = asyncio.create_task(_publish_gui())
+            print("📊 GUI monitoring started - workflow status will be updated in real-time")
     except Exception as e:
         print(f"Warning: GUI failed to launch: {e}")
+
+    if process_existing and paths:
+        await submit_existing_paths(
+            coord,
+            paths,
+            plan,
+            patterns=patterns,
+            ignore_patterns=ignore_patterns,
+            recursive=recursive,
+            work_dir=work_dir,
+        )
+
+    observer = None
+    watcher = None
+    if watch and paths:
+        observer = Observer()
+        watcher = RayFileWatcher(
+            coord,
+            plan,
+            patterns=patterns,
+            ignore_patterns=ignore_patterns,
+            recursive=recursive,
+            work_dir=work_dir,
+        )
+        for p in paths:
+            if Path(p).is_dir():
+                observer.schedule(watcher, p, recursive=recursive)
+        observer.start()
+
+    tasks = []
+    if monitor:
+        tasks.append(asyncio.create_task(tqdm_monitor(coord, continuous=watch)))
+    
+    # Add GUI publish task if GUI was launched
+    if gui_publish_task is not None:
+        tasks.append(gui_publish_task)
 
     try:
         if tasks:
