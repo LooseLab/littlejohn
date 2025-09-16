@@ -140,6 +140,80 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     on_click=lambda: _show_target_coverage_overview()
                 ).props("flat dense").classes("hidden")
             
+            # Add target panel legend
+            def _get_target_panel_info():
+                """Get the target panel information from master.csv"""
+                try:
+                    # Read from master.csv
+                    master_csv_path = sample_dir / "master.csv"
+                    if master_csv_path.exists():
+                        import pandas as pd
+                        df = pd.read_csv(master_csv_path)
+                        if not df.empty and "analysis_panel" in df.columns:
+                            panel = df.iloc[0]["analysis_panel"]
+                            if panel and str(panel).strip() != "":
+                                return str(panel).strip()
+                    return "rCNS2"  # Default fallback
+                except Exception as e:
+                    _log_notify(f"Exception in _get_target_panel_info: {e}", level="error", notify=False)
+                    return "rCNS2"  # Default fallback
+            
+            target_panel = _get_target_panel_info()
+            
+            # Panel legend with color coding
+            panel_colors = {
+                "rCNS2": ("bg-blue-100", "text-blue-800", "rCNS2 Panel"),
+                "AML": ("bg-green-100", "text-green-800", "AML Panel"), 
+                "PanCan": ("bg-purple-100", "text-purple-800", "Pan-Cancer Panel")
+            }
+            
+            panel_color_classes, panel_text_classes, panel_display_name = panel_colors.get(
+                target_panel, ("bg-gray-100", "text-gray-800", f"{target_panel} Panel")
+            )
+            
+            # Store panel information in state for use by other functions
+            key = str(sample_dir)
+            if key not in launcher._coverage_state:
+                launcher._coverage_state[key] = {}
+            launcher._coverage_state[key]["panel_display_name"] = panel_display_name
+            
+            with ui.row().classes("w-full items-center gap-2 mb-2"):
+                ui.label("Panel:").classes("text-sm font-medium text-gray-600")
+                ui.label(panel_display_name).classes(f"px-2 py-1 rounded text-sm font-medium {panel_color_classes} {panel_text_classes}")
+                ui.label("•").classes("text-gray-400")
+                ui.label("Target regions defined by gene panel").classes("text-xs text-gray-500")
+            
+            # Add detailed panel information in an expansion
+            with ui.expansion().classes("w-full mb-2").props("icon=info dense"):
+                ui.label("Panel Details").classes("text-sm font-medium mb-2")
+                
+                # Get the BED file name for the current panel
+                bed_file_mapping = {
+                    "rCNS2": "rCNS2_panel_name_uniq.bed",
+                    "AML": "AML_panel_name_uniq.bed", 
+                    "PanCan": "PanCan_panel_name_uniq.bed"
+                }
+                
+                bed_filename = bed_file_mapping.get(target_panel, "Unknown")
+                
+                with ui.column().classes("gap-1 text-sm"):
+                    with ui.row().classes("items-center gap-2"):
+                        ui.label("Panel:").classes("font-medium w-20")
+                        ui.label(target_panel).classes("font-mono")
+                    
+                    with ui.row().classes("items-center gap-2"):
+                        ui.label("BED File:").classes("font-medium w-20")
+                        ui.label(bed_filename).classes("font-mono text-xs")
+                    
+                    with ui.row().classes("items-center gap-2"):
+                        ui.label("Description:").classes("font-medium w-20")
+                        panel_descriptions = {
+                            "rCNS2": "Central Nervous System genes (244 regions)",
+                            "AML": "Acute Myeloid Leukemia genes (1,181 regions)", 
+                            "PanCan": "Pan-Cancer comprehensive gene set (1,389 regions)"
+                        }
+                        ui.label(panel_descriptions.get(target_panel, "Custom gene panel")).classes("text-xs")
+            
             # Define helper functions before chart creation
             def _show_chromosome_scatter(chromosome: str) -> None:
                 """Show scatter plot for individual genes on a specific chromosome"""
@@ -241,7 +315,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     bed_cov = sample_dir / "bed_coverage_main.csv"
                     if bed_cov.exists():
                         df = pd.read_csv(bed_cov)
-                        _update_boxplot(df)
+                        _update_boxplot(df, panel_display_name)
                     else:
                         ui.notify("No coverage data available", type="warning")
                         return
@@ -270,7 +344,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 {
                     "backgroundColor": "transparent",
                     "title": {
-                        "text": "Target Coverage",
+                        "text": f"Target Coverage ({panel_display_name})",
                         "left": "center",
                         "top": 10,
                         "textStyle": {"fontSize": 16, "color": "#000"},
@@ -3521,7 +3595,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 notify=False,
             )
 
-    def _update_boxplot(bed_df: pd.DataFrame) -> None:
+    def _update_boxplot(bed_df: pd.DataFrame, panel_display_name: str = "Target Coverage") -> None:
         try:
             df = bed_df.copy()
             if "coverage" not in df.columns:
@@ -3624,7 +3698,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             ]
             
             # Restore original title and legend
-            target_boxplot.options["title"]["text"] = "Target Coverage"
+            target_boxplot.options["title"]["text"] = f"Target Coverage ({panel_display_name})"
             target_boxplot.options["title"]["subtext"] = ""
             target_boxplot.options["legend"]["show"] = True
             
@@ -3709,7 +3783,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     try:
                         bed_df = pd.read_csv(bed_cov)
                         state["bed_df"] = bed_df
-                        _update_boxplot(bed_df)
+                        panel_display_name = state.get("panel_display_name", "Target Coverage")
+                        _update_boxplot(bed_df, panel_display_name)
                         if state.get("cov_df") is not None:
                             _update_target_cov(state["cov_df"], bed_df)
                         state["bed_cov_mtime"] = m  # only set on success

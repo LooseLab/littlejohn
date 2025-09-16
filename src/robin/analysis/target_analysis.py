@@ -149,7 +149,7 @@ def run_bedtools(bamfile, bedfile, tempbamfile):
         logger.error(f"Error in run_bedtools: {e}")
 
 
-def get_covdfs(bamfile):
+def get_covdfs(bamfile, bedfile=None):
     """
     Extract coverage information from a BAM file.
 
@@ -160,6 +160,8 @@ def get_covdfs(bamfile):
     ----------
     bamfile : str
         Path to the input BAM file.
+    bedfile : str, optional
+        Path to the target BED file. If not provided, will use unique_genes.bed.
 
     Returns
     -------
@@ -190,33 +192,35 @@ def get_covdfs(bamfile):
 
         logger.info(f"After dropping columns: {list(newcovdf.columns)}")
 
-        # Find unique_genes.bed file from robin resources
-        unique_genes_bed = None
-        if resources is not None:
-            try:
-                unique_genes_bed = os.path.join(
-                    os.path.dirname(os.path.abspath(resources.__file__)),
+        # Find target BED file - use provided bedfile or fallback to unique_genes.bed
+        target_bed = bedfile
+        if target_bed is None:
+            # Fallback to unique_genes.bed for backward compatibility
+            if resources is not None:
+                try:
+                    target_bed = os.path.join(
+                        os.path.dirname(os.path.abspath(resources.__file__)),
+                        "unique_genes.bed",
+                    )
+                    if not os.path.exists(target_bed):
+                        target_bed = None
+                except Exception:
+                    pass
+
+            # Fallback paths for unique_genes.bed
+            if target_bed is None:
+                possible_paths = [
                     "unique_genes.bed",
-                )
-                if not os.path.exists(unique_genes_bed):
-                    unique_genes_bed = None
-            except Exception:
-                pass
+                    "data/unique_genes.bed",
+                    "/usr/local/share/unique_genes.bed",
+                ]
+                for path in possible_paths:
+                    if os.path.exists(path):
+                        target_bed = path
+                        break
 
-        # Fallback paths for unique_genes.bed
-        if unique_genes_bed is None:
-            possible_paths = [
-                "unique_genes.bed",
-                "data/unique_genes.bed",
-                "/usr/local/share/unique_genes.bed",
-            ]
-            for path in possible_paths:
-                if os.path.exists(path):
-                    unique_genes_bed = path
-                    break
-
-        if unique_genes_bed is None:
-            logger.warning("unique_genes.bed not found, skipping bedcov analysis")
+        if target_bed is None:
+            logger.warning("Target BED file not found, skipping bedcov analysis")
             bedcovdf = pd.DataFrame(
                 columns=["chrom", "startpos", "endpos", "name", "bases"]
             )
@@ -225,7 +229,7 @@ def get_covdfs(bamfile):
             bedcovdf = pd.read_csv(
                 StringIO(
                     pysam.bedcov(
-                        unique_genes_bed,
+                        target_bed,
                         f"{bamfile}",
                     )
                 ),
@@ -370,12 +374,13 @@ class TargetMetadata:
 class TargetAnalysis:
     """Target analysis worker"""
 
-    def __init__(self, work_dir=None, config_path=None, threads=4):
+    def __init__(self, work_dir=None, config_path=None, threads=4, target_panel="rCNS2"):
         logger = logging.getLogger("robin.target")
 
         self.work_dir = work_dir or os.getcwd()
         self.config_path = config_path
         self.threads = threads
+        self.target_panel = target_panel
 
         # Initialize counter for incremental file naming
         self.file_counter = 1
@@ -386,7 +391,7 @@ class TargetAnalysis:
         # Note: State is now persisted to files instead of in-memory dictionaries
 
         # Find BED file for target extraction
-        self.bedfile = self._find_target_bed()
+        self.bedfile = self._find_target_bed(target_panel)
 
         # Configuration parameters
         self.callthreshold = self.config.get("call_threshold", 0.1)
@@ -408,34 +413,49 @@ class TargetAnalysis:
 
         logger.info("Target Analysis initialized")
 
-    def _find_target_bed(self) -> str:
-        """Find the target BED file from robin resources"""
+    def _find_target_bed(self, target_panel: str = "rCNS2") -> str:
+        """Find the target BED file from robin resources based on panel type"""
+        logger = logging.getLogger("robin.target")
+        
+        # Determine the correct BED file name based on panel type
+        bed_filename = None
+        if target_panel == "rCNS2":
+            bed_filename = "rCNS2_panel_name_uniq.bed"
+        elif target_panel == "AML":
+            bed_filename = "AML_panel_name_uniq.bed"
+        elif target_panel == "PanCan":
+            bed_filename = "PanCan_panel_name_uniq.bed"
+        else:
+            logger.warning(f"Unknown panel type '{target_panel}', defaulting to rCNS2")
+            bed_filename = "rCNS2_panel_name_uniq.bed"
+        
         if resources is not None:
             try:
                 bed_path = os.path.join(
                     os.path.dirname(os.path.abspath(resources.__file__)),
-                    "rCNS2_panel_name_uniq.bed",
+                    bed_filename,
                 )
                 if os.path.exists(bed_path):
+                    logger.info(f"Found {target_panel} BED file: {bed_path}")
                     return bed_path
             except Exception:
                 pass
 
         # Fallback paths
         possible_paths = [
-            "rCNS2_panel_name_uniq.bed",
-            "data/rCNS2_panel_name_uniq.bed",
-            "/usr/local/share/rCNS2_panel_name_uniq.bed",
+            bed_filename,
+            f"data/{bed_filename}",
+            f"/usr/local/share/{bed_filename}",
         ]
 
         for path in possible_paths:
             if os.path.exists(path):
+                logger.info(f"Found {target_panel} BED file: {path}")
                 return path
 
         # If not found, create a placeholder (this will cause an error later)
-        logger = logging.getLogger("robin.target")
-        logger.warning("Target BED file not found, will use placeholder")
-        return "rCNS2_panel_name_uniq.bed"
+        logger.warning(f"Target BED file '{bed_filename}' not found for panel '{target_panel}', will use placeholder")
+        return bed_filename
 
     def _load_config(self) -> Dict[str, Any]:
         """Load configuration from file or use defaults"""
@@ -539,7 +559,7 @@ class TargetAnalysis:
 
                 # Step 6: Extract coverage data using get_covdfs
                 logger.info("Extracting coverage data...")
-                newcovdf, bedcovdf = get_covdfs(file_path)
+                newcovdf, bedcovdf = get_covdfs(file_path, self.bedfile)
 
                 if newcovdf is None or bedcovdf is None:
                     raise RuntimeError("Failed to extract coverage data from BAM file")
@@ -1069,6 +1089,7 @@ def process_single_file(
     work_dir: str,
     logger,
     reference: Optional[str] = None,
+    target_panel: str = "rCNS2",
 ) -> Dict[str, Any]:
     """
     Process a single file for target analysis using the complete pipeline.
@@ -1078,6 +1099,8 @@ def process_single_file(
         metadata: File metadata
         work_dir: Working directory
         logger: Logger instance
+        reference: Optional reference genome path
+        target_panel: Target panel type (rCNS2, AML, PanCan)
 
     Returns:
         Dictionary with target analysis results
@@ -1106,7 +1129,7 @@ def process_single_file(
 
     try:
         # Initialize target analysis
-        target_analysis = TargetAnalysis(work_dir=work_dir)
+        target_analysis = TargetAnalysis(work_dir=work_dir, target_panel=target_panel)
 
         # Set reference genome if provided
         if reference:
@@ -1154,7 +1177,7 @@ def process_single_file(
         return analysis_result
 
 
-def target_handler(job, work_dir=None, reference=None):
+def target_handler(job, work_dir=None, reference=None, target_panel="rCNS2"):
     """
     Handler function for target analysis jobs.
     This function processes files for target-specific analysis.
@@ -1163,6 +1186,7 @@ def target_handler(job, work_dir=None, reference=None):
         job: The workflow job containing file and metadata
         work_dir: Optional base directory for output (defaults to file directory)
         reference: Optional path to reference genome for SNP calling
+        target_panel: Target panel type (rCNS2, AML, PanCan)
     """
     # Get job-specific logger
     logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
@@ -1202,11 +1226,28 @@ def target_handler(job, work_dir=None, reference=None):
 
         # Process the file
         result = process_single_file(
-            file_path, file_metadata, work_dir, logger, reference
+            file_path, file_metadata, work_dir, logger, reference, target_panel
         )
 
         # Store results in job context
         job.context.add_metadata("target_analysis", result)
+
+        # Update master.csv with panel information
+        if result.get("sample_id") and not result.get("error_message"):
+            try:
+                from robin.analysis.master_csv_manager import MasterCSVManager
+                
+                # Determine work directory
+                if work_dir is None:
+                    work_dir = os.path.dirname(file_path)
+                
+                # Update master.csv with panel information
+                csv_manager = MasterCSVManager(work_dir)
+                csv_manager.update_analysis_panel(result["sample_id"], target_panel)
+                logger.info(f"Updated master.csv with panel '{target_panel}' for sample {result['sample_id']}")
+                
+            except Exception as e:
+                logger.warning(f"Could not update master.csv with panel info for {result.get('sample_id', 'unknown')}: {e}")
 
         if result.get("error_message"):
             job.context.add_error("target_analysis", result["error_message"])

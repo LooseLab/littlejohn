@@ -302,13 +302,14 @@ def process_single_file(
         }
 
 
-def fusion_handler(job, work_dir=None):
+def fusion_handler(job, work_dir=None, target_panel="rCNS2"):
     """
     Handler function for fusion analysis jobs in the workflow system.
 
     Args:
         job: Job object from the workflow system
         work_dir: Working directory for output
+        target_panel: Target gene panel for fusion analysis (rCNS2, AML, or PanCan)
     """
     try:
         # Get logger with proper parameters
@@ -317,6 +318,9 @@ def fusion_handler(job, work_dir=None):
         # Extract file path and metadata from job
         file_path = job.context.filepath
         metadata = job.context.metadata.get("bam_metadata", {})
+
+        logger.info(f"DEBUG: fusion_handler called with target_panel='{target_panel}'")
+        logger.info(f"DEBUG: Job metadata: {job.context.metadata}")
 
         # Access supplementary read information
         has_supplementary = metadata.get("has_supplementary_reads", False)
@@ -347,9 +351,10 @@ def fusion_handler(job, work_dir=None):
                 work_dir = "fusion_output"
 
             logger.info(f"Using work directory: {work_dir}")
+            logger.info(f"Using target panel: {target_panel}")
 
-            # Get target panel from metadata or use default
-            target_panel = metadata.get("target_panel", "rCNS2")
+            # Use the target_panel parameter passed to the handler
+            # (overrides any value in metadata)
 
             # Process the file using fusion_work.py
             result = process_single_file(

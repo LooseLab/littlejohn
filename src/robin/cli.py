@@ -318,6 +318,7 @@ def _create_ray_workflow_runner(
     preprocessing_workers: int = 1,
     bed_workers: int = 1,
     reference: Optional[Path] = None,
+    target_panel: str = "rCNS2",
 ) -> Any:
     """Create and configure Ray-based workflow runner (Ray Core)."""
     try:
@@ -326,12 +327,13 @@ def _create_ray_workflow_runner(
         from robin import workflow_ray as wrn
 
         class _RayCoreWrapper:
-            def __init__(self, reference: Optional[Path] = None):
+            def __init__(self, reference: Optional[Path] = None, target_panel: str = "rCNS2"):
                 self.manager = type(
                     "_DummyManager", (), {"get_priority_info": lambda _self: {}}
                 )()
                 self.coordinator = None  # Will be set when workflow starts
                 self.reference = reference  # Store reference genome for GUI access
+                self.target_panel = target_panel  # Store target panel for GUI access
 
                 # Debug logging for reference genome (only in verbose mode)
                 if self.reference:
@@ -512,7 +514,7 @@ def _create_ray_workflow_runner(
 
                 asyncio.run(_run_with_coordinator())
 
-        return _RayCoreWrapper(reference=reference)
+        return _RayCoreWrapper(reference=reference, target_panel=target_panel)
     except ImportError as e:
         click.echo(
             f"Warning: Ray Core not available ({e}). Falling back to threading-based workflow.",
@@ -639,6 +641,7 @@ def _create_workflow_runner(
     bed_workers: int = 1,
     reference: Optional[Path] = None,
     center: str = None,
+    target_panel: str = "rCNS2",
 ) -> Any:
     """Create the appropriate workflow runner based on configuration."""
     if analysis_workers < 1:
@@ -657,6 +660,7 @@ def _create_workflow_runner(
             preprocessing_workers=preprocessing_workers,
             bed_workers=bed_workers,
             reference=reference,  # Pass reference parameter to Ray workflow runner
+            target_panel=target_panel,  # Pass target_panel parameter to Ray workflow runner
         )
         if runner is None:
             # Fallback to threading-based workflow
@@ -670,6 +674,7 @@ def _create_workflow_runner(
                 bed_workers=bed_workers,
                 reference=reference,
                 center=center,
+                target_panel=target_panel,
             )
         return runner
     else:
@@ -683,6 +688,7 @@ def _create_workflow_runner(
             bed_workers=bed_workers,
             reference=reference,
             center=center,
+            target_panel=target_panel,
         )
 
 
@@ -692,6 +698,7 @@ def _register_handlers(
     work_dir: Optional[Path],
     reference: Optional[Path] = None,
     center: str = None,
+    target_panel: str = "rCNS2",
 ) -> None:
     """Register all workflow handlers with the runner."""
     for (
@@ -711,29 +718,55 @@ def _register_handlers(
         # Create handler with work directory and/or reference genome if specified and needed
         if work_dir and needs_work_dir:
             if reference and job_type == "target":
-                # Special handling for target analysis with reference genome
+                # Special handling for target analysis with reference genome and target panel
                 def create_handler_with_work_dir_and_ref(
-                    handler, work_dir_path, ref_path, center_param
+                    handler, work_dir_path, ref_path, center_param, panel_param
                 ):
                     return lambda job: handler(
-                        job, work_dir=str(work_dir_path), reference=str(ref_path)
+                        job, work_dir=str(work_dir_path), reference=str(ref_path), target_panel=panel_param
                     )
 
                 final_handler = create_handler_with_work_dir_and_ref(
-                    handler_func, work_dir, reference, center
+                    handler_func, work_dir, reference, center, target_panel
+                )
+            elif job_type == "fusion":
+                # Special handling for fusion analysis with target panel
+                def create_fusion_handler_with_work_dir(
+                    handler, work_dir_path, panel_param
+                ):
+                    return lambda job: handler(
+                        job, work_dir=str(work_dir_path), target_panel=panel_param
+                    )
+
+                final_handler = create_fusion_handler_with_work_dir(
+                    handler_func, work_dir, target_panel
                 )
             else:
                 # Standard work directory handling
-                def create_handler_with_work_dir(handler, work_dir_path, center_param):
-                    return lambda job: handler(job, work_dir=str(work_dir_path))
+                if job_type == "target":
+                    # Target analysis with work_dir and target_panel
+                    def create_target_handler_with_work_dir(handler, work_dir_path, panel_param):
+                        return lambda job: handler(job, work_dir=str(work_dir_path), target_panel=panel_param)
+                    
+                    final_handler = create_target_handler_with_work_dir(handler_func, work_dir, target_panel)
+                else:
+                    # Standard work directory handling for other job types
+                    def create_handler_with_work_dir(handler, work_dir_path, center_param):
+                        return lambda job: handler(job, work_dir=str(work_dir_path))
 
-                final_handler = create_handler_with_work_dir(handler_func, work_dir, center)
+                    final_handler = create_handler_with_work_dir(handler_func, work_dir, center)
         elif reference and job_type == "target":
-            # Reference genome only (no work_dir needed)
-            def create_handler_with_ref(handler, ref_path, center_param):
-                return lambda job: handler(job, reference=str(ref_path))
+            # Reference genome only (no work_dir needed) with target panel
+            def create_handler_with_ref(handler, ref_path, center_param, panel_param):
+                return lambda job: handler(job, reference=str(ref_path), target_panel=panel_param)
 
-            final_handler = create_handler_with_ref(handler_func, reference, center)
+            final_handler = create_handler_with_ref(handler_func, reference, center, target_panel)
+        elif job_type == "fusion":
+            # Fusion analysis with target panel only (no work_dir needed)
+            def create_fusion_handler_with_panel(handler, panel_param):
+                return lambda job: handler(job, target_panel=panel_param)
+
+            final_handler = create_fusion_handler_with_panel(handler_func, target_panel)
         elif job_type == "preprocessing":
             # Special handling for preprocessing to pass center
             def create_preprocessing_handler(handler, center_param):
@@ -1064,6 +1097,12 @@ def _display_workflow_config(
     default=True,
     help="Enable Ray dashboard (default: on). Disable with --no-ray-dashboard. Only used when --use-ray is specified.",
 )
+@click.option(
+    "--target-panel",
+    type=click.Choice(["rCNS2", "AML", "PanCan"]),
+    default="rCNS2",
+    help="Target gene panel for fusion analysis (default: rCNS2). Options: rCNS2, AML, PanCan",
+)
 def workflow(
     path: Path,
     workflow: str,
@@ -1092,6 +1131,7 @@ def workflow(
     no_watch: bool,
     preset: Optional[str],
     ray_dashboard: bool,
+    target_panel: str,
 ) -> None:
     """Run various operations on BAM files in a directory. Preprocessing is automatically included as the first step."""
     try:
@@ -1201,6 +1241,7 @@ def workflow(
                 bed_workers=bed_workers,
                 reference=reference,  # Add reference parameter for Ray workflow too
                 center=center,
+                target_panel=target_panel,
             )
 
             # Run Ray Core implementation
@@ -1227,6 +1268,7 @@ def workflow(
                         gui_host=gui_host,
                         gui_port=gui_port,
                         center=center,
+                        target_panel=target_panel,
                     )
                 )
             except KeyboardInterrupt:
@@ -1258,6 +1300,7 @@ def workflow(
             bed_workers=bed_workers,
             reference=reference,
             center=center,
+            target_panel=target_panel,
         )
 
         # Handle Ray-specific configuration
@@ -1296,7 +1339,7 @@ def workflow(
                 click.echo(f"Job deduplication enabled for: {valid_dedup_jobs}")
 
         # Register handlers and command handlers
-        _register_handlers(runner, legacy_analysis_queue, work_dir, reference, center)
+        _register_handlers(runner, legacy_analysis_queue, work_dir, reference, center, target_panel)
         _register_command_handlers(runner, command_map, legacy_analysis_queue)
 
         # For Ray workflow, reinitialize processors after handlers are registered

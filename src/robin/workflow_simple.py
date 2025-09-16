@@ -1452,6 +1452,7 @@ class WorkflowRunner:
         bed_workers: int = 1,
         reference: Optional[Path] = None,
         center: str = None,
+        target_panel: str = "rCNS2",
     ):
         self.manager = WorkflowManager(
             verbose=verbose,
@@ -1463,6 +1464,7 @@ class WorkflowRunner:
         self.verbose = verbose
         self.reference = reference
         self.center = center
+        self.target_panel = target_panel
 
         # Log reference genome status
 

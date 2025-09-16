@@ -70,7 +70,7 @@ class MasterCSVManager:
                     string_fields = [
                         "devices", "basecall_models", "run_time", "flowcell_ids",
                         "run_info_run_time", "run_info_device", "run_info_model", 
-                        "run_info_flow_cell", "samples_overview_job_types"
+                        "run_info_flow_cell", "samples_overview_job_types", "analysis_panel"
                     ]
                     for field in string_fields:
                         if field in data and data[field] is not None:
@@ -114,6 +114,8 @@ class MasterCSVManager:
             "run_info_flow_cell": "",
             "bam_tracking_counter": 0,
             "bam_tracking_total_files": 0,
+            # Analysis panel information
+            "analysis_panel": "",
             # Samples overview (persisted GUI table aggregates)
             "samples_overview_active_jobs": 0,
             "samples_overview_total_jobs": 0,
@@ -221,6 +223,34 @@ class MasterCSVManager:
         data["bam_tracking_total_files"] += 1
 
         return data
+
+    def update_analysis_panel(self, sample_id: str, panel: str) -> None:
+        """
+        Update the analysis panel information for a sample.
+        
+        Args:
+            sample_id: The sample ID
+            panel: The analysis panel used (rCNS2, AML, PanCan)
+        """
+        try:
+            sample_dir = os.path.join(self.work_dir, sample_id)
+            os.makedirs(sample_dir, exist_ok=True)
+            master_csv_path = os.path.join(sample_dir, "master.csv")
+
+            existing_data = self._load_existing_data(master_csv_path)
+            
+            # Update the analysis panel
+            existing_data["analysis_panel"] = str(panel)
+            
+            # Save to CSV
+            self._save_to_csv(existing_data, master_csv_path)
+            
+            logger = logging.getLogger("robin.master_csv")
+            logger.info(f"Updated analysis panel to '{panel}' for sample {sample_id}")
+            
+        except Exception as e:
+            logger = logging.getLogger("robin.master_csv")
+            logger.error(f"Error updating analysis panel for {sample_id}: {e}")
 
     def _save_to_csv(self, data: Dict[str, Any], csv_path: str) -> None:
         """Save data to CSV file"""

@@ -4,12 +4,11 @@ Fusion detection and processing module for BAM files.
 This module provides functionality to detect gene fusions from BAM files by analyzing
 supplementary alignments and identifying reads that map to multiple gene regions.
 
-IMPORTANT: This module now uses strict criteria to avoid false positives:
+IMPORTANT: This module uses strict criteria to avoid false positives:
 1. Only processes reads with supplementary alignments (SA tag)
-2. Filters out reads where primary and supplementary alignments overlap >100 bases in read coordinates
-3. Filters out reads where the same genomic alignment is annotated with multiple overlapping genes
-4. This prevents false positives from long reads spanning nearby genes and mapping artifacts
-5. True fusions require reads to map to multiple genomic locations (supplementary alignments)
+2. Filters out reads where the same genomic alignment is annotated with multiple overlapping genes
+3. This prevents false positives from mapping artifacts where the same genomic region is annotated with multiple overlapping genes
+4. True fusions require reads to map to multiple genomic locations (supplementary alignments)
 """
 
 # Standard library imports
@@ -90,7 +89,7 @@ class GeneRegion:
     name: str
 
     def overlaps_with(
-        self, other_start: int, other_end: int, min_overlap: int = 100
+        self, other_start: int, other_end: int, min_overlap: int = 0
     ) -> bool:
         """Check if this region overlaps with another region."""
         overlap_start = max(self.start, other_start)
@@ -179,6 +178,12 @@ def _setup_file_paths(target_panel: str = "rCNS2") -> Tuple[str, str]:
                 gene_bed = a_ml_path
             else:
                 gene_bed = "AML_panel_name_uniq.bed"
+        elif target_panel == "PanCan":
+            pancan_path = os.path.join(resources_dir, "2025-03_pan-cancer_merged_20kb.bed")
+            if os.path.exists(pancan_path):
+                gene_bed = pancan_path
+            else:
+                gene_bed = "2025-03_pan-cancer_merged_20kb.bed"
         else:
             # Default to rCNS2
             target_panel = "rCNS2"
@@ -201,6 +206,8 @@ def _setup_file_paths(target_panel: str = "rCNS2") -> Tuple[str, str]:
             gene_bed = "rCNS2_panel_name_uniq.bed"
         elif target_panel == "AML":
             gene_bed = "AML_panel_name_uniq.bed"
+        elif target_panel == "PanCan":
+            gene_bed = "2025-03_pan-cancer_merged_20kb.bed"
         else:
             # Default to rCNS2
             target_panel = "rCNS2"
@@ -251,15 +258,28 @@ def _load_bed_regions(bed_file: str) -> Dict[str, List[GeneRegion]]:
 
 def _ensure_gene_regions_loaded(target_panel: str = "rCNS2") -> None:
     """Ensure gene regions are loaded into cache for the given target panel."""
+    logger.info(f"DEBUG: _ensure_gene_regions_loaded called with target_panel='{target_panel}'")
+    logger.info(f"DEBUG: Current cache keys: {list(_gene_regions_cache.keys())}")
+    
     if target_panel not in _gene_regions_cache:
+        logger.info(f"DEBUG: Loading gene regions for target_panel='{target_panel}'")
         gene_bed, all_gene_bed = _setup_file_paths(target_panel)
+        logger.info(f"DEBUG: Resolved gene_bed='{gene_bed}', all_gene_bed='{all_gene_bed}'")
 
         # Load target panel gene regions
         _gene_regions_cache[target_panel] = _load_bed_regions(gene_bed)
+        logger.info(f"Loaded {len(_gene_regions_cache[target_panel])} chromosomes for target panel {target_panel} from {gene_bed}")
+        
+        # Debug: Log some details about loaded regions
+        total_regions = sum(len(regions) for regions in _gene_regions_cache[target_panel].values())
+        logger.info(f"DEBUG: Total gene regions loaded for {target_panel}: {total_regions}")
 
         # Load genome-wide gene regions (shared across all panels)
         if not _all_gene_regions_cache:
             _all_gene_regions_cache["shared"] = _load_bed_regions(all_gene_bed)
+            logger.info(f"Loaded {len(_all_gene_regions_cache['shared'])} chromosomes for genome-wide genes from {all_gene_bed}")
+    else:
+        logger.info(f"DEBUG: Gene regions for target_panel='{target_panel}' already loaded in cache")
 
 
 # =============================================================================
@@ -315,9 +335,8 @@ def find_reads_with_supplementary(bamfile: str) -> Set[str]:
 
 def _check_read_alignments_overlap(read_rows: List[Dict]) -> bool:
     """
-    Check for various types of false positives in read alignments:
-    1. Read coordinate overlaps >100 bases
-    2. Same genomic alignment annotated with multiple genes (overlapping gene regions)
+    Check for false positives in read alignments:
+    - Same genomic alignment annotated with multiple genes (overlapping gene regions)
     
     Args:
         read_rows: List of alignment dictionaries for the same read
@@ -328,31 +347,7 @@ def _check_read_alignments_overlap(read_rows: List[Dict]) -> bool:
     if len(read_rows) < 2:
         return False
     
-    # Check 1: Read coordinate overlaps >100 bases
-    for i in range(len(read_rows)):
-        for j in range(i + 1, len(read_rows)):
-            align1 = read_rows[i]
-            align2 = read_rows[j]
-            
-            # Get read coordinate ranges
-            read1_start = align1['read_start']
-            read1_end = align1['read_end']
-            read2_start = align2['read_start']
-            read2_end = align2['read_end']
-            
-            # Calculate overlap in read coordinates
-            overlap_start = max(read1_start, read2_start)
-            overlap_end = min(read1_end, read2_end)
-            
-            if overlap_end > overlap_start:
-                overlap_length = overlap_end - overlap_start
-                
-                # If overlap is >100 bases in read coordinates,
-                # consider it a false positive (not a true fusion)
-                if overlap_length > 100:
-                    return True
-    
-    # Check 2: Same genomic alignment annotated with multiple genes
+    # Check: Same genomic alignment annotated with multiple genes
     # Group by genomic coordinates (chr:start-end)
     genomic_alignments = {}
     for row in read_rows:
@@ -399,7 +394,7 @@ def _find_gene_intersections(
         return read_rows
 
     for gene_region in gene_regions:
-        if gene_region.overlaps_with(ref_start, ref_end, min_overlap=100):
+        if gene_region.overlaps_with(ref_start, ref_end, min_overlap=0):
             # Create the EXACT column structure expected by the original code
             read_rows.append(
                 {
@@ -498,8 +493,8 @@ def _process_reads_for_fusions(
     # Apply memory optimizations
     df = _optimize_fusion_dataframe(df)
 
-    # Apply the EXACT filtering thresholds from the original code: MQ > 40, span > 200
-    df = df[(df["mapping_quality"] > 40) & (df["mapping_span"] > 200)].reset_index(
+    # Apply filtering thresholds: MQ > 40, span > 100
+    df = df[(df["mapping_quality"] > 40) & (df["mapping_span"] > 100)].reset_index(
         drop=True
     )
 
@@ -592,7 +587,7 @@ def process_bam_for_fusions_work(
 
     Args:
         bamfile: Path to BAM file
-        target_panel: Target panel to use (rCNS2 or AML)
+        target_panel: Target panel to use (rCNS2, AML, or PanCan)
 
     Returns:
         Tuple of (target_panel_candidates, genome_wide_candidates) DataFrames
@@ -603,6 +598,8 @@ def process_bam_for_fusions_work(
     - Immediate cleanup of intermediate data
     """
     try:
+        logger.info(f"DEBUG: process_bam_for_fusions_work called with target_panel='{target_panel}'")
+        
         # Ensure gene regions are loaded
         _ensure_gene_regions_loaded(target_panel)
 
@@ -610,17 +607,25 @@ def process_bam_for_fusions_work(
         reads_with_supp = find_reads_with_supplementary(bamfile)
 
         if not reads_with_supp:
+            logger.info(f"DEBUG: No supplementary reads found in {bamfile}")
             return None, None
 
+        logger.info(f"DEBUG: Found {len(reads_with_supp)} reads with supplementary alignments")
+
         # Process reads for target panel fusions
+        logger.info(f"DEBUG: Processing target panel fusions using cache key '{target_panel}'")
+        logger.info(f"DEBUG: Available cache keys: {list(_gene_regions_cache.keys())}")
+        
         target_candidates = _process_reads_for_fusions(
             bamfile, reads_with_supp, _gene_regions_cache[target_panel]
         )
+        logger.info(f"Target panel candidates found: {len(target_candidates) if target_candidates is not None else 0}")
 
         # Process reads for genome-wide fusions
         genome_wide_candidates = _process_reads_for_fusions(
             bamfile, reads_with_supp, _all_gene_regions_cache["shared"]
         )
+        logger.info(f"Genome-wide candidates found: {len(genome_wide_candidates) if genome_wide_candidates is not None else 0}")
 
         # Clear the reads_with_supp set to free memory
         reads_with_supp.clear()
@@ -803,14 +808,16 @@ def _generate_output_files(
                     )
 
     # Use accumulated data from fusion_metadata for genome-wide candidates
+    logger.info(f"Checking genome-wide candidates in fusion_metadata: has_fusion_data={hasattr(fusion_metadata, 'fusion_data')}, fusion_data_exists={fusion_metadata.fusion_data is not None if hasattr(fusion_metadata, 'fusion_data') else False}")
     if (
         hasattr(fusion_metadata, "fusion_data")
         and fusion_metadata.fusion_data
         and fusion_metadata.fusion_data.get("genome_wide_candidates")
     ):
+        genome_wide_data = fusion_metadata.fusion_data["genome_wide_candidates"]
+        logger.info(f"Found {len(genome_wide_data)} genome-wide candidate records")
 
         # Convert accumulated genome-wide candidates back to DataFrame
-        genome_wide_data = fusion_metadata.fusion_data["genome_wide_candidates"]
         if genome_wide_data:
             genome_wide_candidates = pd.DataFrame(genome_wide_data)
 
@@ -824,6 +831,7 @@ def _generate_output_files(
                 result_all = doubles_all[
                     counts_all > 1
                 ]  # Use > 1 to match original logic exactly
+                logger.info(f"Genome-wide fusion candidates after filtering: {len(result_all)} records")
 
                 if not result_all.empty:
                     # Save the filtered genome-wide candidates to CSV

@@ -349,9 +349,11 @@ def _wrap_real_handler(
                 sig = inspect.signature(py_handler)
                 # Check if handler accepts reference parameter
                 accepts_reference = "reference" in sig.parameters
+                accepts_target_panel = "target_panel" in sig.parameters
 
                 # Get reference from job metadata if available
                 reference = job.context.metadata.get("reference")
+                target_panel = job.context.metadata.get("target_panel", "rCNS2")
 
                 # Call handler with appropriate parameters
                 if (
@@ -359,12 +361,20 @@ def _wrap_real_handler(
                     and work_dir
                     and (job_type in NEEDS_WORK_DIR)
                 ):
-                    if accepts_reference and reference:
+                    if accepts_reference and reference and accepts_target_panel and job_type in ["fusion", "target"]:
+                        py_handler(job, work_dir=work_dir, reference=reference, target_panel=target_panel)
+                    elif accepts_reference and reference:
                         py_handler(job, work_dir=work_dir, reference=reference)
+                    elif accepts_target_panel and job_type in ["fusion", "target"]:
+                        py_handler(job, work_dir=work_dir, target_panel=target_panel)
                     else:
                         py_handler(job, work_dir=work_dir)
+                elif accepts_reference and reference and accepts_target_panel and job_type in ["fusion", "target"]:
+                    py_handler(job, reference=reference, target_panel=target_panel)
                 elif accepts_reference and reference:
                     py_handler(job, reference=reference)
+                elif accepts_target_panel and job_type in ["fusion", "target"]:
+                    py_handler(job, target_panel=target_panel)
                 else:
                     py_handler(job)
             except Exception:
@@ -520,6 +530,7 @@ class Coordinator:
         analysis_workers: int = 1,
         preset: Optional[str] = None,
         reference: Optional[str] = None,
+        target_panel: str = "rCNS2",
     ):
         # dedup maps
         self.pending: Dict[Tuple[str, str], int] = {}
@@ -535,6 +546,7 @@ class Coordinator:
         self.active: Dict[int, Dict[str, Any]] = {}
 
         self.analysis_workers = analysis_workers
+        self.target_panel = target_panel
 
         # Per-sample per-type serialization tracking
         self.running_by_type_sample: Dict[Tuple[str, str], int] = {}
@@ -581,6 +593,10 @@ class Coordinator:
     def get_reference(self) -> Optional[str]:
         """Get the reference genome path."""
         return self.reference
+
+    def get_target_panel(self) -> str:
+        """Get the target panel for fusion analysis."""
+        return self.target_panel
 
     # ----- handler registration API -----
     async def register_handler(self, job_type: str, remote_func) -> None:
@@ -1731,6 +1747,14 @@ async def submit_existing_paths(
                             j.context.add_metadata("reference", coord_reference)
                 except Exception:
                     pass  # Silently continue if reference unavailable
+                # Add target panel to job metadata if available
+                try:
+                    coord_target_panel = ray.get(coord.get_target_panel.remote())
+                    if coord_target_panel:
+                        for j in jobs:
+                            j.context.add_metadata("target_panel", coord_target_panel)
+                except Exception:
+                    pass  # Silently continue if target_panel unavailable
                 seed_jobs += jobs
         elif pth.is_dir():
             # Stream directory walk in small batches; avoid building huge lists
@@ -1755,6 +1779,14 @@ async def submit_existing_paths(
                             j.context.add_metadata("reference", coord_reference)
                 except Exception:
                     pass  # Silently continue if reference unavailable
+                # Add target panel to job metadata if available
+                try:
+                    coord_target_panel = ray.get(coord.get_target_panel.remote())
+                    if coord_target_panel:
+                        for j in jobs:
+                            j.context.add_metadata("target_panel", coord_target_panel)
+                except Exception:
+                    pass  # Silently continue if target_panel unavailable
                 batch += jobs
                 if len(batch) >= 256:
                     await coord.submit_jobs.remote(batch)
@@ -1987,6 +2019,7 @@ async def run(
     gui_host: str = "0.0.0.0",
     gui_port: int = 8081,
     center: str = None,
+    target_panel: str = "rCNS2",
 ):
     global GLOBAL_LOG_LEVEL
     GLOBAL_LOG_LEVEL = (log_level or "INFO").upper()
@@ -2031,11 +2064,11 @@ async def run(
     # Start a fresh coordinator (not detached)
     try:
         coord = Coordinator.options(name="robin_coordinator", num_cpus=0).remote(
-            analysis_workers=analysis_workers, preset=preset, reference=reference
+            analysis_workers=analysis_workers, preset=preset, reference=reference, target_panel=target_panel
         )
     except Exception:
         coord = Coordinator.options(name="robin_coordinator").remote(
-            analysis_workers=analysis_workers, preset=preset, reference=reference
+            analysis_workers=analysis_workers, preset=preset, reference=reference, target_panel=target_panel
         )
 
     # Set global coordinator reference for external access
@@ -2446,3 +2479,4 @@ if __name__ == "__main__":
         )
     except KeyboardInterrupt:
         pass
+        

@@ -426,12 +426,39 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
         except Exception:
             return pd.DataFrame(columns=["chrom", "start_pos", "end_pos", "name", "stain"])
 
-    @lru_cache(maxsize=1)
-    def _load_gene_bed() -> pd.DataFrame:
-        # Use a compact gene list; fall back to all_genes.bed
-        for fname in ["unique_genes.bed", "all_genes.bed"]:
+    def _load_gene_bed(sample_dir: Path = None) -> pd.DataFrame:
+        """Load gene BED file based on the analysis panel used for the sample"""
+        try:
+            # Determine which panel to use
+            panel = "rCNS2"  # Default fallback
+            if sample_dir:
+                try:
+                    master_csv_path = sample_dir / "master.csv"
+                    if master_csv_path.exists():
+                        import pandas as pd
+                        df = pd.read_csv(master_csv_path)
+                        if not df.empty and "analysis_panel" in df.columns:
+                            panel_val = df.iloc[0]["analysis_panel"]
+                            if panel_val and str(panel_val).strip() != "":
+                                panel = str(panel_val).strip()
+                except Exception:
+                    pass
+            
+            # Map panel to BED filename
+            bed_filename = None
+            if panel == "rCNS2":
+                bed_filename = "rCNS2_panel_name_uniq.bed"
+            elif panel == "AML":
+                bed_filename = "AML_panel_name_uniq.bed"
+            elif panel == "PanCan":
+                bed_filename = "PanCan_panel_name_uniq.bed"
+            else:
+                # Fallback to unique_genes.bed for unknown panels
+                bed_filename = "unique_genes.bed"
+            
+            # Try to load the panel-specific BED file
             try:
-                res_path = importlib_resources.files("robin.resources") / fname
+                res_path = importlib_resources.files("robin.resources") / bed_filename
                 if res_path.exists():
                     return pd.read_csv(
                         res_path,
@@ -440,7 +467,24 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                         names=["chrom", "start_pos", "end_pos", "gene"],
                     )
             except Exception:
-                continue
+                pass
+            
+            # Fallback to unique_genes.bed if panel-specific file not found
+            try:
+                res_path = importlib_resources.files("robin.resources") / "unique_genes.bed"
+                if res_path.exists():
+                    return pd.read_csv(
+                        res_path,
+                        sep="\t",
+                        header=None,
+                        names=["chrom", "start_pos", "end_pos", "gene"],
+                    )
+            except Exception:
+                pass
+                
+        except Exception:
+            pass
+            
         return pd.DataFrame(columns=["chrom", "start_pos", "end_pos", "gene"])
 
     def _sex_label(xy_val: Any) -> str:
@@ -529,7 +573,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
 
             merged_rows: List[dict] = []
             if whole_chr_event:
-                gene_df = _load_gene_bed()
+                gene_df = _load_gene_bed(sample_dir)
                 genes_in_chr = (
                     gene_df[gene_df["chrom"] == chromosome]["gene"].astype(str).tolist()
                 )
@@ -600,7 +644,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                         - int(current_group["start_pos"]),
                     }
                     if row["cnv_state"] in ("GAIN", "LOSS", "HIGH_GAIN", "DEEP_LOSS"):
-                        gene_df = _load_gene_bed()
+                        gene_df = _load_gene_bed(sample_dir)
                         genes = (
                             gene_df[
                                 (gene_df["chrom"] == row["chrom"])
@@ -639,7 +683,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                     - int(current_group["start_pos"]),
                 }
                 if row["cnv_state"] in ("GAIN", "LOSS", "HIGH_GAIN", "DEEP_LOSS"):
-                    gene_df = _load_gene_bed()
+                    gene_df = _load_gene_bed(sample_dir)
                     genes = (
                         gene_df[
                             (gene_df["chrom"] == row["chrom"])
@@ -785,7 +829,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             if data and binw:
                 # Load cytobands and genes
                 cyto_df = _load_cytobands_df()
-                gene_df = _load_gene_bed()
+                gene_df = _load_gene_bed(sample_dir)
                 
                 # Detect CNV events using centralized rules
                 events = detect_cnv_events(
@@ -1194,7 +1238,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                 events = []
                                 try:
                                     sex_lbl = _sex_label(state.get("xy"))
-                                    gene_df = _load_gene_bed()
+                                    gene_df = _load_gene_bed(sample_dir)
                                     events = detect_cnv_events(
                                         cnv_data={selected: vals},
                                         bin_width=int(binw),
@@ -1266,7 +1310,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                             pass
                         # Genes of interest and gene selector options
                         try:
-                            gene_df = _load_gene_bed()
+                            gene_df = _load_gene_bed(sample_dir)
                             gchr = gene_df[gene_df["chrom"] == selected]
                             # limit to reduce clutter; still add many labels
                             gene_opts = {"All": "All"}

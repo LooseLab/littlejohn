@@ -49,6 +49,9 @@ def add_summary_section(sample_dir: Path, sample_id: str) -> None:
             state["run_info_labels"]["flow_cell"] = _create_dashboard_card(
                 "Flow Cell", "Loading...", "tag", "Flow cell identification"
             )
+            state["run_info_labels"]["panel"] = _create_dashboard_card(
+                "Analysis Panel", "Loading...", "science", "Target panel used for analysis"
+            )
             state["run_info_labels"]["sample"] = _create_dashboard_card(
                 "Sample ID", sample_id, "play_arrow", "Unique sample identifier"
             )
@@ -319,7 +322,7 @@ def _create_fusion_dashboard_card() -> Dict[str, Any]:
         
         # Panel info and main result
         with ui.row().classes("flex items-center justify-between mb-1"):
-            ui.label("Panel: rCNS2").classes("text-sm font-medium text-gray-700")
+            panel_label = ui.label("Panel: --").classes("text-sm font-medium text-gray-700")
             target_fusions_badge = ui.label("-- target fusions").classes("px-2 py-1 text-xs font-medium rounded-full bg-blue-100 text-blue-800")
         
         # Analysis details in compact layout
@@ -330,6 +333,7 @@ def _create_fusion_dashboard_card() -> Dict[str, Any]:
         ui.label("Fusion candidates identified from reads with supplementary alignments").classes("text-xs text-gray-500")
         
         return {
+            "panel": panel_label,
             "target_fusions": target_fusions_badge,
             "genome_fusions": genome_fusions_label
         }
@@ -393,6 +397,10 @@ def _update_run_information(state: Dict[str, Any]) -> None:
         if "flow_cell" in state["run_info_labels"]:
             state["run_info_labels"]["flow_cell"]["value"].text = run_info.get(
                 "flow_cell", "Unknown"
+            )
+        if "panel" in state["run_info_labels"]:
+            state["run_info_labels"]["panel"]["value"].text = run_info.get(
+                "panel", "Unknown"
             )
 
     except Exception as e:
@@ -594,9 +602,28 @@ def _update_analysis_data(state: Dict[str, Any]) -> None:
                 labels["target_fusions"].text = f"{fusion_data.get('target_fusions', 0)} target fusions"
             if "genome_fusions" in labels:
                 labels["genome_fusions"].text = f"{fusion_data.get('genome_fusions', 0)} genome wide fusions"
+            if "panel" in labels:
+                panel = _get_analysis_panel(state["sample_dir"])
+                labels["panel"].text = f"Panel: {panel}"
 
     except Exception as e:
         logging.exception(f"[Summary] Failed to update analysis data: {e}")
+
+
+def _get_analysis_panel(sample_dir: Path) -> str:
+    """Get the analysis panel from master.csv"""
+    try:
+        master_csv_path = sample_dir / "master.csv"
+        if master_csv_path.exists():
+            import pandas as pd
+            df = pd.read_csv(master_csv_path)
+            if not df.empty and "analysis_panel" in df.columns:
+                panel = df.iloc[0]["analysis_panel"]
+                if panel and str(panel).strip() != "":
+                    return str(panel).strip()
+        return "rCNS2"  # Default fallback
+    except Exception:
+        return "rCNS2"  # Default fallback
 
 
 def _extract_run_information(sample_dir: Path, sample_id: str) -> Dict[str, str]:
@@ -606,6 +633,7 @@ def _extract_run_information(sample_dir: Path, sample_id: str) -> Dict[str, str]
         "model": "Not available",
         "device": "Not available",
         "flow_cell": "Not available",
+        "panel": "Not available",
     }
 
     try:
@@ -682,6 +710,10 @@ def _extract_run_information(sample_dir: Path, sample_id: str) -> Dict[str, str]
                                 ) or get_ci(row, "flowcell_ids")
                                 if flowcell_val and flowcell_val.strip():
                                     run_info["flow_cell"] = flowcell_val.strip()
+
+                                panel_val = get_ci(row, "analysis_panel")
+                                if panel_val and panel_val.strip():
+                                    run_info["panel"] = panel_val.strip()
 
                                 run_time_val = get_ci(row, "run_info_run_time")
                                 if run_time_val and run_time_val.strip():
