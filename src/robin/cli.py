@@ -147,6 +147,172 @@ def main() -> None:
     pass
 
 
+def _remove_panel_from_system(panel_name: str) -> bool:
+    """Remove a custom panel from ROBIN system."""
+    try:
+        # Check if it's a built-in panel
+        built_in_panels = {"rCNS2", "AML", "PanCan"}
+        if panel_name in built_in_panels:
+            click.echo(f"Error: Cannot remove built-in panel '{panel_name}'", err=True)
+            click.echo("Built-in panels (rCNS2, AML, PanCan) cannot be removed.", err=True)
+            return False
+        
+        # Get resources directory
+        try:
+            from robin import resources
+            resources_dir = Path(resources.__file__).parent
+        except ImportError:
+            click.echo("Error: Could not locate ROBIN resources directory", err=True)
+            return False
+        
+        # Check if panel exists
+        panel_filename = f"{panel_name}_panel_name_uniq.bed"
+        panel_path = resources_dir / panel_filename
+        
+        if not panel_path.exists():
+            click.echo(f"Error: Panel '{panel_name}' not found", err=True)
+            click.echo(f"Expected file: {panel_path}", err=True)
+            return False
+        
+        # Confirm removal
+        click.echo(f"Panel '{panel_name}' will be removed:")
+        click.echo(f"  File: {panel_path}")
+        click.echo(f"  Size: {panel_path.stat().st_size} bytes")
+        
+        # Ask for confirmation
+        try:
+            confirm = input(f"\nAre you sure you want to remove panel '{panel_name}'? Type 'yes' to confirm: ").strip()
+            if confirm.lower() != 'yes':
+                click.echo("Panel removal cancelled.")
+                return False
+        except (KeyboardInterrupt, EOFError):
+            click.echo("\nPanel removal cancelled.")
+            return False
+        
+        # Remove the file
+        panel_path.unlink()
+        
+        click.echo(f"✅ Panel '{panel_name}' removed successfully")
+        click.echo(f"📁 Removed file: {panel_path}")
+        
+        return True
+        
+    except Exception as e:
+        click.echo(f"Error removing panel: {e}", err=True)
+        return False
+
+
+@main.command()
+@click.argument("panel_name", type=str)
+@click.option(
+    "--force",
+    "-f",
+    is_flag=True,
+    help="Skip confirmation prompt (use with caution)"
+)
+def remove_panel(panel_name: str, force: bool) -> None:
+    """Remove a custom panel from ROBIN.
+    
+    PANEL_NAME: Name of the panel to remove
+    
+    Built-in panels (rCNS2, AML, PanCan) cannot be removed.
+    """
+    if not _get_user_acknowledgment():
+        sys.exit(1)
+    
+    # Validate panel name
+    if not panel_name or not panel_name.strip():
+        click.echo("Error: Panel name cannot be empty", err=True)
+        sys.exit(1)
+    
+    panel_name = panel_name.strip()
+    
+    # Check if it's a built-in panel
+    built_in_panels = {"rCNS2", "AML", "PanCan"}
+    if panel_name in built_in_panels:
+        click.echo(f"Error: Cannot remove built-in panel '{panel_name}'", err=True)
+        click.echo("Built-in panels (rCNS2, AML, PanCan) cannot be removed.", err=True)
+        sys.exit(1)
+    
+    # Get resources directory
+    try:
+        from robin import resources
+        resources_dir = Path(resources.__file__).parent
+    except ImportError:
+        click.echo("Error: Could not locate ROBIN resources directory", err=True)
+        sys.exit(1)
+    
+    # Check if panel exists
+    panel_filename = f"{panel_name}_panel_name_uniq.bed"
+    panel_path = resources_dir / panel_filename
+    
+    if not panel_path.exists():
+        click.echo(f"Error: Panel '{panel_name}' not found", err=True)
+        click.echo(f"Expected file: {panel_path}", err=True)
+        click.echo("\nUse 'robin list-panels' to see available panels.", err=True)
+        sys.exit(1)
+    
+    # Show panel info
+    click.echo(f"Panel '{panel_name}' found:")
+    click.echo(f"  File: {panel_path}")
+    click.echo(f"  Size: {panel_path.stat().st_size} bytes")
+    
+    # Confirm removal unless --force is used
+    if not force:
+        try:
+            confirm = input(f"\nAre you sure you want to remove panel '{panel_name}'? Type 'yes' to confirm: ").strip()
+            if confirm.lower() != 'yes':
+                click.echo("Panel removal cancelled.")
+                return
+        except (KeyboardInterrupt, EOFError):
+            click.echo("\nPanel removal cancelled.")
+            return
+    
+    # Remove the file
+    try:
+        panel_path.unlink()
+        click.echo(f"\n🎉 Panel '{panel_name}' removed successfully!")
+        click.echo(f"📁 Removed file: {panel_path}")
+        click.echo(f"💡 Use 'robin list-panels' to see remaining panels")
+    except Exception as e:
+        click.echo(f"Error removing panel file: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command()
+def list_panels() -> None:
+    """List all available panels in ROBIN."""
+    if not _get_user_acknowledgment():
+        sys.exit(1)
+    
+    panels = _get_available_panels()
+    
+    click.echo("Available panels in ROBIN:\n")
+    
+    # Built-in panels
+    built_in_panels = ["rCNS2", "AML", "PanCan"]
+    custom_panels = [p for p in panels if p not in built_in_panels]
+    
+    click.echo("BUILT-IN PANELS:")
+    for panel in built_in_panels:
+        click.echo(f"  • {panel}")
+    
+    if custom_panels:
+        click.echo("\nCUSTOM PANELS:")
+        for panel in custom_panels:
+            click.echo(f"  • {panel}")
+    else:
+        click.echo("\nCUSTOM PANELS:")
+        click.echo("  (none)")
+    
+    click.echo(f"\nTotal panels: {len(panels)}")
+    click.echo("\nUsage: Use --target-panel <panel_name> in workflow commands")
+    click.echo("Example: robin workflow /path/to/bams --workflow mgmt,target --target-panel rCNS2")
+    click.echo("\nPanel management:")
+    click.echo("  • Add panel: robin add-panel <bed_file> <panel_name>")
+    click.echo("  • Remove panel: robin remove-panel <panel_name>")
+
+
 @main.command()
 def list_job_types() -> None:
     """List all available job types organized by queue category."""
@@ -198,6 +364,282 @@ def list_job_types() -> None:
     click.echo(
         "Note: The system automatically determines the appropriate queue for each job type in simplified format."
     )
+
+
+def _validate_bed_file(bed_path: Path) -> Tuple[bool, List[str]]:
+    """Validate BED file format and return (is_valid, error_messages)."""
+    errors = []
+    
+    if not bed_path.exists():
+        errors.append(f"BED file does not exist: {bed_path}")
+        return False, errors
+    
+    if not bed_path.is_file():
+        errors.append(f"Path is not a file: {bed_path}")
+        return False, errors
+    
+    try:
+        with open(bed_path, 'r') as f:
+            line_count = 0
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                
+                line_count += 1
+                parts = line.split('\t')
+                
+                if len(parts) < 3:
+                    errors.append(f"Line {line_num}: Invalid BED format - must have at least 3 columns (chromosome, start, end)")
+                    continue
+                
+                # Validate chromosome
+                chrom = parts[0]
+                if not chrom.startswith('chr'):
+                    errors.append(f"Line {line_num}: Chromosome must start with 'chr': {chrom}")
+                
+                # Validate start and end positions
+                try:
+                    start = int(parts[1])
+                    end = int(parts[2])
+                    if start < 0 or end < 0:
+                        errors.append(f"Line {line_num}: Start and end positions must be non-negative")
+                    if start >= end:
+                        errors.append(f"Line {line_num}: Start position must be less than end position")
+                except ValueError:
+                    errors.append(f"Line {line_num}: Start and end positions must be integers")
+                
+                # Check for gene name in 4th column (required for ROBIN panels)
+                if len(parts) < 4 or not parts[3].strip():
+                    errors.append(f"Line {line_num}: Missing gene name in 4th column")
+                
+                # Optional: validate 6-column BED format if present
+                if len(parts) >= 6:
+                    # Validate score (5th column) - should be numeric
+                    try:
+                        score = int(parts[4])
+                        if score < 0:
+                            errors.append(f"Line {line_num}: Score must be non-negative")
+                    except ValueError:
+                        errors.append(f"Line {line_num}: Score must be an integer")
+                    
+                    # Validate strand (6th column) - should be + or -
+                    strand = parts[5].strip()
+                    if strand not in ['+', '-']:
+                        errors.append(f"Line {line_num}: Strand must be '+' or '-', got: {strand}")
+                
+                # Limit error reporting to first 10 errors
+                if len(errors) >= 10:
+                    errors.append("... (additional errors truncated)")
+                    break
+            
+            if line_count == 0:
+                errors.append("BED file contains no valid data lines")
+    
+    except Exception as e:
+        errors.append(f"Error reading BED file: {e}")
+    
+    return len(errors) == 0, errors
+
+
+def _generate_unique_gene_bed(input_bed_path: Path, output_bed_path: Path) -> bool:
+    """Generate unique gene BED file from input BED file."""
+    try:
+        import pandas as pd
+        
+        # Read the input BED file - handle both 4-column and 6-column BED formats
+        try:
+            # Try 6-column format first (chrom, start, end, gene, score, strand)
+            df = pd.read_csv(
+                input_bed_path,
+                sep='\t',
+                header=None,
+                names=['chrom', 'start', 'end', 'gene', 'score', 'strand'],
+                comment='#'
+            )
+        except ValueError:
+            # Fallback to 4-column format (chrom, start, end, gene)
+            df = pd.read_csv(
+                input_bed_path,
+                sep='\t',
+                header=None,
+                names=['chrom', 'start', 'end', 'gene'],
+                comment='#'
+            )
+        
+        # Process gene names - handle comma-separated genes
+        processed_regions = []
+        for _, row in df.iterrows():
+            genes = [g.strip() for g in str(row['gene']).split(',')]
+            for gene in genes:
+                if gene and gene != 'nan':  # Skip empty gene names and NaN values
+                    processed_regions.append({
+                        'chrom': row['chrom'],
+                        'start': int(row['start']),
+                        'end': int(row['end']),
+                        'gene': gene
+                    })
+        
+        # Convert to DataFrame and remove duplicates
+        processed_df = pd.DataFrame(processed_regions)
+        
+        # Remove duplicates based on gene name (keep first occurrence)
+        processed_df = processed_df.drop_duplicates(subset=['gene'], keep='first')
+        
+        # Sort by chromosome and position
+        processed_df = processed_df.sort_values(['chrom', 'start', 'end'])
+        
+        # Write to output file in standard 4-column BED format
+        processed_df[['chrom', 'start', 'end', 'gene']].to_csv(
+            output_bed_path,
+            sep='\t',
+            header=False,
+            index=False
+        )
+        
+        return True
+        
+    except Exception as e:
+        click.echo(f"Error generating unique gene BED file: {e}", err=True)
+        return False
+
+
+def _get_available_panels() -> List[str]:
+    """Get list of available panels from resources directory."""
+    panels = ["rCNS2", "AML", "PanCan"]  # Built-in panels
+    
+    try:
+        from robin import resources
+        resources_dir = Path(resources.__file__).parent
+        
+        # Look for custom panels (files ending with _panel_name_uniq.bed)
+        for bed_file in resources_dir.glob("*_panel_name_uniq.bed"):
+            panel_name = bed_file.stem.replace("_panel_name_uniq", "")
+            if panel_name not in panels:
+                panels.append(panel_name)
+        
+        panels.sort()
+        
+    except ImportError:
+        pass  # Fallback to built-in panels only
+    
+    return panels
+
+
+def _register_panel_in_system(panel_name: str, bed_path: Path) -> bool:
+    """Register the new panel in ROBIN system by updating relevant files."""
+    try:
+        # Create a simple registration by copying the BED file to resources
+        # and updating any necessary configuration files
+        
+        # For now, we'll just ensure the file is in the right location
+        # The actual registration happens when the panel is referenced by name
+        # in analysis modules like target_analysis.py and fusion_work.py
+        
+        click.echo(f"Panel '{panel_name}' registered successfully")
+        click.echo(f"BED file location: {bed_path}")
+        click.echo(f"Panel can now be used with --target-panel {panel_name}")
+        
+        return True
+        
+    except Exception as e:
+        click.echo(f"Error registering panel: {e}", err=True)
+        return False
+
+
+@main.command()
+@click.argument("bed_file", type=click.Path(exists=True, path_type=Path))
+@click.argument("panel_name", type=str)
+@click.option(
+    "--validate-only",
+    is_flag=True,
+    help="Only validate the BED file format without adding the panel"
+)
+def add_panel(bed_file: Path, panel_name: str, validate_only: bool) -> None:
+    """Add a custom panel to ROBIN.
+    
+    BED_FILE: Path to the BED file containing panel regions
+    PANEL_NAME: Name for the panel (e.g., 'CustomPanel', 'MyPanel')
+    
+    The BED file should be in standard format with at least 4 columns:
+    chromosome, start, end, gene_name(s) [, score, strand]
+    
+    Supported formats:
+    - 4-column: chr1, 1000000, 2000000, GENE1
+    - 6-column: chr1, 1000000, 2000000, GENE1, 0, +
+    
+    Gene names can be comma-separated for regions covering multiple genes.
+    The output will be a unique gene list with one entry per gene.
+    """
+    if not _get_user_acknowledgment():
+        sys.exit(1)
+    
+    # Validate panel name
+    if not panel_name or not panel_name.strip():
+        click.echo("Error: Panel name cannot be empty", err=True)
+        sys.exit(1)
+    
+    panel_name = panel_name.strip()
+    
+    # Check for reserved panel names
+    reserved_names = {"rCNS2", "AML", "PanCan"}
+    if panel_name in reserved_names:
+        click.echo(f"Error: Panel name '{panel_name}' is reserved. Please choose a different name.", err=True)
+        sys.exit(1)
+    
+    click.echo(f"Validating BED file: {bed_file}")
+    
+    # Validate BED file format
+    is_valid, errors = _validate_bed_file(bed_file)
+    
+    if not is_valid:
+        click.echo("BED file validation failed:", err=True)
+        for error in errors:
+            click.echo(f"  • {error}", err=True)
+        sys.exit(1)
+    
+    click.echo("✅ BED file format validation passed")
+    
+    if validate_only:
+        click.echo("Validation complete. Use without --validate-only to add the panel.")
+        return
+    
+    # Generate output paths
+    try:
+        from robin import resources
+        resources_dir = Path(resources.__file__).parent
+    except ImportError:
+        click.echo("Error: Could not locate ROBIN resources directory", err=True)
+        sys.exit(1)
+    
+    output_filename = f"{panel_name}_panel_name_uniq.bed"
+    output_path = resources_dir / output_filename
+    
+    # Check if panel already exists
+    if output_path.exists():
+        click.echo(f"Error: Panel '{panel_name}' already exists at {output_path}", err=True)
+        click.echo("Please choose a different panel name or remove the existing panel first.", err=True)
+        sys.exit(1)
+    
+    click.echo(f"Generating unique gene BED file: {output_path}")
+    
+    # Generate unique gene BED file
+    if not _generate_unique_gene_bed(bed_file, output_path):
+        click.echo("Failed to generate unique gene BED file", err=True)
+        sys.exit(1)
+    
+    click.echo("✅ Unique gene BED file generated successfully")
+    
+    # Register panel in system
+    if not _register_panel_in_system(panel_name, output_path):
+        click.echo("Failed to register panel in system", err=True)
+        sys.exit(1)
+    
+    click.echo(f"\n🎉 Panel '{panel_name}' added successfully!")
+    click.echo(f"📁 BED file: {output_path}")
+    click.echo(f"🔧 Usage: Use --target-panel {panel_name} in workflow commands")
+    click.echo(f"📋 Example: robin workflow /path/to/bams --workflow mgmt,target --target-panel {panel_name}")
+    click.echo(f"🗑️  Remove: robin remove-panel {panel_name}")
 
 
 def _parse_job_log_levels(job_log_level: Tuple[str, ...]) -> Dict[str, str]:
@@ -1099,9 +1541,9 @@ def _display_workflow_config(
 )
 @click.option(
     "--target-panel",
-    type=click.Choice(["rCNS2", "AML", "PanCan"]),
+    type=click.Choice(_get_available_panels()),
     default="rCNS2",
-    help="Target gene panel for fusion analysis (default: rCNS2). Options: rCNS2, AML, PanCan",
+    help="Target gene panel for fusion analysis (default: rCNS2). Use 'robin add-panel' to add custom panels.",
 )
 def workflow(
     path: Path,

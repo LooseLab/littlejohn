@@ -453,8 +453,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             elif panel == "PanCan":
                 bed_filename = "PanCan_panel_name_uniq.bed"
             else:
-                # Fallback to unique_genes.bed for unknown panels
-                bed_filename = "unique_genes.bed"
+                # Check for custom panel
+                bed_filename = f"{panel}_panel_name_uniq.bed"
             
             # Try to load the panel-specific BED file
             try:

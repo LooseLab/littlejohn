@@ -426,8 +426,9 @@ class TargetAnalysis:
         elif target_panel == "PanCan":
             bed_filename = "PanCan_panel_name_uniq.bed"
         else:
-            logger.warning(f"Unknown panel type '{target_panel}', defaulting to rCNS2")
-            bed_filename = "rCNS2_panel_name_uniq.bed"
+            # Check for custom panel
+            bed_filename = f"{target_panel}_panel_name_uniq.bed"
+            logger.info(f"Using custom panel: {target_panel}")
         
         if resources is not None:
             try:
