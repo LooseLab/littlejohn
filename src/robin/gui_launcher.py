@@ -116,6 +116,9 @@ class GUILauncher:
         self._cnv_state: Dict[str, Dict[str, Any]] = {}
         # Cache last seen queue status so we can populate immediately on page creation
         self._last_queue_status: Dict[str, Any] = {}
+        
+        # Track which samples have been loaded to avoid showing loading spinner on refresh
+        self._loaded_samples: set[str] = set()
 
     def launch_gui(
         self,
@@ -1432,6 +1435,12 @@ class GUILauncher:
     
     def _create_sample_detail_page(self, sample_id: str):
         """Create the individual sample detail page."""
+        
+        # Check if this sample has been loaded before in this session
+        is_first_load = sample_id not in self._loaded_samples
+        if is_first_load:
+            self._loaded_samples.add(sample_id)
+        
         async def confirm_report_generation():
             """Show a confirmation dialog before generating the report."""
             report_types = {
@@ -1600,23 +1609,28 @@ class GUILauncher:
                             "object-right ml-auto text-sm font-semibold px-3 py-1 rounded"
                         )
                 ui.separator().classes().style("border: 1px solid var(--md-primary)")
-                # Main content area with loading state
+                # Main content area with conditional loading state
                 with ui.column().classes("w-full p-4 gap-4"):
-                    # Loading container that will be hidden when data is ready
-                    loading_container = ui.column().classes(
-                        "w-full items-center justify-center p-8"
-                    )
-                    with loading_container:
-                        ui.spinner("bars", size="4em").classes("mb-4")
-                        ui.label("Loading sample data...").classes("text-lg text-gray-600")
-                        ui.label("This may take a moment for large datasets").classes(
-                            "text-sm text-gray-500"
+                    if is_first_load:
+                        # Loading container that will be hidden when data is ready
+                        loading_container = ui.column().classes(
+                            "w-full items-center justify-center p-8"
                         )
+                        with loading_container:
+                            ui.spinner("bars", size="4em").classes("mb-4")
+                            ui.label("Loading sample data...").classes("text-lg text-gray-600")
+                            ui.label("This may take a moment for large datasets").classes(
+                                "text-sm text-gray-500"
+                            )
 
-                    # Content container that will be shown when data is ready
-                    content_container = (
-                        ui.column().classes("w-full gap-4").style("display: none")
-                    )
+                        # Content container that will be shown when data is ready
+                        content_container = (
+                            ui.column().classes("w-full gap-4").style("display: none")
+                        )
+                    else:
+                        # For subsequent loads, show content immediately
+                        content_container = ui.column().classes("w-full gap-4")
+                        loading_container = None
 
                     with content_container:
                         # Summary section (new component)
@@ -1892,18 +1906,19 @@ class GUILauncher:
                                     pass
                                 _notify_state["csv_error"] = True
 
-                    # Show content and hide loading after initial data load
-                    def _show_content():
-                        loading_container.style("display: none")
-                        content_container.style("display: flex")
+                    # Show content and hide loading after initial data load (only for first load)
+                    if is_first_load and loading_container:
+                        def _show_content():
+                            loading_container.style("display: none")
+                            content_container.style("display: flex")
 
-                    # Initial data load with loading state
-                    try:
-                        # Use a timer to simulate async loading and then show content
-                        ui.timer(0.1, _show_content, once=True)
-                    except Exception:
-                        # Fallback: show content immediately if timer fails
-                        _show_content()
+                        # Initial data load with loading state
+                        try:
+                            # Use a timer to simulate async loading and then show content
+                            ui.timer(0.1, _show_content, once=True)
+                        except Exception:
+                            # Fallback: show content immediately if timer fails
+                            _show_content()
 
                     # Start periodic refresh
                     try:
