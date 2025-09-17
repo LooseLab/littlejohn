@@ -40,8 +40,11 @@ robin is a specialized bioinformatics workflow engine designed for processing BA
 
 1. **Clone the repository with submodules**:
    ```bash
-   git clone --recursive https://github.com/yourusername/robin.git
-   cd robin
+   git clone --recursive https://github.com/LooseLab/littlejohn.git
+   cd littlejohn
+   
+   # Switch to the branch with Git LFS removal
+   git checkout remove_LFS
    ```
 
 2. **Download required model assets**:
@@ -92,8 +95,11 @@ If you prefer not to use conda, you can install from source, but you'll need to 
 
 2. **Clone with submodules**:
    ```bash
-   git clone --recursive https://github.com/yourusername/robin.git
-   cd robin
+   git clone --recursive https://github.com/LooseLab/littlejohn.git
+   cd littlejohn
+   
+   # Switch to the branch with Git LFS removal
+   git checkout remove_LFS
    ```
 
 3. **Download required model assets**:
