@@ -116,9 +116,6 @@ class GUILauncher:
         self._cnv_state: Dict[str, Dict[str, Any]] = {}
         # Cache last seen queue status so we can populate immediately on page creation
         self._last_queue_status: Dict[str, Any] = {}
-        
-        # Track which samples have been loaded to avoid showing loading spinner on refresh
-        self._loaded_samples: set[str] = set()
 
     def launch_gui(
         self,
@@ -1436,10 +1433,25 @@ class GUILauncher:
     def _create_sample_detail_page(self, sample_id: str):
         """Create the individual sample detail page."""
         
-        # Check if this sample has been loaded before in this session
-        is_first_load = sample_id not in self._loaded_samples
-        if is_first_load:
-            self._loaded_samples.add(sample_id)
+        # Check if this is a page refresh vs navigation
+        # Use browser storage to detect if this is a refresh
+        is_page_refresh = False
+        try:
+            # Check if we have a flag indicating this page was recently loaded
+            if hasattr(ui, 'storage') and hasattr(ui.storage, 'browser'):
+                last_load_time = ui.storage.browser.get(f'sample_{sample_id}_last_load', 0)
+                current_time = time.time()
+                # If last load was very recent (< 2 seconds), it's likely a page refresh
+                is_page_refresh = (current_time - last_load_time) < 2.0
+                
+                # Update the last load time
+                ui.storage.browser[f'sample_{sample_id}_last_load'] = current_time
+        except Exception:
+            # If storage is not available, assume it's navigation (show loading)
+            is_page_refresh = False
+        
+        # Show loading spinner unless it's a page refresh
+        show_loading = not is_page_refresh
         
         async def confirm_report_generation():
             """Show a confirmation dialog before generating the report."""
@@ -1611,7 +1623,7 @@ class GUILauncher:
                 ui.separator().classes().style("border: 1px solid var(--md-primary)")
                 # Main content area with conditional loading state
                 with ui.column().classes("w-full p-4 gap-4"):
-                    if is_first_load:
+                    if show_loading:
                         # Loading container that will be hidden when data is ready
                         loading_container = ui.column().classes(
                             "w-full items-center justify-center p-8"
@@ -1628,7 +1640,7 @@ class GUILauncher:
                             ui.column().classes("w-full gap-4").style("display: none")
                         )
                     else:
-                        # For subsequent loads, show content immediately
+                        # For page refreshes, show content immediately
                         content_container = ui.column().classes("w-full gap-4")
                         loading_container = None
 
@@ -1906,8 +1918,8 @@ class GUILauncher:
                                     pass
                                 _notify_state["csv_error"] = True
 
-                    # Show content and hide loading after initial data load (only for first load)
-                    if is_first_load and loading_container:
+                    # Show content and hide loading after initial data load (only when showing loading)
+                    if show_loading and loading_container:
                         def _show_content():
                             loading_container.style("display: none")
                             content_container.style("display: flex")
