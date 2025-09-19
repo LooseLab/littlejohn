@@ -796,6 +796,12 @@ def _generate_output_files(
                 
                 # Apply minimum read support threshold (3 or more supporting reads per gene pair)
                 if not result.empty:
+                    # Create tag column by grouping genes per read_id (same logic as _annotate_results)
+                    lookup = result.groupby("read_id", observed=True)["col4"].agg(
+                        lambda x: ",".join(set(x))
+                    )
+                    result["tag"] = result["read_id"].map(lookup)
+                    
                     # Group by gene pair (tag) and count supporting reads
                     gene_pair_read_counts = result.groupby("tag", observed=True)["read_id"].nunique()
                     valid_gene_pairs = gene_pair_read_counts[gene_pair_read_counts >= 3].index
