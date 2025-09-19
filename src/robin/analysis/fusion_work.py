@@ -9,6 +9,7 @@ IMPORTANT: This module uses strict criteria to avoid false positives:
 2. Filters out reads where the same genomic alignment is annotated with multiple overlapping genes
 3. This prevents false positives from mapping artifacts where the same genomic region is annotated with multiple overlapping genes
 4. True fusions require reads to map to multiple genomic locations (supplementary alignments)
+5. Fusions must be supported by at least 3 reads to ensure reliability and reduce false positives
 """
 
 # Standard library imports
@@ -791,7 +792,14 @@ def _generate_output_files(
                 counts = doubles.groupby("read_id", observed=True)["col4"].transform(
                     "nunique"
                 )
-                result = doubles[counts > 1]  # Use > 1 to match original logic exactly
+                result = doubles[counts > 1]  # Require reads that map to more than 1 gene (fusion candidates)
+                
+                # Apply minimum read support threshold (3 or more supporting reads per gene pair)
+                if not result.empty:
+                    # Group by gene pair (tag) and count supporting reads
+                    gene_pair_read_counts = result.groupby("tag", observed=True)["read_id"].nunique()
+                    valid_gene_pairs = gene_pair_read_counts[gene_pair_read_counts >= 3].index
+                    result = result[result["tag"].isin(valid_gene_pairs)]
 
                 if not result.empty:
                     # Save the filtered fusion candidates to CSV
@@ -835,8 +843,8 @@ def _generate_output_files(
                 ].transform("nunique")
                 result_all = doubles_all[
                     counts_all > 1
-                ]  # Use > 1 to match original logic exactly
-                logger.info(f"Genome-wide fusion candidates after filtering: {len(result_all)} records")
+                ]  # Require reads that map to more than 1 gene (fusion candidates)
+                logger.info(f"Genome-wide fusion candidates after basic filtering: {len(result_all)} records")
 
                 if not result_all.empty:
                     # Save the filtered genome-wide candidates to CSV
@@ -845,7 +853,8 @@ def _generate_output_files(
                         index=False,
                     )
 
-                    # Preprocess for visualization
+                    # Use the same preprocessing pipeline as target candidates
+                    # This ensures proper annotation with tags, colors, and gene group detection
                     preprocess_fusion_data_standalone(
                         result_all,
                         os.path.join(
@@ -1037,7 +1046,11 @@ def _merge_fusion_metadata_objects(
 
 
 def _annotate_results(result: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
-    """Annotates the result DataFrame with tags and colors with memory optimization."""
+    """Annotates the result DataFrame with tags and colors with memory optimization.
+    
+    Filters fusion candidates to require at least 3 supporting reads per gene pair
+    to ensure reliable fusion detection and reduce false positives.
+    """
     # Use inplace operations to avoid unnecessary copies
     result = result.copy()  # Only one copy needed
 
@@ -1056,8 +1069,8 @@ def _annotate_results(result: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
     # Clean string data efficiently
     result = result.apply(lambda x: x.strip() if isinstance(x, str) else x)
 
-    # Find good pairs (reads that map to more than 1 gene - this matches the original code exactly)
-    goodpairs = result.groupby("tag", observed=True)["read_id"].transform("nunique") > 1
+    # Find good pairs (gene pairs supported by 3 or more reads - minimum threshold for reliable fusion detection)
+    goodpairs = result.groupby("tag", observed=True)["read_id"].transform("nunique") >= 3
 
     return result, goodpairs
 
@@ -1188,7 +1201,11 @@ def _get_reads(reads: pd.DataFrame) -> pd.DataFrame:
 def preprocess_fusion_data_standalone(
     fusion_data: pd.DataFrame, output_file: str
 ) -> None:
-    """Standalone version of fusion data preprocessing for CPU-bound execution with memory optimization."""
+    """Standalone version of fusion data preprocessing for CPU-bound execution with memory optimization.
+    
+    Applies strict filtering to require at least 3 supporting reads per gene pair
+    to ensure reliable fusion detection and reduce false positives.
+    """
     try:
         # Apply categorical data types for efficiency
         fusion_data = fusion_data.astype(
@@ -1244,7 +1261,7 @@ def preprocess_fusion_data_standalone(
                         annotated_data[goodpairs]["col4"].isin(gene_group)
                     ]
                 )
-                if len(reads) > 1:
+                if len(reads) >= 3:  # Require minimum 3 supporting reads for reliable fusion detection
                     gene_groups.append(gene_group)
 
             processed_data.update(

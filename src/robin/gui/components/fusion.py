@@ -787,6 +787,13 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
 
             t = _load_processed_pickle(target_file)
             g = _load_processed_pickle(genome_file)
+            
+            # Debug logging
+            logging.info(f"[Fusion] Loaded target data: {t is not None}")
+            logging.info(f"[Fusion] Loaded genome-wide data: {g is not None}")
+            if g is not None:
+                logging.info(f"[Fusion] Genome-wide candidate count: {g.get('candidate_count', 0)}")
+                logging.info(f"[Fusion] Genome-wide gene groups: {len(g.get('gene_groups', []))}")
 
             # Update target panel UI
             target_mtime = target_file.stat().st_mtime if target_file.exists() else None
@@ -843,6 +850,7 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
 
             # Update genome-wide UI
             genome_mtime = genome_file.stat().st_mtime if genome_file.exists() else None
+            logging.info(f"[Fusion] Genome-wide update check: g={g is not None}, mtime_changed={genome_mtime != state['genome'].get('mtime')}")
             if g is not None and genome_mtime != state["genome"].get("mtime"):
                 state["genome"]["data"] = g
                 state["genome"]["mtime"] = genome_mtime
@@ -868,6 +876,7 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     state["genome"]["plot_container"].clear()
                 except Exception:
                     pass
+                logging.info(f"[Fusion] Genome-wide plotting check: candidate_count={g.get('candidate_count', 0)}, gene_groups={len(g.get('gene_groups', []))}")
                 if g.get("candidate_count", 0) > 0 and g.get("gene_groups"):
                     with state["genome"]["plot_container"].classes("w-full"):
                         with ui.row().classes("w-full"):
