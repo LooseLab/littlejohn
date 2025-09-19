@@ -192,8 +192,8 @@ def _remove_panel_from_system(panel_name: str) -> bool:
         # Remove the file
         panel_path.unlink()
         
-        click.echo(f"✅ Panel '{panel_name}' removed successfully")
-        click.echo(f"📁 Removed file: {panel_path}")
+        click.echo(f"Panel '{panel_name}' removed successfully")
+        click.echo(f"Removed file: {panel_path}")
         
         return True
         
@@ -271,9 +271,9 @@ def remove_panel(panel_name: str, force: bool) -> None:
     # Remove the file
     try:
         panel_path.unlink()
-        click.echo(f"\n🎉 Panel '{panel_name}' removed successfully!")
-        click.echo(f"📁 Removed file: {panel_path}")
-        click.echo(f"💡 Use 'robin list-panels' to see remaining panels")
+        click.echo(f"\nPanel '{panel_name}' removed successfully!")
+        click.echo(f"Removed file: {panel_path}")
+        click.echo(f"Use 'robin list-panels' to see remaining panels")
     except Exception as e:
         click.echo(f"Error removing panel file: {e}", err=True)
         sys.exit(1)
@@ -600,7 +600,7 @@ def add_panel(bed_file: Path, panel_name: str, validate_only: bool) -> None:
             click.echo(f"  • {error}", err=True)
         sys.exit(1)
     
-    click.echo("✅ BED file format validation passed")
+    click.echo("BED file format validation passed")
     
     if validate_only:
         click.echo("Validation complete. Use without --validate-only to add the panel.")
@@ -630,18 +630,18 @@ def add_panel(bed_file: Path, panel_name: str, validate_only: bool) -> None:
         click.echo("Failed to generate unique gene BED file", err=True)
         sys.exit(1)
     
-    click.echo("✅ Unique gene BED file generated successfully")
+    click.echo("Unique gene BED file generated successfully")
     
     # Register panel in system
     if not _register_panel_in_system(panel_name, output_path):
         click.echo("Failed to register panel in system", err=True)
         sys.exit(1)
     
-    click.echo(f"\n🎉 Panel '{panel_name}' added successfully!")
-    click.echo(f"📁 BED file: {output_path}")
-    click.echo(f"🔧 Usage: Use --target-panel {panel_name} in workflow commands")
-    click.echo(f"📋 Example: robin workflow /path/to/bams --workflow mgmt,target --target-panel {panel_name}")
-    click.echo(f"🗑️  Remove: robin remove-panel {panel_name}")
+    click.echo(f"\nPanel '{panel_name}' added successfully!")
+    click.echo(f"BED file: {output_path}")
+    click.echo(f"Usage: Use --target-panel {panel_name} in workflow commands")
+    click.echo(f"Example: robin workflow /path/to/bams --workflow mgmt,target --target-panel {panel_name}")
+    click.echo(f"Remove: robin remove-panel {panel_name}")
 
 
 def _parse_job_log_levels(job_log_level: Tuple[str, ...]) -> Dict[str, str]:
@@ -1824,7 +1824,7 @@ def workflow(
         gui_launcher = None
         if with_gui:
             try:
-                print("🚀 Launching NiceGUI workflow monitor with vertical tabs...")
+                print("Launching NiceGUI workflow monitor with vertical tabs...")
 
                 # Import the new GUI launcher
                 try:
@@ -1847,19 +1847,19 @@ def workflow(
 
                         install_workflow_hooks(runner, workflow_steps, str(path))
                         click.echo(
-                            "✅ Workflow state hooks installed for real-time monitoring"
+                            "Workflow state hooks installed for real-time monitoring"
                         )
                     except Exception as e:
                         click.echo(
-                            f"⚠️  Failed to install workflow hooks: {e}. GUI will show static information only."
+                            f"Failed to install workflow hooks: {e}. GUI will show static information only."
                         )
 
                     base_url = f"http://{gui_host}:{gui_port}"
-                    print(f"✅ GUI launched successfully on {base_url}")
-                    print(f"   🏠 Welcome page: {base_url}/")
-                    print(f"   📊 Workflow monitor: {base_url}/robin")
-                    print(f"   📋 Sample tracking: {base_url}/live_data")
-                    print(f"   🔬 Individual samples: {base_url}/live_data/sampleID/")
+                    print(f"GUI launched successfully on {base_url}")
+                    print(f"   Welcome page: {base_url}/")
+                    print(f"   Workflow monitor: {base_url}/robin")
+                    print(f"   Sample tracking: {base_url}/live_data")
+                    print(f"   Individual samples: {base_url}/live_data/sampleID/")
                     print(
                         "   Open your browser to monitor the workflow with the new navigation structure"
                     )
@@ -1868,12 +1868,12 @@ def workflow(
                     )
 
                 except ImportError as e:
-                    click.echo(f"❌ Failed to import GUI launcher: {e}")
+                    click.echo(f"Failed to import GUI launcher: {e}")
                     click.echo("   Please ensure the gui_launcher module is available")
 
             except Exception as e:
                 click.echo(
-                    f"⚠️  Failed to launch GUI: {e}. Continuing with workflow only.",
+                    f"Failed to launch GUI: {e}. Continuing with workflow only.",
                     err=True,
                 )
 
