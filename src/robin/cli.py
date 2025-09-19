@@ -415,13 +415,15 @@ def _validate_bed_file(bed_path: Path) -> Tuple[bool, List[str]]:
                 
                 # Optional: validate 6-column BED format if present
                 if len(parts) >= 6:
-                    # Validate score (5th column) - should be numeric
-                    try:
-                        score = int(parts[4])
-                        if score < 0:
-                            errors.append(f"Line {line_num}: Score must be non-negative")
-                    except ValueError:
-                        errors.append(f"Line {line_num}: Score must be an integer")
+                    # Validate score (5th column) - should be numeric or "."
+                    score = parts[4].strip()
+                    if score != ".":
+                        try:
+                            score_int = int(score)
+                            if score_int < 0:
+                                errors.append(f"Line {line_num}: Score must be non-negative")
+                        except ValueError:
+                            errors.append(f"Line {line_num}: Score must be an integer or '.'")
                     
                     # Validate strand (6th column) - should be + or -
                     strand = parts[5].strip()
