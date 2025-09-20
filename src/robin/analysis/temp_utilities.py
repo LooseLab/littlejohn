@@ -22,6 +22,10 @@ import json
 warnings.filterwarnings(
     "ignore", message="pkg_resources is deprecated", category=UserWarning
 )
+# Suppress matplotlib tight_layout warnings
+warnings.filterwarnings(
+    "ignore", message="The figure layout has changed to tight", category=UserWarning
+)
 
 try:
     import pyranges as pr

@@ -27,6 +27,10 @@ import warnings
 warnings.filterwarnings(
     "ignore", message="pkg_resources is deprecated", category=UserWarning
 )
+# Suppress matplotlib tight_layout warnings
+warnings.filterwarnings(
+    "ignore", message="The figure layout has changed to tight", category=UserWarning
+)
 
 import os
 import time
@@ -2091,7 +2095,7 @@ async def run(
         elif not work_dir:
             print("GUI not launched: --work-dir not provided.")
         else:
-            print("🚀 Launching GUI early to ensure immediate availability...")
+            print("Launching GUI early to ensure immediate availability...")
             launcher = _gui_launch(
                 host=gui_host,
                 port=gui_port,
@@ -2107,9 +2111,9 @@ async def run(
                     if hasattr(launcher, "get_gui_url")
                     else "http://localhost:8081"
                 )
-                print(f"✅ GUI launched successfully on {url}")
+                print(f"GUI launched successfully on {url}")
             except Exception:
-                print("✅ GUI launched successfully")
+                print("GUI launched successfully")
 
             # Start GUI update publishing task immediately
             async def _publish_gui():
@@ -2308,7 +2312,7 @@ async def run(
                         await asyncio.sleep(1.0)
 
             gui_publish_task = asyncio.create_task(_publish_gui())
-            print("📊 GUI monitoring started - workflow status will be updated in real-time")
+            print("GUI monitoring started - workflow status will be updated in real-time")
     except Exception as e:
         print(f"Warning: GUI failed to launch: {e}")
 

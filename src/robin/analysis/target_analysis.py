@@ -1107,7 +1107,7 @@ def process_single_file(
         Dictionary with target analysis results
     """
     sample_id = metadata.get("sample_id", "unknown")
-    logger.info(f"🎯 Starting target analysis for sample: {sample_id}")
+    logger.info(f"Starting target analysis for sample: {sample_id}")
 
     # Create sample-specific output directory
     sample_output_dir = os.path.join(work_dir, sample_id)
@@ -1445,7 +1445,7 @@ def run_snp_analysis(
     logger = logging.getLogger("robin.target")
 
     # CRITICAL: Immediate logging to see if we even get here
-    logger.info("🚀 ENTERING run_snp_analysis function")
+    logger.info("ENTERING run_snp_analysis function")
     logger.info(
         f"Parameters: sample_dir={sample_dir}, threads={threads}, force_regenerate={force_regenerate}, reference={reference}"
     )
@@ -1453,7 +1453,7 @@ def run_snp_analysis(
     # Also log to stderr to make sure we see it
 
     try:
-        logger.info("🔄 STEP 1: Setting up sample directory")
+        logger.info("STEP 1: Setting up sample directory")
         sample_dir = os.path.abspath(sample_dir)
         logger.info(f"Absolute sample_dir: {sample_dir}")
 
@@ -1461,9 +1461,9 @@ def run_snp_analysis(
         logger.info(f"Clair3 output directory: {clair_dir}")
 
         os.makedirs(clair_dir, exist_ok=True)
-        logger.info(f"✅ Clair3 directory created/verified: {clair_dir}")
+        logger.info(f"Clair3 directory created/verified: {clair_dir}")
 
-        logger.info("🔄 STEP 2: Checking for existing SNP analysis")
+        logger.info("STEP 2: Checking for existing SNP analysis")
 
         # Check if SNP analysis already exists and force_regenerate is not set
         snp_output_files = [
@@ -1475,22 +1475,22 @@ def run_snp_analysis(
             logger.info(f"SNP analysis already present in {clair_dir}")
             return clair_dir
 
-        logger.info("🔄 STEP 3: Checking for required input files")
+        logger.info("STEP 3: Checking for required input files")
         target_bam = os.path.join(sample_dir, "target.bam")
         targets_bed = os.path.join(sample_dir, "targets_exceeding_threshold.bed")
 
-        logger.info("🔍 CHECKING INPUT FILES FOR CLAIR3")
+        logger.info("CHECKING INPUT FILES FOR CLAIR3")
         logger.info(f"  Sample directory: {sample_dir}")
         logger.info(f"  Target BAM path: {target_bam}")
         logger.info(f"  Targets BED path: {targets_bed}")
         logger.info(f"  Reference path: {reference}")
 
         if not os.path.exists(target_bam):
-            logger.error(f"❌ target.bam not found: {target_bam}")
+            logger.error(f"target.bam not found: {target_bam}")
             return ""
 
         if not os.path.exists(targets_bed):
-            logger.error(f"❌ targets_exceeding_threshold.bed not found: {targets_bed}")
+            logger.error(f"targets_exceeding_threshold.bed not found: {targets_bed}")
             return ""
 
         # Check for reference genome
@@ -1521,32 +1521,32 @@ def run_snp_analysis(
         logger.info(f"Target BAM: {target_bam}")
         logger.info(f"Targets BED: {targets_bed}")
 
-        logger.info("🔄 STEP 4: Sorting target BAM for Clair3")
+        logger.info("STEP 4: Sorting target BAM for Clair3")
         sorted_bam = os.path.join(clair_dir, "sorted_targets_exceeding.bam")
         logger.info(f"Sorting BAM: {target_bam} -> {sorted_bam}")
 
         try:
             # Check if sorted BAM already exists and is valid
             if os.path.exists(sorted_bam) and os.path.exists(sorted_bam + ".bai"):
-                logger.info(f"✅ Sorted BAM already exists: {sorted_bam}")
+                logger.info(f"Sorted BAM already exists: {sorted_bam}")
                 # Verify the file is readable
                 try:
                     test_bam = pysam.AlignmentFile(sorted_bam, "rb")
                     test_bam.close()
-                    logger.info("✅ Sorted BAM file is valid and readable")
+                    logger.info("Sorted BAM file is valid and readable")
                 except Exception as e:
                     logger.warning(
-                        f"⚠️ Existing sorted BAM appears corrupted, regenerating: {e}"
+                        f"Existing sorted BAM appears corrupted, regenerating: {e}"
                     )
                     os.remove(sorted_bam)
                     if os.path.exists(sorted_bam + ".bai"):
                         os.remove(sorted_bam + ".bai")
                     raise Exception("Corrupted BAM file")
             else:
-                logger.info("🔄 Creating new sorted BAM file...")
+                logger.info("Creating new sorted BAM file...")
 
             # Sort the BAM file
-            logger.info(f"🔄 Sorting BAM with {threads} threads...")
+            logger.info(f"Sorting BAM with {threads} threads...")
             pysam.sort(f"-@{threads}", "-o", sorted_bam, target_bam)
 
             # Verify the sorted file was created
@@ -1554,7 +1554,7 @@ def run_snp_analysis(
                 raise Exception(f"Sorted BAM file was not created: {sorted_bam}")
 
             # Create index
-            logger.info("🔄 Creating BAM index...")
+            logger.info("Creating BAM index...")
             pysam.index(sorted_bam)
 
             # Verify index was created
@@ -1564,11 +1564,11 @@ def run_snp_analysis(
             # Final verification
             file_size = os.path.getsize(sorted_bam)
             logger.info(
-                f"✅ BAM sorting completed successfully: {sorted_bam} ({file_size / (1024**2):.1f} MB)"
+                f"BAM sorting completed successfully: {sorted_bam} ({file_size / (1024**2):.1f} MB)"
             )
 
         except Exception as e:
-            logger.error(f"❌ BAM sorting failed: {e}")
+            logger.error(f"BAM sorting failed: {e}")
             # Clean up any partial files
             for file_path in [sorted_bam, sorted_bam + ".bai"]:
                 if os.path.exists(file_path):
@@ -1576,16 +1576,16 @@ def run_snp_analysis(
                     logger.info(f"Cleaned up partial file: {file_path}")
             return ""
 
-        logger.info("🔄 STEP 5: Running Clair3 pipeline")
+        logger.info("STEP 5: Running Clair3 pipeline")
         logger.info("Running Clair3 pipeline...")
 
         # Run Clair3 pipeline using Docker
-        logger.info("🔍 CHECKING DOCKER AVAILABILITY")
+        logger.info("CHECKING DOCKER AVAILABILITY")
         if docker is None:
-            logger.error("❌ Docker module not available. Cannot run Clair3 pipeline.")
+            logger.error("Docker module not available. Cannot run Clair3 pipeline.")
             return ""
         else:
-            logger.info("✅ Docker module is available")
+            logger.info("Docker module is available")
 
         try:
             client = docker.from_env()
@@ -1593,24 +1593,24 @@ def run_snp_analysis(
             # Test Docker connectivity
             try:
                 client.ping()
-                logger.info("✅ Docker daemon is accessible")
+                logger.info("Docker daemon is accessible")
             except Exception as docker_error:
-                logger.error(f"❌ Docker daemon not accessible: {docker_error}")
+                logger.error(f"Docker daemon not accessible: {docker_error}")
                 return ""
 
             # Check if Clair3 image exists
             try:
                 client.images.get("hkubal/clairs-to:latest")
-                logger.info("✅ Clair3 image found: hkubal/clairs-to:latest")
+                logger.info("Clair3 image found: hkubal/clairs-to:latest")
             except Exception:
                 logger.warning(
-                    "⚠️ Clair3 image not found, attempting to pull: hkubal/clairs-to:latest"
+                    "Clair3 image not found, attempting to pull: hkubal/clairs-to:latest"
                 )
                 try:
                     client.images.pull("hkubal/clairs-to:latest")
-                    logger.info("✅ Clair3 image pulled successfully")
+                    logger.info("Clair3 image pulled successfully")
                 except Exception as pull_error:
-                    logger.error(f"❌ Failed to pull Clair3 image: {pull_error}")
+                    logger.error(f"Failed to pull Clair3 image: {pull_error}")
                     return ""
 
             # Create container-specific paths using the original working pattern
@@ -1641,34 +1641,34 @@ def run_snp_analysis(
                 },  # Output directory (clair3)
             }
 
-            logger.info("🔍 Verifying volume bindings...")
+            logger.info("Verifying volume bindings...")
             for source_path, binding_info in volume_bindings.items():
                 if not os.path.exists(source_path):
-                    logger.error(f"❌ Volume source path does not exist: {source_path}")
+                    logger.error(f"Volume source path does not exist: {source_path}")
                     return ""
                 if not os.access(source_path, os.R_OK):
-                    logger.error(f"❌ Volume source path not readable: {source_path}")
+                    logger.error(f"Volume source path not readable: {source_path}")
                     return ""
                 logger.info(
-                    f"✅ Volume binding verified: {source_path} -> {binding_info['bind']}"
+                    f"Volume binding verified: {source_path} -> {binding_info['bind']}"
                 )
 
             # Verify the specific files exist in their directories
-            logger.info("🔍 Verifying input files in volume directories...")
+            logger.info("Verifying input files in volume directories...")
             
             if not os.path.exists(sorted_bam):
-                logger.error(f"❌ Sorted BAM file not found in directory: {sorted_bam}")
+                logger.error(f"Sorted BAM file not found in directory: {sorted_bam}")
                 return ""
             if not os.path.exists(targets_bed):
                 logger.error(
-                    f"❌ Targets BED file not found in directory: {targets_bed}"
+                    f"Targets BED file not found in directory: {targets_bed}"
                 )
                 return ""
             if not os.path.exists(reference):
-                logger.error(f"❌ Reference file not found in directory: {reference}")
+                logger.error(f"Reference file not found in directory: {reference}")
                 return ""
 
-            logger.info("✅ All input files verified in their directories")
+            logger.info("All input files verified in their directories")
 
             host_config = client.api.create_host_config(binds=volume_bindings)
 
@@ -1992,7 +1992,7 @@ def run_snp_analysis(
             logger.error(f"Error running Clair3 pipeline: {e}")
             return ""
 
-        logger.info("🔄 STEP 6: Running annotation pipeline")
+        logger.info("STEP 6: Running annotation pipeline")
         logger.info("Running annotation pipeline...")
 
         try:
@@ -2411,7 +2411,7 @@ def run_snp_analysis(
         except Exception as e:
             logger.warning(f"VCF parsing failed: {e}")
 
-        logger.info("🎉 FINAL SUCCESS: SNP analysis completed successfully!")
+        logger.info("FINAL SUCCESS: SNP analysis completed successfully!")
         logger.info(
             f"SNP analysis completed successfully for {os.path.basename(sample_dir)}"
         )
@@ -2419,11 +2419,11 @@ def run_snp_analysis(
         return clair_dir
 
     except Exception as e:
-        print(f"❌ EXCEPTION in run_snp_analysis: {e} - PRINT STATEMENT")
+        print(f"EXCEPTION in run_snp_analysis: {e} - PRINT STATEMENT")
         logger.error(f"Failed to run SNP analysis in {sample_dir}: {e}")
         import traceback
 
-        print(f"❌ TRACEBACK: {traceback.format_exc()} - PRINT STATEMENT")
+        print(f"TRACEBACK: {traceback.format_exc()} - PRINT STATEMENT")
         return ""
 
 
@@ -2478,18 +2478,18 @@ def snp_analysis_handler(job, work_dir: Optional[str] = None) -> None:
         try:
             if os.path.exists(sample_dir):
                 dir_contents = os.listdir(sample_dir)
-                logger.info(f"📁 Directory contents of {sample_dir}:")
+                logger.info(f"Directory contents of {sample_dir}:")
                 for item in dir_contents:
                     item_path = os.path.join(sample_dir, item)
                     if os.path.isfile(item_path):
                         size = os.path.getsize(item_path)
-                        logger.info(f"  📄 {item} ({size / (1024**2):.1f} MB)")
+                        logger.info(f"  {item} ({size / (1024**2):.1f} MB)")
                     else:
-                        logger.info(f"  📁 {item}/")
+                        logger.info(f"  {item}/")
             else:
-                logger.error(f"❌ Sample directory does not exist: {sample_dir}")
+                logger.error(f"Sample directory does not exist: {sample_dir}")
         except Exception as e:
-            logger.warning(f"⚠️ Could not list directory contents: {e}")
+            logger.warning(f"Could not list directory contents: {e}")
 
         # Check for required input files
         target_bam = os.path.join(sample_dir, "target.bam")
@@ -2521,14 +2521,14 @@ def snp_analysis_handler(job, work_dir: Optional[str] = None) -> None:
             )
 
         if reference:
-            logger.info(f"✅ Using reference genome from job metadata: {reference}")
+            logger.info(f"Using reference genome from job metadata: {reference}")
         else:
             logger.warning(
-                "❌ No reference genome in job metadata - will try to auto-detect"
+                "No reference genome in job metadata - will try to auto-detect"
             )
 
         # Run SNP analysis
-        logger.info("🚀 ABOUT TO CALL run_snp_analysis function")
+        logger.info("ABOUT TO CALL run_snp_analysis function")
         logger.info(
             f"Calling run_snp_analysis with: sample_dir={sample_dir}, threads={threads}, force_regenerate={force_regenerate}, reference={reference}"
         )

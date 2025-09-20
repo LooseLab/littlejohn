@@ -41,7 +41,7 @@ def install_workflow_hooks(
         _install_runner_hooks(workflow_runner, workflow_steps, monitored_directory)
         _install_manager_hooks(workflow_runner)
 
-        logging.info("✅ Workflow hooks installed for real-time GUI monitoring")
+        logging.info("Workflow hooks installed for real-time GUI monitoring")
     except Exception as exc:
         logging.error(f"Failed to install workflow hooks: {exc}")
         logging.info("GUI will run without real-time updates")

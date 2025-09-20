@@ -125,16 +125,16 @@ class LightweightGeneAnalysis:
 
     def _load_clinvar_data(self) -> None:
         """Load and index ClinVar pathogenic variants."""
-        print(f"📚 Loading ClinVar pathogenic variants from: {self.clinvar_path}")
+        print(f"Loading ClinVar pathogenic variants from: {self.clinvar_path}")
         self.logger.info("Loading ClinVar pathogenic variants...")
 
         if not self.clinvar_path.exists():
-            print(f"❌ ClinVar file not found: {self.clinvar_path}")
+            print(f"ClinVar file not found: {self.clinvar_path}")
             self.logger.warning(f"ClinVar file not found: {self.clinvar_path}")
             return
 
         try:
-            print("📖 Parsing ClinVar VCF file...")
+            print("Parsing ClinVar VCF file...")
             # Handle compressed VCF files properly
             if str(self.clinvar_path).endswith(".gz"):
                 import gzip
@@ -146,16 +146,16 @@ class LightweightGeneAnalysis:
                     self._parse_clinvar_vcf(vcf_file)
 
             print(
-                f"✅ Successfully loaded {len(self.clinvar_variants)} pathogenic variants from ClinVar"
+                f" Successfully loaded {len(self.clinvar_variants)} pathogenic variants from ClinVar"
             )
-            print(f"✅ Variants found for {len(self.gene_variants)} genes")
+            print(f"Variants found for {len(self.gene_variants)} genes")
             self.logger.info(
                 f"Loaded {len(self.clinvar_variants)} pathogenic variants from ClinVar"
             )
             self.logger.info(f"Variants found for {len(self.gene_variants)} genes")
 
         except Exception as e:
-            print(f"❌ Error loading ClinVar data: {e}")
+            print(f"Error loading ClinVar data: {e}")
             self.logger.error(f"Error loading ClinVar data: {e}")
             import traceback
 
@@ -166,7 +166,7 @@ class LightweightGeneAnalysis:
         pathogenic_count = 0
         total_lines = 0
 
-        print("   📖 Parsing VCF file line by line...")
+        print("   Parsing VCF file line by line...")
 
         for line_num, line in enumerate(vcf_file, 1):
             line = line.strip()
@@ -180,7 +180,7 @@ class LightweightGeneAnalysis:
             # Show progress every 10000 lines
             if total_lines % 10000 == 0:
                 print(
-                    f"   📊 Processed {total_lines:,} lines, found {pathogenic_count} pathogenic variants..."
+                    f"    Processed {total_lines:,} lines, found {pathogenic_count} pathogenic variants..."
                 )
 
             try:
@@ -240,12 +240,12 @@ class LightweightGeneAnalysis:
 
             except Exception as e:
                 if line_num < 100:  # Only log first 100 errors to avoid spam
-                    print(f"   ⚠️  Warning parsing line {line_num}: {e}")
+                    print(f"   Warning parsing line {line_num}: {e}")
                     self.logger.warning(f"Error parsing line {line_num}: {e}")
                 continue
 
         print(
-            f"   ✅ VCF parsing completed: {total_lines:,} total lines, {pathogenic_count} pathogenic variants found"
+            f"    VCF parsing completed: {total_lines:,} total lines, {pathogenic_count} pathogenic variants found"
         )
 
     def _is_pathogenic(self, record) -> bool:
@@ -316,7 +316,7 @@ class LightweightGeneAnalysis:
         Returns:
             Dictionary mapping region identifiers to GeneReport objects
         """
-        print("🔍 Starting lightweight analysis of BED regions...")
+        print("Starting lightweight analysis of BED regions...")
         self.logger.info("Starting lightweight analysis of BED regions")
 
         if not os.path.exists(bam_path):
@@ -325,27 +325,27 @@ class LightweightGeneAnalysis:
         if not os.path.exists(bed_path):
             raise FileNotFoundError(f"BED file not found: {bed_path}")
 
-        print(f"📁 BAM file: {bam_path}")
-        print(f"📁 BED file: {bed_path}")
+        print(f"BAM file: {bam_path}")
+        print(f"BED file: {bed_path}")
 
         # Load BED regions
-        print("📖 Loading BED regions...")
+        print("Loading BED regions...")
         bed_regions = self._load_bed_regions(bed_path)
-        print(f"✅ Loaded {len(bed_regions)} BED regions")
+        print(f"Loaded {len(bed_regions)} BED regions")
         self.logger.info(f"Loaded {len(bed_regions)} BED regions")
 
         # Find ClinVar variants that intersect with BED regions
-        print("🔍 Finding ClinVar variants intersecting with BED regions...")
+        print("Finding ClinVar variants intersecting with BED regions...")
         intersecting_variants = self._find_bed_clinvar_intersections(bed_regions)
         print(
-            f"✅ Found {len(intersecting_variants)} ClinVar variants intersecting with BED regions"
+            f" Found {len(intersecting_variants)} ClinVar variants intersecting with BED regions"
         )
         self.logger.info(
             f"Found {len(intersecting_variants)} ClinVar variants intersecting with BED regions"
         )
 
         # Group variants by region for analysis
-        print("📊 Grouping variants by region...")
+        print("Grouping variants by region...")
         region_variants = self._group_variants_by_region(
             intersecting_variants, bed_regions
         )
@@ -353,14 +353,14 @@ class LightweightGeneAnalysis:
         results = {}
         total_regions = len([r for r in region_variants.values() if r])
 
-        print(f"🚀 Starting analysis of {total_regions} regions with variants...")
+        print(f"Starting analysis of {total_regions} regions with variants...")
 
         for i, (region_id, variants) in enumerate(region_variants.items(), 1):
             if not variants:
                 continue
 
             print(
-                f"📊 [{i}/{total_regions}] Analyzing region '{region_id}' with {len(variants)} variants..."
+                f" [{i}/{total_regions}] Analyzing region '{region_id}' with {len(variants)} variants..."
             )
             self.logger.info(
                 f"Analyzing region {region_id} with {len(variants)} variants"
@@ -372,14 +372,14 @@ class LightweightGeneAnalysis:
                     bam_path, region_id, variants
                 )
                 results[region_id] = region_report
-                print(f"✅ Region '{region_id}' completed successfully")
+                print(f"Region '{region_id}' completed successfully")
 
             except Exception as e:
-                print(f"❌ Error analyzing region '{region_id}': {e}")
+                print(f"Error analyzing region '{region_id}': {e}")
                 self.logger.error(f"Error analyzing region {region_id}: {e}")
                 continue
 
-        print(f"🎉 Analysis completed! Successfully analyzed {len(results)} regions")
+        print(f"Analysis completed! Successfully analyzed {len(results)} regions")
         self.logger.info(f"Completed analysis of {len(results)} regions")
         return results
 
@@ -489,7 +489,7 @@ class LightweightGeneAnalysis:
         """Load BED regions from file."""
         regions = []
         try:
-            print(f"   📖 Reading BED file: {bed_path}")
+            print(f"   Reading BED file: {bed_path}")
             with open(bed_path, "r") as f:
                 for line_num, line in enumerate(f, 1):
                     line = line.strip()
@@ -512,17 +512,17 @@ class LightweightGeneAnalysis:
                         # Show first few regions for debugging
                         if line_num <= 5:
                             print(
-                                f"   📍 Region {line_num}: {region['chromosome']}:{region['start']}-{region['end']} '{region['name']}'"
+                                f"   Region {line_num}: {region['chromosome']}:{region['start']}-{region['end']} '{region['name']}'"
                             )
                         elif line_num == 6:
                             print(f"   ... and {len(regions) - 5} more regions")
 
-            print(f"   ✅ Successfully loaded {len(regions)} BED regions")
+            print(f"   Successfully loaded {len(regions)} BED regions")
             self.logger.info(f"Loaded {len(regions)} BED regions")
             return regions
 
         except Exception as e:
-            print(f"   ❌ Error loading BED file: {e}")
+            print(f"   Error loading BED file: {e}")
             self.logger.error(f"Error loading BED file: {e}")
             return []
 
@@ -534,11 +534,11 @@ class LightweightGeneAnalysis:
         total_variants = len(self.clinvar_variants)
 
         print(
-            f"   🔍 Checking {total_variants} ClinVar variants against {len(bed_regions)} BED regions..."
+            f"    Checking {total_variants} ClinVar variants against {len(bed_regions)} BED regions..."
         )
 
         # Show sample of BED regions for debugging
-        print("   📍 Sample BED regions:")
+        print("   Sample BED regions:")
         for i, region in enumerate(bed_regions[:3]):
             print(
                 f"      Region {i+1}: {region['chromosome']}:{region['start']:,}-{region['end']:,} '{region['name']}'"
@@ -564,7 +564,7 @@ class LightweightGeneAnalysis:
 
             # Show progress every 1000 variants
             if i % 1000 == 0:
-                print(f"   📊 Processed {i}/{total_variants} ClinVar variants...")
+                print(f"   Processed {i}/{total_variants} ClinVar variants...")
 
             # Check if this variant intersects with any BED region
             for region in bed_regions:
@@ -601,7 +601,7 @@ class LightweightGeneAnalysis:
                     # Show first few intersections for debugging
                     if len(intersecting_variants) <= 5:
                         print(
-                            f"   🎯 Found intersection: {chrom}:{pos:,} in region '{region['name']}' ({variant_info.get('gene_info', 'unknown')})"
+                            f"   Found intersection: {chrom}:{pos:,} in region '{region['name']}' ({variant_info.get('gene_info', 'unknown')})"
                         )
                         print(f"      Matched: {variant_chrom} ↔ {region_chrom}")
                     elif len(intersecting_variants) == 6:
@@ -612,7 +612,7 @@ class LightweightGeneAnalysis:
                     break  # Found intersection, move to next variant
 
         if not intersecting_variants:
-            print("   ⚠️  No intersections found! This might indicate:")
+            print("   No intersections found! This might indicate:")
             print("      • Coordinate system mismatch (e.g., 'chr1' vs '1')")
             print("      • Different genome builds (e.g., hg38 vs hg19)")
             print("      • BED regions outside ClinVar variant ranges")
@@ -622,7 +622,7 @@ class LightweightGeneAnalysis:
             bed_chroms = set(region["chromosome"] for region in bed_regions)
             clinvar_chroms = set(chrom for chrom, _ in self.clinvar_variants.keys())
 
-            print("   🔍 Coordinate system analysis:")
+            print("   Coordinate system analysis:")
             print(f"      BED chromosomes: {sorted(list(bed_chroms))[:10]}...")
             print(f"      ClinVar chromosomes: {sorted(list(clinvar_chroms))[:10]}...")
 
@@ -646,7 +646,7 @@ class LightweightGeneAnalysis:
                 print("      No obvious coordinate system matches found")
 
         print(
-            f"   ✅ Found {len(intersecting_variants)} ClinVar variants intersecting with BED regions"
+            f"    Found {len(intersecting_variants)} ClinVar variants intersecting with BED regions"
         )
         self.logger.info(
             f"Found {len(intersecting_variants)} ClinVar variants intersecting with BED regions"
@@ -749,23 +749,23 @@ class LightweightGeneAnalysis:
     ) -> List[Dict[str, Any]]:
         """Perform targeted pileup using pysam for a specific gene region."""
 
-        print(f"         📖 Opening BAM file: {bam_path}")
+        print(f"         Opening BAM file: {bam_path}")
 
         # Open BAM file
         try:
             bam_file = pysam.AlignmentFile(bam_path, "rb")
         except Exception as e:
-            print(f"         ❌ Error opening BAM file: {e}")
+            print(f"         Error opening BAM file: {e}")
             self.logger.error(f"Error opening BAM file {bam_path}: {e}")
             return []
 
         # Check if BAM file has an index
         try:
             bam_file.check_index()
-            print("         ✅ BAM file has valid index")
+            print("         BAM file has valid index")
         except Exception as e:
-            print(f"         ❌ BAM file missing or invalid index: {e}")
-            print(f"         💡 Try running: samtools index {bam_path}")
+            print(f"         BAM file missing or invalid index: {e}")
+            print(f"         Try running: samtools index {bam_path}")
             self.logger.error(f"BAM file missing index: {e}")
             bam_file.close()
             return []
@@ -789,7 +789,7 @@ class LightweightGeneAnalysis:
 
             # Check if chromosome exists in BAM
             if chrom_name not in bam_file.references:
-                print(f"         ❌ Chromosome {chrom_name} not found in BAM file")
+                print(f"         Chromosome {chrom_name} not found in BAM file")
                 self.logger.warning(
                     f"Chromosome {chrom_name} not found in BAM file. Available: {list(bam_file.references)[:5]}..."
                 )
@@ -800,7 +800,7 @@ class LightweightGeneAnalysis:
             end_pos = gene_coords["end"]
 
             print(
-                f"         📍 Analyzing region: {chrom_name}:{start_pos:,}-{end_pos:,}"
+                f"         Analyzing region: {chrom_name}:{start_pos:,}-{end_pos:,}"
             )
             self.logger.debug(
                 f"Analyzing pileup for {chrom_name}:{start_pos}-{end_pos}"
@@ -879,18 +879,18 @@ class LightweightGeneAnalysis:
 
                 # Log progress for large regions
                 if len(pileup_data) % 1000 == 0:
-                    print(f"         📊 Processed {len(pileup_data)} positions...")
+                    print(f"         Processed {len(pileup_data)} positions...")
                     self.logger.debug(f"Processed {len(pileup_data)} positions...")
 
             print(
-                f"         ✅ Pileup analysis completed: {len(pileup_data)} positions analyzed"
+                f"          Pileup analysis completed: {len(pileup_data)} positions analyzed"
             )
             self.logger.info(
                 f"Generated pileup data for {len(pileup_data)} positions in region {chrom_name}:{start_pos}-{end_pos}"
             )
 
         except Exception as e:
-            print(f"         ❌ Error during pileup analysis: {e}")
+            print(f"         Error during pileup analysis: {e}")
             self.logger.error(f"Error during pileup analysis: {e}")
             import traceback
 
@@ -1099,7 +1099,7 @@ class LightweightGeneAnalysis:
         if output_path is None:
             output_path = self.work_dir / "lightweight_gene_analysis_report.html"
 
-        print(f"         📊 Generating HTML report for {len(gene_reports)} regions...")
+        print(f"         Generating HTML report for {len(gene_reports)} regions...")
 
         # Convert to DataFrame for easy manipulation
         report_data = []
@@ -1127,7 +1127,7 @@ class LightweightGeneAnalysis:
         with open(output_path, "w") as f:
             f.write(html_content)
 
-        print(f"         ✅ HTML report generated: {output_path}")
+        print(f"         HTML report generated: {output_path}")
         self.logger.info(f"Generated report: {output_path}")
         return str(output_path)
 
@@ -1163,14 +1163,14 @@ class LightweightGeneAnalysis:
             </div>
             
             <div class="summary">
-                <h2>📊 Analysis Summary</h2>
+                <h2> Analysis Summary</h2>
                 <p><strong>Total Genes Analyzed:</strong> {len(gene_reports)}</p>
                 <p><strong>Genes with Pathogenic SNPs:</strong> {sum(1 for r in gene_reports.values() if r.pathogenic_snps_found > 0)}</p>
                 <p><strong>Total Pathogenic SNPs Found:</strong> {sum(r.pathogenic_snps_found for r in gene_reports.values())}</p>
                 <p><strong>Genes with Low Coverage (&lt;10x):</strong> {sum(1 for r in gene_reports.values() if r.mean_coverage < 10)}</p>
             </div>
             
-            <h2>🔍 Detailed Gene Analysis</h2>
+            <h2> Detailed Gene Analysis</h2>
         """
 
         # Group variants by gene for better reporting
@@ -1217,15 +1217,15 @@ class LightweightGeneAnalysis:
             # Determine coverage class and status
             if first_report.mean_coverage < 10:
                 coverage_class = "coverage-low"
-                coverage_status = "⚠️ LOW COVERAGE"
+                coverage_status = " LOW COVERAGE"
                 detail_class = "low-coverage"
             elif first_report.mean_coverage < 30:
                 coverage_class = "coverage-medium"
-                coverage_status = "⚠️ MEDIUM COVERAGE"
+                coverage_status = " MEDIUM COVERAGE"
                 detail_class = "gene-detail"
             else:
                 coverage_class = "coverage-high"
-                coverage_status = "✅ GOOD COVERAGE"
+                coverage_status = " GOOD COVERAGE"
                 detail_class = "gene-detail"
 
             # Determine pathogenic SNP status
@@ -1234,7 +1234,7 @@ class LightweightGeneAnalysis:
                 detail_class += " pathogenic-present"
             else:
                 pathogenic_status = (
-                    "✅ NO PATHOGENIC SNPS DETECTED (or all below coverage threshold)"
+                    " NO PATHOGENIC SNPS DETECTED (or all below coverage threshold)"
                 )
                 detail_class += " pathogenic-absent"
 
@@ -1261,7 +1261,7 @@ class LightweightGeneAnalysis:
                 low_coverage_group = [v for v in variants if v["coverage"] < 10]
 
                 if high_coverage_group:
-                    html += f"<h4>✅ High Coverage Variants (≥10x) - {len(high_coverage_group)} variants</h4>"
+                    html += f"<h4> High Coverage Variants (≥10x) - {len(high_coverage_group)} variants</h4>"
                     for variant_data in high_coverage_group:
                         variant = variant_data["variant"]
                         coverage = variant_data["coverage"]
@@ -1289,7 +1289,7 @@ class LightweightGeneAnalysis:
                         html += "</div>"
 
                 if low_coverage_group:
-                    html += f"<h4>⚠️ Low Coverage Variants (<10x) - {len(low_coverage_group)} variants</h4>"
+                    html += f"<h4> Low Coverage Variants (<10x) - {len(low_coverage_group)} variants</h4>"
                     html += "<p><em>These variants are excluded from detailed analysis due to insufficient coverage:</em></p>"
                     for variant_data in low_coverage_group:
                         variant = variant_data["variant"]
@@ -1303,7 +1303,7 @@ class LightweightGeneAnalysis:
                         </div>
                         """
             else:
-                html += "<p><strong>✅ No pathogenic variants detected in this gene</strong></p>"
+                html += "<p><strong> No pathogenic variants detected in this gene</strong></p>"
 
             html += "</div>"
 
@@ -1330,7 +1330,7 @@ class LightweightGeneAnalysis:
         if output_path is None:
             output_path = self.work_dir / "lightweight_gene_analysis_results.json"
 
-        print(f"         📊 Generating JSON report for {len(gene_reports)} regions...")
+        print(f"         Generating JSON report for {len(gene_reports)} regions...")
 
         # Group variants by gene for better JSON structure
         gene_variants = {}
@@ -1495,7 +1495,7 @@ class LightweightGeneAnalysis:
         with open(output_path, "w") as f:
             json.dump(json_data, f, indent=2, default=str)
 
-        print(f"         ✅ JSON report generated: {output_path}")
+        print(f"         JSON report generated: {output_path}")
         self.logger.info(f"Exported JSON report: {output_path}")
         return str(output_path)
 
@@ -1513,7 +1513,7 @@ def lightweight_gene_analysis_handler(job, work_dir: Optional[str] = None) -> No
     - reference: Path to reference genome (optional)
     - sample_id: Sample identifier (optional, will try to extract from job context)
     """
-    print("🚀 Starting Lightweight Gene Analysis Handler...")
+    print(" Starting Lightweight Gene Analysis Handler...")
     logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
 
     try:
@@ -1522,7 +1522,7 @@ def lightweight_gene_analysis_handler(job, work_dir: Optional[str] = None) -> No
         clinvar_path = job.context.metadata.get("clinvar_path")
         reference = job.context.metadata.get("reference")
 
-        print("📋 Job parameters:")
+        print(" Job parameters:")
         print(f"   - BED path: {bed_path}")
         print(f"   - ClinVar path: {clinvar_path}")
         print(f"   - Reference: {reference}")
@@ -1537,15 +1537,15 @@ def lightweight_gene_analysis_handler(job, work_dir: Optional[str] = None) -> No
         if hasattr(job.context, "get_sample_id"):
             try:
                 sample_id = job.context.get_sample_id()
-                print(f"🔧 Sample ID from context: {sample_id}")
+                print(f" Sample ID from context: {sample_id}")
             except Exception as e:
-                print(f"⚠️  Could not get sample ID from context: {e}")
+                print(f"  Could not get sample ID from context: {e}")
 
         # If no sample ID from context, try to extract from metadata or filepath
         if not sample_id:
             if "sample_id" in job.context.metadata:
                 sample_id = job.context.metadata["sample_id"]
-                print(f"🔧 Sample ID from metadata: {sample_id}")
+                print(f" Sample ID from metadata: {sample_id}")
             else:
                 # Try to extract from filepath
                 try:
@@ -1553,61 +1553,61 @@ def lightweight_gene_analysis_handler(job, work_dir: Optional[str] = None) -> No
                     if filepath:
                         # Extract the last part of the path as sample ID
                         sample_id = os.path.basename(filepath)
-                        print(f"🔧 Sample ID extracted from filepath: {sample_id}")
+                        print(f" Sample ID extracted from filepath: {sample_id}")
                 except Exception as e:
-                    print(f"⚠️  Could not extract sample ID from filepath: {e}")
+                    print(f"  Could not extract sample ID from filepath: {e}")
 
-        print(f"📁 Sample directory: {sample_dir}")
-        print(f"🔧 Sample ID: {sample_id}")
+        print(f" Sample directory: {sample_dir}")
+        print(f" Sample ID: {sample_id}")
 
         # Find the best available BAM file for analysis
         target_bam = None
 
         # ALWAYS prioritize igv_ready.bam from IGV folders first (these are properly indexed)
-        print("🔍 Searching for igv_ready.bam in IGV folders (priority 1)...")
+        print(" Searching for igv_ready.bam in IGV folders (priority 1)...")
 
         # Priority 1: Try igv_ready.bam from IGV folder in sample subdirectory (if sample_id is known)
         if sample_id:
             igv_bam = os.path.join(sample_dir, sample_id, "igv", "igv_ready.bam")
             if os.path.exists(igv_bam):
                 target_bam = igv_bam
-                print(f"✅ Found igv_ready.bam in sample IGV folder: {target_bam}")
+                print(f" Found igv_ready.bam in sample IGV folder: {target_bam}")
                 print(
-                    "🔧 This file should be properly indexed and ready for pileup analysis"
+                    " This file should be properly indexed and ready for pileup analysis"
                 )
             else:
-                print(f"🔍 igv_ready.bam not found at: {igv_bam}")
+                print(f" igv_ready.bam not found at: {igv_bam}")
 
         # Priority 2: Try igv_ready.bam from IGV folder in main directory
         if not target_bam:
             igv_bam = os.path.join(sample_dir, "igv", "igv_ready.bam")
             if os.path.exists(igv_bam):
                 target_bam = igv_bam
-                print(f"✅ Found igv_ready.bam in main IGV folder: {target_bam}")
+                print(f" Found igv_ready.bam in main IGV folder: {target_bam}")
                 print(
-                    "🔧 This file should be properly indexed and ready for pileup analysis"
+                    " This file should be properly indexed and ready for pileup analysis"
                 )
             else:
-                print(f"🔍 igv_ready.bam not found at: {igv_bam}")
+                print(f" igv_ready.bam not found at: {igv_bam}")
 
         # Priority 3: Search ALL subdirectories for igv_ready.bam (IGV files are priority)
         if not target_bam:
             print(
-                "🔍 No IGV igv_ready.bam found, searching all subdirectories for igv_ready.bam..."
+                " No IGV igv_ready.bam found, searching all subdirectories for igv_ready.bam..."
             )
             for root, dirs, files in os.walk(sample_dir):
                 if "igv_ready.bam" in files:
                     target_bam = os.path.join(root, "igv_ready.bam")
-                    print(f"✅ Found igv_ready.bam in subdirectory: {target_bam}")
+                    print(f" Found igv_ready.bam in subdirectory: {target_bam}")
                     print(
-                        "🔧 This file should be properly indexed and ready for pileup analysis"
+                        " This file should be properly indexed and ready for pileup analysis"
                     )
                     break
 
         # NO FALLBACK to target.bam - only use properly indexed IGV files
         if not target_bam:
-            print("❌ No igv_ready.bam found in any IGV folders or subdirectories")
-            print("🔍 Searched locations:")
+            print(" No igv_ready.bam found in any IGV folders or subdirectories")
+            print(" Searched locations:")
             if sample_id:
                 print(
                     f"   - {os.path.join(sample_dir, sample_id, 'igv', 'igv_ready.bam')}"
@@ -1626,8 +1626,8 @@ def lightweight_gene_analysis_handler(job, work_dir: Optional[str] = None) -> No
         # Check if BAM file has an index
         bam_index = target_bam + ".bai"
         if not os.path.exists(bam_index):
-            print(f"⚠️  BAM file {target_bam} has no index (.bai file)")
-            print("🔧 Attempting to create index using samtools...")
+            print(f"  BAM file {target_bam} has no index (.bai file)")
+            print(" Attempting to create index using samtools...")
 
             try:
                 import subprocess
@@ -1639,13 +1639,13 @@ def lightweight_gene_analysis_handler(job, work_dir: Optional[str] = None) -> No
                     timeout=300,
                 )
                 if result.returncode == 0:
-                    print("✅ Successfully created BAM index")
+                    print(" Successfully created BAM index")
                 else:
-                    print(f"❌ Failed to create BAM index: {result.stderr}")
-                    print("⚠️  Analysis may fail due to missing index")
+                    print(f" Failed to create BAM index: {result.stderr}")
+                    print("  Analysis may fail due to missing index")
             except Exception as e:
-                print(f"❌ Error creating BAM index: {e}")
-                print("⚠️  Analysis may fail due to missing index")
+                print(f" Error creating BAM index: {e}")
+                print("  Analysis may fail due to missing index")
 
         # Find BED file if not specified
         if not bed_path:
@@ -1655,9 +1655,9 @@ def lightweight_gene_analysis_handler(job, work_dir: Optional[str] = None) -> No
                     sample_dir, sample_id, "targets_exceeding_threshold.bed"
                 )
                 if os.path.exists(bed_path):
-                    print(f"✅ Found BED file in sample subdirectory: {bed_path}")
+                    print(f" Found BED file in sample subdirectory: {bed_path}")
                 else:
-                    print(f"🔍 BED file not found at: {bed_path}")
+                    print(f" BED file not found at: {bed_path}")
                     bed_path = None
             else:
                 bed_path = os.path.join(sample_dir, "targets_exceeding_threshold.bed")
@@ -1665,19 +1665,19 @@ def lightweight_gene_analysis_handler(job, work_dir: Optional[str] = None) -> No
         if not bed_path or not os.path.exists(bed_path):
             # Try to find targets_exceeding_threshold.bed in subdirectories
             print(
-                "🔍 targets_exceeding_threshold.bed not found, searching subdirectories..."
+                " targets_exceeding_threshold.bed not found, searching subdirectories..."
             )
             for root, dirs, files in os.walk(sample_dir):
                 if "targets_exceeding_threshold.bed" in files:
                     bed_path = os.path.join(root, "targets_exceeding_threshold.bed")
-                    print(f"✅ Found BED file in subdirectory: {bed_path}")
+                    print(f" Found BED file in subdirectory: {bed_path}")
                     break
             else:
                 raise FileNotFoundError(
                     f"targets_exceeding_threshold.bed not found in {sample_dir} or any subdirectories"
                 )
         else:
-            print(f"✅ Found BED file: {bed_path}")
+            print(f" Found BED file: {bed_path}")
 
         # Use default ClinVar path if not specified
         if not clinvar_path:
@@ -1688,7 +1688,7 @@ def lightweight_gene_analysis_handler(job, work_dir: Optional[str] = None) -> No
                 "clinvar.vcf.gz",
             )
 
-        print(f"📚 ClinVar path: {clinvar_path}")
+        print(f" ClinVar path: {clinvar_path}")
 
         logger.info("Starting lightweight gene analysis for BED regions")
         logger.info(f"Target BAM: {target_bam}")
@@ -1696,19 +1696,19 @@ def lightweight_gene_analysis_handler(job, work_dir: Optional[str] = None) -> No
         logger.info(f"ClinVar path: {clinvar_path}")
 
         # Initialize analysis
-        print("🔧 Initializing LightweightGeneAnalysis...")
+        print(" Initializing LightweightGeneAnalysis...")
         analysis = LightweightGeneAnalysis(
             work_dir=sample_dir, clinvar_path=clinvar_path, reference=reference
         )
 
         # Perform analysis using BED regions
-        print("🚀 Starting BED region analysis...")
+        print(" Starting BED region analysis...")
 
         results = analysis.analyze_bed_regions(target_bam, bed_path)
 
         if not results:
             print(
-                "⚠️  No regions were successfully analyzed - this may indicate no ClinVar variants intersect with your BED regions"
+                "  No regions were successfully analyzed - this may indicate no ClinVar variants intersect with your BED regions"
             )
             logger.warning(
                 "No regions were successfully analyzed - this may indicate no ClinVar variants intersect with your BED regions"
@@ -1717,7 +1717,7 @@ def lightweight_gene_analysis_handler(job, work_dir: Optional[str] = None) -> No
             results = {}
 
         # Generate JSON report
-        print("📊 Generating JSON report...")
+        print(" Generating JSON report...")
 
         # Determine the correct output directory for the sample
         if sample_id:
@@ -1732,7 +1732,7 @@ def lightweight_gene_analysis_handler(job, work_dir: Optional[str] = None) -> No
             results, os.path.join(output_dir, "lightweight_gene_analysis_results.json")
         )
 
-        print("✅ JSON report generated:")
+        print(" JSON report generated:")
         print(f"   - JSON: {json_report}")
 
         # Record results
@@ -1752,9 +1752,9 @@ def lightweight_gene_analysis_handler(job, work_dir: Optional[str] = None) -> No
         except Exception:
             pass
 
-        print("🎉 Lightweight gene analysis completed successfully!")
+        print(" Lightweight gene analysis completed successfully!")
         print(
-            f"📊 Analyzed {len(results)} regions, found {sum(r.pathogenic_snps_found for r in results.values())} pathogenic SNPs"
+            f" Analyzed {len(results)} regions, found {sum(r.pathogenic_snps_found for r in results.values())} pathogenic SNPs"
         )
         logger.info("Lightweight gene analysis completed successfully")
         logger.info(
@@ -1762,7 +1762,7 @@ def lightweight_gene_analysis_handler(job, work_dir: Optional[str] = None) -> No
         )
 
     except Exception as e:
-        print(f"❌ Lightweight gene analysis handler failed: {e}")
+        print(f" Lightweight gene analysis handler failed: {e}")
         job.context.add_error("lightweight_gene_analysis", str(e))
         logger.error(f"Lightweight gene analysis handler failed: {e}")
         raise

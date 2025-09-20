@@ -1156,9 +1156,9 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
         # IGV control buttons
         with ui.row().classes("items-center gap-2 mt-2"):
-            ui.button("🔄 Refresh IGV Check", on_click=_refresh_igv_check)
-            ui.button("🗂️ Clear Data Tracks", on_click=_clear_igv_tracks)
-            ui.button("📁 Reload BAM", on_click=_reload_bam_track)
+            ui.button("Refresh IGV Check", on_click=_refresh_igv_check)
+            ui.button("Clear Data Tracks", on_click=_clear_igv_tracks)
+            ui.button("Reload BAM", on_click=_reload_bam_track)
 
         # Add IGV library status check timer once after a delay
         ui.timer(3.0, _check_igv_library, once=True)
@@ -1827,7 +1827,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                     if not target_bam.exists():
                         snp_files_status.set_text(
-                            "❌ Missing target.bam - run target analysis first"
+                            " Missing target.bam - run target analysis first"
                         )
                         snp_files_status.classes(replace="text-xs text-red-500")
                         snp_analysis_button.disable()
@@ -1835,7 +1835,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                     if not targets_bed.exists():
                         snp_files_status.set_text(
-                            "❌ Missing targets_exceeding_threshold.bed - run target analysis first"
+                            " Missing targets_exceeding_threshold.bed - run target analysis first"
                         )
                         snp_files_status.classes(replace="text-xs text-red-500")
                         snp_analysis_button.disable()
@@ -1860,13 +1860,13 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             return True
 
                     except Exception as e:
-                        snp_files_status.set_text(f"❌ Error reading BED file: {e}")
+                        snp_files_status.set_text(f" Error reading BED file: {e}")
                         snp_files_status.classes(replace="text-xs text-red-500")
                         snp_analysis_button.disable()
                         return False
 
                 except Exception as e:
-                    snp_files_status.set_text(f"❌ Error checking files: {e}")
+                    snp_files_status.set_text(f" Error checking files: {e}")
                     snp_files_status.classes(replace="text-xs text-red-500")
                     snp_analysis_button.disable()
                     return False
@@ -1965,14 +1965,14 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                         )
                                     else:
                                         print(
-                                            "❌ FAILED: No reference genome in workflow runner"
+                                            " FAILED: No reference genome in workflow runner"
                                         )
                                 else:
-                                    print("❌ Workflow runner has no reference attribute")
+                                    print(" Workflow runner has no reference attribute")
                             else:
-                                print("❌ Workflow runner is None")
+                                print(" Workflow runner is None")
                         else:
-                            print("❌ No workflow runner attribute found")
+                            print(" No workflow runner attribute found")
 
                         print("=== END REFERENCE GENOME DEBUGGING ===")
 
@@ -2298,8 +2298,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             ).classes("flex-1")
 
                             # Add debug info
-                            print(f"🔧 GUI: Created view button with path: {json_report}")
-                            print(f"🔧 GUI: Button object: {view_button}")
+                            print(f" GUI: Created view button with path: {json_report}")
+                            print(f" GUI: Button object: {view_button}")
 
                     # Update button state
                     lga_analysis_button.set_text("Rerun Variant Analysis")
@@ -2310,17 +2310,17 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     try:
                         import json
 
-                        print(f"🔧 GUI: Function called with path: {json_path}")
-                        print(f"🔧 GUI: Path type: {type(json_path)}")
+                        print(f" GUI: Function called with path: {json_path}")
+                        print(f" GUI: Path type: {type(json_path)}")
 
                         # Convert to Path object if it's a string
                         if isinstance(json_path, str):
                             json_path = Path(json_path)
 
-                        print(f"🔧 GUI: Attempting to load JSON from: {json_path}")
-                        print(f"🔧 GUI: File exists: {json_path.exists()}")
+                        print(f" GUI: Attempting to load JSON from: {json_path}")
+                        print(f" GUI: File exists: {json_path.exists()}")
                         print(
-                            f"🔧 GUI: File size: {json_path.stat().st_size if json_path.exists() else 'N/A'} bytes"
+                            f" GUI: File size: {json_path.stat().st_size if json_path.exists() else 'N/A'} bytes"
                         )
 
                         # Read and parse JSON
@@ -2328,7 +2328,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             data = json.load(f)
 
                         print(
-                            f"🔧 GUI: Successfully loaded JSON with {len(data.get('genes', {}))} genes"
+                            f" GUI: Successfully loaded JSON with {len(data.get('genes', {}))} genes"
                         )
 
                         # Clear previous results and display inline
@@ -2413,7 +2413,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                     on_click=lambda: _hide_lga_results(),
                                 ).props("color=secondary")
 
-                        print("🔧 GUI: Results displayed inline successfully")
+                        print(" GUI: Results displayed inline successfully")
 
                     except Exception as e:
                         ui.notify(f"Error viewing results: {e}", type="error")
@@ -2426,7 +2426,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 def _hide_lga_results():
                     """Hide the inline results and restore the original simple view"""
                     try:
-                        print("🔧 GUI: Hiding results...")
+                        print(" GUI: Hiding results...")
 
                         # Clear the results container
                         lga_results_container.clear()
@@ -2460,10 +2460,10 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                     ),
                                 ).classes("flex-1")
 
-                        print("🔧 GUI: Results hidden successfully")
+                        print(" GUI: Results hidden successfully")
 
                     except Exception as e:
-                        print(f"🔧 GUI: Error hiding results: {e}")
+                        print(f" GUI: Error hiding results: {e}")
                         import traceback
 
                         traceback.print_exc()
@@ -3221,7 +3221,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                 if not target_bam.exists():
                     lga_files_status.set_text(
-                        "❌ Missing target.bam - run target analysis first"
+                        " Missing target.bam - run target analysis first"
                     )
                     lga_files_status.classes(replace="text-xs text-red-500")
                     lga_analysis_button.disable()
@@ -3229,7 +3229,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                 if not targets_bed.exists():
                     lga_files_status.set_text(
-                        "❌ Missing targets_exceeding_threshold.bed - run target analysis first"
+                        " Missing targets_exceeding_threshold.bed - run target analysis first"
                     )
                     lga_files_status.classes(replace="text-xs text-red-500")
                     lga_analysis_button.disable()
@@ -3254,13 +3254,13 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         return True
 
                 except Exception as e:
-                    lga_files_status.set_text(f"❌ Error reading BED file: {e}")
+                    lga_files_status.set_text(f" Error reading BED file: {e}")
                     lga_files_status.classes(replace="text-xs text-red-500")
                     lga_analysis_button.disable()
                     return False
 
             except Exception as e:
-                lga_files_status.set_text(f"❌ Error checking files: {e}")
+                lga_files_status.set_text(f" Error checking files: {e}")
                 lga_files_status.classes(replace="text-xs text-red-500")
                 lga_analysis_button.disable()
                 return False
@@ -3313,12 +3313,12 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 lga_status_label.set_text("Starting lightweight variant analysis...")
                 lga_status_label.classes(replace="text-sm text-blue-600")
 
-                print("🔧 GUI: Starting lightweight variant analysis...")
+                print(" GUI: Starting lightweight variant analysis...")
 
                 # Create and submit lightweight variant analysis job
                 try:
                     # Import required modules
-                    print("🔧 GUI: Importing required modules...")
+                    print(" GUI: Importing required modules...")
                     from robin.analysis.lightweight_gene_analysis import (
                         lightweight_gene_analysis_handler,
                     )
@@ -3340,7 +3340,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         if env_reference and os.path.exists(env_reference):
                             reference_genome = env_reference
 
-                    print(f"🔧 GUI: Reference genome: {reference_genome}")
+                    print(f" GUI: Reference genome: {reference_genome}")
 
                     # Use monitored_directory as work_dir, or fall back to sample_dir if not available
                     work_dir = (
@@ -3348,7 +3348,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         if launcher.monitored_directory
                         else str(sample_dir)
                     )
-                    print(f"🔧 GUI: Work directory: {work_dir}")
+                    print(f" GUI: Work directory: {work_dir}")
 
                     metadata = {
                         "work_dir": work_dir,
@@ -3357,10 +3357,10 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         "force_regenerate": lga_force_regenerate_checkbox.value,
                     }
 
-                    print(f"🔧 GUI: Job metadata: {metadata}")
+                    print(f" GUI: Job metadata: {metadata}")
 
                     # Create workflow context
-                    print("🔧 GUI: Creating workflow context...")
+                    print(" GUI: Creating workflow context...")
                     context = WorkflowContext(
                         filepath=str(sample_dir), metadata=metadata
                     )
@@ -3374,7 +3374,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     context.add_error = lambda key, value: None  # Mock for now
 
                     # Create job
-                    print("🔧 GUI: Creating job object...")
+                    print(" GUI: Creating job object...")
                     job = Job(
                         job_id=hash(f"lightweight_gene_analysis_{sample_dir.name}")
                         % 1000000,  # Simple hash-based ID
@@ -3384,11 +3384,11 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         workflow=["fast:lightweight_gene_analysis"],
                     )
 
-                    print(f"🔧 GUI: Job created with ID: {job.job_id}")
+                    print(f" GUI: Job created with ID: {job.job_id}")
 
                     # For now, let's force direct execution to see our debug prints
                     # TODO: Re-enable workflow submission once we understand how it works
-                    print("🔧 Forcing direct execution to see debug output...")
+                    print(" Forcing direct execution to see debug output...")
 
                     # Use a shared variable to communicate between threads
                     lga_status = {"status": "running", "message": "", "error": None}
@@ -3396,7 +3396,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     def run_lga_analysis_direct():
                         try:
                             print(
-                                "🚀 Starting lightweight gene analysis in background thread..."
+                                "Starting lightweight gene analysis in background thread..."
                             )
                             # Use the work_dir variable we calculated earlier
                             lightweight_gene_analysis_handler(job, work_dir=work_dir)
@@ -3411,7 +3411,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             )
 
                         except Exception as e:
-                            print(f"❌ Error in background thread: {e}")
+                            print(f" Error in background thread: {e}")
                             lga_status["status"] = "error"
                             lga_status["error"] = str(e)
 
@@ -3435,7 +3435,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 lga_analysis_button.set_text("Rerun Variant Analysis")
                                 lga_analysis_button.props("color=secondary")
                             except Exception as e:
-                                print(f"❌ Error updating UI: {e}")
+                                print(f" Error updating UI: {e}")
                             return False  # Stop checking
                         elif lga_status["status"] == "error":
                             try:
@@ -3445,7 +3445,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 lga_status_label.classes(replace="text-sm text-red-600")
                                 lga_analysis_button.enable()
                             except Exception as e:
-                                print(f"❌ Error updating UI: {e}")
+                                print(f" Error updating UI: {e}")
                             return False  # Stop checking
                         return True  # Keep checking
 

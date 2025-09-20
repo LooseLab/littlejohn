@@ -362,11 +362,15 @@ def _check_read_alignments_overlap(read_rows: List[Dict]) -> bool:
             genomic_alignments[genomic_key] = []
         genomic_alignments[genomic_key].append(row)
     
-    # If any genomic alignment has multiple gene annotations, it's a false positive
+    # Only filter out if we have the EXACT same genomic coordinates with different genes
+    # This is more restrictive - only remove true mapping artifacts
     for genomic_key, alignments in genomic_alignments.items():
         if len(alignments) > 1:
-            # Same genomic coordinates with multiple gene annotations = false positive
-            return True
+            # Check if all alignments have the same gene annotation
+            genes = [align['col4'] for align in alignments]
+            if len(set(genes)) > 1:
+                # Same genomic coordinates with different gene annotations = false positive
+                return True
     
     return False
 
@@ -499,8 +503,8 @@ def _process_reads_for_fusions(
     # Apply memory optimizations
     df = _optimize_fusion_dataframe(df)
 
-    # Apply filtering thresholds: MQ > 40, span > 100
-    df = df[(df["mapping_quality"] > 40) & (df["mapping_span"] > 100)].reset_index(
+    # Apply filtering thresholds: MQ > 20, span > 50 (more permissive)
+    df = df[(df["mapping_quality"] > 20) & (df["mapping_span"] > 50)].reset_index(
         drop=True
     )
 
@@ -1209,8 +1213,8 @@ def preprocess_fusion_data_standalone(
 ) -> None:
     """Standalone version of fusion data preprocessing for CPU-bound execution with memory optimization.
     
-    Applies strict filtering to require at least 3 supporting reads per gene pair
-    to ensure reliable fusion detection and reduce false positives.
+    Applies filtering to require at least 3 supporting reads per gene pair
+    to ensure reliable fusion detection while maintaining quality control.
     """
     try:
         # Apply categorical data types for efficiency

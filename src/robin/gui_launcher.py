@@ -11,6 +11,10 @@ import warnings
 warnings.filterwarnings(
     "ignore", message="pkg_resources is deprecated", category=UserWarning
 )
+# Suppress matplotlib tight_layout warnings
+warnings.filterwarnings(
+    "ignore", message="The figure layout has changed to tight", category=UserWarning
+)
 
 import threading
 import time
@@ -606,7 +610,7 @@ class GUILauncher:
                 favicon=iconfile,
             )
         except Exception as e:
-            print(f"❌ GUI worker error: {e}")
+            print(f"GUI worker error: {e}")
             import traceback
 
             traceback.print_exc()
@@ -651,20 +655,20 @@ class GUILauncher:
 
                         # Action buttons - responsive grid layout
                         with ui.grid(columns=2).classes("w-full gap-4 mb-8"):
-                            ui.link("📊 View All Samples", "/live_data").classes(
+                            ui.link("View All Samples", "/live_data").classes(
                                 "bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors text-center"
                             )
-                            ui.link("📊 Open Workflow Monitor", "/robin").classes(
+                            ui.link("Open Workflow Monitor", "/robin").classes(
                                 "bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors text-center"
                             )
                             ui.button(
-                                "🚀 Launch New Workflow",
+                                "Launch New Workflow",
                                 on_click=lambda: self._launch_workflow_button_clicked(),
                             ).classes(
                                 "bg-green-600 hover:bg-green-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors"
                             )
                             ui.link(
-                                "📋 View Documentation",
+                                "View Documentation",
                                 "https://looselab.github.io/ROBIN/",
                             ).classes(
                                 "bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors text-center"
@@ -697,7 +701,7 @@ class GUILauncher:
                 with ui.card().classes(
                     "w-full bg-gradient-to-r from-blue-50 to-indigo-50"
                 ):
-                    ui.label("📊 Sample Statistics").classes(
+                    ui.label("Sample Statistics").classes(
                         "text-lg font-semibold mb-4 text-blue-800"
                     )
 
@@ -709,11 +713,11 @@ class GUILauncher:
                 # Samples table
                 with ui.card().classes("w-full"):
                     with ui.row().classes("w-full items-center justify-between mb-4"):
-                        ui.label("📋 All Tracked Samples").classes(
+                        ui.label("All Tracked Samples").classes(
                             "text-lg font-semibold"
                         )
                         #ui.button(
-                        #    "🔄 Refresh All Plots",
+                        #    "Refresh All Plots",
                         #    on_click=lambda: self._refresh_all_sample_plots(),
                         #).classes("q-btn--secondary")
 
@@ -1749,7 +1753,7 @@ class GUILauncher:
 
                         # Files in output directory
                         with ui.card().classes("w-full"):
-                            ui.label("📁 Output Files").classes(
+                            ui.label("Output Files").classes(
                                 "text-lg font-semibold mb-2"
                             )
                             with ui.row().classes("items-center gap-3 mb-2"):
@@ -1793,7 +1797,7 @@ class GUILauncher:
 
                         # master.csv summary
                         with ui.card().classes("w-full"):
-                            ui.label("📊 master.csv Summary").classes(
+                            ui.label("master.csv Summary").classes(
                                 "text-lg font-semibold mb-2"
                             )
                             with ui.row().classes("items-center gap-3 mb-2"):
@@ -1949,7 +1953,7 @@ class GUILauncher:
             # Page title and navigation
             with ui.row().classes("w-full p-4 items-center justify-between"):
                 with ui.row().classes("items-center"):
-                    ui.label("📊 robin Workflow Monitor").classes("text-2xl font-bold")
+                    ui.label("robin Workflow Monitor").classes("text-2xl font-bold")
                     ui.label("Real-time workflow monitoring and control").classes(
                         "text-sm ml-4 opacity-80"
                     )
@@ -1960,7 +1964,7 @@ class GUILauncher:
                 with ui.card().classes(
                     "w-full bg-gradient-to-r from-blue-50 to-indigo-50"
                 ):
-                    ui.label("🚀 Workflow Status Overview").classes(
+                    ui.label("Workflow Status Overview").classes(
                         "text-lg font-semibold mb-4 text-blue-800"
                     )
 
@@ -2010,13 +2014,13 @@ class GUILauncher:
 
                 # Queue Status
                 with ui.card().classes("w-full"):
-                    ui.label("📋 Queue Status").classes("text-lg font-semibold mb-4")
+                    ui.label("Queue Status").classes("text-lg font-semibold mb-4")
 
                     # Queue status grid
                     with ui.grid(columns=4).classes("w-full gap-4"):
                         # Preprocessing
                         with ui.card().classes("bg-green-50 p-4"):
-                            ui.label("🔬 Preprocessing").classes(
+                            ui.label("Preprocessing").classes(
                                 "text-sm font-medium text-green-800"
                             )
                             self.preprocessing_status = ui.label("0/0").classes(
@@ -2034,7 +2038,7 @@ class GUILauncher:
 
                         # Classification
                         with ui.card().classes("bg-purple-50 p-4"):
-                            ui.label("🎯 Classification").classes(
+                            ui.label("Classification").classes(
                                 "text-sm font-medium text-purple-800"
                             )
                             self.classification_status = ui.label("0/0").classes(
@@ -2043,7 +2047,7 @@ class GUILauncher:
 
                         # Other
                         with ui.card().classes("bg-gray-50 p-4"):
-                            ui.label("⚙️ Other").classes(
+                            ui.label("Other").classes(
                                 "text-sm font-medium text-gray-800"
                             )
                             self.other_status = ui.label("0/0").classes(
@@ -2059,7 +2063,7 @@ class GUILauncher:
 
                 # Active Jobs
                 with ui.card().classes("w-full"):
-                    ui.label("⚡ Active Jobs").classes("text-lg font-semibold mb-4")
+                    ui.label("Active Jobs").classes("text-lg font-semibold mb-4")
 
                     with ui.row().classes("items-center gap-3 mb-2"):
                         self.active_jobs_search = ui.input("Search…").props(
@@ -2152,7 +2156,7 @@ class GUILauncher:
 
                 # Live Logs
                 with ui.card().classes("w-full"):
-                    ui.label("📝 Live Logs").classes("text-lg font-semibold mb-4")
+                    ui.label("Live Logs").classes("text-lg font-semibold mb-4")
 
                     # Log controls
                     with ui.row().classes("w-full justify-between items-center mb-2"):
@@ -2175,7 +2179,7 @@ class GUILauncher:
 
                 # Configuration
                 with ui.card().classes("w-full"):
-                    ui.label("⚙️ Workflow Configuration").classes(
+                    ui.label("Workflow Configuration").classes(
                         "text-lg font-semibold mb-4"
                     )
 
@@ -2209,7 +2213,7 @@ class GUILauncher:
 
                 # Error Summary & Troubleshooting
                 with ui.card().classes("w-full"):
-                    ui.label("⚠️ Error Summary & Troubleshooting").classes(
+                    ui.label("Error Summary & Troubleshooting").classes(
                         "text-lg font-semibold mb-2"
                     )
 
@@ -2722,16 +2726,16 @@ if __name__ == "__main__":
     if args.monitored_directory:
         monitored_path = Path(args.monitored_directory)
         if not monitored_path.exists():
-            print(f"❌ Error: Directory '{args.monitored_directory}' does not exist")
+            print(f"Error: Directory '{args.monitored_directory}' does not exist")
             sys.exit(1)
         if not monitored_path.is_dir():
-            print(f"❌ Error: '{args.monitored_directory}' is not a directory")
+            print(f"Error: '{args.monitored_directory}' is not a directory")
             sys.exit(1)
-        print(f"📁 Will monitor: {monitored_path.resolve()}")
+        print(f"Will monitor: {monitored_path.resolve()}")
 
     try:
         # Create and launch GUI directly to avoid relative import issues
-        print("🚀 Creating GUI launcher...")
+        print("Creating GUI launcher...")
 
         # Create the GUI launcher directly
         launcher = GUILauncher(
@@ -2744,8 +2748,8 @@ if __name__ == "__main__":
         if args.monitored_directory:
             launcher.monitored_directory = str(Path(args.monitored_directory).resolve())
 
-        print(f"🚀 Launching full GUI on http://{args.host}:{args.port}")
-        print("💡 Use Ctrl+C to stop the GUI")
+        print(f"Launching full GUI on http://{args.host}:{args.port}")
+        print("Use Ctrl+C to stop the GUI")
 
         # Launch the GUI directly
         success = launcher.launch_gui(
@@ -2755,9 +2759,9 @@ if __name__ == "__main__":
         )
 
         if success:
-            print("✅ GUI launched successfully!")
+            print("GUI launched successfully!")
             print("🌐 Open your browser to the URL above")
-            print("💡 Press Ctrl+C to stop the GUI")
+            print("Press Ctrl+C to stop the GUI")
 
             # Keep the main thread alive while GUI runs
             try:
@@ -2766,15 +2770,15 @@ if __name__ == "__main__":
             except KeyboardInterrupt:
                 print("\n🛑 Shutting down GUI...")
                 launcher.stop_gui()
-                print("👋 GUI stopped")
+                print("GUI stopped")
         else:
-            print("❌ Failed to launch GUI")
+            print("Failed to launch GUI")
             sys.exit(1)
 
     except KeyboardInterrupt:
-        print("\n👋 GUI stopped by user")
+        print("\nGUI stopped by user")
     except Exception as e:
-        print(f"❌ GUI failed to start: {e}")
+        print(f"GUI failed to start: {e}")
         import traceback
 
         traceback.print_exc()

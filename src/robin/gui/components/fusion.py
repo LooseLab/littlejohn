@@ -23,6 +23,17 @@ except ImportError:
     DNA_FEATURES_AVAILABLE = False
     logging.warning("DNA Features Viewer not available - using fallback visualization")
 
+    
+# Import chrov for chromosome ideograms
+try:
+    import chrov
+    from chrov.viz.annot import annot_chroms
+    from chrov.viz.plot import plot_seaborn
+    from chrov.viz.figure import plot_with_chroms
+    CHROV_AVAILABLE = True
+except ImportError:
+    CHROV_AVAILABLE = False
+    logging.warning("chrov not available - ideograms will not be displayed")
 
 try:
     from nicegui import ui
@@ -146,8 +157,8 @@ def _plot_gene_group(
         # Clear container and create advanced visualization
         container.clear()
         with container:
-            # Create matplotlib element for the sophisticated plot
-            mpl_element = ui.matplotlib(figsize=(19, 5)).classes("w-full")
+            # Create matplotlib element for the sophisticated plot with ideograms
+            mpl_element = ui.matplotlib(figsize=(19, 8)).classes("w-full")
 
             # Create the advanced fusion plot
             fig = _create_advanced_fusion_plot(
@@ -200,14 +211,15 @@ def _create_advanced_fusion_plot(
     if len(unique_genes) == 0:
         return _create_simple_fallback_plot(gene_group, subset)
 
-    # Create the unified side-by-side layout like the original code
-    # For 2 genes, we'll create 2 columns with 2 rows each (gene structure + read mapping)
+    # Create the unified side-by-side layout with chrov ideograms
+    # For 2 genes, we'll create 2 columns with 3 rows each (ideogram + gene structure + read mapping)
     num_genes = len(unique_genes)
-    fig, axes = plt.subplots(2, num_genes, figsize=(19, 5))
+    logging.info(f"[Fusion] Creating {num_genes} gene layout with 3 rows (chrov ideogram + gene structure + read mapping)")
+    fig, axes = plt.subplots(3, num_genes, figsize=(19, 8))
 
     # Handle single gene case
     if num_genes == 1:
-        axes = axes.reshape(2, 1)
+        axes = axes.reshape(3, 1)
 
     # Process each gene
     for col_idx, gene_name in enumerate(unique_genes):
@@ -221,14 +233,20 @@ def _create_advanced_fusion_plot(
         gene_end = gene_data["reference_end"].max()
         gene_chrom = gene_data["reference_id"].iloc[0]
 
-        # Row 0: Gene structure with DNA Features Viewer (exactly as original)
-        ax_gene = axes[0, col_idx]
+        # Row 0: Chromosome ideogram using chrov
+        ax_ideogram = axes[0, col_idx]
+        logging.info(f"[Fusion] Creating chrov ideogram axis for {gene_name} on {gene_chrom}")
+        logging.info(f"[Fusion] Gene coordinates: {gene_start:,} - {gene_end:,}")
+        _plot_chromosome_ideogram_chrov(ax_ideogram, gene_chrom, gene_start, gene_end)
+
+        # Row 1: Gene structure with DNA Features Viewer
+        ax_gene = axes[1, col_idx]
         _plot_gene_structure_with_dna_features(
             ax_gene, gene_name, gene_chrom, gene_start, gene_end, gene_table
         )
 
-        # Row 1: Read mapping visualization (exactly as original)
-        ax_reads = axes[1, col_idx]
+        # Row 2: Read mapping visualization
+        ax_reads = axes[2, col_idx]
         _plot_read_mapping_sophisticated(
             ax_reads, gene_data, gene_name, gene_chrom, gene_start, gene_end
         )
@@ -238,7 +256,7 @@ def _create_advanced_fusion_plot(
         plt.tight_layout()
     except Exception:
         # Fallback to manual adjustment if tight_layout fails
-        plt.subplots_adjust(hspace=0.4, wspace=0.3)
+        plt.subplots_adjust(hspace=0.3, wspace=0.3)
 
     # Add overall title
     fig.suptitle(
@@ -246,6 +264,100 @@ def _create_advanced_fusion_plot(
     )
 
     return fig
+
+
+def _plot_chromosome_ideogram_chrov(ax: plt.Axes, chrom: str, start: int, end: int) -> None:
+    """Plot a chromosome ideogram using chrov with local cytoband data."""
+    logging.info(f"[Fusion] Plotting chrov ideogram for {chrom} at {start}-{end}")
+    
+    if not CHROV_AVAILABLE:
+        logging.warning(f"[Fusion] chrov not available, using fallback for {chrom}")
+        # Fallback: simple chromosome representation
+        ax.text(0.5, 0.5, f"Chromosome {chrom}\n{start:,}-{end:,}", 
+                transform=ax.transAxes, ha="center", va="center",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray", alpha=0.7))
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.axis('off')
+        return
+    
+    try:
+        # Load cytoband data
+        cytoband_path = "src/robin/resources/cytoBand.txt"
+        if not os.path.exists(cytoband_path):
+            logging.warning(f"[Fusion] Cytoband file not found at {cytoband_path}")
+            raise FileNotFoundError("Cytoband file not found")
+        
+        # Read cytoband data
+        cytobands = pd.read_csv(cytoband_path, sep='\t', header=None, 
+                               names=['chrom', 'start', 'end', 'band', 'stain'])
+        
+        # Filter for the specific chromosome
+        chrom_cytobands = cytobands[cytobands['chrom'] == chrom]
+        
+        if chrom_cytobands.empty:
+            # Try with 'chr' prefix
+            chrom_cytobands = cytobands[cytobands['chrom'] == f'chr{chrom}']
+        
+        if chrom_cytobands.empty:
+            logging.warning(f"[Fusion] No cytoband data found for chromosome {chrom}")
+            raise ValueError(f"No cytoband data for {chrom}")
+        
+        # Create a simple data frame for the chromosome
+        chrom_data = pd.DataFrame({
+            'chrom': [chrom],
+            'start': [start],
+            'end': [end],
+            'label': [f'{chrom}:{start:,}-{end:,}']
+        })
+        
+        # Use chrov's annot_chroms function to plot the chromosome ideogram
+        # Highlight the fusion region
+        annot_chroms(
+            data=chrom_cytobands,
+            chromosomes=[chrom],
+            ax_chrom=ax,
+            chrom_y=0.5,
+            test=False
+        )
+        
+        # Set title
+        ax.set_title(f"Chromosome {chrom}", fontsize=10, fontweight="bold")
+        
+        # Convert x-axis to megabases if possible
+        try:
+            _format_ticks_to_megabases(ax)
+        except Exception:
+            pass  # If formatting fails, keep default
+            
+        logging.info(f"[Fusion] Successfully plotted chrov ideogram for {chrom}")
+        
+    except Exception as e:
+        logging.error(f"Error plotting chrov ideogram for {chrom}: {e}")
+        logging.error(f"Exception details: {type(e).__name__}: {str(e)}")
+        # Fallback: simple chromosome representation
+        ax.text(0.5, 0.5, f"Chromosome {chrom}\n{start:,}-{end:,}", 
+                transform=ax.transAxes, ha="center", va="center",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray", alpha=0.7))
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.axis('off')
+
+
+def _format_ticks_to_megabases(ax: plt.Axes) -> None:
+    """Safely format x-axis ticks to megabases, handling custom formatters from DNA Features Viewer."""
+    try:
+        ticks = ax.get_xticks()
+        # Set the tick positions first, then the labels to avoid warnings
+        ax.set_xticks(ticks)
+        ax.set_xticklabels([f'{t/1e6:.1f}' for t in ticks])
+    except Exception as e:
+        logging.warning(f"Could not format ticks to megabases: {e}")
+        # Fallback: try to use ticklabel_format if possible
+        try:
+            ax.ticklabel_format(style='scientific', axis='x', scilimits=(0,0))
+        except Exception:
+            pass  # If both methods fail, just leave the default formatting
 
 
 def _load_gene_annotations() -> Optional[pd.DataFrame]:
@@ -282,7 +394,7 @@ def _plot_gene_structure_with_dna_features(
 
         if gene_info.empty:
             # Fallback if no gene info found
-            ax.set_title(f"Gene Structure: {gene_name}", fontsize=10, fontweight="bold")
+            ax.set_title(f"Gene Structure: {gene_name} ({chrom})", fontsize=10, fontweight="bold")
             # Extend plot range to show full context
             plot_start = start - (end - start) * 0.1
             plot_end = end + (end - start) * 0.1
@@ -297,6 +409,10 @@ def _plot_gene_structure_with_dna_features(
                 va="center",
                 bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.7),
             )
+            # Convert x-axis to megabases
+            ax.set_xlabel(f"Position (Mb) - {chrom}", fontsize=10)
+            # Convert tick labels to megabases
+            _format_ticks_to_megabases(ax)
             return
 
         # Create DNA Features Viewer visualization
@@ -341,13 +457,15 @@ def _plot_gene_structure_with_dna_features(
             record.plot(
                 ax=ax, with_ruler=False, draw_line=True, strand_in_label_threshold=4
             )
-            ax.set_title(f"Gene Structure: {gene_name}", fontsize=10, fontweight="bold")
-            ax.set_xlabel(f"Position (Mb) - {chrom} - {gene_name}", fontsize=10)
+            ax.set_title(f"Gene Structure: {gene_name} ({chrom})", fontsize=10, fontweight="bold")
+            ax.set_xlabel(f"Position (Mb) - {chrom}", fontsize=10)
             # Extend plot range to show full context
             ax.margins(x=0.15, y=0.1)
+            # Convert tick labels to megabases (avoid ticklabel_format due to DNA Features Viewer formatter)
+            _format_ticks_to_megabases(ax)
         else:
             # Fallback if no features found
-            ax.set_title(f"Gene Structure: {gene_name}", fontsize=10, fontweight="bold")
+            ax.set_title(f"Gene Structure: {gene_name} ({chrom})", fontsize=10, fontweight="bold")
             # Extend plot range to show full context
             plot_start = start - (end - start) * 0.1
             plot_end = end + (end - start) * 0.1
@@ -362,11 +480,15 @@ def _plot_gene_structure_with_dna_features(
                 va="center",
                 bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.7),
             )
+            # Convert x-axis to megabases
+            ax.set_xlabel(f"Position (Mb) - {chrom}", fontsize=10)
+        # Convert tick labels to megabases
+        _format_ticks_to_megabases(ax)
 
     except Exception as e:
         logging.error(f"Error plotting gene structure with DNA Features Viewer: {e}")
         # Fallback to simple text
-        ax.set_title(f"Gene Structure: {gene_name}", fontsize=10, fontweight="bold")
+        ax.set_title(f"Gene Structure: {gene_name} ({chrom})", fontsize=10, fontweight="bold")
         # Extend plot range to show full context
         plot_start = start - (end - start) * 0.1
         plot_end = end + (end - start) * 0.1
@@ -381,6 +503,10 @@ def _plot_gene_structure_with_dna_features(
             va="center",
             color="red",
         )
+        # Convert x-axis to megabases even in error case
+        ax.set_xlabel(f"Position (Mb) - {chrom}", fontsize=10)
+        # Convert tick labels to megabases
+        _format_ticks_to_megabases(ax)
 
 
 def _plot_read_mapping_sophisticated(
@@ -456,16 +582,25 @@ def _plot_read_mapping_sophisticated(
                 )
 
         # Customize plot
-        ax.set_title(f"Read Mapping: {gene_name}", fontsize=10, fontweight="bold")
+        ax.set_title(f"Read Mapping: {gene_name} ({chrom})", fontsize=10, fontweight="bold")
         # Extend plot range to clearly show read ends
         plot_start = start - (end - start) * 0.15
         plot_end = end + (end - start) * 0.15
         ax.set_xlim(plot_start, plot_end)
-        ax.set_xlabel("Genomic Position")
+        ax.set_xlabel(f"Position (Mb) - {chrom}")
         ax.set_ylabel("Reads")
+
+        # Convert x-axis to megabases
+        _format_ticks_to_megabases(ax)
 
         # Add grid
         ax.grid(True, alpha=0.3)
+        
+        # Remove box edges/borders
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['bottom'].set_visible(False)
+        ax.spines['left'].set_visible(False)
 
         # Add legend if not too many reads and we have labeled artists
         if len(unique_reads) <= 10 and len(ax.get_legend_handles_labels()[0]) > 0:
@@ -474,6 +609,7 @@ def _plot_read_mapping_sophisticated(
     except Exception as e:
         logging.error(f"Error plotting sophisticated read mapping: {e}")
         # Fallback to simple text
+        ax.set_title(f"Read Mapping: {gene_name} ({chrom})", fontsize=10, fontweight="bold")
         ax.text(
             0.5,
             0.5,
@@ -483,6 +619,12 @@ def _plot_read_mapping_sophisticated(
             va="center",
             color="red",
         )
+        # Convert x-axis to megabases even in error case
+        ax.set_xlabel(f"Position (Mb) - {chrom}")
+        # Format x-axis ticks to show megabases
+        ax.ticklabel_format(style='scientific', axis='x', scilimits=(0,0))
+        # Convert tick labels to megabases
+        _format_ticks_to_megabases(ax)
 
 
 def _process_reads_for_original_plot(subset: pd.DataFrame) -> pd.DataFrame:
@@ -534,7 +676,7 @@ def _plot_gene_structure_original(
     try:
         # This would need access to the gene_table data from the original code
         # For now, create a placeholder that matches the original structure
-        ax.set_title(f"Gene Structure: {data['gene']}", fontsize=10, fontweight="bold")
+        ax.set_title(f"Gene Structure: {data['gene']} ({chrom})", fontsize=10, fontweight="bold")
         ax.set_xlim(start, end)
         ax.set_ylim(0, 1)
 
@@ -549,8 +691,10 @@ def _plot_gene_structure_original(
             bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.7),
         )
 
-        ax.set_xlabel("Genomic Position")
+        ax.set_xlabel(f"Position (Mb) - {chrom}")
         ax.set_ylabel("Gene Structure")
+        # Convert x-axis to megabases
+        _format_ticks_to_megabases(ax)
 
     except Exception as e:
         logging.error(f"Error plotting gene structure: {e}")
@@ -588,7 +732,7 @@ def _plot_read_mapping_original(
         # This would need the original plotting logic with overlapping ranges, ranks, etc.
 
         # For now, create a simplified version that shows the structure
-        ax.set_title(f"Read Mapping: {data['gene']}", fontsize=10, fontweight="bold")
+        ax.set_title(f"Read Mapping: {data['gene']} ({chrom})", fontsize=10, fontweight="bold")
         # Extend plot range to clearly show read ends
         plot_start = start - (end - start) * 0.15
         plot_end = end + (end - start) * 0.15
@@ -600,9 +744,17 @@ def _plot_read_mapping_original(
             read_end = read["reference_end"]
             ax.plot([read_start, read_end], [i, i], linewidth=2, alpha=0.8)
 
-        ax.set_xlabel("Genomic Position")
+        ax.set_xlabel(f"Position (Mb) - {chrom}")
         ax.set_ylabel("Reads")
+        # Convert x-axis to megabases
+        _format_ticks_to_megabases(ax)
         ax.grid(True, alpha=0.3)
+        
+        # Remove box edges/borders
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['bottom'].set_visible(False)
+        ax.spines['left'].set_visible(False)
 
     except Exception as e:
         logging.error(f"Error plotting read mapping: {e}")
@@ -624,7 +776,7 @@ def _plot_gene_structure(
     try:
         # This would integrate with your gene annotation data
         # For now, create a placeholder gene structure
-        ax.set_title(f"Gene Structure: {gene_name}", fontsize=10, fontweight="bold")
+        ax.set_title(f"Gene Structure: {gene_name} ({chrom})", fontsize=10, fontweight="bold")
         ax.set_xlim(start, end)
         ax.set_ylim(0, 1)
 
@@ -639,8 +791,10 @@ def _plot_gene_structure(
             bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.7),
         )
 
-        ax.set_xlabel("Genomic Position")
+        ax.set_xlabel(f"Position (Mb) - {chrom}")
         ax.set_ylabel("Gene Structure")
+        # Convert x-axis to megabases
+        _format_ticks_to_megabases(ax)
 
     except Exception as e:
         logging.error(f"Error plotting gene structure for {gene_name}: {e}")
@@ -693,16 +847,25 @@ def _plot_read_mapping(
             )  # Limit legend to first 10 reads
 
         # Customize plot
-        ax.set_title(f"Read Mapping: {gene_name}", fontsize=10, fontweight="bold")
+        ax.set_title(f"Read Mapping: {gene_name} ({chrom})", fontsize=10, fontweight="bold")
         # Extend plot range to clearly show read ends
         plot_start = start - (end - start) * 0.15
         plot_end = end + (end - start) * 0.15
         ax.set_xlim(plot_start, plot_end)
-        ax.set_xlabel("Genomic Position")
+        ax.set_xlabel(f"Position (Mb) - {chrom}")
         ax.set_ylabel("Reads")
+
+        # Convert x-axis to megabases
+        _format_ticks_to_megabases(ax)
 
         # Add grid
         ax.grid(True, alpha=0.3)
+        
+        # Remove box edges/borders
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['bottom'].set_visible(False)
+        ax.spines['left'].set_visible(False)
 
         # Add legend if not too many reads and we have labeled artists
         if len(unique_reads) <= 10 and len(ax.get_legend_handles_labels()[0]) > 0:
