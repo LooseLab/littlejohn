@@ -559,19 +559,17 @@ def _filter_fusion_candidates(df: pd.DataFrame) -> Optional[pd.DataFrame]:
         return None
 
     try:
-        # Filter for duplicated reads (reads that appear multiple times)
-        uniques = df["read_id"].duplicated(keep=False)
-
-        if not uniques.any():
+        # Count unique genes per read_id to find fusion candidates
+        gene_counts = df.groupby("read_id", observed=True)["col4"].nunique()
+        
+        # Filter for reads that map to more than 1 gene (fusion candidates)
+        fusion_read_ids = gene_counts[gene_counts > 1].index
+        
+        if len(fusion_read_ids) == 0:
             return None
 
-        doubles = df[uniques]
-
-        # Count unique genes per read_id
-        counts = doubles.groupby("read_id", observed=True)["col4"].transform("nunique")
-
-        # Filter for reads that map to more than 1 gene
-        result = doubles[counts > 1]
+        # Return all rows for reads that map to multiple genes
+        result = df[df["read_id"].isin(fusion_read_ids)]
 
         if result.empty:
             return None
@@ -789,20 +787,18 @@ def _generate_output_files(
         if target_candidates_data:
             target_candidates = pd.DataFrame(target_candidates_data)
 
-            # Filter for fusion candidates using the original logic
-            uniques = target_candidates["read_id"].duplicated(keep=False)
-            if uniques.any():
-                doubles = target_candidates[uniques]
-                counts = doubles.groupby("read_id", observed=True)["col4"].transform(
-                    "nunique"
-                )
-                result = doubles[counts > 1]  # Require reads that map to more than 1 gene (fusion candidates)
+            # Filter for fusion candidates using the corrected logic
+            gene_counts = target_candidates.groupby("read_id", observed=True)["col4"].nunique()
+            fusion_read_ids = gene_counts[gene_counts > 1].index
+            
+            if len(fusion_read_ids) > 0:
+                result = target_candidates[target_candidates["read_id"].isin(fusion_read_ids)]
                 
                 # Apply minimum read support threshold (3 or more supporting reads per gene pair)
                 if not result.empty:
                     # Create tag column by grouping genes per read_id (same logic as _annotate_results)
                     lookup = result.groupby("read_id", observed=True)["col4"].agg(
-                        lambda x: ",".join(set(x))
+                        lambda x: ",".join(sorted(set(x)))
                     )
                     result["tag"] = result["read_id"].map(lookup)
                     
@@ -844,16 +840,12 @@ def _generate_output_files(
         if genome_wide_data:
             genome_wide_candidates = pd.DataFrame(genome_wide_data)
 
-            # Filter for fusion candidates using the original logic
-            uniques_all = genome_wide_candidates["read_id"].duplicated(keep=False)
-            if uniques_all.any():
-                doubles_all = genome_wide_candidates[uniques_all]
-                counts_all = doubles_all.groupby("read_id", observed=True)[
-                    "col4"
-                ].transform("nunique")
-                result_all = doubles_all[
-                    counts_all > 1
-                ]  # Require reads that map to more than 1 gene (fusion candidates)
+            # Filter for fusion candidates using the corrected logic
+            gene_counts_all = genome_wide_candidates.groupby("read_id", observed=True)["col4"].nunique()
+            fusion_read_ids_all = gene_counts_all[gene_counts_all > 1].index
+            
+            if len(fusion_read_ids_all) > 0:
+                result_all = genome_wide_candidates[genome_wide_candidates["read_id"].isin(fusion_read_ids_all)]
                 logger.info(f"Genome-wide fusion candidates after basic filtering: {len(result_all)} records")
 
                 if not result_all.empty:
@@ -1250,6 +1242,7 @@ def preprocess_fusion_data_standalone(
                 .unique()
                 .tolist()
             )
+            
             # Filter out empty strings and create valid gene pairs
             valid_gene_pairs = []
             for pair in gene_pairs:
@@ -1266,12 +1259,12 @@ def preprocess_fusion_data_standalone(
             gene_groups = []
 
             for gene_group in gene_groups_test:
-                reads = _get_reads(
-                    annotated_data[goodpairs][
-                        annotated_data[goodpairs]["col4"].isin(gene_group)
-                    ]
-                )
-                if len(reads) >= 3:  # Require minimum 3 supporting reads for reliable fusion detection
+                # Count unique reads for this gene group (simpler approach)
+                gene_group_reads = annotated_data[goodpairs][
+                    annotated_data[goodpairs]["col4"].isin(gene_group)
+                ]
+                unique_read_count = gene_group_reads["read_id"].nunique()
+                if unique_read_count >= 3:  # Require minimum 3 supporting reads for reliable fusion detection
                     gene_groups.append(gene_group)
 
             processed_data.update(
@@ -1287,13 +1280,13 @@ def preprocess_fusion_data_standalone(
 
         with open(output_file, "wb") as f:
             pickle.dump(processed_data, f)
+        
         # Free the processed data immediately
         del processed_data
 
     except Exception as e:
         print(f"Error pre-processing fusion data: {str(e)}")
         import traceback
-
         print(f"Exception details: {traceback.format_exc()}")
 
 

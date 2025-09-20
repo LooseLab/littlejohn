@@ -74,7 +74,6 @@ dependencies = [
     "svglib",
     "geocoder",
     "cnv_from_bam",
-    "chrov",
 ]
 
 [project.optional-dependencies]

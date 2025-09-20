@@ -24,16 +24,7 @@ except ImportError:
     logging.warning("DNA Features Viewer not available - using fallback visualization")
 
     
-# Import chrov for chromosome ideograms
-try:
-    import chrov
-    from chrov.viz.annot import annot_chroms
-    from chrov.viz.plot import plot_seaborn
-    from chrov.viz.figure import plot_with_chroms
-    CHROV_AVAILABLE = True
-except ImportError:
-    CHROV_AVAILABLE = False
-    logging.warning("chrov not available - ideograms will not be displayed")
+# chrov ideograms removed - not working properly
 
 try:
     from nicegui import ui
@@ -211,15 +202,15 @@ def _create_advanced_fusion_plot(
     if len(unique_genes) == 0:
         return _create_simple_fallback_plot(gene_group, subset)
 
-    # Create the unified side-by-side layout with chrov ideograms
-    # For 2 genes, we'll create 2 columns with 3 rows each (ideogram + gene structure + read mapping)
+    # Create the unified side-by-side layout without ideograms
+    # For 2 genes, we'll create 2 columns with 2 rows each (gene structure + read mapping)
     num_genes = len(unique_genes)
-    logging.info(f"[Fusion] Creating {num_genes} gene layout with 3 rows (chrov ideogram + gene structure + read mapping)")
-    fig, axes = plt.subplots(3, num_genes, figsize=(19, 8))
+    logging.info(f"[Fusion] Creating {num_genes} gene layout with 2 rows (gene structure + read mapping)")
+    fig, axes = plt.subplots(2, num_genes, figsize=(19, 6))
 
     # Handle single gene case
     if num_genes == 1:
-        axes = axes.reshape(3, 1)
+        axes = axes.reshape(2, 1)
 
     # Process each gene
     for col_idx, gene_name in enumerate(unique_genes):
@@ -233,20 +224,14 @@ def _create_advanced_fusion_plot(
         gene_end = gene_data["reference_end"].max()
         gene_chrom = gene_data["reference_id"].iloc[0]
 
-        # Row 0: Chromosome ideogram using chrov
-        ax_ideogram = axes[0, col_idx]
-        logging.info(f"[Fusion] Creating chrov ideogram axis for {gene_name} on {gene_chrom}")
-        logging.info(f"[Fusion] Gene coordinates: {gene_start:,} - {gene_end:,}")
-        _plot_chromosome_ideogram_chrov(ax_ideogram, gene_chrom, gene_start, gene_end)
-
-        # Row 1: Gene structure with DNA Features Viewer
-        ax_gene = axes[1, col_idx]
+        # Row 0: Gene structure with DNA Features Viewer
+        ax_gene = axes[0, col_idx]
         _plot_gene_structure_with_dna_features(
             ax_gene, gene_name, gene_chrom, gene_start, gene_end, gene_table
         )
 
-        # Row 2: Read mapping visualization
-        ax_reads = axes[2, col_idx]
+        # Row 1: Read mapping visualization
+        ax_reads = axes[1, col_idx]
         _plot_read_mapping_sophisticated(
             ax_reads, gene_data, gene_name, gene_chrom, gene_start, gene_end
         )
@@ -266,82 +251,6 @@ def _create_advanced_fusion_plot(
     return fig
 
 
-def _plot_chromosome_ideogram_chrov(ax: plt.Axes, chrom: str, start: int, end: int) -> None:
-    """Plot a chromosome ideogram using chrov with local cytoband data."""
-    logging.info(f"[Fusion] Plotting chrov ideogram for {chrom} at {start}-{end}")
-    
-    if not CHROV_AVAILABLE:
-        logging.warning(f"[Fusion] chrov not available, using fallback for {chrom}")
-        # Fallback: simple chromosome representation
-        ax.text(0.5, 0.5, f"Chromosome {chrom}\n{start:,}-{end:,}", 
-                transform=ax.transAxes, ha="center", va="center",
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray", alpha=0.7))
-        ax.set_xlim(0, 1)
-        ax.set_ylim(0, 1)
-        ax.axis('off')
-        return
-    
-    try:
-        # Load cytoband data
-        cytoband_path = "src/robin/resources/cytoBand.txt"
-        if not os.path.exists(cytoband_path):
-            logging.warning(f"[Fusion] Cytoband file not found at {cytoband_path}")
-            raise FileNotFoundError("Cytoband file not found")
-        
-        # Read cytoband data
-        cytobands = pd.read_csv(cytoband_path, sep='\t', header=None, 
-                               names=['chrom', 'start', 'end', 'band', 'stain'])
-        
-        # Filter for the specific chromosome
-        chrom_cytobands = cytobands[cytobands['chrom'] == chrom]
-        
-        if chrom_cytobands.empty:
-            # Try with 'chr' prefix
-            chrom_cytobands = cytobands[cytobands['chrom'] == f'chr{chrom}']
-        
-        if chrom_cytobands.empty:
-            logging.warning(f"[Fusion] No cytoband data found for chromosome {chrom}")
-            raise ValueError(f"No cytoband data for {chrom}")
-        
-        # Create a simple data frame for the chromosome
-        chrom_data = pd.DataFrame({
-            'chrom': [chrom],
-            'start': [start],
-            'end': [end],
-            'label': [f'{chrom}:{start:,}-{end:,}']
-        })
-        
-        # Use chrov's annot_chroms function to plot the chromosome ideogram
-        # Highlight the fusion region
-        annot_chroms(
-            data=chrom_cytobands,
-            chromosomes=[chrom],
-            ax_chrom=ax,
-            chrom_y=0.5,
-            test=False
-        )
-        
-        # Set title
-        ax.set_title(f"Chromosome {chrom}", fontsize=10, fontweight="bold")
-        
-        # Convert x-axis to megabases if possible
-        try:
-            _format_ticks_to_megabases(ax)
-        except Exception:
-            pass  # If formatting fails, keep default
-            
-        logging.info(f"[Fusion] Successfully plotted chrov ideogram for {chrom}")
-        
-    except Exception as e:
-        logging.error(f"Error plotting chrov ideogram for {chrom}: {e}")
-        logging.error(f"Exception details: {type(e).__name__}: {str(e)}")
-        # Fallback: simple chromosome representation
-        ax.text(0.5, 0.5, f"Chromosome {chrom}\n{start:,}-{end:,}", 
-                transform=ax.transAxes, ha="center", va="center",
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray", alpha=0.7))
-        ax.set_xlim(0, 1)
-        ax.set_ylim(0, 1)
-        ax.axis('off')
 
 
 def _format_ticks_to_megabases(ax: plt.Axes) -> None:
