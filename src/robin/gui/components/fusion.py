@@ -5,6 +5,7 @@ from pathlib import Path
 import logging
 import pickle
 import os
+import hashlib
 
 import pandas as pd
 import numpy as np
@@ -57,6 +58,43 @@ def _rename_and_sort(df: pd.DataFrame) -> pd.DataFrame:
         return df.sort_values(by="reference_start").rename(columns=rename_map)
     except Exception:
         return df.rename(columns=rename_map)
+
+
+def _create_data_hash(data: Dict[str, Any]) -> str:
+    """Create a hash of the fusion data to detect actual content changes."""
+    try:
+        if not data:
+            return ""
+        
+        # Create hash from key data components
+        hash_components = []
+        
+        # Hash the annotated data DataFrame
+        if "annotated_data" in data and data["annotated_data"] is not None:
+            df_str = data["annotated_data"].to_string()
+            df_hash = hashlib.md5(df_str.encode()).hexdigest()
+            hash_components.append(f"df:{df_hash}")
+        
+        # Hash the goodpairs Series
+        if "goodpairs" in data and data["goodpairs"] is not None:
+            pairs_str = data["goodpairs"].to_string()
+            pairs_hash = hashlib.md5(pairs_str.encode()).hexdigest()
+            hash_components.append(f"pairs:{pairs_hash}")
+        
+        # Hash gene groups
+        if "gene_groups" in data and data["gene_groups"] is not None:
+            groups_str = str(sorted(data["gene_groups"]))
+            groups_hash = hashlib.md5(groups_str.encode()).hexdigest()
+            hash_components.append(f"groups:{groups_hash}")
+        
+        # Hash candidate count
+        if "candidate_count" in data:
+            hash_components.append(f"count:{data['candidate_count']}")
+        
+        return hashlib.md5("|".join(hash_components).encode()).hexdigest()
+    except Exception as e:
+        logging.warning(f"[Fusion] Failed to create data hash: {e}")
+        return ""
 
 
 def _load_processed_pickle(file_path: Path) -> Optional[Dict[str, Any]]:
@@ -149,7 +187,7 @@ def _plot_gene_group(
         container.clear()
         with container:
             # Create matplotlib element for the sophisticated plot with ideograms
-            mpl_element = ui.matplotlib(figsize=(19, 8)).classes("w-full")
+            mpl_element = ui.matplotlib(figsize=(20, 10)).classes("w-full")
 
             # Create the advanced fusion plot
             fig = _create_advanced_fusion_plot(
@@ -206,7 +244,8 @@ def _create_advanced_fusion_plot(
     # For 2 genes, we'll create 2 columns with 2 rows each (gene structure + read mapping)
     num_genes = len(unique_genes)
     logging.info(f"[Fusion] Creating {num_genes} gene layout with 2 rows (gene structure + read mapping)")
-    fig, axes = plt.subplots(2, num_genes, figsize=(19, 6))
+    # Increase figure size and add more padding to prevent tight layout warnings
+    fig, axes = plt.subplots(2, num_genes, figsize=(20, 10))
 
     # Handle single gene case
     if num_genes == 1:
@@ -236,17 +275,27 @@ def _create_advanced_fusion_plot(
             ax_reads, gene_data, gene_name, gene_chrom, gene_start, gene_end
         )
 
-    # Adjust layout using tight_layout for better compatibility
-    try:
-        plt.tight_layout()
-    except Exception:
-        # Fallback to manual adjustment if tight_layout fails
-        plt.subplots_adjust(hspace=0.3, wspace=0.3)
-
-    # Add overall title
+    # Add overall title first
     fig.suptitle(
         f"Fusion Analysis: {', '.join(gene_group)}", fontsize=14, fontweight="bold"
     )
+
+    # Use constrained_layout for better automatic spacing
+    try:
+        # Enable constrained layout for automatic spacing
+        fig.set_constrained_layout(True)
+        fig.set_constrained_layout_pads(w_pad=0.1, h_pad=0.1)
+    except Exception as e:
+        logging.warning(f"[Fusion] Constrained layout failed, using manual adjustment: {e}")
+        # Fallback to manual adjustment with more space
+        plt.subplots_adjust(
+            top=0.85,  # Leave space for suptitle
+            bottom=0.1,
+            left=0.1,
+            right=0.95,
+            hspace=0.4,  # More space between rows
+            wspace=0.3   # Space between columns
+        )
 
     return fig
 
@@ -834,6 +883,7 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
         "target": {
             "data": None,
             "mtime": None,
+            "data_hash": None,
             "table_container": None,
             "table": None,
             "plot_container": None,
@@ -842,6 +892,7 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
         "genome": {
             "data": None,
             "mtime": None,
+            "data_hash": None,
             "table_container": None,
             "table": None,
             "plot_container": None,
@@ -869,9 +920,14 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
 
             # Update target panel UI
             target_mtime = target_file.stat().st_mtime if target_file.exists() else None
+            target_data_hash = _create_data_hash(t) if t is not None else None
+            
+            # Always update summary and table when file changes
             if t is not None and target_mtime != state["target"].get("mtime"):
                 state["target"]["data"] = t
                 state["target"]["mtime"] = target_mtime
+                state["target"]["data_hash"] = target_data_hash
+                
                 # summary
                 try:
                     if "summary" in state and state["summary"].get("target_lbl"):
@@ -891,6 +947,39 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     state["target"]["table_container"],
                     t.get("annotated_data", pd.DataFrame()),
                 )
+                
+                # Create visualization on first load or when data changes
+                try:
+                    state["target"]["plot_container"].clear()
+                except Exception:
+                    pass
+                if t.get("candidate_count", 0) > 0 and t.get("gene_groups"):
+                    with state["target"]["plot_container"].classes("w-full"):
+                        with ui.row().classes("w-full"):
+                            ui.select(
+                                options=t.get("gene_groups", []),
+                                with_input=True,
+                                on_change=lambda e, t=t: (
+                                    state["target"]["card"].clear(),
+                                    state["target"]["card"].classes("w-full"),
+                                    _plot_gene_group(
+                                        state["target"]["card"],
+                                        e.value,
+                                        t.get("annotated_data"),
+                                        t.get("goodpairs"),
+                                    ),
+                                ),
+                            ).classes("w-40")
+                        with ui.row().classes("w-full"):
+                            state["target"]["card"] = ui.card()
+                            with state["target"]["card"]:
+                                ui.label("Select gene pair to see results.").classes(
+                                    "drop-shadow font-bold"
+                                )
+            
+            # Only update visualization when data content actually changes (for background refreshes)
+            elif t is not None and target_data_hash != state["target"].get("data_hash"):
+                state["target"]["data_hash"] = target_data_hash
                 # plot area
                 try:
                     state["target"]["plot_container"].clear()
@@ -922,10 +1011,15 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
 
             # Update genome-wide UI
             genome_mtime = genome_file.stat().st_mtime if genome_file.exists() else None
+            genome_data_hash = _create_data_hash(g) if g is not None else None
             logging.info(f"[Fusion] Genome-wide update check: g={g is not None}, mtime_changed={genome_mtime != state['genome'].get('mtime')}")
+            
+            # Always update summary and table when file changes
             if g is not None and genome_mtime != state["genome"].get("mtime"):
                 state["genome"]["data"] = g
                 state["genome"]["mtime"] = genome_mtime
+                state["genome"]["data_hash"] = genome_data_hash
+                
                 # summary
                 try:
                     if "summary" in state and state["summary"].get("genome_lbl"):
@@ -943,6 +1037,40 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     state["genome"]["table_container"],
                     g.get("annotated_data", pd.DataFrame()),
                 )
+                
+                # Create visualization on first load or when data changes
+                try:
+                    state["genome"]["plot_container"].clear()
+                except Exception:
+                    pass
+                logging.info(f"[Fusion] Genome-wide plotting check: candidate_count={g.get('candidate_count', 0)}, gene_groups={len(g.get('gene_groups', []))}")
+                if g.get("candidate_count", 0) > 0 and g.get("gene_groups"):
+                    with state["genome"]["plot_container"].classes("w-full"):
+                        with ui.row().classes("w-full"):
+                            ui.select(
+                                options=g.get("gene_groups", []),
+                                with_input=True,
+                                on_change=lambda e, g=g: (
+                                    state["genome"]["card"].clear(),
+                                    state["genome"]["card"].classes("w-full"),
+                                    _plot_gene_group(
+                                        state["genome"]["card"],
+                                        e.value,
+                                        g.get("annotated_data"),
+                                        g.get("goodpairs"),
+                                    ),
+                                ),
+                            ).classes("w-40")
+                        with ui.row().classes("w-full"):
+                            state["genome"]["card"] = ui.card()
+                            with state["genome"]["card"]:
+                                ui.label("Select gene pair to see results.").classes(
+                                    "drop-shadow font-bold"
+                                )
+            
+            # Only update visualization when data content actually changes (for background refreshes)
+            elif g is not None and genome_data_hash != state["genome"].get("data_hash"):
+                state["genome"]["data_hash"] = genome_data_hash
                 # plot area
                 try:
                     state["genome"]["plot_container"].clear()
@@ -993,14 +1121,14 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
 
         # Target Panel
         ui.label("Target Panel").classes("text-base font-medium mt-1 mb-1")
-        state["target"]["table_container"] = ui.column().classes("w-full")
-        state["target"]["plot_container"] = ui.column().classes("w-full mt-2")
+        state["target"]["plot_container"] = ui.column().classes("w-full")
+        state["target"]["table_container"] = ui.column().classes("w-full mt-2")
 
         # Genome-wide
         ui.separator()
         ui.label("Genome-wide").classes("text-base font-medium mt-2 mb-1")
-        state["genome"]["table_container"] = ui.column().classes("w-full")
-        state["genome"]["plot_container"] = ui.column().classes("w-full mt-2")
+        state["genome"]["plot_container"] = ui.column().classes("w-full")
+        state["genome"]["table_container"] = ui.column().classes("w-full mt-2")
 
     # Initial refresh and timer
     try:

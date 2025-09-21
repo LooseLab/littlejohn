@@ -236,7 +236,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             pass
 
     # Adaptive thinning helpers
-    MAX_POINTS_PER_CHART = 2000
+    MAX_POINTS_PER_CHART = 10000
 
     def _get_visible_range(chart, series_list):
         try:

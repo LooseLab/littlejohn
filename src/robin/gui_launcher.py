@@ -16,6 +16,7 @@ warnings.filterwarnings(
     "ignore", message="The figure layout has changed to tight", category=UserWarning
 )
 
+import asyncio
 import threading
 import time
 import logging
@@ -112,6 +113,10 @@ class GUILauncher:
         self._known_sample_ids: set[str] = set()
         self._preexisting_sample_ids: set[str] = set()
         self._preexisting_scanned: bool = False
+        
+        # Caching for samples data
+        self._last_cache_time: float = 0.0
+        self._cache_duration: float = 30.0  # Cache for 30 seconds
         # MGMT per-sample cache (latest count seen)
         self._mgmt_state: Dict[str, Dict[str, Any]] = {}
         # Coverage per-sample cache (file mtimes, computed metrics)
@@ -583,10 +588,10 @@ class GUILauncher:
                     # Seed pre-existing samples shortly after startup, then poll for new ones
                     ui.timer(
                         0.5,
-                        lambda: self._scan_and_seed_samples(preexisting=True),
+                        lambda: self._scan_and_seed_samples_async(preexisting=True),
                         once=True,
                     )
-                    ui.timer(3.0, self._scan_for_new_samples, active=True)
+                    ui.timer(3.0, self._scan_for_new_samples_async, active=True)
                 except Exception:
                     pass
 
@@ -716,6 +721,11 @@ class GUILauncher:
                         ui.label("All Tracked Samples").classes(
                             "text-lg font-semibold"
                         )
+                        
+                        # Loading indicator
+                        self.samples_loading_indicator = ui.spinner(size="sm", color="primary")
+                        self.samples_loading_indicator.set_visibility(False)
+                        
                         #ui.button(
                         #    "Refresh All Plots",
                         #    on_click=lambda: self._refresh_all_sample_plots(),
@@ -762,6 +772,13 @@ class GUILauncher:
                             )
                         )
 
+                    # Loading state container
+                    self.samples_loading_container = ui.card().classes("w-full p-8 text-center")
+                    with self.samples_loading_container:
+                        ui.spinner(size="lg", color="primary")
+                        ui.label("Loading samples...").classes("ml-2 text-lg")
+                        ui.label("This may take a moment for large directories").classes("text-sm text-gray-500 mt-2")
+                    
                     # Create a placeholder table that will be updated later
                     from robin.gui.theme import styled_table
 
@@ -1122,9 +1139,16 @@ class GUILauncher:
                     if self._last_samples_rows:
                         try:
                             self._apply_samples_table_filters()
+                            # Hide loading container if we have data
+                            if hasattr(self, "samples_loading_container"):
+                                self.samples_loading_container.set_visibility(False)
                             # No selection behavior needed; per-row buttons handle navigation
                         except Exception:
                             pass
+                    else:
+                        # Show loading container if no cached data
+                        if hasattr(self, "samples_loading_container"):
+                            self.samples_loading_container.set_visibility(True)
 
     def _update_samples_table(self, data: Dict[str, Any]):
         """Update the samples overview table with new data."""
@@ -1649,7 +1673,7 @@ class GUILauncher:
                         loading_container = None
 
                     with content_container:
-                        # Summary section (new component)
+                        # Summary section (new component) - create UI immediately, load data async
                         try:
                             try:
                                 from .gui.components.summary import add_summary_section  # type: ignore
@@ -1657,6 +1681,7 @@ class GUILauncher:
                                 # Try absolute import if relative fails
                                 from robin.gui.components.summary import add_summary_section
 
+                            # Create the UI components immediately on the main thread
                             add_summary_section(sample_dir, sample_id)
                         except Exception as e:
                             logging.exception(f"[GUI] Summary section failed: {e}")
@@ -1665,7 +1690,7 @@ class GUILauncher:
                             except Exception:
                                 pass
 
-                        # Classification section (refactored component)
+                        # Classification section (refactored component) - create UI immediately
                         try:
                             try:
                                 from .gui.components.classification import add_classification_section  # type: ignore
@@ -1675,6 +1700,7 @@ class GUILauncher:
                                     add_classification_section,
                                 )
 
+                            # Create the UI components immediately on the main thread
                             add_classification_section(sample_dir)
                         except Exception as e:
                             logging.exception(f"[GUI] Classification section failed: {e}")
@@ -1685,7 +1711,7 @@ class GUILauncher:
                             except Exception:
                                 pass
 
-                        # Coverage section (refactored component)
+                        # Coverage section (refactored component) - create UI immediately
                         try:
                             try:
                                 from .gui.components.coverage import add_coverage_section  # type: ignore
@@ -1695,6 +1721,7 @@ class GUILauncher:
                                     add_coverage_section,
                                 )
 
+                            # Create the UI components immediately on the main thread
                             add_coverage_section(self, sample_dir)
                         except Exception as e:
                             try:
@@ -1702,7 +1729,7 @@ class GUILauncher:
                             except Exception:
                                 pass
 
-                        # MGMT section (refactored component)
+                        # MGMT section (refactored component) - create UI immediately
                         try:
                             try:
                                 from .gui.components.mgmt import add_mgmt_section  # type: ignore
@@ -1710,6 +1737,7 @@ class GUILauncher:
                                 # Try absolute import if relative fails
                                 from robin.gui.components.mgmt import add_mgmt_section
 
+                            # Create the UI components immediately on the main thread
                             add_mgmt_section(self, sample_dir)
                         except Exception as e:
                             logging.exception(f"[GUI] MGMT section failed: {e}")
@@ -1718,7 +1746,7 @@ class GUILauncher:
                             except Exception:
                                 pass
 
-                        # CNV section (refactored component)
+                        # CNV section (refactored component) - create UI immediately
                         try:
                             try:
                                 from .gui.components.cnv import add_cnv_section  # type: ignore
@@ -1726,6 +1754,7 @@ class GUILauncher:
                                 # Try absolute import if relative fails
                                 from robin.gui.components.cnv import add_cnv_section
 
+                            # Create the UI components immediately on the main thread
                             # Pass launcher for shared state access (launcher._cnv_state)
                             add_cnv_section(self, sample_dir)
                         except Exception as e:
@@ -1735,7 +1764,7 @@ class GUILauncher:
                             except Exception:
                                 pass
 
-                        # Fusion section (target and genome-wide; excludes full SV UI)
+                        # Fusion section (target and genome-wide; excludes full SV UI) - create UI immediately
                         try:
                             try:
                                 from .gui.components.fusion import add_fusion_section  # type: ignore
@@ -1743,6 +1772,7 @@ class GUILauncher:
                                 # Try absolute import if relative fails
                                 from robin.gui.components.fusion import add_fusion_section
 
+                            # Create the UI components immediately on the main thread
                             add_fusion_section(self, sample_dir)
                         except Exception as e:
                             logging.exception(f"[GUI] Fusion section failed: {e}")
@@ -1834,27 +1864,114 @@ class GUILauncher:
                     # Periodic refresher for files table and master.csv summary
                     _notify_state = {"files_error": False, "csv_error": False}
 
+                    def _refresh_files_list_sync() -> List[Dict[str, Any]]:
+                        """Synchronous file list refresh - runs in background thread"""
+                        rows = []
+                        if sample_dir and sample_dir.exists():
+                            for f in sorted(sample_dir.iterdir()):
+                                if f.is_file():
+                                    try:
+                                        stat = f.stat()
+                                        rows.append(
+                                            {
+                                                "name": f.name,
+                                                "size": stat.st_size,
+                                                "mtime": time.strftime(
+                                                    "%Y-%m-%d %H:%M:%S",
+                                                    time.localtime(stat.st_mtime),
+                                                ),
+                                            }
+                                        )
+                                    except Exception:
+                                        continue
+                        return rows
+
+                    def _refresh_csv_summary_sync() -> List[Dict[str, Any]]:
+                        """Synchronous CSV summary refresh - runs in background thread"""
+                        if not sample_dir:
+                            return [{"key": "Status", "value": "No sample directory"}]
+                            
+                        csv_path = sample_dir / "master.csv"
+                        if not csv_path.exists():
+                            return [{"key": "Status", "value": "master.csv not found"}]
+                            
+                        try:
+                            with csv_path.open("r", newline="") as fh:
+                                reader = csv.DictReader(fh)
+                                first_row = next(reader, None)
+                            if first_row:
+                                preferred_keys = [
+                                    "counter_bam_passed",
+                                    "counter_bam_failed",
+                                    "counter_bases_count",
+                                    "counter_mapped_count",
+                                    "counter_unmapped_count",
+                                    "run_info_run_time",
+                                    "run_info_device",
+                                    "run_info_model",
+                                    "run_info_flow_cell",
+                                    "bam_tracking_counter",
+                                    "bam_tracking_total_files",
+                                ]
+                                rows2 = []
+                                for k in preferred_keys:
+                                    if k in first_row:
+                                        rows2.append(
+                                            {
+                                                "key": k,
+                                                "value": first_row.get(k, ""),
+                                            }
+                                        )
+                                if not rows2:
+                                    rows2 = [
+                                        {"key": k, "value": v}
+                                        for k, v in first_row.items()
+                                    ]
+                                return rows2
+                        except Exception:
+                            return [{"key": "Error", "value": "Failed to read CSV"}]
+
+                    async def _refresh_sample_detail_async() -> None:
+                        """Asynchronous version of sample detail refresh"""
+                        try:
+                            # Run file operations in background threads
+                            import concurrent.futures
+                            with concurrent.futures.ThreadPoolExecutor() as executor:
+                                files_future = executor.submit(_refresh_files_list_sync)
+                                csv_future = executor.submit(_refresh_csv_summary_sync)
+                                
+                                files_result = await asyncio.wrap_future(files_future)
+                                csv_result = await asyncio.wrap_future(csv_future)
+                            
+                            # Update UI with results
+                            files_table.rows = files_result
+                            files_table.update()
+                            
+                            summary_table.rows = csv_result
+                            summary_table.update()
+                            
+                            # Reset error states on success
+                            _notify_state["files_error"] = False
+                            _notify_state["csv_error"] = False
+                            
+                        except Exception as e:
+                            logging.error(f"Error in async sample detail refresh: {e}")
+                            # Only show error notification once per error type
+                            if not _notify_state["files_error"]:
+                                try:
+                                    ui.notify(
+                                        f"Failed to refresh sample data for {sample_id}: {e}",
+                                        type="warning",
+                                    )
+                                except Exception:
+                                    pass
+                                _notify_state["files_error"] = True
+
                     def _refresh_sample_detail() -> None:
+                        """Synchronous version - kept for backward compatibility"""
                         # Refresh files list
                         try:
-                            rows = []
-                            if sample_dir and sample_dir.exists():
-                                for f in sorted(sample_dir.iterdir()):
-                                    if f.is_file():
-                                        try:
-                                            stat = f.stat()
-                                            rows.append(
-                                                {
-                                                    "name": f.name,
-                                                    "size": stat.st_size,
-                                                    "mtime": time.strftime(
-                                                        "%Y-%m-%d %H:%M:%S",
-                                                        time.localtime(stat.st_mtime),
-                                                    ),
-                                                }
-                                            )
-                                        except Exception:
-                                            continue
+                            rows = _refresh_files_list_sync()
                             files_table.rows = rows
                             files_table.update()
                         except Exception as e:
@@ -1870,47 +1987,9 @@ class GUILauncher:
 
                         # Refresh master.csv summary
                         try:
-                            if sample_dir:
-                                csv_path = sample_dir / "master.csv"
-                                if csv_path.exists():
-                                    with csv_path.open("r", newline="") as fh:
-                                        reader = csv.DictReader(fh)
-                                        first_row = next(reader, None)
-                                    if first_row:
-                                        preferred_keys = [
-                                            "counter_bam_passed",
-                                            "counter_bam_failed",
-                                            "counter_bases_count",
-                                            "counter_mapped_count",
-                                            "counter_unmapped_count",
-                                            "run_info_run_time",
-                                            "run_info_device",
-                                            "run_info_model",
-                                            "run_info_flow_cell",
-                                            "bam_tracking_counter",
-                                            "bam_tracking_total_files",
-                                        ]
-                                        rows2 = []
-                                        for k in preferred_keys:
-                                            if k in first_row:
-                                                rows2.append(
-                                                    {
-                                                        "key": k,
-                                                        "value": first_row.get(k, ""),
-                                                    }
-                                                )
-                                        if not rows2:
-                                            rows2 = [
-                                                {"key": k, "value": v}
-                                                for k, v in first_row.items()
-                                            ]
-                                        summary_table.rows = rows2
-                                        summary_table.update()
-                                else:
-                                    summary_table.rows = [
-                                        {"key": "Status", "value": "master.csv not found"}
-                                    ]
-                                    summary_table.update()
+                            rows2 = _refresh_csv_summary_sync()
+                            summary_table.rows = rows2
+                            summary_table.update()
                         except Exception as e:
                             if not _notify_state["csv_error"]:
                                 try:
@@ -1924,21 +2003,39 @@ class GUILauncher:
 
                     # Show content and hide loading after initial data load (only when showing loading)
                     if show_loading and loading_container:
-                        def _show_content():
-                            loading_container.style("display: none")
-                            content_container.style("display: flex")
+                        async def _load_initial_data_and_show():
+                            """Load initial data asynchronously then show content"""
+                            try:
+                                # Load initial data
+                                await _refresh_sample_detail_async()
+                                
+                                # Show content and hide loading
+                                loading_container.style("display: none")
+                                content_container.style("display: flex")
+                                
+                            except Exception as e:
+                                logging.error(f"Error loading initial data: {e}")
+                                # Show content anyway to avoid infinite loading
+                                loading_container.style("display: none")
+                                content_container.style("display: flex")
 
-                        # Initial data load with loading state
+                        # Start initial data loading
                         try:
-                            # Use a timer to simulate async loading and then show content
-                            ui.timer(0.1, _show_content, once=True)
+                            ui.timer(0.1, _load_initial_data_and_show, once=True)
                         except Exception:
                             # Fallback: show content immediately if timer fails
-                            _show_content()
+                            loading_container.style("display: none")
+                            content_container.style("display: flex")
+                    else:
+                        # For page refreshes, load data immediately
+                        try:
+                            ui.timer(0.1, _refresh_sample_detail_async, once=True)
+                        except Exception:
+                            pass
 
-                    # Start periodic refresh
+                    # Start periodic refresh with async version
                     try:
-                        ui.timer(5.0, _refresh_sample_detail)
+                        ui.timer(5.0, _refresh_sample_detail_async)
                     except Exception:
                         pass
 
@@ -2287,6 +2384,7 @@ class GUILauncher:
             pass
 
     def _scan_and_seed_samples(self, preexisting: bool = False) -> None:
+        """Synchronous version - kept for backward compatibility and io_bound calls"""
         try:
             base = Path(self.monitored_directory) if self.monitored_directory else None
             if not base or not base.exists():
@@ -2401,6 +2499,247 @@ class GUILauncher:
                 self._preexisting_scanned = True
         except Exception:
             pass
+
+    def _get_cached_samples(self) -> Optional[List[Dict[str, Any]]]:
+        """Return cached sample data if available and recent"""
+        if self._last_samples_rows and time.time() - self._last_cache_time < self._cache_duration:
+            return self._last_samples_rows
+        return None
+
+    async def _load_samples_progressively(self, sample_dirs: List[Path], batch_size: int = 10) -> None:
+        """Load samples in small batches to avoid blocking the UI"""
+        try:
+            total_dirs = len(sample_dirs)
+            processed = 0
+            
+            # Show progress
+            if hasattr(self, "samples_loading_container"):
+                self.samples_loading_container.clear()
+                with self.samples_loading_container:
+                    ui.spinner(size="lg", color="primary")
+                    ui.label("Loading samples...").classes("ml-2 text-lg")
+                    progress_label = ui.label(f"Processing {processed}/{total_dirs} samples").classes("text-sm text-gray-500 mt-2")
+            
+            rows: List[Dict[str, Any]] = []
+            
+            for i in range(0, total_dirs, batch_size):
+                batch = sample_dirs[i:i + batch_size]
+                
+                # Process batch synchronously in background
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(self._process_sample_batch, batch)
+                    batch_rows = await asyncio.wrap_future(future)
+                rows.extend(batch_rows)
+                
+                processed += len(batch)
+                
+                # Update progress
+                if hasattr(self, "samples_loading_container") and 'progress_label' in locals():
+                    progress_label.set_text(f"Processing {processed}/{total_dirs} samples")
+                
+                # Small delay to keep UI responsive
+                await asyncio.sleep(0.1)
+            
+            # Update table with all rows
+            if rows:
+                self._last_samples_rows = rows
+                self._last_cache_time = time.time()
+                
+                if hasattr(self, "samples_table"):
+                    try:
+                        self.samples_table.rows = rows
+                        self.samples_table.update()
+                    except Exception:
+                        pass
+            
+            # Hide loading container
+            if hasattr(self, "samples_loading_container"):
+                self.samples_loading_container.set_visibility(False)
+                
+            ui.notify(f"Loaded {len(rows)} samples successfully", type="positive", timeout=2000)
+            
+        except Exception as e:
+            logging.error(f"Error in progressive loading: {e}")
+            ui.notify(f"Error loading samples: {str(e)}", type="error", timeout=3000)
+            if hasattr(self, "samples_loading_container"):
+                self.samples_loading_container.set_visibility(False)
+
+    def _process_sample_batch(self, sample_dirs: List[Path]) -> List[Dict[str, Any]]:
+        """Process a batch of sample directories synchronously"""
+        rows: List[Dict[str, Any]] = []
+        
+        for sample_dir in sample_dirs:
+            if not sample_dir.is_dir():
+                continue
+                
+            master = sample_dir / "master.csv"
+            if master.exists():
+                sid = sample_dir.name
+                
+                # Determine last_seen from file mtime
+                last_seen = master.stat().st_mtime
+                
+                # Try to load persisted overview and run info
+                run_start = ""
+                device = ""
+                flowcell = ""
+                ov_active = 0
+                ov_total = 0
+                ov_completed = 0
+                ov_failed = 0
+                ov_job_types = ""
+                
+                try:
+                    with master.open("r", newline="") as fh:
+                        reader = csv.DictReader(fh)
+                        first_row = next(reader, None)
+                    if first_row:
+                        run_start = first_row.get("run_info_run_time", "")
+                        device = first_row.get("run_info_device", "")
+                        flowcell = first_row.get("run_info_flow_cell", "")
+                        
+                        # Use saved last_seen if present
+                        try:
+                            saved_last = float(
+                                first_row.get("samples_overview_last_seen", 0.0)
+                            )
+                            if saved_last:
+                                last_seen = saved_last
+                        except Exception:
+                            pass
+                            
+                        ov_active = int(
+                            first_row.get("samples_overview_active_jobs", 0) or 0
+                        )
+                        ov_total = int(
+                            first_row.get("samples_overview_total_jobs", 0) or 0
+                        )
+                        ov_completed = int(
+                            first_row.get("samples_overview_completed_jobs", 0) or 0
+                        )
+                        ov_failed = int(
+                            first_row.get("samples_overview_failed_jobs", 0) or 0
+                        )
+                        ov_job_types = str(
+                            first_row.get("samples_overview_job_types", "") or ""
+                        )
+                except Exception:
+                    pass
+                    
+                origin_value = (
+                    "Pre-existing"
+                    if sid in self._preexisting_sample_ids and (time.time() - last_seen) >= 3600
+                    else "Live"
+                )
+                try:
+                    if origin_value == "Live" and (time.time() - last_seen) >= 3600:
+                        origin_value = "Complete"
+                except Exception:
+                    pass
+                    
+                rows.append(
+                    {
+                        "sample_id": sid,
+                        "origin": origin_value,
+                        "run_start": self._format_timestamp_for_display(run_start),
+                        "device": device,
+                        "flowcell": flowcell,
+                        "active_jobs": ov_active,
+                        "total_jobs": ov_total,
+                        "completed_jobs": ov_completed,
+                        "failed_jobs": ov_failed,
+                        "job_types": ov_job_types,
+                        "last_seen": time.strftime(
+                            "%Y-%m-%d %H:%M:%S", time.localtime(last_seen)
+                        ),
+                        "_last_seen_raw": last_seen,
+                    }
+                )
+        
+        return rows
+
+    async def _scan_and_seed_samples_async(self, preexisting: bool = False) -> None:
+        """Asynchronous version that runs file operations in background thread"""
+        try:
+            # Check if we have recent cached data
+            cached_data = self._get_cached_samples()
+            if cached_data and not preexisting:
+                # Use cached data and update UI immediately
+                if hasattr(self, "samples_table"):
+                    try:
+                        self.samples_table.rows = cached_data
+                        self.samples_table.update()
+                        # Hide loading indicator
+                        if hasattr(self, "samples_loading_container"):
+                            self.samples_loading_container.set_visibility(False)
+                    except Exception:
+                        pass
+                return
+            
+            # Check if we need progressive loading for large directories
+            base = Path(self.monitored_directory) if self.monitored_directory else None
+            if base and base.exists():
+                sample_dirs = [d for d in base.iterdir() if d.is_dir()]
+                
+                # Use progressive loading for directories with many samples
+                if len(sample_dirs) > 20:
+                    await self._load_samples_progressively(sample_dirs)
+                    return
+            
+            # Show loading notification for smaller directories
+            ui.notify("Loading samples...", type="info", timeout=2000)
+            
+            # Show loading indicator
+            if hasattr(self, "samples_loading_indicator"):
+                self.samples_loading_indicator.set_visibility(True)
+            
+            # Run the synchronous file operations in a background thread
+            # Use threading instead of ui.run.io_bound for compatibility
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(self._scan_and_seed_samples, preexisting)
+                result = await asyncio.wrap_future(future)
+            
+            # Update cache timestamp
+            self._last_cache_time = time.time()
+            
+            # Hide loading indicator
+            if hasattr(self, "samples_loading_indicator"):
+                self.samples_loading_indicator.set_visibility(False)
+            if hasattr(self, "samples_loading_container"):
+                self.samples_loading_container.set_visibility(False)
+            
+            # Show success notification
+            if result is not None:
+                ui.notify("Samples loaded successfully", type="positive", timeout=1500)
+            
+        except Exception as e:
+            logging.error(f"Error in async sample scanning: {e}")
+            ui.notify(f"Error loading samples: {str(e)}", type="error", timeout=3000)
+            
+            # Hide loading indicators on error
+            if hasattr(self, "samples_loading_indicator"):
+                self.samples_loading_indicator.set_visibility(False)
+            if hasattr(self, "samples_loading_container"):
+                self.samples_loading_container.set_visibility(False)
+
+    async def _scan_for_new_samples_async(self) -> None:
+        """Asynchronous version of new samples scanning"""
+        try:
+            # Check cache first
+            cached_data = self._get_cached_samples()
+            if cached_data:
+                return  # Use cached data
+            
+            # Run synchronous scanning in background
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(self._scan_for_new_samples)
+                await asyncio.wrap_future(future)
+            
+        except Exception as e:
+            logging.error(f"Error in async new samples scanning: {e}")
 
     def _scan_for_new_samples(self) -> None:
         try:
