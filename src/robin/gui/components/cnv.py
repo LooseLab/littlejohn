@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
 from pathlib import Path
+import asyncio
+import concurrent.futures
 
 import natsort
 import numpy as np
@@ -1512,10 +1514,28 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
         except Exception:
             pass
 
-    def _refresh_cnv() -> None:
+    async def _refresh_cnv_async() -> None:
+        """Refresh CNV data asynchronously."""
         try:
-            if not sample_dir or not sample_dir.exists():
+            # Check directory existence in background thread
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(lambda: sample_dir and sample_dir.exists())
+                dir_exists = await asyncio.wrap_future(future)
+            
+            if not dir_exists:
                 return
+            
+            # Run all file operations in background thread
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(_refresh_cnv_sync, sample_dir, launcher)
+                await asyncio.wrap_future(future)
+                
+        except Exception as e:
+            logging.exception(f"[CNV] Async refresh failed: {e}")
+
+    def _refresh_cnv_sync(sample_dir: Path, launcher: Any) -> None:
+        """Synchronous CNV refresh - runs in background thread."""
+        try:
             key = str(sample_dir)
             state = launcher._cnv_state.get(key, {})
 
@@ -1703,19 +1723,19 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             except Exception:
                 pass
             # Trigger immediate refresh to update all UI elements
-            _refresh_cnv()
+            ui.timer(0.1, _refresh_cnv_async, once=True)
 
         def _on_scale(ev):
             st = launcher._cnv_state.setdefault(str(sample_dir), {})
             st["y_scale"] = _val(ev, "linear") or "linear"
             # Trigger immediate refresh to update all UI elements
-            _refresh_cnv()
+            ui.timer(0.1, _refresh_cnv_async, once=True)
 
         def _on_bp(ev):
             st = launcher._cnv_state.setdefault(str(sample_dir), {})
             st["show_bp"] = _val(ev, "show") == "show"
             # Trigger immediate refresh to update all UI elements
-            _refresh_cnv()
+            ui.timer(0.1, _refresh_cnv_async, once=True)
 
         def _on_color(ev):
             st = launcher._cnv_state.setdefault(str(sample_dir), {})
@@ -1730,7 +1750,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 st["color_mode"] = "chromosome"
             logging.debug(f"CNV color mode -> {st['color_mode']} (raw={val})")
             # Trigger immediate refresh to update all UI elements
-            _refresh_cnv()
+            ui.timer(0.1, _refresh_cnv_async, once=True)
 
         # Bind both native change and model-value updates for robustness
         cnv_chrom_select.on("change", _on_chrom)
@@ -1741,7 +1761,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             st = launcher._cnv_state.setdefault(str(sample_dir), {})
             st["selected_gene"] = _val(ev, "All") or "All"
             # Trigger immediate refresh to update all UI elements
-            _refresh_cnv()
+            ui.timer(0.1, _refresh_cnv_async, once=True)
 
         cnv_gene_select.on("change", _on_gene)
         cnv_gene_select.on("update:model-value", _on_gene)
@@ -1754,4 +1774,5 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
     except Exception:
         pass
 
-    ui.timer(30.0, _refresh_cnv, active=True)
+    # Start the refresh timer (every 30 seconds) with async function
+    ui.timer(30.0, lambda: ui.timer(0.1, _refresh_cnv_async, once=True), active=True)

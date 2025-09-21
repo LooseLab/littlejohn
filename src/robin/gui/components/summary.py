@@ -7,6 +7,8 @@ import csv
 from datetime import datetime
 import hashlib
 import logging
+import asyncio
+import concurrent.futures
 
 try:
     from nicegui import ui
@@ -84,24 +86,26 @@ def add_summary_section(sample_dir: Path, sample_id: str) -> None:
             state["mgmt_labels"] = _create_mgmt_dashboard_card()
             state["fusion_labels"] = _create_fusion_dashboard_card()
 
-    # Initial data load
-    def _initial_load():
-        """Load initial data immediately."""
+    # Async data loading functions
+    async def _initial_load_async():
+        """Load initial data asynchronously."""
         try:
-            _refresh_summary_data()
+            await _refresh_summary_data_async()
         except Exception as e:
             logging.exception(f"[Summary] Initial load failed: {e}")
 
-    # Refresh function
-    def _refresh_summary_data():
-        """Refresh all summary data if source files have changed."""
+    async def _refresh_summary_data_async():
+        """Refresh all summary data asynchronously if source files have changed."""
         try:
-            # Check if data has actually changed
-            current_hash = _calculate_data_hash(state["sample_dir"])
+            # Run data hash calculation in background thread
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(_calculate_data_hash, state["sample_dir"])
+                current_hash = await asyncio.wrap_future(future)
+            
             if current_hash == state["last_data_hash"]:
                 return  # No changes, skip update
 
-            # Update the data
+            # Update the data (these functions are already synchronous and safe to call)
             _update_run_information(state)
             _update_classification_data(state)
             _update_analysis_data(state)
@@ -114,11 +118,11 @@ def add_summary_section(sample_dir: Path, sample_id: str) -> None:
         except Exception as e:
             logging.exception(f"[Summary] Refresh failed: {e}")
 
-    # Start the refresh timer (every 30 seconds)
-    state["refresh_timer"] = ui.timer(30.0, _refresh_summary_data, active=True)
+    # Start the refresh timer (every 30 seconds) with async function
+    state["refresh_timer"] = ui.timer(30.0, lambda: ui.timer(0.1, _refresh_summary_data_async, once=True), active=True)
 
-    # Load initial data
-    ui.timer(0.1, _initial_load, once=True)
+    # Load initial data asynchronously
+    ui.timer(0.1, _initial_load_async, once=True)
 
 
 def _create_dashboard_card(title: str, value: str, icon: str, description: str) -> Dict[str, Any]:

@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Any
 import time
 import os
+import asyncio
+import concurrent.futures
 
 import natsort
 import numpy as np
@@ -3735,15 +3737,35 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 f"Target table update failed: {e}", level="warning", notify=False
             )
 
-    def _refresh_coverage() -> None:
+    async def _refresh_coverage_async() -> None:
+        """Refresh coverage data asynchronously."""
         try:
-            if not sample_dir or not sample_dir.exists():
+            # Check directory existence in background thread
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(lambda: sample_dir and sample_dir.exists())
+                dir_exists = await asyncio.wrap_future(future)
+            
+            if not dir_exists:
                 _log_notify(
                     f"Sample directory not found: {sample_dir}",
                     level="warning",
                     notify=True,
                 )
                 return
+            
+            # Run all file operations in background thread
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(_refresh_coverage_sync, sample_dir, launcher)
+                await asyncio.wrap_future(future)
+                
+        except Exception as e:
+            _log_notify(
+                f"Unexpected coverage refresh error: {e}", level="error", notify=True
+            )
+
+    def _refresh_coverage_sync(sample_dir: Path, launcher: Any) -> None:
+        """Synchronous coverage refresh - runs in background thread."""
+        try:
             key = str(sample_dir)
             state = launcher._coverage_state.get(key, {})
             cov_main = sample_dir / "coverage_main.csv"
@@ -4026,5 +4048,5 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             )
 
     # Trigger an immediate refresh on page load, then continue with periodic refreshes
-    ui.timer(0.5, _refresh_coverage, once=True)
-    ui.timer(30.0, _refresh_coverage, active=True)
+    ui.timer(0.5, lambda: ui.timer(0.1, _refresh_coverage_async, once=True), once=True)
+    ui.timer(30.0, lambda: ui.timer(0.1, _refresh_coverage_async, once=True), active=True)

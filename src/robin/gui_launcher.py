@@ -1677,7 +1677,13 @@ class GUILauncher:
                 # Import here to avoid global dependency if GUI isn't used
                 from nicegui import run as ng_run  # type: ignore
 
-                if not sample_dir or not sample_dir.exists():
+                # Check directory existence asynchronously
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(lambda: sample_dir and sample_dir.exists())
+                    dir_exists = await asyncio.wrap_future(future)
+                
+                if not dir_exists:
                     ui.notify(
                         "Output directory not available for this sample",
                         type="warning",
@@ -1749,14 +1755,20 @@ class GUILauncher:
                 ui.notify(f"Opening sample {sample_id}", type="info")
             except Exception:
                 pass
-            if not sample_dir or not sample_dir.exists():
+            
+            # Check directory existence asynchronously to avoid blocking
+            async def check_directory_and_notify():
                 try:
-                    ui.notify(
-                        f"Sample output directory not found for {sample_id}",
-                        type="warning",
-                    )
+                    if not sample_dir or not sample_dir.exists():
+                        ui.notify(
+                            f"Sample output directory not found for {sample_id}",
+                            type="warning",
+                        )
                 except Exception:
                     pass
+            
+            # Start directory check in background
+            ui.timer(0.1, check_directory_and_notify, once=True)
 
             with ui.card().classes("w-full").style("border: 2px solid var(--md-primary)"):
                 with ui.row().classes("w-full flex justify-between items-center"):

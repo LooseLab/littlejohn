@@ -6,6 +6,8 @@ import logging
 import pickle
 import os
 import hashlib
+import asyncio
+import concurrent.futures
 
 import pandas as pd
 import numpy as np
@@ -900,10 +902,28 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
         },
     }
 
-    def refresh() -> None:
+    async def refresh_async() -> None:
+        """Refresh fusion data asynchronously."""
         try:
-            if sample_dir is None or not sample_dir.exists():
+            # Check directory existence in background thread
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(lambda: sample_dir and sample_dir.exists())
+                dir_exists = await asyncio.wrap_future(future)
+            
+            if not dir_exists:
                 return
+            
+            # Run all file operations in background thread
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(refresh_sync, sample_dir, state)
+                await asyncio.wrap_future(future)
+                
+        except Exception as e:
+            logging.exception(f"[Fusion] Async refresh failed: {e}")
+
+    def refresh_sync(sample_dir: Path, state: Dict[str, Any]) -> None:
+        """Synchronous fusion refresh - runs in background thread."""
+        try:
             # Load target panel processed
             target_file = sample_dir / "fusion_candidates_master_processed.csv"
             genome_file = sample_dir / "fusion_candidates_all_processed.csv"
@@ -1162,7 +1182,8 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     pass
         except Exception:
             pass
-        refresh()
-        ui.timer(10.0, refresh)
+        
+        # Start the refresh timer (every 10 seconds) with async function
+        ui.timer(10.0, lambda: ui.timer(0.1, refresh_async, once=True), active=True)
     except Exception:
         pass

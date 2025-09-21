@@ -3,6 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List
 import csv
+import asyncio
+import concurrent.futures
+import logging
 
 try:
     from nicegui import ui
@@ -428,18 +431,37 @@ def add_classification_section(sample_dir: Path) -> None:
         except Exception:
             pass
 
-    def _refresh_classification() -> None:
-        for tool_name, cfg in tool_to_file.items():
-            file_path = sample_dir / cfg["file"] if sample_dir else None
-            try:
-                if file_path and file_path.exists():
-                    mtime = file_path.stat().st_mtime
-                    if charts[tool_name].get("last_mtime") is None or mtime > charts[
-                        tool_name
-                    ].get("last_mtime", 0):
-                        _update_charts_from_file(tool_name, cfg["file"])
-                        charts[tool_name]["last_mtime"] = mtime
-            except Exception:
-                pass
+    async def _refresh_classification_async() -> None:
+        """Refresh classification data asynchronously."""
+        try:
+            # Run file operations in background thread
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                futures = []
+                for tool_name, cfg in tool_to_file.items():
+                    file_path = sample_dir / cfg["file"] if sample_dir else None
+                    if file_path:
+                        future = executor.submit(_check_and_update_file, tool_name, cfg["file"], file_path, charts)
+                        futures.append(future)
+                
+                # Wait for all file operations to complete
+                for future in futures:
+                    try:
+                        await asyncio.wrap_future(future)
+                    except Exception:
+                        pass
+        except Exception as e:
+            logging.exception(f"[Classification] Async refresh failed: {e}")
 
-    ui.timer(30.0, _refresh_classification, active=True)
+    def _check_and_update_file(tool_name: str, filename: str, file_path: Path, charts: Dict[str, Any]) -> None:
+        """Check file and update charts if needed - runs in background thread."""
+        try:
+            if file_path.exists():
+                mtime = file_path.stat().st_mtime
+                if charts[tool_name].get("last_mtime") is None or mtime > charts[tool_name].get("last_mtime", 0):
+                    _update_charts_from_file(tool_name, filename)
+                    charts[tool_name]["last_mtime"] = mtime
+        except Exception:
+            pass
+
+    # Start the refresh timer (every 30 seconds) with async function
+    ui.timer(30.0, lambda: ui.timer(0.1, _refresh_classification_async, once=True), active=True)
