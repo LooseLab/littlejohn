@@ -361,6 +361,8 @@ def _calculate_data_hash(sample_dir: Path) -> str:
             "cnv_analysis_counter.txt",
             "1_mgmt.csv",
             "sv_count.txt",
+            "fusion_summary.csv",
+            "fusion_results.csv",
         ]
 
         for filename in key_files:
@@ -1201,62 +1203,73 @@ def _extract_classification_data(sample_dir: Path) -> Dict[str, Any]:
 
 
 def _extract_fusion_data(sample_dir: Path) -> Dict[str, Any]:
-    """Extract fusion analysis data."""
-    fusion_data = {"target_fusions": "Not available", "genome_fusions": "Not available"}
+    """Extract fusion analysis data from generated summary files."""
+    fusion_data = {"target_fusions": 0, "genome_fusions": 0}
 
     try:
-        # Look for fusion result files
-        fusion_files = [
-            "sv_count.txt",
-            "fusion_results.csv",
-            "fusion_summary.txt",
-            "fusion_analysis.csv",
-        ]
+        # First try to read from the new fusion_summary.csv file
+        summary_file = sample_dir / "fusion_summary.csv"
+        if summary_file.exists():
+            try:
+                with open(summary_file, "r") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        fusion_data["target_fusions"] = int(row.get("target_fusions", 0))
+                        fusion_data["genome_fusions"] = int(row.get("genome_fusions", 0))
+                        break
+                logging.debug(f"[Summary] Fusion data extracted from summary file - target: {fusion_data['target_fusions']}, genome: {fusion_data['genome_fusions']}")
+                return fusion_data
+            except Exception as e:
+                logging.debug(f"   Fusion: Failed to read summary file: {e}")
+        
+        # If summary files don't exist, try to generate them from pickle files
+        try:
+            from robin.gui.components.fusion import _generate_summary_files_from_pickle
+            if _generate_summary_files_from_pickle(sample_dir):
+                # Try reading the newly generated summary file
+                if summary_file.exists():
+                    with open(summary_file, "r") as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            fusion_data["target_fusions"] = int(row.get("target_fusions", 0))
+                            fusion_data["genome_fusions"] = int(row.get("genome_fusions", 0))
+                            break
+                    logging.debug(f"[Summary] Fusion data extracted from generated summary file - target: {fusion_data['target_fusions']}, genome: {fusion_data['genome_fusions']}")
+                    return fusion_data
+        except Exception as e:
+            logging.debug(f"   Fusion: Failed to generate summary files from pickle: {e}")
+        
+        # Fallback to individual fusion_results.csv file
+        fusion_results_file = sample_dir / "fusion_results.csv"
+        if fusion_results_file.exists():
+            try:
+                with open(fusion_results_file, "r") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        fusion_data["target_fusions"] = int(row.get("target_fusions", 0))
+                        fusion_data["genome_fusions"] = int(row.get("genome_fusions", 0))
+                        break
+                logging.debug(f"[Summary] Fusion data extracted from results file - target: {fusion_data['target_fusions']}, genome: {fusion_data['genome_fusions']}")
+                return fusion_data
+            except Exception as e:
+                logging.debug(f"   Fusion: Failed to read results file: {e}")
+        
+        # Final fallback to legacy sv_count.txt file
+        sv_count_file = sample_dir / "sv_count.txt"
+        if sv_count_file.exists():
+            try:
+                with open(sv_count_file, "r") as f:
+                    content = f.read().strip()
+                    if content.isdigit():
+                        # Legacy behavior - assume this is genome-wide count
+                        fusion_data["genome_fusions"] = int(content)
+                        fusion_data["target_fusions"] = 0
+                logging.debug(f"[Summary] Fusion data extracted from legacy sv_count file - target: {fusion_data['target_fusions']}, genome: {fusion_data['genome_fusions']}")
+            except Exception as e:
+                logging.debug(f"   Fusion: Failed to read legacy sv_count file: {e}")
 
-        for fusion_file in fusion_files:
-            file_path = sample_dir / fusion_file
-            if file_path.exists():
-                if fusion_file.endswith(".txt"):
-                    try:
-                        with open(file_path, "r") as f:
-                            content = f.read().strip()
-                            # Parse counter file for basic fusion info
-                            if content.isdigit():
-                                fusion_data["genome_fusions"] = int(
-                                    content
-                                )  # Assume this is genome-wide fusions
-                                fusion_data["target_fusions"] = 0  # Default value
-                    except Exception as e:
-                        logging.debug(f"   Fusion: <access denied>: {e}")
-                        pass
-                elif fusion_file.endswith(".csv"):
-                    try:
-                        with open(file_path, "r") as f:
-                            reader = csv.DictReader(f)
-                            for row in reader:
-                                if "target_fusions" in row:
-                                    try:
-                                        fusion_data["target_fusions"] = int(
-                                            row["target_fusions"]
-                                        )
-                                    except Exception as e:
-                                        logging.debug(f"   Fusion: <access denied>: {e}")
-                                        pass
-                                if "genome_fusions" in row:
-                                    try:
-                                        fusion_data["genome_fusions"] = int(
-                                            row["genome_fusions"]
-                                        )
-                                    except Exception as e:
-                                        logging.debug(f"   Fusion: <access denied>: {e}")
-                                        pass
-                    except Exception as e:
-                        logging.debug(f"   Fusion: <access denied>: {e}")
-                        pass
-                break
-
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug(f"   Fusion: <access denied>: {e}")
 
     return fusion_data
 

@@ -87,7 +87,7 @@ class FusionSection(ReportSection):
         return [list(component) for component in connected_components]
 
     def _load_fusion_data(self):
-        """Load fusion data from the processed pickle files."""
+        """Load fusion data, preferring text-based files over pickle files."""
         fusion_data = {
             "master_candidates": None,
             "all_candidates": None,
@@ -98,57 +98,105 @@ class FusionSection(ReportSection):
         }
 
         try:
-            # Load master fusion candidates from processed pickle
-            if os.path.exists(fusion_data["master_path"]):
-                with open(fusion_data["master_path"], "rb") as f:
-                    try:
-                        processed_data = pickle.load(f)
-                        # Filter to only good pairs to reduce memory usage and processing time
-                        annotated_data = processed_data.get("annotated_data", pd.DataFrame())
-                        goodpairs = processed_data.get("goodpairs", pd.Series())
-                        
-                        if not annotated_data.empty and not goodpairs.empty:
-                            # Only keep the good pairs (same as GUI does)
-                            fusion_data["master_candidates"] = annotated_data[goodpairs]
-                        else:
-                            fusion_data["master_candidates"] = annotated_data
-                        
-                        logger.debug(
-                            f"Loaded master fusion candidates from {fusion_data['master_path']} "
-                            f"({len(fusion_data['master_candidates'])} good pairs from {len(annotated_data)} total candidates)"
-                        )
-                    except (pickle.UnpicklingError, EOFError) as e:
-                        logger.warning(f"Error loading master fusion pickle: {e}")
-                        fusion_data["master_candidates"] = pd.DataFrame()
+            # PREFERRED: Try to load from text-based files first
+            master_text_data = self._load_from_text_files("target")
+            if master_text_data is not None:
+                fusion_data["master_candidates"] = master_text_data
+                logger.debug(f"Loaded master fusion data from text files")
+            else:
+                # FALLBACK: Load master fusion candidates from processed pickle
+                if os.path.exists(fusion_data["master_path"]):
+                    with open(fusion_data["master_path"], "rb") as f:
+                        try:
+                            processed_data = pickle.load(f)
+                            # Filter to only good pairs to reduce memory usage and processing time
+                            annotated_data = processed_data.get("annotated_data", pd.DataFrame())
+                            goodpairs = processed_data.get("goodpairs", pd.Series())
+                            
+                            if not annotated_data.empty and not goodpairs.empty:
+                                # Only keep the good pairs (same as GUI does)
+                                fusion_data["master_candidates"] = annotated_data[goodpairs]
+                            else:
+                                fusion_data["master_candidates"] = annotated_data
+                            
+                            logger.debug(
+                                f"Loaded master fusion candidates from pickle (fallback) "
+                                f"({len(fusion_data['master_candidates'])} good pairs)"
+                            )
+                        except (pickle.UnpicklingError, EOFError) as e:
+                            logger.warning(f"Error loading master fusion pickle: {e}")
+                            fusion_data["master_candidates"] = pd.DataFrame()
 
-            # Load all fusion candidates from processed pickle
-            if os.path.exists(fusion_data["all_path"]):
-                with open(fusion_data["all_path"], "rb") as f:
-                    try:
-                        processed_data = pickle.load(f)
-                        # Filter to only good pairs to reduce memory usage and processing time
-                        annotated_data = processed_data.get("annotated_data", pd.DataFrame())
-                        goodpairs = processed_data.get("goodpairs", pd.Series())
-                        
-                        if not annotated_data.empty and not goodpairs.empty:
-                            # Only keep the good pairs (same as GUI does)
-                            fusion_data["all_candidates"] = annotated_data[goodpairs]
-                        else:
-                            fusion_data["all_candidates"] = annotated_data
-                        
-                        logger.debug(
-                            f"Loaded all fusion candidates from {fusion_data['all_path']} "
-                            f"({len(fusion_data['all_candidates'])} good pairs from {len(annotated_data)} total candidates)"
-                        )
-                    except (pickle.UnpicklingError, EOFError) as e:
-                        logger.warning(f"Error loading all fusion pickle: {e}")
-                        fusion_data["all_candidates"] = pd.DataFrame()
+            # PREFERRED: Try to load genome-wide data from text files first
+            genome_text_data = self._load_from_text_files("genome")
+            if genome_text_data is not None:
+                fusion_data["all_candidates"] = genome_text_data
+                logger.debug(f"Loaded genome-wide fusion data from text files")
+            else:
+                # FALLBACK: Load all fusion candidates from processed pickle
+                if os.path.exists(fusion_data["all_path"]):
+                    with open(fusion_data["all_path"], "rb") as f:
+                        try:
+                            processed_data = pickle.load(f)
+                            # Filter to only good pairs to reduce memory usage and processing time
+                            annotated_data = processed_data.get("annotated_data", pd.DataFrame())
+                            goodpairs = processed_data.get("goodpairs", pd.Series())
+                            
+                            if not annotated_data.empty and not goodpairs.empty:
+                                # Only keep the good pairs (same as GUI does)
+                                fusion_data["all_candidates"] = annotated_data[goodpairs]
+                            else:
+                                fusion_data["all_candidates"] = annotated_data
+                            
+                            logger.debug(
+                                f"Loaded genome-wide fusion candidates from pickle (fallback) "
+                                f"({len(fusion_data['all_candidates'])} good pairs)"
+                            )
+                        except (pickle.UnpicklingError, EOFError) as e:
+                            logger.warning(f"Error loading genome-wide fusion pickle: {e}")
+                            fusion_data["all_candidates"] = pd.DataFrame()
 
         except Exception as e:
             logger.error(f"Error loading fusion data: {str(e)}")
             logger.debug("Exception details:", exc_info=True)
 
         return fusion_data
+
+    def _load_from_text_files(self, analysis_type):
+        """Load fusion data from text-based files (JSON/CSV) if available."""
+        try:
+            import json
+            
+            # Try JSON file first
+            json_file = os.path.join(self.report.output, f"fusion_data_{analysis_type}.json")
+            if os.path.exists(json_file):
+                with open(json_file, "r") as f:
+                    data = json.load(f)
+                
+                # Convert sample data back to DataFrame if available
+                sample_data = data.get("sample_data", [])
+                if sample_data:
+                    # Convert back to DataFrame for compatibility with existing code
+                    df = pd.DataFrame(sample_data)
+                    logger.debug(f"Loaded {len(df)} fusion candidates from text file: {analysis_type}")
+                    return df
+                else:
+                    # If no sample data, create empty DataFrame with expected structure
+                    logger.debug(f"Loaded fusion summary from text file (no detailed data): {analysis_type}")
+                    return pd.DataFrame()
+            
+            # Fallback to CSV files
+            gene_groups_file = os.path.join(self.report.output, f"fusion_gene_groups_{analysis_type}.csv")
+            if os.path.exists(gene_groups_file):
+                # For reporting, we mainly need the summary info, not detailed data
+                logger.debug(f"Found gene groups CSV file: {analysis_type}")
+                return pd.DataFrame()  # Return empty DataFrame - reporting will use summary info
+            
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Error loading fusion data from text files ({analysis_type}): {e}")
+            return None
 
     def _format_fusion_table(self, data, title):
         """Create a formatted table for fusion data."""
