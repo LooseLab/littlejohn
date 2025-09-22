@@ -1200,154 +1200,52 @@ def _get_reads(reads: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def _save_fusion_data_as_json(output_file: str, processed_data: dict, annotated_data: pd.DataFrame, goodpairs: pd.Series) -> None:
-    """Save fusion data as a single comprehensive JSON file.
-    
-    This replaces the complex pickle + multiple text files approach with a single JSON file
-    that contains all the data needed by both GUI and reporting components.
-    """
-    try:
-        import json
-        from pathlib import Path
-        
-        # Get the directory and determine analysis type
-        output_dir = Path(output_file).parent
-        is_target_panel = "master" in Path(output_file).name
-        analysis_type = "target_panel" if is_target_panel else "genome_wide"
-        
-        # Create comprehensive fusion data structure
-        fusion_data = {
-            "analysis_type": analysis_type,
-            "candidate_count": processed_data.get("candidate_count", 0),
-            "gene_groups": processed_data.get("gene_groups", []),
-            "gene_pairs": processed_data.get("gene_pairs", []),
-            "is_target_panel": is_target_panel,
-            "timestamp": pd.Timestamp.now().isoformat(),
-            "metadata": {
-                "total_reads": len(annotated_data) if not annotated_data.empty else 0,
-                "good_pairs_count": goodpairs.sum() if goodpairs is not None else 0,
-                "file_source": output_file
-            }
-        }
-        
-        # Add detailed data for visualization (first 1000 rows to keep file size reasonable)
-        if not annotated_data.empty and goodpairs is not None:
-            try:
-                # Get subset of data for GUI display
-                subset_data = annotated_data[goodpairs].head(1000) if goodpairs.any() else annotated_data.head(1000)
-                
-                # Convert to JSON-serializable format
-                fusion_data["detailed_data"] = subset_data.to_dict('records') if not subset_data.empty else []
-                fusion_data["metadata"]["total_candidates"] = len(annotated_data)
-                fusion_data["metadata"]["filtered_candidates"] = goodpairs.sum()
-                
-            except Exception as e:
-                # Detailed data serialization warning suppressed
-                fusion_data["detailed_data"] = []
-        
-        # Save as JSON
-        json_file = output_dir / "fusion_results.json"
-        with open(json_file, "w") as f:
-            json.dump(fusion_data, f, indent=2, default=str)
-        
-        # Also create a simple summary file for backward compatibility
-        summary_file = output_dir / "fusion_summary.csv"
-        with open(summary_file, "w") as f:
-            f.write("analysis_type,candidate_count,timestamp\n")
-            f.write(f"{analysis_type},{processed_data.get('candidate_count', 0)},{fusion_data['timestamp']}\n")
-        
-        # Fusion data saved successfully
-        
-    except Exception as e:
-        # JSON save failed, using fallback
-        # Fallback to old method if JSON saving fails
-        import pickle
-        with open(output_file, "wb") as f:
-            pickle.dump(processed_data, f)
-
 def _generate_fusion_summary_files(output_file: str, processed_data: dict) -> None:
-    """Generate comprehensive text-based summary files for GUI components.
+    """Generate summary files for the summary component.
     
-    Creates detailed text/CSV files that can be easily read by GUI components
-    without needing to parse pickle files, preventing file access conflicts.
+    Creates sv_count.txt and fusion_results.csv files that can be easily
+    read by the summary component without needing to parse pickle files.
     """
     try:
         import os
-        import json
         from pathlib import Path
         
         # Get the directory where the output file is located
         output_dir = Path(output_file).parent
         
-        # Extract fusion data
+        # Extract fusion counts
         candidate_count = processed_data.get("candidate_count", 0)
-        gene_groups = processed_data.get("gene_groups", [])
-        gene_pairs = processed_data.get("gene_pairs", [])
-        annotated_data = processed_data.get("annotated_data")
-        goodpairs = processed_data.get("goodpairs")
         
         # Determine if this is target panel or genome-wide based on filename
         is_target_panel = "master" in Path(output_file).name
         
-        # Generate comprehensive fusion data file (JSON format for easy parsing)
-        fusion_data_file = output_dir / f"fusion_data_{'target' if is_target_panel else 'genome'}.json"
-        fusion_summary = {
-            "candidate_count": candidate_count,
-            "gene_groups": gene_groups,
-            "gene_pairs": gene_pairs,
-            "is_target_panel": is_target_panel,
-            "analysis_type": "target_panel" if is_target_panel else "genome_wide"
-        }
-        
-        # Add detailed data if available
-        if annotated_data is not None and goodpairs is not None:
-            # Convert to basic data structures for JSON serialization
-            try:
-                # Get a subset of the data for GUI display (first 1000 rows to avoid huge files)
-                subset_data = annotated_data[goodpairs].head(1000) if not annotated_data.empty and goodpairs.any() else annotated_data.head(1000)
-                
-                # Convert to records format for JSON
-                fusion_summary["sample_data"] = subset_data.to_dict('records') if not subset_data.empty else []
-                fusion_summary["total_candidates"] = len(annotated_data)
-                fusion_summary["good_pairs_count"] = goodpairs.sum() if goodpairs is not None else 0
-            except Exception as e:
-                # Detailed data serialization warning suppressed
-                fusion_summary["sample_data"] = []
-                fusion_summary["total_candidates"] = 0
-                fusion_summary["good_pairs_count"] = 0
-        
-        # Write JSON data file
-        with open(fusion_data_file, "w") as f:
-            json.dump(fusion_summary, f, indent=2, default=str)
-        
-        # Generate CSV files for easy reading
-        import csv
-        
-        # 1. Gene groups summary
-        gene_groups_file = output_dir / f"fusion_gene_groups_{'target' if is_target_panel else 'genome'}.csv"
-        with open(gene_groups_file, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["group_id", "genes", "gene_count"])
-            for i, group in enumerate(gene_groups):
-                writer.writerow([i, ", ".join(group), len(group)])
-        
-        # 2. Gene pairs summary
-        gene_pairs_file = output_dir / f"fusion_gene_pairs_{'target' if is_target_panel else 'genome'}.csv"
-        with open(gene_pairs_file, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["pair_id", "gene1", "gene2"])
-            for i, pair in enumerate(gene_pairs):
-                if len(pair) >= 2:
-                    writer.writerow([i, pair[0], pair[1]])
-                elif len(pair) == 1:
-                    writer.writerow([i, pair[0], ""])
-        
-        # 3. Simple count file
+        # Generate sv_count.txt file (simple count)
         sv_count_file = output_dir / "sv_count.txt"
-        with open(sv_count_file, "w") as f:
-            f.write(str(candidate_count))
+        if is_target_panel:
+            # For target panel, we still write to sv_count.txt but it represents target fusions
+            with open(sv_count_file, "w") as f:
+                f.write(str(candidate_count))
+        else:
+            # For genome-wide, write the genome-wide count
+            with open(sv_count_file, "w") as f:
+                f.write(str(candidate_count))
         
-        # 4. Combined summary file
+        # Generate fusion_results.csv file with detailed information
+        fusion_results_file = output_dir / "fusion_results.csv"
+        with open(fusion_results_file, "w", newline="") as f:
+            import csv
+            writer = csv.writer(f)
+            
+            # Write header
+            if is_target_panel:
+                writer.writerow(["target_fusions", "genome_fusions"])
+                writer.writerow([candidate_count, 0])  # Target panel only has target fusions
+            else:
+                writer.writerow(["target_fusions", "genome_fusions"])
+                writer.writerow([0, candidate_count])  # Genome-wide only has genome fusions
+        
+        # Generate a combined summary file that has both counts
+        # This will be overwritten each time, with the final one containing the correct totals
         summary_file = output_dir / "fusion_summary.csv"
         
         # Try to read existing summary to get both counts
@@ -1377,11 +1275,8 @@ def _generate_fusion_summary_files(output_file: str, processed_data: dict) -> No
             writer.writerow(["target_fusions", "genome_fusions"])
             writer.writerow([target_count, genome_count])
         
-                # Fusion summary files generated
-        
     except Exception as e:
-        # Fusion summary generation failed
-        pass
+        print(f"Warning: Failed to generate fusion summary files: {e}")
 
 
 def preprocess_fusion_data_standalone(
@@ -1459,15 +1354,22 @@ def preprocess_fusion_data_standalone(
                 }
             )
 
-        # Save processed data as JSON for simplified access
-        _save_fusion_data_as_json(output_file, processed_data, annotated_data, goodpairs)
+        # Save processed data as pickle for efficient loading
+        import pickle
+
+        with open(output_file, "wb") as f:
+            pickle.dump(processed_data, f)
+        
+        # Generate summary files for the summary component
+        _generate_fusion_summary_files(output_file, processed_data)
         
         # Free the processed data immediately
         del processed_data
 
     except Exception as e:
-        # Fusion preprocessing error occurred
-        pass
+        print(f"Error pre-processing fusion data: {str(e)}")
+        import traceback
+        print(f"Exception details: {traceback.format_exc()}")
 
 
 # =============================================================================

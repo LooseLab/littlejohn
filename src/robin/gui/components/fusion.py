@@ -24,7 +24,7 @@ try:
     DNA_FEATURES_AVAILABLE = True
 except ImportError:
     DNA_FEATURES_AVAILABLE = False
-    # DNA Features Viewer not available - using fallback
+    logging.warning("DNA Features Viewer not available - using fallback visualization")
 
     
 # chrov ideograms removed - not working properly
@@ -102,246 +102,103 @@ def _create_data_hash(data: Dict[str, Any]) -> str:
 def _generate_summary_files_from_pickle(sample_dir: Path) -> bool:
     """Generate summary files from existing pickle files if they don't exist.
     
-    Returns True if summary files were generated or already existed, False otherwise.
+    This provides backward compatibility for existing analyses that were run
+    before the summary file generation was implemented.
+    
+    Returns True if summary files were generated, False otherwise.
     """
     try:
-        target_file = sample_dir / "fusion_candidates_master_processed.csv"
-        genome_file = sample_dir / "fusion_candidates_all_processed.csv"
+        import csv
+        from pathlib import Path
         
         # Check if summary files already exist
         summary_file = sample_dir / "fusion_summary.csv"
         if summary_file.exists():
-            return True  # Already generated
+            return True  # Already have summary files
         
-        # Load pickle data
-        target_data = _load_processed_pickle(target_file, require_detailed_data=False)
-        genome_data = _load_processed_pickle(genome_file, require_detailed_data=False)
+        # Load data from pickle files
+        target_file = sample_dir / "fusion_candidates_master_processed.csv"
+        genome_file = sample_dir / "fusion_candidates_all_processed.csv"
         
-        if target_data is None and genome_data is None:
-            return False  # No data available
+        target_data = _load_processed_pickle(target_file)
+        genome_data = _load_processed_pickle(genome_file)
         
         # Extract counts
-        target_count = target_data.get("candidate_count", 0) if target_data else 0
-        genome_count = genome_data.get("candidate_count", 0) if genome_data else 0
+        target_count = 0
+        genome_count = 0
+        
+        if target_data is not None and isinstance(target_data, dict):
+            target_count = target_data.get("candidate_count", 0)
+        
+        if genome_data is not None and isinstance(genome_data, dict):
+            genome_count = genome_data.get("candidate_count", 0)
         
         # Generate fusion_summary.csv
-        import csv
         with open(summary_file, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["target_fusions", "genome_fusions"])
             writer.writerow([target_count, genome_count])
         
-        # Generate individual results files if they don't exist
-        target_results_file = sample_dir / "fusion_results_target.csv"
-        genome_results_file = sample_dir / "fusion_results_genome.csv"
-        
-        if target_data is not None and not target_results_file.exists():
-            with open(target_results_file, "w", newline="") as f:
+        # Generate fusion_results.csv (use the one with more data)
+        results_file = sample_dir / "fusion_results.csv"
+        if target_count > 0:
+            # Use target panel data
+            with open(results_file, "w", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow(["target_fusions", "genome_fusions"])
                 writer.writerow([target_count, 0])
-        
-        if genome_data is not None and not genome_results_file.exists():
-            with open(genome_results_file, "w", newline="") as f:
+        elif genome_count > 0:
+            # Use genome-wide data
+            with open(results_file, "w", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow(["target_fusions", "genome_fusions"])
                 writer.writerow([0, genome_count])
         
-        # Update sv_count.txt with the genome-wide count (for backward compatibility)
+        # Generate sv_count.txt (use genome count for backward compatibility)
         sv_count_file = sample_dir / "sv_count.txt"
-        if genome_count > 0:
-            with open(sv_count_file, "w") as f:
-                f.write(str(genome_count))
+        with open(sv_count_file, "w") as f:
+            f.write(str(genome_count))
         
-        # Generated summary files from pickle data
+        logging.info(f"[Fusion] Generated summary files from pickle data - target: {target_count}, genome: {genome_count}")
         return True
         
     except Exception as e:
-        logging.warning(f"[Fusion] Failed to generate summary files from pickle data: {e}")
+        logging.warning(f"[Fusion] Failed to generate summary files from pickle: {e}")
         return False
 
 
-def _load_processed_pickle(file_path: Path, require_detailed_data: bool = False) -> Optional[Dict[str, Any]]:
-    """Load the preprocessed fusion data structure, preferring text-based files over pickle files.
+def _load_processed_pickle(file_path: Path) -> Optional[Dict[str, Any]]:
+    """Load the preprocessed fusion data structure written by preprocess_fusion_data_standalone.
 
-    Reads from JSON/CSV files first (generated by analysis code) to prevent access conflicts,
-    falls back to pickle files if text files don't exist or if detailed data is required.
-    
-    Args:
-        file_path: Path to the pickle file (used to determine text file locations)
-        require_detailed_data: If True, will fall back to pickle files for detailed data
+    Note: Although the extension is .csv, the file is a pickle per current pipeline.
     """
     try:
-        if not file_path.exists():
+        if not file_path.exists() or file_path.stat().st_size == 0:
             return None
         
-        # Determine the analysis type and corresponding text files
-        is_target_panel = "master" in file_path.name
-        analysis_type = "target" if is_target_panel else "genome"
-        
-        # Get the directory and construct text file paths
-        output_dir = file_path.parent
-        
-        # If detailed data is required, skip text files and go directly to pickle files
-        if require_detailed_data:
-            # Loading detailed data from pickle file
-            # Skip to pickle file loading below
-            pass
-        else:
-            # PREFERRED: Load from JSON data file (generated by analysis code)
-            json_file = output_dir / f"fusion_data_{analysis_type}.json"
-            if json_file.exists():
+        # Try to load the pickle with better error handling
+        with open(file_path, "rb") as f:
+            try:
+                data = pickle.load(f)
+            except (pickle.UnpicklingError, EOFError) as e:
+                # If pickle is truncated, try to load what we can
+                logging.warning(f"[Fusion] Pickle file appears truncated, attempting recovery: {file_path}")
+                f.seek(0)
                 try:
-                    import json
-                    with open(json_file, "r") as f:
-                        data = json.load(f)
-                    
-                    # Convert back to expected format for GUI compatibility
-                    result = {
-                        "candidate_count": data.get("candidate_count", 0),
-                        "gene_groups": data.get("gene_groups", []),
-                        "gene_pairs": data.get("gene_pairs", []),
-                        "is_target_panel": data.get("is_target_panel", is_target_panel),
-                        "analysis_type": data.get("analysis_type", analysis_type),
-                        "sample_data": data.get("sample_data", []),
-                        "total_candidates": data.get("total_candidates", 0),
-                        "good_pairs_count": data.get("good_pairs_count", 0),
-                        # For text-based files, we don't have the full detailed data
-                        "annotated_data": None,
-                        "goodpairs": None
-                    }
-                    
-                    # Loaded fusion data from text file
-                    return result
-                    
-                except Exception as e:
-                    logging.warning(f"[Fusion] Failed to load JSON data: {json_file} - {e}")
+                    # Try loading with protocol 0 which is more forgiving
+                    data = pickle.load(f)
+                except:
+                    # If all else fails, return None and let the system regenerate
+                    logging.error(f"[Fusion] Could not recover truncated pickle: {file_path}")
+                    return None
         
-        # FALLBACK 1: Try CSV files if JSON doesn't exist
-        gene_groups_file = output_dir / f"fusion_gene_groups_{analysis_type}.csv"
-        gene_pairs_file = output_dir / f"fusion_gene_pairs_{analysis_type}.csv"
-        
-        if gene_groups_file.exists() and gene_pairs_file.exists():
-            try:
-                import pandas as pd
-                
-                # Load gene groups
-                gene_groups_df = pd.read_csv(gene_groups_file)
-                gene_groups = []
-                for _, row in gene_groups_df.iterrows():
-                    genes = row["genes"].split(", ") if pd.notna(row["genes"]) else []
-                    gene_groups.append([gene.strip() for gene in genes if gene.strip()])
-                
-                # Load gene pairs
-                gene_pairs_df = pd.read_csv(gene_pairs_file)
-                gene_pairs = []
-                for _, row in gene_pairs_df.iterrows():
-                    if pd.notna(row["gene1"]) and pd.notna(row["gene2"]) and row["gene2"]:
-                        gene_pairs.append((str(row["gene1"]).strip(), str(row["gene2"]).strip()))
-                    elif pd.notna(row["gene1"]):
-                        gene_pairs.append((str(row["gene1"]).strip(),))
-                
-                result = {
-                    "candidate_count": len(gene_groups),
-                    "gene_groups": gene_groups,
-                    "gene_pairs": gene_pairs,
-                    "is_target_panel": is_target_panel,
-                    "analysis_type": analysis_type,
-                    "sample_data": [],
-                    "total_candidates": len(gene_groups),
-                    "good_pairs_count": len(gene_groups),
-                    # For CSV files, we don't have the full detailed data
-                    "annotated_data": None,
-                    "goodpairs": None
-                }
-                
-                # Loaded fusion data from CSV files
-                return result
-                
-            except Exception as e:
-                logging.warning(f"[Fusion] Failed to load CSV data: {e}")
-        
-        # FALLBACK 2: Read from pickle file (original format used by analysis code)
-        if file_path.stat().st_size > 0:
-            try:
-                with open(file_path, "rb") as f:
-                    try:
-                        data = pickle.load(f)
-                    except (pickle.UnpicklingError, EOFError) as e:
-                        logging.warning(f"[Fusion] Pickle file appears truncated, attempting recovery: {file_path}")
-                        f.seek(0)
-                        try:
-                            data = pickle.load(f)
-                        except:
-                            logging.error(f"[Fusion] Could not recover truncated pickle: {file_path}")
-                            return None
-                
-                # Generate text-based files from pickle data for future GUI access
-                if isinstance(data, dict):
-                    _generate_summary_files_from_pickle_data(file_path.parent, data, is_target_panel)
-                    # Generated text files from pickle data for future use
-                
-                # Loaded fusion data from pickle file
-                return data
-                    
-            except Exception as e:
-                logging.warning(f"[Fusion] Failed to load pickle file: {file_path} - {e}")
-        
-        return None
-        
+        # Expected keys: annotated_data (DataFrame), goodpairs (Series), gene_groups (list), candidate_count (int)
+        return data if isinstance(data, dict) else None
     except Exception as e:
-        logging.exception(f"[Fusion] Failed to load fusion data: {file_path} - {e}")
+        logging.exception(
+            f"[Fusion] Failed to load processed fusion pickle: {file_path} - {e}"
+        )
         return None
-
-
-def _generate_summary_files_from_pickle_data(output_dir: Path, data: dict, is_target_panel: bool) -> None:
-    """Generate text-based summary files from pickle data for future use."""
-    try:
-        import json
-        import csv
-        
-        analysis_type = "target" if is_target_panel else "genome"
-        
-        # Generate JSON data file
-        json_file = output_dir / f"fusion_data_{analysis_type}.json"
-        fusion_summary = {
-            "candidate_count": data.get("candidate_count", 0),
-            "gene_groups": data.get("gene_groups", []),
-            "gene_pairs": data.get("gene_pairs", []),
-            "is_target_panel": is_target_panel,
-            "analysis_type": analysis_type,
-            "sample_data": [],
-            "total_candidates": data.get("candidate_count", 0),
-            "good_pairs_count": data.get("candidate_count", 0)
-        }
-        
-        with open(json_file, "w") as f:
-            json.dump(fusion_summary, f, indent=2, default=str)
-        
-        # Generate CSV files
-        gene_groups = data.get("gene_groups", [])
-        gene_groups_file = output_dir / f"fusion_gene_groups_{analysis_type}.csv"
-        with open(gene_groups_file, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["group_id", "genes", "gene_count"])
-            for i, group in enumerate(gene_groups):
-                writer.writerow([i, ", ".join(group), len(group)])
-        
-        gene_pairs = data.get("gene_pairs", [])
-        gene_pairs_file = output_dir / f"fusion_gene_pairs_{analysis_type}.csv"
-        with open(gene_pairs_file, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["pair_id", "gene1", "gene2"])
-            for i, pair in enumerate(gene_pairs):
-                if len(pair) >= 2:
-                    writer.writerow([i, pair[0], pair[1]])
-                elif len(pair) == 1:
-                    writer.writerow([i, pair[0], ""])
-        
-        # Generated text-based files from pickle data
-        
-    except Exception as e:
-        logging.warning(f"[Fusion] Failed to generate text files from pickle data: {e}")
 
 
 def _make_fusion_table(container: Any, df: pd.DataFrame) -> Any:
@@ -389,23 +246,6 @@ def _plot_gene_group(
     3. Professional-grade visualization using DNA Features Viewer
     """
     try:
-        # Check if we have the required data for plotting
-        if annotated_data is None or goodpairs is None:
-            # Data not available (e.g., loaded from text files without detailed data)
-            with container:
-                ui.label(f"Gene Group: {', '.join(gene_group)}").classes("text-lg font-bold mb-2")
-                ui.label("Detailed visualization data not available").classes("text-gray-600 mb-2")
-                ui.label("This gene group was detected but detailed read mapping data").classes("text-gray-500 text-sm")
-                ui.label("is not available in the current data format.").classes("text-gray-500 text-sm")
-                
-                # Show basic gene group information
-                with ui.card().classes("mt-4"):
-                    ui.label("Gene Group Information").classes("font-bold mb-2")
-                    ui.label(f"Genes: {', '.join(gene_group)}").classes("text-sm")
-                    ui.label(f"Gene Count: {len(gene_group)}").classes("text-sm")
-            return
-        
-        # Original plotting logic for when we have detailed data
         subset = annotated_data[goodpairs]
         subset = subset[subset["col4"].isin(gene_group)]
         if subset.empty:
@@ -451,13 +291,13 @@ def _create_advanced_fusion_plot(
 
     # Check if DNA Features Viewer is available
     if not DNA_FEATURES_AVAILABLE:
-        # DNA Features Viewer not available, using fallback
+        logging.warning("DNA Features Viewer not available, using fallback plot")
         return _create_simple_fallback_plot(gene_group, subset)
 
     # Load gene annotation data
     gene_table = _load_gene_annotations()
     if gene_table is None:
-        # Could not load gene annotations, using fallback
+        logging.warning("Could not load gene annotations, using fallback plot")
         return _create_simple_fallback_plot(gene_group, subset)
 
     # Create figure with tight layout - exactly as in original code
@@ -473,7 +313,7 @@ def _create_advanced_fusion_plot(
     # Create the unified side-by-side layout without ideograms
     # For 2 genes, we'll create 2 columns with 2 rows each (gene structure + read mapping)
     num_genes = len(unique_genes)
-    # Creating gene layout for visualization
+    logging.info(f"[Fusion] Creating {num_genes} gene layout with 2 rows (gene structure + read mapping)")
     # Increase figure size and add more padding to prevent tight layout warnings
     fig, axes = plt.subplots(2, num_genes, figsize=(20, 10))
 
@@ -540,7 +380,7 @@ def _format_ticks_to_megabases(ax: plt.Axes) -> None:
         ax.set_xticks(ticks)
         ax.set_xticklabels([f'{t/1e6:.1f}' for t in ticks])
     except Exception as e:
-        # Could not format ticks to megabases
+        logging.warning(f"Could not format ticks to megabases: {e}")
         # Fallback: try to use ticklabel_format if possible
         try:
             ax.ticklabel_format(style='scientific', axis='x', scilimits=(0,0))
@@ -555,10 +395,10 @@ def _load_gene_annotations() -> Optional[pd.DataFrame]:
         gene_data_path = "src/robin/resources/rCNS2_data.csv.gz"
         if os.path.exists(gene_data_path):
             gene_table = pd.read_csv(gene_data_path)
-            # Gene annotations loaded
+            logging.info(f"Loaded gene annotations: {len(gene_table)} entries")
             return gene_table
         else:
-            # Gene annotation file not found
+            logging.warning(f"Gene annotation file not found: {gene_data_path}")
             return None
     except Exception as e:
         logging.error(f"Error loading gene annotations: {e}")
@@ -1141,50 +981,31 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             if not dir_exists:
                 return
             
-            # Run data loading in background thread, UI updates in main thread
+            # Run all file operations in background thread
             with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(load_fusion_data_sync, sample_dir)
-                data = await asyncio.wrap_future(future)
-                
-                # Update UI in main thread
-                if data:
-                    update_fusion_ui(data, state)
+                future = executor.submit(refresh_sync, sample_dir, state)
+                await asyncio.wrap_future(future)
                 
         except Exception as e:
             logging.exception(f"[Fusion] Async refresh failed: {e}")
 
-    def load_fusion_data_sync(sample_dir: Path) -> Optional[Dict[str, Any]]:
-        """Load fusion data in background thread - no UI operations."""
+    def refresh_sync(sample_dir: Path, state: Dict[str, Any]) -> None:
+        """Synchronous fusion refresh - runs in background thread."""
         try:
             # Load target panel processed
             target_file = sample_dir / "fusion_candidates_master_processed.csv"
             genome_file = sample_dir / "fusion_candidates_all_processed.csv"
 
-            t = _load_processed_pickle(target_file, require_detailed_data=True)
-            g = _load_processed_pickle(genome_file, require_detailed_data=True)
+            t = _load_processed_pickle(target_file)
+            g = _load_processed_pickle(genome_file)
             
             # Debug logging
-            # Fusion data loaded successfully
+            logging.info(f"[Fusion] Loaded target data: {t is not None}")
+            logging.info(f"[Fusion] Loaded genome-wide data: {g is not None}")
+            if g is not None:
+                logging.info(f"[Fusion] Genome-wide candidate count: {g.get('candidate_count', 0)}")
+                logging.info(f"[Fusion] Genome-wide gene groups: {len(g.get('gene_groups', []))}")
 
-            return {
-                "target": t,
-                "genome": g,
-                "target_file": target_file,
-                "genome_file": genome_file
-            }
-            
-        except Exception as e:
-            logging.exception(f"[Fusion] Data loading failed: {e}")
-            return None
-
-    def update_fusion_ui(data: Dict[str, Any], state: Dict[str, Any]) -> None:
-        """Update fusion UI elements in main thread."""
-        try:
-            t = data["target"]
-            g = data["genome"]
-            target_file = data["target_file"]
-            genome_file = data["genome_file"]
-            
             # Update target panel UI
             target_mtime = target_file.stat().st_mtime if target_file.exists() else None
             target_data_hash = _create_data_hash(t) if t is not None else None
@@ -1212,7 +1033,7 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     pass
                 state["target"]["table"] = _make_fusion_table(
                     state["target"]["table_container"],
-                    t.get("annotated_data") or pd.DataFrame(),
+                    t.get("annotated_data", pd.DataFrame()),
                 )
                 
                 # Create visualization on first load or when data changes
@@ -1236,49 +1057,52 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                                         t.get("goodpairs"),
                                     ),
                                 ),
-                            ).classes("w-full")
-                        ui.label("").classes("text-sm text-gray-600")
-                        state["target"]["card"] = ui.card().classes("w-full")
-                        # Plot the first gene group by default
-                        if t.get("gene_groups"):
-                            _plot_gene_group(
-                                state["target"]["card"],
-                                t.get("gene_groups", [])[0],
-                                t.get("annotated_data"),
-                                t.get("goodpairs"),
-                            )
-            elif t is None:
-                # Clear target panel if no data
-                state["target"]["data"] = None
-                state["target"]["mtime"] = None
-                state["target"]["data_hash"] = None
-                
-                # Clear summary
-                try:
-                    if "summary" in state and state["summary"].get("target_lbl"):
-                        state["summary"]["target_lbl"].text = "Target fusion groups: 0"
-                except Exception:
-                    pass
-                
-                # Clear table
-                try:
-                    state["target"]["table_container"].clear()
-                    state["target"]["table"] = _make_fusion_table(
-                        state["target"]["table_container"], pd.DataFrame()
-                    )
-                except Exception:
-                    pass
-                
-                # Clear plot
+                            ).classes("w-40")
+                        with ui.row().classes("w-full"):
+                            state["target"]["card"] = ui.card()
+                            with state["target"]["card"]:
+                                ui.label("Select gene pair to see results.").classes(
+                                    "drop-shadow font-bold"
+                                )
+            
+            # Only update visualization when data content actually changes (for background refreshes)
+            elif t is not None and target_data_hash != state["target"].get("data_hash"):
+                state["target"]["data_hash"] = target_data_hash
+                # plot area
                 try:
                     state["target"]["plot_container"].clear()
                 except Exception:
                     pass
+                if t.get("candidate_count", 0) > 0 and t.get("gene_groups"):
+                    with state["target"]["plot_container"].classes("w-full"):
+                        with ui.row().classes("w-full"):
+                            ui.select(
+                                options=t.get("gene_groups", []),
+                                with_input=True,
+                                on_change=lambda e, t=t: (
+                                    state["target"]["card"].clear(),
+                                    state["target"]["card"].classes("w-full"),
+                                    _plot_gene_group(
+                                        state["target"]["card"],
+                                        e.value,
+                                        t.get("annotated_data"),
+                                        t.get("goodpairs"),
+                                    ),
+                                ),
+                            ).classes("w-40")
+                        with ui.row().classes("w-full"):
+                            state["target"]["card"] = ui.card()
+                            with state["target"]["card"]:
+                                ui.label("Select gene pair to see results.").classes(
+                                    "drop-shadow font-bold"
+                                )
 
             # Update genome-wide UI
             genome_mtime = genome_file.stat().st_mtime if genome_file.exists() else None
             genome_data_hash = _create_data_hash(g) if g is not None else None
+            logging.info(f"[Fusion] Genome-wide update check: g={g is not None}, mtime_changed={genome_mtime != state['genome'].get('mtime')}")
             
+            # Always update summary and table when file changes
             if g is not None and genome_mtime != state["genome"].get("mtime"):
                 state["genome"]["data"] = g
                 state["genome"]["mtime"] = genome_mtime
@@ -1289,9 +1113,7 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     if "summary" in state and state["summary"].get("genome_lbl"):
                         state["summary"][
                             "genome_lbl"
-                        ].text = (
-                            f"Genome-wide fusion groups: {int(g.get('candidate_count', 0))}"
-                        )
+                        ].text = f"Genome-wide fusion groups: {int(g.get('candidate_count', 0))}"
                 except Exception:
                     pass
                 # table
@@ -1301,7 +1123,7 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     pass
                 state["genome"]["table"] = _make_fusion_table(
                     state["genome"]["table_container"],
-                    g.get("annotated_data") or pd.DataFrame(),
+                    g.get("annotated_data", pd.DataFrame()),
                 )
                 
                 # Create visualization on first load or when data changes
@@ -1309,6 +1131,7 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     state["genome"]["plot_container"].clear()
                 except Exception:
                     pass
+                logging.info(f"[Fusion] Genome-wide plotting check: candidate_count={g.get('candidate_count', 0)}, gene_groups={len(g.get('gene_groups', []))}")
                 if g.get("candidate_count", 0) > 0 and g.get("gene_groups"):
                     with state["genome"]["plot_container"].classes("w-full"):
                         with ui.row().classes("w-full"):
@@ -1325,49 +1148,48 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                                         g.get("goodpairs"),
                                     ),
                                 ),
-                            ).classes("w-full")
-                        ui.label("").classes("text-sm text-gray-600")
-                        state["genome"]["card"] = ui.card().classes("w-full")
-                        # Plot the first gene group by default
-                        if g.get("gene_groups"):
-                            _plot_gene_group(
-                                state["genome"]["card"],
-                                g.get("gene_groups", [])[0],
-                                g.get("annotated_data"),
-                                g.get("goodpairs"),
-                            )
-            elif g is None:
-                # Clear genome panel if no data
-                state["genome"]["data"] = None
-                state["genome"]["mtime"] = None
-                state["genome"]["data_hash"] = None
-                
-                # Clear summary
-                try:
-                    if "summary" in state and state["summary"].get("genome_lbl"):
-                        state["summary"]["genome_lbl"].text = "Genome-wide fusion groups: 0"
-                except Exception:
-                    pass
-                
-                # Clear table
-                try:
-                    state["genome"]["table_container"].clear()
-                    state["genome"]["table"] = _make_fusion_table(
-                        state["genome"]["table_container"], pd.DataFrame()
-                    )
-                except Exception:
-                    pass
-                
-                # Clear plot
+                            ).classes("w-40")
+                        with ui.row().classes("w-full"):
+                            state["genome"]["card"] = ui.card()
+                            with state["genome"]["card"]:
+                                ui.label("Select gene pair to see results.").classes(
+                                    "drop-shadow font-bold"
+                                )
+            
+            # Only update visualization when data content actually changes (for background refreshes)
+            elif g is not None and genome_data_hash != state["genome"].get("data_hash"):
+                state["genome"]["data_hash"] = genome_data_hash
+                # plot area
                 try:
                     state["genome"]["plot_container"].clear()
                 except Exception:
                     pass
-
+                logging.info(f"[Fusion] Genome-wide plotting check: candidate_count={g.get('candidate_count', 0)}, gene_groups={len(g.get('gene_groups', []))}")
+                if g.get("candidate_count", 0) > 0 and g.get("gene_groups"):
+                    with state["genome"]["plot_container"].classes("w-full"):
+                        with ui.row().classes("w-full"):
+                            ui.select(
+                                options=g.get("gene_groups", []),
+                                with_input=True,
+                                on_change=lambda e, g=g: (
+                                    state["genome"]["card"].clear(),
+                                    state["genome"]["card"].classes("w-full"),
+                                    _plot_gene_group(
+                                        state["genome"]["card"],
+                                        e.value,
+                                        g.get("annotated_data"),
+                                        g.get("goodpairs"),
+                                    ),
+                                ),
+                            ).classes("w-40")
+                        with ui.row().classes("w-full"):
+                            state["genome"]["card"] = ui.card()
+                            with state["genome"]["card"]:
+                                ui.label("Select gene pair to see results.").classes(
+                                    "drop-shadow font-bold"
+                                )
         except Exception as e:
-            logging.exception(f"[Fusion] UI update failed: {e}")
-
-    # Old refresh_sync function removed - replaced by load_fusion_data_sync and update_fusion_ui
+            logging.exception(f"[Fusion] Refresh failed: {e}")
 
     # Build UI
     with ui.card().classes("w-full"):
@@ -1403,14 +1225,12 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             t0 = _load_processed_pickle(
                 (sample_dir / "fusion_candidates_master_processed.csv")
                 if sample_dir
-                else Path("/dev/null"),
-                require_detailed_data=False
+                else Path("/dev/null")
             )
             g0 = _load_processed_pickle(
                 (sample_dir / "fusion_candidates_all_processed.csv")
                 if sample_dir
-                else Path("/dev/null"),
-                require_detailed_data=False
+                else Path("/dev/null")
             )
             if "summary" in state:
                 t_count0 = (
