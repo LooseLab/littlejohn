@@ -5,7 +5,7 @@ This module provides a single source of truth for confidence thresholds
 and CNV classification rules used across the robin application (GUI, reporting, etc.).
 """
 
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Any
 
 # Confidence thresholds for different classifiers
 CLASSIFIER_CONFIDENCE_THRESHOLDS: Dict[str, Dict[str, float]] = {
@@ -240,3 +240,184 @@ def is_resolution_sufficient(bin_width: int) -> bool:
         True if resolution is sufficient for CNV calling
     """
     return bin_width <= CNV_EVENT_RULES["resolution"]["max_bin_width"]
+
+# Fusion Detection Configuration
+FUSION_DETECTION_THRESHOLDS = {
+    "mapping_quality": {
+        "min_threshold": 39,  # Minimum mapping quality score
+        "description": "Minimum mapping quality to consider read alignment reliable"
+    },
+    "mapping_span": {
+        "min_threshold": 49,  # Minimum mapping span in bases
+        "description": "Minimum read mapping length for reliable fusion detection"
+    },
+    "gene_overlap": {
+        "min_threshold": 99,  # Minimum overlap with gene region
+        "description": "Minimum overlap between read and gene region (0 = any overlap)"
+    },
+    "read_support": {
+        "min_threshold": 3,  # Minimum supporting reads per gene pair
+        "description": "Minimum number of supporting reads required for reliable fusion detection"
+    },
+    "read_coordinate_overlap": {
+        "max_threshold": 100,  # Maximum allowed overlap between read alignments
+        "description": "Maximum allowed overlap between read alignments to prevent false positives"
+    },
+    "coordinate_similarity": {
+        "max_threshold": 50,  # Maximum allowed coordinate difference for similar alignments
+        "description": "Maximum coordinate difference (start or end) to consider alignments as similar and filter duplicates"
+    }
+}
+
+# Fusion Detection Rules
+FUSION_DETECTION_RULES = {
+    "supplementary_alignment": {
+        "required": True,
+        "description": "Only process reads with supplementary alignments (SA tag)"
+    },
+    "multi_gene_mapping": {
+        "required": True,
+        "description": "Reads must map to more than 1 gene to be considered fusion candidates"
+    },
+    "overlapping_gene_filter": {
+        "enabled": True,
+        "description": "Filter out reads where same genomic alignment is annotated with multiple overlapping genes"
+    },
+    "exact_coordinate_matching": {
+        "enabled": True,
+        "description": "Use exact genomic coordinate matching to identify identical alignments"
+    },
+    "coordinate_similarity_filter": {
+        "enabled": True,
+        "description": "Filter out reads with very similar (but not identical) alignments to reduce mapping artifacts"
+    }
+}
+
+def get_fusion_threshold(threshold_name: str) -> int:
+    """
+    Get fusion detection threshold by name.
+    
+    Args:
+        threshold_name: Name of the threshold ('mapping_quality', 'mapping_span', etc.)
+    
+    Returns:
+        Threshold value as integer
+    """
+    if threshold_name not in FUSION_DETECTION_THRESHOLDS:
+        raise ValueError(f"Unknown fusion threshold: {threshold_name}")
+    
+    # Handle both min_threshold and max_threshold keys
+    threshold_config = FUSION_DETECTION_THRESHOLDS[threshold_name]
+    if "min_threshold" in threshold_config:
+        return threshold_config["min_threshold"]
+    elif "max_threshold" in threshold_config:
+        return threshold_config["max_threshold"]
+    else:
+        raise ValueError(f"Threshold {threshold_name} has no min_threshold or max_threshold defined")
+
+def get_fusion_rule(rule_name: str) -> bool:
+    """
+    Get fusion detection rule setting by name.
+    
+    Args:
+        rule_name: Name of the rule ('supplementary_alignment', 'multi_gene_mapping', etc.)
+    
+    Returns:
+        Rule setting as boolean
+    """
+    if rule_name not in FUSION_DETECTION_RULES:
+        raise ValueError(f"Unknown fusion rule: {rule_name}")
+    
+    return FUSION_DETECTION_RULES[rule_name]["required"] if "required" in FUSION_DETECTION_RULES[rule_name] else FUSION_DETECTION_RULES[rule_name]["enabled"]
+
+def validate_fusion_candidate(
+    mapping_quality: int,
+    mapping_span: int,
+    gene_overlap: int,
+    supporting_reads: int,
+    has_supplementary: bool = True,
+    maps_multiple_genes: bool = True
+) -> Tuple[bool, str]:
+    """
+    Validate a fusion candidate against all detection rules and thresholds.
+    
+    Args:
+        mapping_quality: Read mapping quality score
+        mapping_span: Read mapping span in bases
+        gene_overlap: Overlap with gene region in bases
+        supporting_reads: Number of supporting reads for the gene pair
+        has_supplementary: Whether read has supplementary alignments
+        maps_multiple_genes: Whether read maps to multiple genes
+    
+    Returns:
+        Tuple of (is_valid, reason) where reason explains why validation failed
+    """
+    # Check supplementary alignment requirement
+    if get_fusion_rule("supplementary_alignment") and not has_supplementary:
+        return False, "Missing supplementary alignment (SA tag)"
+    
+    # Check multi-gene mapping requirement
+    if get_fusion_rule("multi_gene_mapping") and not maps_multiple_genes:
+        return False, "Read does not map to multiple genes"
+    
+    # Check mapping quality threshold
+    min_mq = get_fusion_threshold("mapping_quality")
+    if mapping_quality <= min_mq:
+        return False, f"Mapping quality {mapping_quality} below threshold {min_mq}"
+    
+    # Check mapping span threshold
+    min_span = get_fusion_threshold("mapping_span")
+    if mapping_span <= min_span:
+        return False, f"Mapping span {mapping_span} below threshold {min_span}"
+    
+    # Check gene overlap threshold
+    min_overlap = get_fusion_threshold("gene_overlap")
+    if gene_overlap < min_overlap:
+        return False, f"Gene overlap {gene_overlap} below threshold {min_overlap}"
+    
+    # Check read support threshold
+    min_support = get_fusion_threshold("read_support")
+    if supporting_reads < min_support:
+        return False, f"Supporting reads {supporting_reads} below threshold {min_support}"
+    
+    return True, "All validation criteria passed"
+
+def are_coordinates_similar(
+    coord1_start: int, coord1_end: int,
+    coord2_start: int, coord2_end: int,
+    max_difference: int = None
+) -> bool:
+    """
+    Check if two coordinate ranges are similar (within threshold).
+    
+    Args:
+        coord1_start: Start of first coordinate range
+        coord1_end: End of first coordinate range
+        coord2_start: Start of second coordinate range
+        coord2_end: End of second coordinate range
+        max_difference: Maximum allowed difference in coordinates (uses config if None)
+    
+    Returns:
+        True if coordinates are similar (within threshold)
+    """
+    if max_difference is None:
+        max_difference = FUSION_DETECTION_THRESHOLDS["coordinate_similarity"]["max_threshold"]
+    
+    # Check if start and end coordinates are within the threshold
+    start_diff = abs(coord1_start - coord2_start)
+    end_diff = abs(coord1_end - coord2_end)
+    
+    return start_diff <= max_difference and end_diff <= max_difference
+
+def get_fusion_config_summary() -> Dict[str, Any]:
+    """
+    Get a summary of all fusion detection configuration.
+    
+    Returns:
+        Dictionary containing all thresholds and rules
+    """
+    return {
+        "thresholds": FUSION_DETECTION_THRESHOLDS,
+        "rules": FUSION_DETECTION_RULES,
+        "description": "Centralized fusion detection configuration for consistent analysis across the application"
+    }

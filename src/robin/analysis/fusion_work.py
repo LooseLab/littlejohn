@@ -4,12 +4,14 @@ Fusion detection and processing module for BAM files.
 This module provides functionality to detect gene fusions from BAM files by analyzing
 supplementary alignments and identifying reads that map to multiple gene regions.
 
-IMPORTANT: This module uses strict criteria to avoid false positives:
+IMPORTANT: This module uses centralized configuration from classification_config.py:
 1. Only processes reads with supplementary alignments (SA tag)
 2. Filters out reads where the same genomic alignment is annotated with multiple overlapping genes
 3. This prevents false positives from mapping artifacts where the same genomic region is annotated with multiple overlapping genes
 4. True fusions require reads to map to multiple genomic locations (supplementary alignments)
-5. Fusions must be supported by at least 3 reads to ensure reliability and reduce false positives
+5. Fusions must be supported by a configurable minimum number of reads (default: 3) to ensure reliability and reduce false positives
+
+All thresholds and rules are centrally managed in classification_config.py for consistency across the application.
 """
 
 # Standard library imports
@@ -27,6 +29,14 @@ import numpy as np
 import pandas as pd
 import pysam
 import networkx as nx
+
+# Local imports
+from robin.classification_config import (
+    get_fusion_threshold,
+    get_fusion_rule,
+    validate_fusion_candidate,
+    are_coordinates_similar
+)
 
 # FusionMetadata is now defined in this file
 
@@ -90,9 +100,11 @@ class GeneRegion:
     name: str
 
     def overlaps_with(
-        self, other_start: int, other_end: int, min_overlap: int = 0
+        self, other_start: int, other_end: int, min_overlap: int = None
     ) -> bool:
         """Check if this region overlaps with another region."""
+        if min_overlap is None:
+            min_overlap = get_fusion_threshold("gene_overlap")
         overlap_start = max(self.start, other_start)
         overlap_end = min(self.end, other_end)
         return (
@@ -343,6 +355,7 @@ def _check_read_alignments_overlap(read_rows: List[Dict]) -> bool:
     """
     Check for false positives in read alignments:
     - Same genomic alignment annotated with multiple genes (overlapping gene regions)
+    - Very similar (but not identical) alignments that are likely mapping artifacts
     
     Args:
         read_rows: List of alignment dictionaries for the same read
@@ -371,6 +384,27 @@ def _check_read_alignments_overlap(read_rows: List[Dict]) -> bool:
             if len(set(genes)) > 1:
                 # Same genomic coordinates with different gene annotations = false positive
                 return True
+    
+    # Check: Very similar alignments (coordinate similarity filter)
+    if get_fusion_rule("coordinate_similarity_filter"):
+        max_diff = get_fusion_threshold("coordinate_similarity")
+        
+        # Compare all pairs of alignments for similarity
+        for i in range(len(read_rows)):
+            for j in range(i + 1, len(read_rows)):
+                row1 = read_rows[i]
+                row2 = read_rows[j]
+                
+                # Only check alignments on the same chromosome
+                if row1['reference_id'] == row2['reference_id']:
+                    if are_coordinates_similar(
+                        row1['reference_start'], row1['reference_end'],
+                        row2['reference_start'], row2['reference_end'],
+                        max_diff
+                    ):
+                        # Very similar alignments detected - likely mapping artifact
+                        logger.debug(f"Filtering similar alignments: {row1['reference_id']}:{row1['reference_start']}-{row1['reference_end']} vs {row2['reference_id']}:{row2['reference_start']}-{row2['reference_end']}")
+                        return True
     
     return False
 
@@ -404,7 +438,7 @@ def _find_gene_intersections(
         return read_rows
 
     for gene_region in gene_regions:
-        if gene_region.overlaps_with(ref_start, ref_end, min_overlap=0):
+        if gene_region.overlaps_with(ref_start, ref_end):
             # Create the EXACT column structure expected by the original code
             read_rows.append(
                 {
@@ -503,8 +537,10 @@ def _process_reads_for_fusions(
     # Apply memory optimizations
     df = _optimize_fusion_dataframe(df)
 
-    # Apply filtering thresholds: MQ > 20, span > 50 (more permissive)
-    df = df[(df["mapping_quality"] > 20) & (df["mapping_span"] > 50)].reset_index(
+    # Apply filtering thresholds using centralized configuration
+    min_mq = get_fusion_threshold("mapping_quality")
+    min_span = get_fusion_threshold("mapping_span")
+    df = df[(df["mapping_quality"] > min_mq) & (df["mapping_span"] > min_span)].reset_index(
         drop=True
     )
 
@@ -804,7 +840,8 @@ def _generate_output_files(
                     
                     # Group by gene pair (tag) and count supporting reads
                     gene_pair_read_counts = result.groupby("tag", observed=True)["read_id"].nunique()
-                    valid_gene_pairs = gene_pair_read_counts[gene_pair_read_counts >= 3].index
+                    min_support = get_fusion_threshold("read_support")
+                    valid_gene_pairs = gene_pair_read_counts[gene_pair_read_counts >= min_support].index
                     result = result[result["tag"].isin(valid_gene_pairs)]
 
                 if not result.empty:
@@ -1071,8 +1108,9 @@ def _annotate_results(result: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
     # Clean string data efficiently
     result = result.apply(lambda x: x.strip() if isinstance(x, str) else x)
 
-    # Find good pairs (gene pairs supported by 3 or more reads - minimum threshold for reliable fusion detection)
-    goodpairs = result.groupby("tag", observed=True)["read_id"].transform("nunique") >= 3
+    # Find good pairs (gene pairs supported by minimum threshold for reliable fusion detection)
+    min_support = get_fusion_threshold("read_support")
+    goodpairs = result.groupby("tag", observed=True)["read_id"].transform("nunique") >= min_support
 
     return result, goodpairs
 
@@ -1343,7 +1381,8 @@ def preprocess_fusion_data_standalone(
                     annotated_data[goodpairs]["col4"].isin(gene_group)
                 ]
                 unique_read_count = gene_group_reads["read_id"].nunique()
-                if unique_read_count >= 3:  # Require minimum 3 supporting reads for reliable fusion detection
+                min_support = get_fusion_threshold("read_support")
+                if unique_read_count >= min_support:  # Require minimum supporting reads for reliable fusion detection
                     gene_groups.append(gene_group)
 
             processed_data.update(

@@ -234,23 +234,40 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
 
             bam_path = sample_dir / "mgmt_sorted.bam"
             if bam_path.exists():
-                from robin.analysis.methylation_wrapper import (
-                    locus_figure,
-                )
+                try:
+                    from robin.analysis.methylation_wrapper import (
+                        locus_figure,
+                    )
 
-                fig = locus_figure(
-                    interval="chr10:129466536-129467536",
-                    bam_path=str(bam_path),
-                    motif="CG",
-                    mods="m",
-                    extra_cli=[
-                        # "--minqual","20", "--reads","2000", "--height","6", "--width","10"
-                    ],
-                    site_rows=site_rows,
-                )
-                # Update NiceGUI Matplotlib element
-                mgmt_mpl.figure = fig
-                mgmt_mpl.update()
+                    fig = locus_figure(
+                        interval="chr10:129466536-129467536",
+                        bam_path=str(bam_path),
+                        motif="CG",
+                        mods="m",
+                        extra_cli=[
+                            # "--minqual","20", "--reads","2000", "--height","6", "--width","10"
+                        ],
+                        site_rows=site_rows,
+                    )
+                    # Update NiceGUI Matplotlib element
+                    mgmt_mpl.figure = fig
+                    mgmt_mpl.update()
+                except Exception as e:
+                    # If methylartist fails, create a simple placeholder plot
+                    import matplotlib.pyplot as plt
+                    import matplotlib.patches as patches
+                    
+                    fig, ax = plt.subplots(figsize=(4, 3))
+                    ax.text(0.5, 0.5, f"Methylation plot unavailable\n({str(e)})", 
+                           ha='center', va='center', transform=ax.transAxes,
+                           fontsize=10, color='red')
+                    ax.set_xlim(0, 1)
+                    ax.set_ylim(0, 1)
+                    ax.axis('off')
+                    ax.set_title("MGMT Methylation Plot")
+                    
+                    mgmt_mpl.figure = fig
+                    mgmt_mpl.update()
 
             launcher._mgmt_state[key] = {
                 "last_count": current_count,
