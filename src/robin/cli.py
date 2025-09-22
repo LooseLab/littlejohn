@@ -1177,6 +1177,18 @@ def _register_handlers(
                 final_handler = create_handler_with_work_dir_and_ref(
                     handler_func, work_dir, reference, center, target_panel
                 )
+            elif reference and job_type == "mgmt":
+                # Special handling for MGMT analysis with reference genome
+                def create_mgmt_handler_with_work_dir_and_ref(
+                    handler, work_dir_path, ref_path
+                ):
+                    return lambda job: handler(
+                        job, work_dir=str(work_dir_path), reference=str(ref_path)
+                    )
+
+                final_handler = create_mgmt_handler_with_work_dir_and_ref(
+                    handler_func, work_dir, reference
+                )
             elif job_type == "fusion":
                 # Special handling for fusion analysis with target panel
                 def create_fusion_handler_with_work_dir(

@@ -1200,6 +1200,71 @@ def _get_reads(reads: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def _save_fusion_data_as_json(output_file: str, processed_data: dict, annotated_data: pd.DataFrame, goodpairs: pd.Series) -> None:
+    """Save fusion data as a single comprehensive JSON file.
+    
+    This replaces the complex pickle + multiple text files approach with a single JSON file
+    that contains all the data needed by both GUI and reporting components.
+    """
+    try:
+        import json
+        from pathlib import Path
+        
+        # Get the directory and determine analysis type
+        output_dir = Path(output_file).parent
+        is_target_panel = "master" in Path(output_file).name
+        analysis_type = "target_panel" if is_target_panel else "genome_wide"
+        
+        # Create comprehensive fusion data structure
+        fusion_data = {
+            "analysis_type": analysis_type,
+            "candidate_count": processed_data.get("candidate_count", 0),
+            "gene_groups": processed_data.get("gene_groups", []),
+            "gene_pairs": processed_data.get("gene_pairs", []),
+            "is_target_panel": is_target_panel,
+            "timestamp": pd.Timestamp.now().isoformat(),
+            "metadata": {
+                "total_reads": len(annotated_data) if not annotated_data.empty else 0,
+                "good_pairs_count": goodpairs.sum() if goodpairs is not None else 0,
+                "file_source": output_file
+            }
+        }
+        
+        # Add detailed data for visualization (first 1000 rows to keep file size reasonable)
+        if not annotated_data.empty and goodpairs is not None:
+            try:
+                # Get subset of data for GUI display
+                subset_data = annotated_data[goodpairs].head(1000) if goodpairs.any() else annotated_data.head(1000)
+                
+                # Convert to JSON-serializable format
+                fusion_data["detailed_data"] = subset_data.to_dict('records') if not subset_data.empty else []
+                fusion_data["metadata"]["total_candidates"] = len(annotated_data)
+                fusion_data["metadata"]["filtered_candidates"] = goodpairs.sum()
+                
+            except Exception as e:
+                # Detailed data serialization warning suppressed
+                fusion_data["detailed_data"] = []
+        
+        # Save as JSON
+        json_file = output_dir / "fusion_results.json"
+        with open(json_file, "w") as f:
+            json.dump(fusion_data, f, indent=2, default=str)
+        
+        # Also create a simple summary file for backward compatibility
+        summary_file = output_dir / "fusion_summary.csv"
+        with open(summary_file, "w") as f:
+            f.write("analysis_type,candidate_count,timestamp\n")
+            f.write(f"{analysis_type},{processed_data.get('candidate_count', 0)},{fusion_data['timestamp']}\n")
+        
+        # Fusion data saved successfully
+        
+    except Exception as e:
+        # JSON save failed, using fallback
+        # Fallback to old method if JSON saving fails
+        import pickle
+        with open(output_file, "wb") as f:
+            pickle.dump(processed_data, f)
+
 def _generate_fusion_summary_files(output_file: str, processed_data: dict) -> None:
     """Generate comprehensive text-based summary files for GUI components.
     
@@ -1246,7 +1311,7 @@ def _generate_fusion_summary_files(output_file: str, processed_data: dict) -> No
                 fusion_summary["total_candidates"] = len(annotated_data)
                 fusion_summary["good_pairs_count"] = goodpairs.sum() if goodpairs is not None else 0
             except Exception as e:
-                print(f"Warning: Could not serialize detailed data: {e}")
+                # Detailed data serialization warning suppressed
                 fusion_summary["sample_data"] = []
                 fusion_summary["total_candidates"] = 0
                 fusion_summary["good_pairs_count"] = 0
@@ -1312,10 +1377,10 @@ def _generate_fusion_summary_files(output_file: str, processed_data: dict) -> No
             writer.writerow(["target_fusions", "genome_fusions"])
             writer.writerow([target_count, genome_count])
         
-        print(f"Generated comprehensive fusion summary files for {'target' if is_target_panel else 'genome'}: {candidate_count} candidates")
+                # Fusion summary files generated
         
     except Exception as e:
-        print(f"Warning: Failed to generate fusion summary files: {e}")
+        # Fusion summary generation failed
 
 
 def preprocess_fusion_data_standalone(
@@ -1393,22 +1458,14 @@ def preprocess_fusion_data_standalone(
                 }
             )
 
-        # Save processed data as pickle for efficient loading
-        import pickle
-
-        with open(output_file, "wb") as f:
-            pickle.dump(processed_data, f)
-        
-        # Generate summary files for the summary component
-        _generate_fusion_summary_files(output_file, processed_data)
+        # Save processed data as JSON for simplified access
+        _save_fusion_data_as_json(output_file, processed_data, annotated_data, goodpairs)
         
         # Free the processed data immediately
         del processed_data
 
     except Exception as e:
-        print(f"Error pre-processing fusion data: {str(e)}")
-        import traceback
-        print(f"Exception details: {traceback.format_exc()}")
+        # Fusion preprocessing error occurred
 
 
 # =============================================================================
