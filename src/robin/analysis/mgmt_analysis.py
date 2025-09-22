@@ -260,7 +260,7 @@ def run_matkit(
 
 
 def process_bam_file(
-    bam_path: str, metadata: Dict[str, Any], work_dir: str, threads: int = 4
+    bam_path: str, metadata: Dict[str, Any], work_dir: str, threads: int = 4, reference: Optional[str] = None
 ) -> MGMTMetadata:
     """Process a single BAM file for MGMT analysis"""
     # print(f"Processing MGMT for BAM file: {bam_path}\n\n")
@@ -419,7 +419,14 @@ def process_bam_file(
                 mgmt_bam_for_plot = mgmt_bam_output
 
             plot_out = os.path.join(sample_dir, f"{file_number}_mgmt.png")
+            
+            # Build methylartist command with reference genome if available
             methylartist_cmd = f"methylartist locus -i chr10:129466536-129467536 -b {mgmt_bam_for_plot} -o {plot_out} --motif CG --mods m"
+            if reference and os.path.exists(reference):
+                methylartist_cmd += f" --ref {reference}"
+                logger.info(f"Using reference genome for methylartist: {reference}")
+            else:
+                logger.warning("No reference genome provided or file not found - methylartist may fail")
 
             result = subprocess.run(
                 methylartist_cmd,
@@ -528,7 +535,7 @@ def run_final_combined_analysis(sample_id: str, work_dir: str) -> bool:
         return False
 
 
-def mgmt_handler(job, work_dir=None):
+def mgmt_handler(job, work_dir=None, reference=None):
     """
     Handler function for MGMT analysis jobs.
     This function processes BAM files for MGMT methylation analysis.
@@ -536,6 +543,7 @@ def mgmt_handler(job, work_dir=None):
     Args:
         job: The workflow job containing file and metadata
         work_dir: Optional base directory for output (defaults to BAM file directory)
+        reference: Optional path to reference genome for methylartist
     """
     try:
         bam_path = job.context.filepath
@@ -557,7 +565,7 @@ def mgmt_handler(job, work_dir=None):
             logger.debug(f"Using specified work directory: {work_dir}")
 
         # Process the BAM file
-        mgmt_result = process_bam_file(bam_path, bam_metadata, work_dir)
+        mgmt_result = process_bam_file(bam_path, bam_metadata, work_dir, reference=reference)
 
         # Store results in job context
         job.context.add_metadata("mgmt_analysis", mgmt_result.results)
