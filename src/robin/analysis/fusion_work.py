@@ -1381,6 +1381,7 @@ def _generate_fusion_summary_files(output_file: str, processed_data: dict) -> No
         
     except Exception as e:
         # Fusion summary generation failed
+        pass
 
 
 def preprocess_fusion_data_standalone(
@@ -1466,6 +1467,7 @@ def preprocess_fusion_data_standalone(
 
     except Exception as e:
         # Fusion preprocessing error occurred
+        pass
 
 
 # =============================================================================
