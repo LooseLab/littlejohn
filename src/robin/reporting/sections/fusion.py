@@ -103,10 +103,19 @@ class FusionSection(ReportSection):
                 with open(fusion_data["master_path"], "rb") as f:
                     try:
                         processed_data = pickle.load(f)
-                        fusion_data["master_candidates"] = processed_data.get("annotated_data", pd.DataFrame())
+                        # Filter to only good pairs to reduce memory usage and processing time
+                        annotated_data = processed_data.get("annotated_data", pd.DataFrame())
+                        goodpairs = processed_data.get("goodpairs", pd.Series())
+                        
+                        if not annotated_data.empty and not goodpairs.empty:
+                            # Only keep the good pairs (same as GUI does)
+                            fusion_data["master_candidates"] = annotated_data[goodpairs]
+                        else:
+                            fusion_data["master_candidates"] = annotated_data
+                        
                         logger.debug(
                             f"Loaded master fusion candidates from {fusion_data['master_path']} "
-                            f"({len(fusion_data['master_candidates'])} candidates)"
+                            f"({len(fusion_data['master_candidates'])} good pairs from {len(annotated_data)} total candidates)"
                         )
                     except (pickle.UnpicklingError, EOFError) as e:
                         logger.warning(f"Error loading master fusion pickle: {e}")
@@ -117,10 +126,19 @@ class FusionSection(ReportSection):
                 with open(fusion_data["all_path"], "rb") as f:
                     try:
                         processed_data = pickle.load(f)
-                        fusion_data["all_candidates"] = processed_data.get("annotated_data", pd.DataFrame())
+                        # Filter to only good pairs to reduce memory usage and processing time
+                        annotated_data = processed_data.get("annotated_data", pd.DataFrame())
+                        goodpairs = processed_data.get("goodpairs", pd.Series())
+                        
+                        if not annotated_data.empty and not goodpairs.empty:
+                            # Only keep the good pairs (same as GUI does)
+                            fusion_data["all_candidates"] = annotated_data[goodpairs]
+                        else:
+                            fusion_data["all_candidates"] = annotated_data
+                        
                         logger.debug(
                             f"Loaded all fusion candidates from {fusion_data['all_path']} "
-                            f"({len(fusion_data['all_candidates'])} candidates)"
+                            f"({len(fusion_data['all_candidates'])} good pairs from {len(annotated_data)} total candidates)"
                         )
                     except (pickle.UnpicklingError, EOFError) as e:
                         logger.warning(f"Error loading all fusion pickle: {e}")
