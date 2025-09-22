@@ -6,6 +6,7 @@ This module contains the fusion analysis section of the report.
 
 import os
 import logging
+import pickle
 from reportlab.platypus import Paragraph, Spacer, Table, TableStyle
 from reportlab.lib import colors
 from reportlab.lib.units import inch
@@ -21,7 +22,32 @@ class FusionSection(ReportSection):
     """Section containing the fusion analysis results."""
 
     def _get_gene_pairs(self, data):
-        """Get unique gene fusion pairs from the data."""
+        """Get unique gene fusion pairs from the processed data."""
+        if data is None or data.empty:
+            return []
+
+        # For processed data, we can use the 'tag' column which contains gene pairs
+        # or fall back to grouping by read_id if needed
+        if 'tag' in data.columns:
+            # Extract gene pairs from the tag column (format: "gene1,gene2")
+            gene_pairs = []
+            for tag in data['tag'].unique():
+                if ',' in tag:
+                    genes = tag.split(',')
+                    if len(genes) >= 2:
+                        # Sort genes to ensure consistent ordering
+                        gene_pair = tuple(sorted(genes))
+                        gene_pairs.append(gene_pair)
+            
+            # Get unique pairs
+            unique_pairs = list(set(gene_pairs))
+            return unique_pairs
+        else:
+            # Fallback to original method if tag column not available
+            return self._get_gene_pairs_fallback(data)
+
+    def _get_gene_pairs_fallback(self, data):
+        """Fallback method for getting gene pairs from raw data."""
         if data is None or data.empty:
             return []
 
@@ -61,66 +87,62 @@ class FusionSection(ReportSection):
         return [list(component) for component in connected_components]
 
     def _load_fusion_data(self):
-        """Load fusion data from the output directory."""
+        """Load fusion data from the processed pickle files."""
         fusion_data = {
             "master_candidates": None,
             "all_candidates": None,
             "master_path": os.path.join(
-                self.report.output, "fusion_candidates_master.csv"
+                self.report.output, "fusion_candidates_master_processed.csv"
             ),
-            "all_path": os.path.join(self.report.output, "fusion_candidates_all.csv"),
+            "all_path": os.path.join(self.report.output, "fusion_candidates_all_processed.csv"),
         }
 
         try:
+            # Load master fusion candidates from processed pickle
             if os.path.exists(fusion_data["master_path"]):
-                fusion_data["master_candidates"] = pd.read_csv(
-                    fusion_data["master_path"],
-                    names=[
-                        "chromBED",
-                        "BS",
-                        "BE",
-                        "Gene",
-                        "chrom",
-                        "mS",
-                        "mE",
-                        "readID",
-                        "mapQ",
-                        "strand",
-                        "Read_Map_Start",
-                        "Read_Map_End",
-                        "Secondary",
-                        "Supplementary",
-                        "mapping_span",
-                    ],
-                )
-                logger.debug(
-                    f"Loaded master fusion candidates from {fusion_data['master_path']}"
-                )
+                with open(fusion_data["master_path"], "rb") as f:
+                    try:
+                        processed_data = pickle.load(f)
+                        # Filter to only good pairs to reduce memory usage and processing time
+                        annotated_data = processed_data.get("annotated_data", pd.DataFrame())
+                        goodpairs = processed_data.get("goodpairs", pd.Series())
+                        
+                        if not annotated_data.empty and not goodpairs.empty:
+                            # Only keep the good pairs (same as GUI does)
+                            fusion_data["master_candidates"] = annotated_data[goodpairs]
+                        else:
+                            fusion_data["master_candidates"] = annotated_data
+                        
+                        logger.debug(
+                            f"Loaded master fusion candidates from {fusion_data['master_path']} "
+                            f"({len(fusion_data['master_candidates'])} good pairs from {len(annotated_data)} total candidates)"
+                        )
+                    except (pickle.UnpicklingError, EOFError) as e:
+                        logger.warning(f"Error loading master fusion pickle: {e}")
+                        fusion_data["master_candidates"] = pd.DataFrame()
 
+            # Load all fusion candidates from processed pickle
             if os.path.exists(fusion_data["all_path"]):
-                fusion_data["all_candidates"] = pd.read_csv(
-                    fusion_data["all_path"],
-                    names=[
-                        "chromBED",
-                        "BS",
-                        "BE",
-                        "Gene",
-                        "chrom",
-                        "mS",
-                        "mE",
-                        "readID",
-                        "mapQ",
-                        "strand",
-                        "Read_Map_Start",
-                        "Read_Map_End",
-                        "Secondary",
-                        "Supplementary",
-                        "mapping_span",
-                    ],
-                )
-                logger.debug(
-                    f"Loaded all fusion candidates from {fusion_data['all_path']}"
-                )
+                with open(fusion_data["all_path"], "rb") as f:
+                    try:
+                        processed_data = pickle.load(f)
+                        # Filter to only good pairs to reduce memory usage and processing time
+                        annotated_data = processed_data.get("annotated_data", pd.DataFrame())
+                        goodpairs = processed_data.get("goodpairs", pd.Series())
+                        
+                        if not annotated_data.empty and not goodpairs.empty:
+                            # Only keep the good pairs (same as GUI does)
+                            fusion_data["all_candidates"] = annotated_data[goodpairs]
+                        else:
+                            fusion_data["all_candidates"] = annotated_data
+                        
+                        logger.debug(
+                            f"Loaded all fusion candidates from {fusion_data['all_path']} "
+                            f"({len(fusion_data['all_candidates'])} good pairs from {len(annotated_data)} total candidates)"
+                        )
+                    except (pickle.UnpicklingError, EOFError) as e:
+                        logger.warning(f"Error loading all fusion pickle: {e}")
+                        fusion_data["all_candidates"] = pd.DataFrame()
 
         except Exception as e:
             logger.error(f"Error loading fusion data: {str(e)}")
@@ -132,9 +154,6 @@ class FusionSection(ReportSection):
         """Create a formatted table for fusion data."""
         if data is None or data.empty:
             return None
-
-        # Group by readID to get fusion pairs
-        read_groups = data.groupby("readID")
 
         # Create paragraph styles for cells
         header_style = ParagraphStyle(
@@ -158,6 +177,103 @@ class FusionSection(ReportSection):
             spaceBefore=0,
             spaceAfter=0,
         )
+
+        # Prepare table data with updated headers using Paragraph objects
+        table_data = [
+            [
+                Paragraph("Fusion Pair", header_style),
+                Paragraph("Chr 1", header_style),
+                Paragraph("Chr 2", header_style),
+                Paragraph("Gene 1 Position", header_style),
+                Paragraph("Gene 2 Position", header_style),
+                Paragraph("Reads", header_style),
+            ]
+        ]
+
+        # Track processed pairs to avoid duplicates
+        processed_pairs = set()
+        fusion_details = {}
+
+        if 'tag' in data.columns:
+            # Use processed data structure
+            for tag in data['tag'].unique():
+                if ',' in tag and tag not in processed_pairs:
+                    processed_pairs.add(tag)
+                    genes = tag.split(',')
+                    if len(genes) >= 2:
+                        gene_pair = f"{genes[0]}-{genes[1]}"
+                        
+                        # Get supporting reads count
+                        supporting_reads = len(data[data['tag'] == tag]['read_id'].unique())
+                        
+                        # Get gene information from the data
+                        gene_info = {}
+                        for gene in genes:
+                            gene_data = data[data['col4'] == gene]
+                            if not gene_data.empty:
+                                first_row = gene_data.iloc[0]
+                                gene_info[gene] = {
+                                    "chrom": first_row.get('reference_id', 'Unknown'),
+                                    "position": f"{first_row.get('reference_start', 'N/A')}-{first_row.get('reference_end', 'N/A')}",
+                                }
+
+                        # Only store fusion details if we have complete information
+                        if len(gene_info) == 2 and supporting_reads >= 3:
+                            fusion_details[gene_pair] = {
+                                "chrom1": gene_info[genes[0]]["chrom"],
+                                "chrom2": gene_info[genes[1]]["chrom"],
+                                "pos1": gene_info[genes[0]]["position"],
+                                "pos2": gene_info[genes[1]]["position"],
+                                "supporting_reads": supporting_reads,
+                            }
+        else:
+            # Fallback to original method for raw data
+            return self._format_fusion_table_fallback(data, title, header_style, cell_style)
+
+        # Add rows to table using Paragraph objects for wrappable text
+        for gene_pair, details in fusion_details.items():
+            table_data.append(
+                [
+                    Paragraph(gene_pair, cell_style),
+                    Paragraph(details["chrom1"], cell_style),
+                    Paragraph(details["chrom2"], cell_style),
+                    Paragraph(details["pos1"], cell_style),
+                    Paragraph(details["pos2"], cell_style),
+                    Paragraph(str(details["supporting_reads"]), cell_style),
+                ]
+            )
+
+        # Return None if no fusions meet the threshold
+        if len(table_data) == 1:  # Only header row
+            return None
+
+        # Define column widths (in inches) - adjusted for better proportions
+        col_widths = [1.8, 0.5, 0.5, 1.6, 1.6, 0.6]
+
+        # Create and style the table
+        table = Table(
+            table_data, colWidths=[inch * width for width in col_widths], repeatRows=1
+        )
+        table.setStyle(
+            TableStyle(
+                [
+                    # Inherit modern table style
+                    *self.MODERN_TABLE_STYLE._cmds,
+                    # Preserve specific alignments
+                    ("ALIGN", (0, 0), (0, -1), "LEFT"),  # Left-align Fusion Pair
+                    ("ALIGN", (1, 0), (2, -1), "CENTER"),  # Center-align Chromosomes
+                    ("ALIGN", (3, 0), (4, -1), "LEFT"),  # Left-align positions
+                    ("ALIGN", (5, 0), (5, -1), "RIGHT"),  # Right-align Supporting Reads
+                ]
+            )
+        )
+
+        return table
+
+    def _format_fusion_table_fallback(self, data, title, header_style, cell_style):
+        """Fallback method for formatting fusion table from raw data."""
+        # Group by readID to get fusion pairs
+        read_groups = data.groupby("readID")
 
         # Prepare table data with updated headers using Paragraph objects
         table_data = [
@@ -351,7 +467,7 @@ class FusionSection(ReportSection):
             source_text = "Data sources:\n"
             source_text += f"- Target panel fusions: {fusion_data['master_path']}\n"
             source_text += f"- Genome-wide fusions: {fusion_data['all_path']}\n"
-            source_text += "\nNote: Fusion candidates are identified from reads with supplementary alignments and filtered based on mapping quality (>40) and alignment length (>100bp)."
+            source_text += "\nNote: Fusion candidates are identified from reads with supplementary alignments and filtered based on mapping quality (>50) and alignment length (>200bp). Processed data includes pre-computed gene pairs and networks."
 
             self.elements.append(Paragraph(source_text, self.styles.styles["Normal"]))
 
@@ -380,34 +496,69 @@ class FusionSection(ReportSection):
                 def _fusion_rows(df):
                     if df is None or df.empty:
                         return []
-                    read_groups = df.groupby("readID")
-                    gene_pair_reads = {}
-                    for read_id, group in read_groups:
-                        genes = sorted(group["Gene"].unique())
-                        if len(genes) >= 2:
-                            for i in range(len(genes) - 1):
-                                for j in range(i + 1, len(genes)):
-                                    gene_pair = f"{genes[i]}-{genes[j]}"
-                                    gene_pair_reads.setdefault(gene_pair, set()).add(
-                                        read_id
-                                    )
-                    rows = []
-                    for gene_pair, reads in gene_pair_reads.items():
-                        if len(reads) >= 3:
-                            g1, g2 = gene_pair.split("-")
-                            g1row = df[df["Gene"] == g1].iloc[0]
-                            g2row = df[df["Gene"] == g2].iloc[0]
-                            rows.append(
-                                {
-                                    "FusionPair": gene_pair,
-                                    "Chrom1": g1row["chromBED"],
-                                    "Chrom2": g2row["chromBED"],
-                                    "Gene1Pos": f"{g1row['BS']}-{g1row['BE']}",
-                                    "Gene2Pos": f"{g2row['BS']}-{g2row['BE']}",
-                                    "SupportingReads": len(reads),
-                                }
-                            )
-                    return rows
+                    
+                    if 'tag' in df.columns:
+                        # Use processed data structure
+                        rows = []
+                        for tag in df['tag'].unique():
+                            if ',' in tag:
+                                genes = tag.split(',')
+                                if len(genes) >= 2:
+                                    supporting_reads = len(df[df['tag'] == tag]['read_id'].unique())
+                                    if supporting_reads >= 3:
+                                        gene_pair = f"{genes[0]}-{genes[1]}"
+                                        
+                                        # Get gene information
+                                        gene_info = {}
+                                        for gene in genes:
+                                            gene_data = df[df['col4'] == gene]
+                                            if not gene_data.empty:
+                                                first_row = gene_data.iloc[0]
+                                                gene_info[gene] = {
+                                                    "chrom": first_row.get('reference_id', 'Unknown'),
+                                                    "position": f"{first_row.get('reference_start', 'N/A')}-{first_row.get('reference_end', 'N/A')}",
+                                                }
+                                        
+                                        if len(gene_info) == 2:
+                                            rows.append({
+                                                "FusionPair": gene_pair,
+                                                "Chrom1": gene_info[genes[0]]["chrom"],
+                                                "Chrom2": gene_info[genes[1]]["chrom"],
+                                                "Gene1Pos": gene_info[genes[0]]["position"],
+                                                "Gene2Pos": gene_info[genes[1]]["position"],
+                                                "SupportingReads": supporting_reads,
+                                            })
+                        return rows
+                    else:
+                        # Fallback to original method for raw data
+                        read_groups = df.groupby("readID")
+                        gene_pair_reads = {}
+                        for read_id, group in read_groups:
+                            genes = sorted(group["Gene"].unique())
+                            if len(genes) >= 2:
+                                for i in range(len(genes) - 1):
+                                    for j in range(i + 1, len(genes)):
+                                        gene_pair = f"{genes[i]}-{genes[j]}"
+                                        gene_pair_reads.setdefault(gene_pair, set()).add(
+                                            read_id
+                                        )
+                        rows = []
+                        for gene_pair, reads in gene_pair_reads.items():
+                            if len(reads) >= 3:
+                                g1, g2 = gene_pair.split("-")
+                                g1row = df[df["Gene"] == g1].iloc[0]
+                                g2row = df[df["Gene"] == g2].iloc[0]
+                                rows.append(
+                                    {
+                                        "FusionPair": gene_pair,
+                                        "Chrom1": g1row["chromBED"],
+                                        "Chrom2": g2row["chromBED"],
+                                        "Gene1Pos": f"{g1row['BS']}-{g1row['BE']}",
+                                        "Gene2Pos": f"{g2row['BS']}-{g2row['BE']}",
+                                        "SupportingReads": len(reads),
+                                    }
+                                )
+                        return rows
 
                 master_rows = _fusion_rows(fusion_data["master_candidates"])
                 if master_rows:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
 from pathlib import Path
+import asyncio
+import concurrent.futures
 
 import natsort
 import numpy as np
@@ -16,6 +18,8 @@ except ImportError:  # pragma: no cover
     ui = None
 
 from robin.gui.theme import styled_table
+from robin.analysis.cnv_classification import detect_cnv_events, get_cnv_summary, CNVEvent
+from robin.classification_config import get_cnv_thresholds
 
 
 def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
@@ -161,11 +165,30 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             }
         ).classes("w-full h-72")
 
-        # Cytoband analysis table (updated when a single chromosome is selected)
-        ui.label("CNV Cytoband Analysis").classes("text-md font-semibold mt-4")
-        cyto_summary = ui.label("Select a chromosome to view cytoband events").classes(
-            "text-gray-600 mb-1"
+        # CNV Events Summary
+        ui.label("CNV Events Summary").classes("text-md font-semibold mt-4")
+        cnv_events_summary = ui.label("No CNV events detected").classes("text-gray-600 mb-2")
+        
+        # CNV Events Table
+        cnv_events_columns = [
+            {"name": "chromosome", "label": "Chr", "field": "chromosome", "sortable": True},
+            {"name": "event_type", "label": "Event Type", "field": "event_type", "sortable": True},
+            {"name": "arm", "label": "Arm", "field": "arm", "sortable": True},
+            {"name": "start_mb", "label": "Start (Mb)", "field": "start_mb", "sortable": True, "align": "right"},
+            {"name": "end_mb", "label": "End (Mb)", "field": "end_mb", "sortable": True, "align": "right"},
+            {"name": "length_mb", "label": "Length (Mb)", "field": "length_mb", "sortable": True, "align": "right"},
+            {"name": "mean_cnv_str", "label": "Mean CNV", "field": "mean_cnv_str", "sortable": True, "align": "right"},
+            {"name": "confidence", "label": "Confidence", "field": "confidence", "sortable": True, "align": "center"},
+            {"name": "proportion_affected", "label": "% Affected", "field": "proportion_affected", "sortable": True, "align": "right"},
+            {"name": "genes_str", "label": "Genes", "field": "genes_str"},
+        ]
+        _, cnv_events_table = styled_table(
+            columns=cnv_events_columns, rows=[], pagination=20, class_size="table-xs"
         )
+        try:
+            cnv_events_table.props('multi-sort rows-per-page-options="[10,20,50,0]"')
+        except Exception:
+            pass
         cyto_columns = [
             {"name": "chrom", "label": "Chr", "field": "chrom", "sortable": True},
             {"name": "region", "label": "Region", "field": "region", "sortable": True},
@@ -215,7 +238,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             pass
 
     # Adaptive thinning helpers
-    MAX_POINTS_PER_CHART = 2000
+    MAX_POINTS_PER_CHART = 10000
 
     def _get_visible_range(chart, series_list):
         try:
@@ -399,28 +422,72 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 res_path,
                 sep="\t",
                 header=None,
-                names=["chrom", "start", "end", "name", "stain"],
+                names=["chrom", "start_pos", "end_pos", "name", "stain"],
             )
             return df
         except Exception:
-            return pd.DataFrame(columns=["chrom", "start", "end", "name", "stain"])
+            return pd.DataFrame(columns=["chrom", "start_pos", "end_pos", "name", "stain"])
 
-    @lru_cache(maxsize=1)
-    def _load_gene_bed() -> pd.DataFrame:
-        # Use a compact gene list; fall back to all_genes.bed
-        for fname in ["unique_genes.bed", "all_genes.bed"]:
+    def _load_gene_bed(sample_dir: Path = None) -> pd.DataFrame:
+        """Load gene BED file based on the analysis panel used for the sample"""
+        try:
+            # Determine which panel to use
+            panel = "rCNS2"  # Default fallback
+            if sample_dir:
+                try:
+                    master_csv_path = sample_dir / "master.csv"
+                    if master_csv_path.exists():
+                        import pandas as pd
+                        df = pd.read_csv(master_csv_path)
+                        if not df.empty and "analysis_panel" in df.columns:
+                            panel_val = df.iloc[0]["analysis_panel"]
+                            if panel_val and str(panel_val).strip() != "":
+                                panel = str(panel_val).strip()
+                except Exception:
+                    pass
+            
+            # Map panel to BED filename
+            bed_filename = None
+            if panel == "rCNS2":
+                bed_filename = "rCNS2_panel_name_uniq.bed"
+            elif panel == "AML":
+                bed_filename = "AML_panel_name_uniq.bed"
+            elif panel == "PanCan":
+                bed_filename = "PanCan_panel_name_uniq.bed"
+            else:
+                # Check for custom panel
+                bed_filename = f"{panel}_panel_name_uniq.bed"
+            
+            # Try to load the panel-specific BED file
             try:
-                res_path = importlib_resources.files("robin.resources") / fname
+                res_path = importlib_resources.files("robin.resources") / bed_filename
                 if res_path.exists():
                     return pd.read_csv(
                         res_path,
                         sep="\t",
                         header=None,
-                        names=["chrom", "start", "end", "gene"],
+                        names=["chrom", "start_pos", "end_pos", "gene"],
                     )
             except Exception:
-                continue
-        return pd.DataFrame(columns=["chrom", "start", "end", "gene"])
+                pass
+            
+            # Fallback to unique_genes.bed if panel-specific file not found
+            try:
+                res_path = importlib_resources.files("robin.resources") / "unique_genes.bed"
+                if res_path.exists():
+                    return pd.read_csv(
+                        res_path,
+                        sep="\t",
+                        header=None,
+                        names=["chrom", "start_pos", "end_pos", "gene"],
+                    )
+            except Exception:
+                pass
+                
+        except Exception:
+            pass
+            
+        return pd.DataFrame(columns=["chrom", "start_pos", "end_pos", "gene"])
 
     def _sex_label(xy_val: Any) -> str:
         try:
@@ -481,29 +548,13 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             means_mean = float(_np.mean(chrom_means)) if chrom_means else 0.0
             means_std = float(_np.std(chrom_means)) if chrom_means else 1.0
 
-            # Thresholds
-            sex_lbl = sex_estimate
-            if chromosome.startswith("chr") and chromosome[3:].isdigit():
-                gain_threshold = means_mean + (1.0 * means_std)
-                loss_threshold = means_mean - (1.0 * means_std)
-                cyto_gain_th = chr_mean + (1.0 * chr_std)
-                cyto_loss_th = chr_mean - (1.0 * chr_std)
-            elif chromosome == "chrX":
-                gain_threshold = means_mean + (1.0 * means_std)
-                loss_threshold = means_mean - (1.0 * means_std)
-                cyto_gain_th = chr_mean + (1.0 * chr_std)
-                cyto_loss_th = chr_mean - (1.0 * chr_std)
-            else:  # chrY
-                if sex_lbl in ("Male", "XY"):
-                    gain_threshold = means_mean + (1.0 * means_std)
-                    loss_threshold = means_mean - (1.0 * means_std)
-                    cyto_gain_th = chr_mean + (1.0 * chr_std)
-                    cyto_loss_th = chr_mean - (1.0 * chr_std)
-                else:
-                    gain_threshold = means_mean + (1.2 * means_std)
-                    loss_threshold = means_mean - (1.2 * means_std)
-                    cyto_gain_th = chr_mean + (1.2 * chr_std)
-                    cyto_loss_th = chr_mean - (1.2 * chr_std)
+            # Use the same thresholds as centralized CNV detection for consistency
+            from robin.classification_config import get_cnv_thresholds
+            gain_threshold, loss_threshold = get_cnv_thresholds(chromosome, sex_estimate)
+            
+            # Use the same thresholds for cytoband-level analysis
+            cyto_gain_th = gain_threshold
+            cyto_loss_th = loss_threshold
 
             # Whole chromosome event detection
             bins_above_gain = float(
@@ -524,20 +575,20 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
 
             merged_rows: List[dict] = []
             if whole_chr_event:
-                gene_df = _load_gene_bed()
+                gene_df = _load_gene_bed(sample_dir)
                 genes_in_chr = (
                     gene_df[gene_df["chrom"] == chromosome]["gene"].astype(str).tolist()
                 )
                 merged_rows.append(
                     {
                         "chrom": chromosome,
-                        "start_pos": int(chromosome_cytobands["start"].min()),
-                        "end_pos": int(chromosome_cytobands["end"].max()),
+                        "start_pos": int(chromosome_cytobands["start_pos"].min()),
+                        "end_pos": int(chromosome_cytobands["end_pos"].max()),
                         "name": f"{chromosome} WHOLE CHROMOSOME {whole_chr_state}",
                         "mean_cnv": chr_mean,
                         "cnv_state": whole_chr_state,
-                        "length": int(chromosome_cytobands["end"].max())
-                        - int(chromosome_cytobands["start"].min()),
+                        "length": int(chromosome_cytobands["end_pos"].max())
+                        - int(chromosome_cytobands["start_pos"].min()),
                         "genes": genes_in_chr,
                     }
                 )
@@ -546,8 +597,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             current_group = None
             vals = _np.asarray(cnv_data[chromosome])
             for _, band in chromosome_cytobands.iterrows():
-                s_bp = int(band["start"])
-                e_bp = int(band["end"])
+                s_bp = int(band["start_pos"])
+                e_bp = int(band["end_pos"])
                 s_bin = max(0, s_bp // bin_width)
                 e_bin = min(len(vals) - 1, max(0, e_bp // bin_width))
                 region = (
@@ -556,25 +607,13 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                     else _np.array([])
                 )
                 mean_val = float(_np.mean(region)) if region.size else 0.0
-                if whole_chr_event:
-                    if whole_chr_state == "GAIN":
-                        state = (
-                            "LOSS"
-                            if mean_val < (chr_mean - 2.0 * chr_std)
-                            else "NORMAL"
-                        )
-                    else:
-                        state = (
-                            "GAIN"
-                            if mean_val > (chr_mean + 2.0 * chr_std)
-                            else "NORMAL"
-                        )
-                else:
-                    state = (
-                        "GAIN"
-                        if mean_val > cyto_gain_th
-                        else ("LOSS" if mean_val < cyto_loss_th else "NORMAL")
-                    )
+                # Determine cytoband state - always use standard thresholds for regional analysis
+                # This ensures we capture all significant regional variations regardless of whole chromosome events
+                state = (
+                    "GAIN"
+                    if mean_val > cyto_gain_th
+                    else ("LOSS" if mean_val < cyto_loss_th else "NORMAL")
+                )
 
                 if current_group is None:
                     current_group = {
@@ -607,12 +646,12 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                         - int(current_group["start_pos"]),
                     }
                     if row["cnv_state"] in ("GAIN", "LOSS", "HIGH_GAIN", "DEEP_LOSS"):
-                        gene_df = _load_gene_bed()
+                        gene_df = _load_gene_bed(sample_dir)
                         genes = (
                             gene_df[
                                 (gene_df["chrom"] == row["chrom"])
-                                & (gene_df["start"] <= row["end_pos"])
-                                & (gene_df["end"] >= row["start_pos"])
+                                & (gene_df["start_pos"] <= row["end_pos"])
+                                & (gene_df["end_pos"] >= row["start_pos"])
                             ]["gene"]
                             .astype(str)
                             .tolist()
@@ -646,12 +685,12 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                     - int(current_group["start_pos"]),
                 }
                 if row["cnv_state"] in ("GAIN", "LOSS", "HIGH_GAIN", "DEEP_LOSS"):
-                    gene_df = _load_gene_bed()
+                    gene_df = _load_gene_bed(sample_dir)
                     genes = (
                         gene_df[
                             (gene_df["chrom"] == row["chrom"])
-                            & (gene_df["start"] <= row["end_pos"])
-                            & (gene_df["end"] >= row["start_pos"])
+                            & (gene_df["start_pos"] <= row["end_pos"])
+                            & (gene_df["end_pos"] >= row["start_pos"])
                         ]["gene"]
                         .astype(str)
                         .tolist()
@@ -767,6 +806,78 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
         except Exception:
             return rows
         return rows
+
+    def _update_cnv_events_analysis(state: Dict[str, Any]) -> None:
+        """Update CNV events analysis using centralized classification rules."""
+        try:
+            cnv_map = state.get("cnv")
+            cnv3_map = state.get("cnv3")
+            if isinstance(cnv_map, dict) and "cnv" in cnv_map:
+                cnv_map = cnv_map["cnv"]
+            if isinstance(cnv3_map, dict) and "cnv" in cnv3_map:
+                cnv3_map = cnv3_map["cnv"]
+            
+            if not cnv_map:
+                cnv_events_table.rows = []
+                cnv_events_summary.set_text("No CNV data available")
+                return
+            
+            binw = state.get("cnv_dict", {}).get("bin_width", 1000000)
+            sex_lbl = _sex_label(state.get("xy"))
+            
+            # Use difference map (CNV3) for calling if available, otherwise absolute
+            data = cnv3_map if isinstance(cnv3_map, dict) else cnv_map
+            
+            if data and binw:
+                # Load cytobands and genes
+                cyto_df = _load_cytobands_df()
+                gene_df = _load_gene_bed(sample_dir)
+                
+                # Detect CNV events using centralized rules
+                events = detect_cnv_events(
+                    cnv_data=data,
+                    bin_width=int(binw),
+                    sex_estimate=sex_lbl,
+                    cytobands_df=cyto_df,
+                    gene_df=gene_df
+                )
+                
+                # Update events table
+                events_rows = []
+                for event in events:
+                    event_dict = event.to_dict()
+                    # Format proportion as percentage
+                    event_dict["proportion_affected"] = f"{event.proportion_affected:.1%}"
+                    events_rows.append(event_dict)
+                
+                cnv_events_table.rows = events_rows
+                try:
+                    cnv_events_table.update()
+                except Exception:
+                    pass
+                
+                # Update summary
+                summary = get_cnv_summary(events)
+                if summary["total_events"] > 0:
+                    summary_text = f"Detected {summary['total_events']} CNV events: "
+                    parts = []
+                    if summary["whole_chromosome_events"]:
+                        parts.append(f"{len(summary['whole_chromosome_events'])} whole chromosome")
+                    if summary["arm_events"]:
+                        parts.append(f"{len(summary['arm_events'])} arm-specific")
+                    if summary["gene_containing_events"]:
+                        parts.append(f"{summary['total_genes_affected']} genes affected")
+                    summary_text += ", ".join(parts)
+                    cnv_events_summary.set_text(summary_text)
+                else:
+                    cnv_events_summary.set_text("No significant CNV events detected")
+            else:
+                cnv_events_table.rows = []
+                cnv_events_summary.set_text("CNV data not available")
+        except Exception as e:
+            logging.error(f"Error updating CNV events analysis: {e}")
+            cnv_events_table.rows = []
+            cnv_events_summary.set_text("Error analyzing CNV events")
 
     def _render_cnv_from_state(state: Dict[str, Any]) -> None:
         try:
@@ -1124,8 +1235,30 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                     else np.array([])
                                 )
                                 band_areas = []
+                                
+                                # Get CNV events for this chromosome to highlight significant events
+                                events = []
+                                try:
+                                    sex_lbl = _sex_label(state.get("xy"))
+                                    gene_df = _load_gene_bed(sample_dir)
+                                    events = detect_cnv_events(
+                                        cnv_data={selected: vals},
+                                        bin_width=int(binw),
+                                        sex_estimate=sex_lbl,
+                                        cytobands_df=cyto_df,
+                                        gene_df=gene_df
+                                    )
+                                except Exception:
+                                    pass
+                                
+                                # Create event lookup for highlighting
+                                event_regions = {}
+                                for event in events:
+                                    key = f"{event.start_pos}-{event.end_pos}"
+                                    event_regions[key] = event
+                                
                                 for _, row in bands.iterrows():
-                                    s_bp, e_bp = int(row["start"]), int(row["end"])
+                                    s_bp, e_bp = int(row["start_pos"]), int(row["end_pos"])
                                     s_bin = max(0, s_bp // binw)
                                     e_bin = min(len(vals) - 1, max(0, e_bp // binw))
                                     if len(vals) > 0 and e_bin >= s_bin:
@@ -1134,12 +1267,28 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                         )
                                     else:
                                         mean_val = 0.0
-                                    if mean_val > 0.5:
-                                        color = "rgba(52, 199, 89, 0.12)"
-                                    elif mean_val < -0.5:
-                                        color = "rgba(255, 45, 85, 0.12)"
+                                    
+                                    # Check if this region has a significant CNV event
+                                    region_key = f"{s_bp}-{e_bp}"
+                                    event = event_regions.get(region_key)
+                                    
+                                    if event:
+                                        # Highlight significant events with stronger colors
+                                        if event.event_type in ("GAIN", "WHOLE_CHR_GAIN"):
+                                            color = "rgba(52, 199, 89, 0.3)"  # Stronger green for gains
+                                        elif event.event_type in ("LOSS", "WHOLE_CHR_LOSS"):
+                                            color = "rgba(255, 45, 85, 0.3)"  # Stronger red for losses
+                                        else:
+                                            color = "rgba(0, 0, 0, 0.03)"
                                     else:
-                                        color = "rgba(0, 0, 0, 0.03)"
+                                        # Standard cytoband coloring
+                                        if mean_val > 0.5:
+                                            color = "rgba(52, 199, 89, 0.12)"
+                                        elif mean_val < -0.5:
+                                            color = "rgba(255, 45, 85, 0.12)"
+                                        else:
+                                            color = "rgba(0, 0, 0, 0.03)"
+                                    
                                     band_areas.append(
                                         [
                                             {
@@ -1163,7 +1312,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                             pass
                         # Genes of interest and gene selector options
                         try:
-                            gene_df = _load_gene_bed()
+                            gene_df = _load_gene_bed(sample_dir)
                             gchr = gene_df[gene_df["chrom"] == selected]
                             # limit to reduce clutter; still add many labels
                             gene_opts = {"All": "All"}
@@ -1183,14 +1332,14 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                         [
                                             {
                                                 "name": str(gr["gene"]),
-                                                "xAxis": float(gr["start"]),
+                                                "xAxis": float(gr["start_pos"]),
                                                 "label": {
                                                     "position": "insideTop",
                                                     "color": "#000",
                                                     "fontSize": 11,
                                                 },
                                             },
-                                            {"xAxis": float(gr["end"])},
+                                            {"xAxis": float(gr["end_pos"])},
                                         ]
                                     )
                                 main.setdefault("markArea", {"data": []})
@@ -1206,8 +1355,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                             if sel_gene and sel_gene != "All":
                                 row = gchr[gchr["gene"] == sel_gene]
                                 if not row.empty:
-                                    s_bp = int(row.iloc[0]["start"])
-                                    e_bp = int(row.iloc[0]["end"])
+                                    s_bp = int(row.iloc[0]["start_pos"])
+                                    e_bp = int(row.iloc[0]["end_pos"])
                                     pad = int(0.1 * (e_bp - s_bp + 1))
                                     for chart in (cnv_abs, cnv_diff):
                                         try:
@@ -1237,7 +1386,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                             ):
                                 arr = state["bp_array"]
                                 pos = [
-                                    int(r["end"]) for r in arr if r["name"] == selected
+                                    int(r["end_pos"]) for r in arr if r["name"] == selected
                                 ]
                                 lines = [
                                     {
@@ -1365,10 +1514,28 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
         except Exception:
             pass
 
-    def _refresh_cnv() -> None:
+    async def _refresh_cnv_async() -> None:
+        """Refresh CNV data asynchronously."""
         try:
-            if not sample_dir or not sample_dir.exists():
+            # Check directory existence in background thread
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(lambda: sample_dir and sample_dir.exists())
+                dir_exists = await asyncio.wrap_future(future)
+            
+            if not dir_exists:
                 return
+            
+            # Run all file operations in background thread
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(_refresh_cnv_sync, sample_dir, launcher)
+                await asyncio.wrap_future(future)
+                
+        except Exception as e:
+            logging.exception(f"[CNV] Async refresh failed: {e}")
+
+    def _refresh_cnv_sync(sample_dir: Path, launcher: Any) -> None:
+        """Synchronous CNV refresh - runs in background thread."""
+        try:
             key = str(sample_dir)
             state = launcher._cnv_state.get(key, {})
 
@@ -1487,6 +1654,9 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 if changed or ui_changed or not state.get("_rendered_once"):
                     _render_cnv_from_state(state)
                     state["_rendered_once"] = True
+                
+                # Update CNV events analysis
+                _update_cnv_events_analysis(state)
             # Breakpoint density overlay
             if data_array_npy.exists():
                 try:
@@ -1496,7 +1666,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                         state["bp_array"] = arr
                         dens: Dict[int, int] = {}
                         for r in arr:
-                            end = int(r["end"])
+                            end = int(r["end_pos"])
                             bin_idx = end // binw
                             dens[bin_idx] = dens.get(bin_idx, 0) + 1
                         dens_pts = [[k * binw, v] for k, v in sorted(dens.items())]
@@ -1553,19 +1723,19 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             except Exception:
                 pass
             # Trigger immediate refresh to update all UI elements
-            _refresh_cnv()
+            ui.timer(0.1, _refresh_cnv_async, once=True)
 
         def _on_scale(ev):
             st = launcher._cnv_state.setdefault(str(sample_dir), {})
             st["y_scale"] = _val(ev, "linear") or "linear"
             # Trigger immediate refresh to update all UI elements
-            _refresh_cnv()
+            ui.timer(0.1, _refresh_cnv_async, once=True)
 
         def _on_bp(ev):
             st = launcher._cnv_state.setdefault(str(sample_dir), {})
             st["show_bp"] = _val(ev, "show") == "show"
             # Trigger immediate refresh to update all UI elements
-            _refresh_cnv()
+            ui.timer(0.1, _refresh_cnv_async, once=True)
 
         def _on_color(ev):
             st = launcher._cnv_state.setdefault(str(sample_dir), {})
@@ -1580,7 +1750,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 st["color_mode"] = "chromosome"
             logging.debug(f"CNV color mode -> {st['color_mode']} (raw={val})")
             # Trigger immediate refresh to update all UI elements
-            _refresh_cnv()
+            ui.timer(0.1, _refresh_cnv_async, once=True)
 
         # Bind both native change and model-value updates for robustness
         cnv_chrom_select.on("change", _on_chrom)
@@ -1591,7 +1761,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             st = launcher._cnv_state.setdefault(str(sample_dir), {})
             st["selected_gene"] = _val(ev, "All") or "All"
             # Trigger immediate refresh to update all UI elements
-            _refresh_cnv()
+            ui.timer(0.1, _refresh_cnv_async, once=True)
 
         cnv_gene_select.on("change", _on_gene)
         cnv_gene_select.on("update:model-value", _on_gene)
@@ -1604,4 +1774,5 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
     except Exception:
         pass
 
-    ui.timer(30.0, _refresh_cnv, active=True)
+    # Start the refresh timer (every 30 seconds) with async function
+    ui.timer(30.0, lambda: ui.timer(0.1, _refresh_cnv_async, once=True), active=True)

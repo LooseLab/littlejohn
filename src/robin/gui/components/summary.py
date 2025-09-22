@@ -7,6 +7,8 @@ import csv
 from datetime import datetime
 import hashlib
 import logging
+import asyncio
+import concurrent.futures
 
 try:
     from nicegui import ui
@@ -33,97 +35,77 @@ def add_summary_section(sample_dir: Path, sample_id: str) -> None:
         "refresh_timer": None,
     }
 
-    # Run Information Section
-    with ui.card().classes("w-full bg-gradient-to-r from-blue-50 to-indigo-50"):
-        ui.label("Run Information").classes("text-lg font-semibold mb-3 text-blue-800")
-
-        with ui.row().classes("w-full gap-8 items-center flex-wrap"):
-            state["run_info_labels"]["run"] = _create_info_item(
-                "Run", "Loading...", "schedule"
-            )
-            state["run_info_labels"]["model"] = _create_info_item(
-                "Model", "Loading...", "settings"
-            )
-            state["run_info_labels"]["device"] = _create_info_item(
-                "Device", "Loading...", "smartphone"
-            )
-            state["run_info_labels"]["flow_cell"] = _create_info_item(
-                "Flow Cell", "Loading...", "tag"
-            )
-            state["run_info_labels"]["sample"] = _create_info_item(
-                "Sample", sample_id, "play_arrow"
-            )
-
-    # Classification Summary Section
     with ui.card().classes("w-full"):
-        ui.label("Classification Summary").classes("text-lg font-semibold mb-3")
+        ui.label("Run Details").classes("text-lg font-semibold text-blue-800")
+        ui.separator().classes().style("border: 1px solid var(--md-primary)")# Run Information Section
+        with ui.row().classes("w-full gap-4"):
+            state["run_info_labels"]["run"] = _create_dashboard_card(
+                "Run Time", "Loading...", "schedule", "Sequencing run timestamp"
+            )
+            state["run_info_labels"]["model"] = _create_dashboard_card(
+                "Basecall Model", "Loading...", "settings", "AI model used for basecalling"
+            )
+            state["run_info_labels"]["device"] = _create_dashboard_card(
+                "Device", "Loading...", "smartphone", "Sequencing device identifier"
+            )
+            state["run_info_labels"]["flow_cell"] = _create_dashboard_card(
+                "Flow Cell", "Loading...", "tag", "Flow cell identification"
+            )
+            state["run_info_labels"]["panel"] = _create_dashboard_card(
+                "Analysis Panel", "Loading...", "science", "Target panel used for analysis"
+            )
+            state["run_info_labels"]["sample"] = _create_dashboard_card(
+                "Sample ID", sample_id, "play_arrow", "Unique sample identifier"
+            )
 
-        with ui.row().classes("w-full gap-4 flex-wrap"):
-            state["classification_labels"]["sturgeon"] = _create_classification_card(
-                "Sturgeon classification",
-                "Loading...",
-                "0.0%",
-                "Unknown",
-                "0",
-                "Features",
+    with ui.card().classes("w-full"):
+        ui.label("Classification Details").classes("text-lg font-semibold text-blue-800")
+        ui.separator().classes().style("border: 1px solid var(--md-primary)")
+        # Classification Summary Section
+        with ui.row().classes("w-full gap-4"):
+            state["classification_labels"]["sturgeon"] = _create_classification_dashboard_card(
+                "Sturgeon", "Loading...", "psychology", "AI brain tumor classification"
             )
-            state["classification_labels"]["nanodx"] = _create_classification_card(
-                "NanoDX classification",
-                "Loading...",
-                "0.0%",
-                "Unknown",
-                "0",
-                "Features",
-                "Capper_et_al_NN.pkl",
+            state["classification_labels"]["nanodx"] = _create_classification_dashboard_card(
+                "NanoDX", "Loading...", "biotech", "Molecular cancer diagnostics"
             )
-            state["classification_labels"]["pannanodx"] = _create_classification_card(
-                "NanoDX classification",
-                "Loading...",
-                "0.0%",
-                "Unknown",
-                "0",
-                "Features",
-                "pancan_devel_v5i_NN.pkl",
+            state["classification_labels"]["pannanodx"] = _create_classification_dashboard_card(
+                "PanNanoDX", "Loading...", "science", "Pan-cancer analysis"
             )
-            state["classification_labels"]["random_forest"] = (
-                _create_classification_card(
-                    "Forest classification",
-                    "Loading...",
-                    "0.0%",
-                    "Unknown",
-                    "0",
-                    "Features",
-                )
+            state["classification_labels"]["random_forest"] = _create_classification_dashboard_card(
+                "Random Forest", "Loading...", "forest", "Machine learning classification"
             )
 
     # Analysis Details Section
     with ui.card().classes("w-full"):
-        ui.label("Analysis Details").classes("text-lg font-semibold mb-3")
+        ui.label("Analysis Details").classes("text-lg font-semibold text-blue-800")
+        ui.separator().classes().style("border: 1px solid var(--md-primary)")
+        with ui.row().classes("w-full gap-4"):
+            state["coverage_labels"] = _create_coverage_dashboard_card()
+            state["cnv_labels"] = _create_cnv_dashboard_card()
+            state["mgmt_labels"] = _create_mgmt_dashboard_card()
+            state["fusion_labels"] = _create_fusion_dashboard_card()
 
-        with ui.row().classes("w-full gap-4 flex-wrap"):
-            state["coverage_labels"] = _create_coverage_analysis_card()
-            state["cnv_labels"] = _create_cnv_analysis_card()
-            state["mgmt_labels"] = _create_mgmt_analysis_card()
-            state["fusion_labels"] = _create_fusion_analysis_card()
-
-    # Initial data load
-    def _initial_load():
-        """Load initial data immediately."""
+    # Async data loading functions
+    async def _initial_load_async():
+        """Load initial data asynchronously."""
         try:
-            _refresh_summary_data()
+            await _refresh_summary_data_async()
         except Exception as e:
             logging.exception(f"[Summary] Initial load failed: {e}")
 
-    # Refresh function
-    def _refresh_summary_data():
-        """Refresh all summary data if source files have changed."""
+    async def _refresh_summary_data_async():
+        """Refresh all summary data asynchronously if source files have changed."""
         try:
-            # Check if data has actually changed
-            current_hash = _calculate_data_hash(state["sample_dir"])
+            # Run data hash calculation in background thread
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(_calculate_data_hash, state["sample_dir"])
+                current_hash = await asyncio.wrap_future(future)
+            
             if current_hash == state["last_data_hash"]:
                 return  # No changes, skip update
 
-            # Update the data
+            # Update the data (these functions are already synchronous and safe to call)
             _update_run_information(state)
             _update_classification_data(state)
             _update_analysis_data(state)
@@ -136,20 +118,64 @@ def add_summary_section(sample_dir: Path, sample_id: str) -> None:
         except Exception as e:
             logging.exception(f"[Summary] Refresh failed: {e}")
 
-    # Start the refresh timer (every 30 seconds)
-    state["refresh_timer"] = ui.timer(30.0, _refresh_summary_data, active=True)
+    # Start the refresh timer (every 30 seconds) with async function
+    state["refresh_timer"] = ui.timer(30.0, lambda: ui.timer(0.1, _refresh_summary_data_async, once=True), active=True)
 
-    # Load initial data
-    ui.timer(0.1, _initial_load, once=True)
+    # Load initial data asynchronously
+    ui.timer(0.1, _initial_load_async, once=True)
 
 
-def _create_info_item(label: str, value: str, icon: str) -> Dict[str, Any]:
-    """Create a single information item with icon and value. Returns labels for updating."""
-    with ui.column().classes("items-center min-w-24"):
-        ui.icon(icon).classes("text-2xl text-blue-600 mb-1")
-        ui.label(label).classes("text-xs text-gray-600")
-        value_label = ui.label(value).classes("text-sm font-semibold text-gray-800")
+def _create_dashboard_card(title: str, value: str, icon: str, description: str) -> Dict[str, Any]:
+    """Create a compact dashboard-style card matching the design pattern. Returns labels for updating."""
+    with ui.card().classes("flex-1 bg-white rounded-lg shadow-sm border border-gray-200 p-4"):
+        with ui.row().classes("flex items-center justify-between mb-2"):
+            # Title
+            ui.label(title).classes("text-sm font-medium text-gray-600")
+            
+            # Icon in circular background
+            with ui.row().classes("w-7 h-7 bg-pink-100 rounded-full flex items-center justify-center"):
+                ui.icon(icon).classes("w-3.5 h-3.5 text-pink-600")
+        
+        # Main value
+        value_label = ui.label(value).classes("text-xl font-bold text-gray-900 mb-1")
+        
+        # Description
+        ui.label(description).classes("text-xs text-gray-500")
+        
         return {"value": value_label}
+
+
+def _create_classification_dashboard_card(title: str, classification: str, icon: str, description: str) -> Dict[str, Any]:
+    """Create a compact classification dashboard card with detailed information. Returns labels for updating."""
+    with ui.card().classes("flex-1 bg-white rounded-lg shadow-sm border border-gray-200 p-4"):
+        with ui.row().classes("flex items-center justify-between mb-2"):
+            # Title
+            ui.label(title).classes("text-sm font-medium text-gray-600")
+            
+            # Icon in circular background
+            with ui.row().classes("w-7 h-7 bg-blue-100 rounded-full flex items-center justify-center"):
+                ui.icon(icon).classes("w-3.5 h-3.5 text-blue-600")
+        
+        # Main classification result with confidence badge
+        with ui.row().classes("flex items-center justify-between mb-1"):
+            classification_label = ui.label(classification).classes("text-xl font-bold text-gray-900")
+            # Confidence level badge
+            confidence_badge = ui.label("Loading...").classes("px-2 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-600")
+        
+        # Compact details in a single row
+        with ui.row().classes("flex items-center justify-between mb-1"):
+            confidence_label = ui.label("Confidence: Loading...").classes("text-xs font-medium text-gray-700")
+            features_label = ui.label("Features: Loading...").classes("text-xs text-gray-500")
+        
+        # Description
+        ui.label(description).classes("text-xs text-gray-500")
+        
+        return {
+            "classification": classification_label,
+            "confidence": confidence_label,
+            "confidence_badge": confidence_badge,
+            "features": features_label
+        }
 
 
 def _create_classification_card(
@@ -163,154 +189,160 @@ def _create_classification_card(
 ) -> Dict[str, Any]:
     """Create a classification summary card. Returns labels for updating."""
     labels = {}
-
-    with ui.card().classes("flex-1 min-w-64 bg-gray-50"):
-        ui.label(title).classes("text-sm font-semibold text-gray-800 mb-1")
-        # Display the current top classification for this classifier
-        labels["classification"] = ui.label(classification).classes(
-            "text-base font-semibold text-gray-900 mb-2"
-        )
-
-        if model:
-            ui.label(f"Model: {model}").classes("text-xs text-gray-600 mb-1")
-
-        if features and features_label:
-            labels["features"] = ui.label(f"{features_label}: {features}").classes(
-                "text-xs text-gray-600 mb-2"
-            )
-
-        # Confidence percentage with color coding
+    with ui.card().classes("flex-1 elevation-4 rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50 border-l-4 border-blue-500"):
+        ui.label(f"{title}").classes("font-bold text-blue-800 mb-2")
+        ui.separator().classes().style("border: 1px solid var(--md-primary)")
+        labels["classification"] = ui.label(f"Class: {classification}").classes("font-bold text-medium text-blue-600")
         confidence_color = _get_confidence_color(confidence_level)
-        labels["confidence"] = ui.label(confidence).classes(
-            f"text-2xl font-bold {confidence_color} mb-1"
-        )
-
-        labels["confidence_level"] = ui.label(confidence_level).classes(
-            "text-xs text-gray-600"
-        )
-
-    return labels
-
-
-def _create_coverage_analysis_card() -> Dict[str, Any]:
-    """Create the coverage analysis card. Returns labels for updating."""
-    labels = {}
-
-    with ui.card().classes("flex-1 min-w-64"):
-        # Header with quality status
-        with ui.row().classes("items-center justify-between mb-2"):
-            labels["quality"] = ui.label("Quality: Loading...").classes(
-                "text-sm font-semibold text-gray-600"
-            )
-            labels["coverage_badge"] = ui.badge("--x").props("color=grey")
-
-        ui.label("Coverage Depths").classes("text-xs font-semibold text-gray-700 mb-2")
-
-        with ui.column().classes("gap-1 mb-3"):
-            labels["global_coverage"] = ui.label(
-                "Global Estimated Coverage: --x"
-            ).classes("text-xs text-gray-600")
-            labels["target_coverage"] = ui.label(
-                "Targets Estimated Coverage: --x"
-            ).classes("text-xs text-gray-600")
-            labels["enrichment"] = ui.label("Estimated enrichment: --x").classes(
-                "text-xs text-gray-600"
-            )
-
-        # Coverage thresholds
-        with ui.row().classes("gap-2 flex-wrap"):
-            ui.badge("≥30x Excellent").props("color=positive size=sm")
-            ui.badge("≥20x Good").props("color=primary size=sm")
-            ui.badge("≥10x Moderate").props("color=warning size=sm")
-            ui.badge("<10x Insufficient").props("color=negative size=sm")
+        labels["confidence"] = ui.label(f"Confidence: {confidence}%").classes(f"text-sm text-{confidence_color}-600")
+        labels["confidence_level"] = ui.label(confidence_level).classes(f"text-sm text-{confidence_color}-600")
+        if model:
+            ui.label(f"Model: {model}").classes("text-sm text-blue-600")
+        if features and features_label:
+            labels["features"] = ui.label(f"Features: {features_label}").classes("text-sm text-blue-600")
 
     return labels
 
 
-def _create_cnv_analysis_card() -> Dict[str, Any]:
-    """Create the CNV analysis card. Returns labels for updating."""
-    labels = {}
-
-    with ui.card().classes("flex-1 min-w-64"):
-        with ui.row().classes("items-center gap-2 mb-2"):
-            ui.icon("person").classes("text-blue-600")
-            labels["genetic_sex"] = ui.label("Genetic Sex: Loading...").classes(
-                "text-sm font-semibold text-blue-600"
-            )
-
-        ui.label("Analysis Details").classes("text-xs font-semibold text-gray-700 mb-2")
-
-        with ui.column().classes("gap-1 mb-3"):
-            labels["bin_width"] = ui.label("Bin Width: Loading...").classes(
-                "text-xs text-gray-600"
-            )
-            labels["variance"] = ui.label("Variance: Loading...").classes(
-                "text-xs text-gray-600"
-            )
-
-        with ui.row().classes("gap-2 mb-2"):
-            labels["gained"] = ui.badge("Gained: --").props("color=positive")
-            labels["lost"] = ui.badge("Lost: --").props("color=negative")
-
-        ui.label(
-            "Copy number analysis across genome with breakpoint detection"
-        ).classes("text-xs text-gray-600")
-
-    return labels
-
-
-def _create_mgmt_analysis_card() -> Dict[str, Any]:
-    """Create the MGMT analysis card. Returns labels for updating."""
-    labels = {}
-
-    with ui.card().classes("flex-1 min-w-64"):
-        # Header with methylation status
-        with ui.row().classes("items-center justify-between mb-2"):
-            labels["status"] = ui.label("Status: Loading...").classes(
-                "text-sm font-semibold text-gray-600"
-            )
-            labels["methylation_badge"] = ui.badge("--%").props("color=grey")
-
-        ui.label("Analysis Details").classes("text-xs font-semibold text-gray-700 mb-2")
-
-        with ui.column().classes("gap-1 mb-3"):
-            labels["average_methylation"] = ui.label(
-                "Average Methylation: --%"
-            ).classes("text-xs text-gray-600")
-            labels["prediction_score"] = ui.label("Prediction Score: --%").classes(
-                "text-xs text-gray-600"
-            )
-
-        labels["cpg_sites"] = ui.label(
-            "MGMT status determined from methylation analysis of -- CpG sites"
-        ).classes("text-xs text-gray-600")
-
-    return labels
+def _create_coverage_dashboard_card() -> Dict[str, Any]:
+    """Create a compact coverage analysis dashboard card. Returns labels for updating."""
+    with ui.card().classes("flex-1 bg-white rounded-lg shadow-sm border border-gray-200 p-4"):
+        with ui.row().classes("flex items-center justify-between mb-2"):
+            # Title
+            ui.label("Coverage Analysis").classes("text-sm font-medium text-gray-600")
+            
+            # Icon in circular background
+            with ui.row().classes("w-7 h-7 bg-blue-100 rounded-full flex items-center justify-center"):
+                ui.icon("analytics").classes("w-3.5 h-3.5 text-blue-600")
+        
+        # Main quality result with badge
+        with ui.row().classes("flex items-center justify-between mb-1"):
+            quality_label = ui.label("Loading...").classes("text-xl font-bold text-gray-900")
+            # Coverage badge
+            coverage_badge = ui.label("--x").classes("px-2 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-600")
+        
+        # Coverage details in compact layout
+        with ui.column().classes("mb-2"):
+            global_coverage_label = ui.label("Global: Loading...").classes("text-xs text-gray-600")
+            target_coverage_label = ui.label("Targets: Loading...").classes("text-xs text-gray-600")
+            enrichment_label = ui.label("Enrichment: Loading...").classes("text-xs text-gray-600")
+        
+        # Coverage thresholds as small badges
+        with ui.row().classes("gap-1 flex-wrap"):
+            ui.label("≥30x").classes("px-1 py-0.5 text-xs bg-green-100 text-green-800 rounded")
+            ui.label("≥20x").classes("px-1 py-0.5 text-xs bg-blue-100 text-blue-800 rounded")
+            ui.label("≥10x").classes("px-1 py-0.5 text-xs bg-yellow-100 text-yellow-800 rounded")
+            ui.label("<10x").classes("px-1 py-0.5 text-xs bg-red-100 text-red-800 rounded")
+        
+        return {
+            "quality": quality_label,
+            "coverage_badge": coverage_badge,
+            "global_coverage": global_coverage_label,
+            "target_coverage": target_coverage_label,
+            "enrichment": enrichment_label
+        }
 
 
-def _create_fusion_analysis_card() -> Dict[str, Any]:
-    """Create the fusion analysis card. Returns labels for updating."""
-    labels = {}
+def _create_cnv_dashboard_card() -> Dict[str, Any]:
+    """Create a compact CNV analysis dashboard card. Returns labels for updating."""
+    with ui.card().classes("flex-1 bg-white rounded-lg shadow-sm border border-gray-200 p-4"):
+        with ui.row().classes("flex items-center justify-between mb-2"):
+            # Title
+            ui.label("Copy Number Analysis").classes("text-sm font-medium text-gray-600")
+            
+            # Icon in circular background
+            with ui.row().classes("w-7 h-7 bg-purple-100 rounded-full flex items-center justify-center"):
+                ui.icon("person").classes("w-3.5 h-3.5 text-purple-600")
+        
+        # Main genetic sex result
+        genetic_sex_label = ui.label("Loading...").classes("text-xl font-bold text-gray-900 mb-1")
+        
+        # Analysis details in compact layout
+        with ui.column().classes("mb-2"):
+            bin_width_label = ui.label("Bin Width: Loading...").classes("text-xs text-gray-600")
+            variance_label = ui.label("Variance: Loading...").classes("text-xs text-gray-600")
+        
+        # CNV counts as badges
+        with ui.row().classes("gap-2 mb-1"):
+            gained_badge = ui.label("Gained: --").classes("px-2 py-1 text-xs font-medium rounded-full bg-green-100 text-green-800")
+            lost_badge = ui.label("Lost: --").classes("px-2 py-1 text-xs font-medium rounded-full bg-red-100 text-red-800")
+        
+        # Description
+        ui.label("Copy number analysis across genome with breakpoint detection").classes("text-xs text-gray-500")
+        
+        return {
+            "genetic_sex": genetic_sex_label,
+            "bin_width": bin_width_label,
+            "variance": variance_label,
+            "gained": gained_badge,
+            "lost": lost_badge
+        }
 
-    with ui.card().classes("flex-1 min-w-64"):
-        with ui.row().classes("items-center justify-between mb-2"):
-            ui.label("Panel: rCNS2").classes("text-sm font-semibold text-gray-800")
-            labels["target_fusions"] = ui.badge("-- between target fusions").props(
-                "color=primary"
-            )
 
-        ui.label("Analysis Details").classes("text-xs font-semibold text-gray-700 mb-2")
+def _create_mgmt_dashboard_card() -> Dict[str, Any]:
+    """Create a compact MGMT analysis dashboard card. Returns labels for updating."""
+    with ui.card().classes("flex-1 bg-white rounded-lg shadow-sm border border-gray-200 p-4"):
+        with ui.row().classes("flex items-center justify-between mb-2"):
+            # Title
+            ui.label("MGMT Analysis").classes("text-sm font-medium text-gray-600")
+            
+            # Icon in circular background
+            with ui.row().classes("w-7 h-7 bg-orange-100 rounded-full flex items-center justify-center"):
+                ui.icon("science").classes("w-3.5 h-3.5 text-orange-600")
+        
+        # Main status result with badge
+        with ui.row().classes("flex items-center justify-between mb-1"):
+            status_label = ui.label("Loading...").classes("text-xl font-bold text-gray-900")
+            # Methylation badge
+            methylation_badge = ui.label("--%").classes("px-2 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-600")
+        
+        # Analysis details in compact layout
+        with ui.column().classes("mb-2"):
+            average_methylation_label = ui.label("Average: Loading...").classes("text-xs text-gray-600")
+            prediction_score_label = ui.label("Score: Loading...").classes("text-xs text-gray-600")
+        
+        # Description
+        cpg_sites_label = ui.label("MGMT status determined from methylation analysis of -- CpG sites").classes("text-xs text-gray-500")
+        
+        return {
+            "status": status_label,
+            "methylation_badge": methylation_badge,
+            "average_methylation": average_methylation_label,
+            "prediction_score": prediction_score_label,
+            "cpg_sites": cpg_sites_label
+        }
 
-        with ui.column().classes("gap-1 mb-3"):
-            labels["genome_fusions"] = ui.label("-- genome wide fusions").classes(
-                "text-xs text-gray-600"
-            )
 
-        ui.label(
-            "Fusion candidates identified from reads with supplementary alignments"
-        ).classes("text-xs text-gray-600")
+def _create_fusion_dashboard_card() -> Dict[str, Any]:
+    """Create a compact fusion analysis dashboard card. Returns labels for updating."""
+    with ui.card().classes("flex-1 bg-white rounded-lg shadow-sm border border-gray-200 p-4"):
+        with ui.row().classes("flex items-center justify-between mb-2"):
+            # Title
+            ui.label("Fusion Analysis").classes("text-sm font-medium text-gray-600")
+            
+            # Icon in circular background
+            with ui.row().classes("w-7 h-7 bg-green-100 rounded-full flex items-center justify-center"):
+                ui.icon("merge").classes("w-3.5 h-3.5 text-green-600")
+        
+        # Panel info and main result
+        with ui.row().classes("flex items-center justify-between mb-1"):
+            panel_label = ui.label("Panel: --").classes("text-sm font-medium text-gray-700")
+            target_fusions_badge = ui.label("-- target fusions").classes("px-2 py-1 text-xs font-medium rounded-full bg-blue-100 text-blue-800")
+        
+        # Analysis details in compact layout
+        with ui.column().classes("mb-2"):
+            genome_fusions_label = ui.label("-- genome wide fusions").classes("text-xs text-gray-600")
+        
+        # Description
+        ui.label("Fusion candidates identified from reads with supplementary alignments").classes("text-xs text-gray-500")
+        
+        return {
+            "panel": panel_label,
+            "target_fusions": target_fusions_badge,
+            "genome_fusions": genome_fusions_label
+        }
 
-    return labels
+
 
 
 def _calculate_data_hash(sample_dir: Path) -> str:
@@ -370,6 +402,10 @@ def _update_run_information(state: Dict[str, Any]) -> None:
             state["run_info_labels"]["flow_cell"]["value"].text = run_info.get(
                 "flow_cell", "Unknown"
             )
+        if "panel" in state["run_info_labels"]:
+            state["run_info_labels"]["panel"]["value"].text = run_info.get(
+                "panel", "Unknown"
+            )
 
     except Exception as e:
         logging.exception(f"[Summary] Failed to update run information: {e}")
@@ -385,81 +421,100 @@ def _update_classification_data(state: Dict[str, Any]) -> None:
             labels = state["classification_labels"]["sturgeon"]
             data = classification_data.get("sturgeon", {})
             if "classification" in labels:
-                labels["classification"].text = data.get("classification", "Unknown")
+                classification = data.get('classification', 'Unknown')
+                labels["classification"].text = classification
             if "confidence" in labels:
-                labels["confidence"].text = f"{data.get('confidence', 0):.1f}%"
-                # Update confidence color
-                confidence_level = data.get("confidence_level", "Unknown")
-                confidence_color = _get_confidence_color(confidence_level)
-                labels["confidence"].classes(
-                    f"text-2xl font-bold {confidence_color} mb-1"
-                )
-            if "confidence_level" in labels:
-                labels["confidence_level"].text = data.get(
-                    "confidence_level", "Unknown"
-                )
+                confidence = data.get('confidence', 0)
+                labels["confidence"].text = f"Confidence: {confidence:.1f}%"
+            if "confidence_badge" in labels:
+                confidence = data.get('confidence', 0)
+                confidence_level = _get_confidence_level(confidence, "sturgeon")
+                labels["confidence_badge"].text = confidence_level
+                # Update badge color using style method
+                if confidence >= 80:
+                    labels["confidence_badge"].style("background-color: #dcfce7; color: #166534;")  # green
+                elif confidence >= 50:
+                    labels["confidence_badge"].style("background-color: #fef3c7; color: #92400e;")  # yellow
+                else:
+                    labels["confidence_badge"].style("background-color: #fee2e2; color: #991b1b;")  # red
             if "features" in labels:
-                labels["features"].text = f"Features: {data.get('features', 0):,}"
+                features = data.get('features', 0)
+                labels["features"].text = f"Features: {features:,}"
 
         # Update NanoDX
         if "nanodx" in state["classification_labels"]:
             labels = state["classification_labels"]["nanodx"]
             data = classification_data.get("nanodx", {})
             if "classification" in labels:
-                labels["classification"].text = data.get("classification", "Unknown")
+                classification = data.get('classification', 'Unknown')
+                labels["classification"].text = classification
             if "confidence" in labels:
-                labels["confidence"].text = f"{data.get('confidence', 0):.1f}%"
-                confidence_level = data.get("confidence_level", "Unknown")
-                confidence_color = _get_confidence_color(confidence_level)
-                labels["confidence"].classes(
-                    f"text-2xl font-bold {confidence_color} mb-1"
-                )
-            if "confidence_level" in labels:
-                labels["confidence_level"].text = data.get(
-                    "confidence_level", "Unknown"
-                )
+                confidence = data.get('confidence', 0)
+                labels["confidence"].text = f"Confidence: {confidence:.1f}%"
+            if "confidence_badge" in labels:
+                confidence = data.get('confidence', 0)
+                confidence_level = _get_confidence_level(confidence, "nanodx")
+                labels["confidence_badge"].text = confidence_level
+                # Update badge color using style method
+                if confidence >= 80:
+                    labels["confidence_badge"].style("background-color: #dcfce7; color: #166534;")  # green
+                elif confidence >= 50:
+                    labels["confidence_badge"].style("background-color: #fef3c7; color: #92400e;")  # yellow
+                else:
+                    labels["confidence_badge"].style("background-color: #fee2e2; color: #991b1b;")  # red
             if "features" in labels:
-                labels["features"].text = f"Features: {data.get('features', 0):,}"
+                features = data.get('features', 0)
+                labels["features"].text = f"Features: {features:,}"
 
         # Update PanNanoDX
         if "pannanodx" in state["classification_labels"]:
             labels = state["classification_labels"]["pannanodx"]
             data = classification_data.get("pannanodx", {})
             if "classification" in labels:
-                labels["classification"].text = data.get("classification", "Unknown")
+                classification = data.get('classification', 'Unknown')
+                labels["classification"].text = classification
             if "confidence" in labels:
-                labels["confidence"].text = f"{data.get('confidence', 0):.1f}%"
-                confidence_level = data.get("confidence_level", "Unknown")
-                confidence_color = _get_confidence_color(confidence_level)
-                labels["confidence"].classes(
-                    f"text-2xl font-bold {confidence_color} mb-1"
-                )
-            if "confidence_level" in labels:
-                labels["confidence_level"].text = data.get(
-                    "confidence_level", "Unknown"
-                )
+                confidence = data.get('confidence', 0)
+                labels["confidence"].text = f"Confidence: {confidence:.1f}%"
+            if "confidence_badge" in labels:
+                confidence = data.get('confidence', 0)
+                confidence_level = _get_confidence_level(confidence, "pannanodx")
+                labels["confidence_badge"].text = confidence_level
+                # Update badge color using style method
+                if confidence >= 80:
+                    labels["confidence_badge"].style("background-color: #dcfce7; color: #166534;")  # green
+                elif confidence >= 50:
+                    labels["confidence_badge"].style("background-color: #fef3c7; color: #92400e;")  # yellow
+                else:
+                    labels["confidence_badge"].style("background-color: #fee2e2; color: #991b1b;")  # red
             if "features" in labels:
-                labels["features"].text = f"Features: {data.get('features', 0):,}"
+                features = data.get('features', 0)
+                labels["features"].text = f"Features: {features:,}"
 
         # Update Random Forest
         if "random_forest" in state["classification_labels"]:
             labels = state["classification_labels"]["random_forest"]
             data = classification_data.get("random_forest", {})
             if "classification" in labels:
-                labels["classification"].text = data.get("classification", "Unknown")
+                classification = data.get('classification', 'Unknown')
+                labels["classification"].text = classification
             if "confidence" in labels:
-                labels["confidence"].text = f"{data.get('confidence', 0):.1f}%"
-                confidence_level = data.get("confidence_level", "Unknown")
-                confidence_color = _get_confidence_color(confidence_level)
-                labels["confidence"].classes(
-                    f"text-2xl font-bold {confidence_color} mb-1"
-                )
-            if "confidence_level" in labels:
-                labels["confidence_level"].text = data.get(
-                    "confidence_level", "Unknown"
-                )
+                confidence = data.get('confidence', 0)
+                labels["confidence"].text = f"Confidence: {confidence:.1f}%"
+            if "confidence_badge" in labels:
+                confidence = data.get('confidence', 0)
+                confidence_level = _get_confidence_level(confidence, "random_forest")
+                labels["confidence_badge"].text = confidence_level
+                # Update badge color using style method
+                if confidence >= 80:
+                    labels["confidence_badge"].style("background-color: #dcfce7; color: #166534;")  # green
+                elif confidence >= 50:
+                    labels["confidence_badge"].style("background-color: #fef3c7; color: #92400e;")  # yellow
+                else:
+                    labels["confidence_badge"].style("background-color: #fee2e2; color: #991b1b;")  # red
             if "features" in labels:
-                labels["features"].text = f"Features: {data.get('features', 0):,}"
+                features = data.get('features', 0)
+                labels["features"].text = f"Features: {features:,}"
 
     except Exception as e:
         logging.exception(f"[Summary] Failed to update classification data: {e}")
@@ -474,44 +529,41 @@ def _update_analysis_data(state: Dict[str, Any]) -> None:
             labels = state["coverage_labels"]
             if "quality" in labels:
                 quality_status = coverage_data.get("quality", "Unknown")
-                quality_color = _get_quality_color(quality_status)
-                labels["quality"].text = f"Quality: {quality_status}"
-                labels["quality"].classes(f"text-sm font-semibold {quality_color}")
+                labels["quality"].text = quality_status
             if "coverage_badge" in labels:
                 coverage_value = coverage_data.get("target_coverage", "0.0x")
-                labels["coverage_badge"].props(
-                    f"color={_get_coverage_badge_color(coverage_value)}"
-                )
                 labels["coverage_badge"].text = coverage_value
+                # Update badge color using style method
+                try:
+                    coverage_num = float(coverage_value.replace("x", ""))
+                    if coverage_num >= 30:
+                        labels["coverage_badge"].style("background-color: #dcfce7; color: #166534;")  # green
+                    elif coverage_num >= 20:
+                        labels["coverage_badge"].style("background-color: #dbeafe; color: #1e40af;")  # blue
+                    elif coverage_num >= 10:
+                        labels["coverage_badge"].style("background-color: #fef3c7; color: #92400e;")  # yellow
+                    else:
+                        labels["coverage_badge"].style("background-color: #fee2e2; color: #991b1b;")  # red
+                except (ValueError, AttributeError):
+                    # Handle "Not available" or other non-numeric values
+                    labels["coverage_badge"].style("background-color: #f3f4f6; color: #6b7280;")  # gray
             if "global_coverage" in labels:
-                labels["global_coverage"].text = (
-                    f"Global Estimated Coverage: {coverage_data.get('global_coverage', '0.0x')}"
-                )
+                labels["global_coverage"].text = f"Global: {coverage_data.get('global_coverage', '0.0x')}"
             if "target_coverage" in labels:
-                labels["target_coverage"].text = (
-                    f"Targets Estimated Coverage: {coverage_data.get('target_coverage', '0.0x')}"
-                )
+                labels["target_coverage"].text = f"Targets: {coverage_data.get('target_coverage', '0.0x')}"
             if "enrichment" in labels:
-                labels["enrichment"].text = (
-                    f"Estimated enrichment: {coverage_data.get('enrichment', '0.0x')}"
-                )
+                labels["enrichment"].text = f"Enrichment: {coverage_data.get('enrichment', '0.0x')}"
 
         # Update CNV data
         cnv_data = _extract_cnv_data(state["sample_dir"])
         if "cnv_labels" in state:
             labels = state["cnv_labels"]
             if "genetic_sex" in labels:
-                labels["genetic_sex"].text = (
-                    f"Genetic Sex: {cnv_data.get('genetic_sex', 'Unknown')}"
-                )
+                labels["genetic_sex"].text = cnv_data.get('genetic_sex', 'Unknown')
             if "bin_width" in labels:
-                labels["bin_width"].text = (
-                    f"Bin Width: {cnv_data.get('bin_width', 'Unknown')}"
-                )
+                labels["bin_width"].text = f"Bin Width: {cnv_data.get('bin_width', 'Unknown')}"
             if "variance" in labels:
-                labels["variance"].text = (
-                    f"Variance: {cnv_data.get('variance', 'Unknown')}"
-                )
+                labels["variance"].text = f"Variance: {cnv_data.get('variance', 'Unknown')}"
             if "gained" in labels:
                 labels["gained"].text = f"Gained: {cnv_data.get('gained', 0)}"
             if "lost" in labels:
@@ -523,43 +575,59 @@ def _update_analysis_data(state: Dict[str, Any]) -> None:
             labels = state["mgmt_labels"]
             if "status" in labels:
                 methylation_status = mgmt_data.get("status", "Unknown")
-                methylation_color = _get_methylation_color(methylation_status)
-                labels["status"].text = f"Status: {methylation_status}"
-                labels["status"].classes(f"text-sm font-semibold {methylation_color}")
+                labels["status"].text = methylation_status
             if "methylation_badge" in labels:
                 methylation_value = mgmt_data.get("methylation_percent", "0.0%")
-                labels["methylation_badge"].props(
-                    f"color={_get_methylation_badge_color(methylation_value)}"
-                )
                 labels["methylation_badge"].text = methylation_value
+                # Update badge color using style method
+                try:
+                    meth_num = float(methylation_value.replace("%", ""))
+                    if meth_num > 10:
+                        labels["methylation_badge"].style("background-color: #dcfce7; color: #166534;")  # green
+                    elif meth_num > 5:
+                        labels["methylation_badge"].style("background-color: #fef3c7; color: #92400e;")  # yellow
+                    else:
+                        labels["methylation_badge"].style("background-color: #fee2e2; color: #991b1b;")  # red
+                except (ValueError, AttributeError):
+                    # Handle "Not available" or other non-numeric values
+                    labels["methylation_badge"].style("background-color: #f3f4f6; color: #6b7280;")  # gray
             if "average_methylation" in labels:
-                labels["average_methylation"].text = (
-                    f"Average Methylation: {mgmt_data.get('average_methylation', '0.0%')}"
-                )
+                labels["average_methylation"].text = f"Average: {mgmt_data.get('average_methylation', '0.0%')}"
             if "prediction_score" in labels:
-                labels["prediction_score"].text = (
-                    f"Prediction Score: {mgmt_data.get('prediction_score', '0.0%')}"
-                )
+                labels["prediction_score"].text = f"Score: {mgmt_data.get('prediction_score', '0.0%')}"
             if "cpg_sites" in labels:
-                labels["cpg_sites"].text = (
-                    f"MGMT status determined from methylation analysis of {mgmt_data.get('cpg_sites', 0)} CpG sites"
-                )
+                labels["cpg_sites"].text = f"MGMT status determined from methylation analysis of {mgmt_data.get('cpg_sites', 0)} CpG sites"
 
         # Update fusion data
         fusion_data = _extract_fusion_data(state["sample_dir"])
         if "fusion_labels" in state:
             labels = state["fusion_labels"]
             if "target_fusions" in labels:
-                labels["target_fusions"].text = (
-                    f"{fusion_data.get('target_fusions', 0)} between target fusions"
-                )
+                labels["target_fusions"].text = f"{fusion_data.get('target_fusions', 0)} target fusions"
             if "genome_fusions" in labels:
-                labels["genome_fusions"].text = (
-                    f"{fusion_data.get('genome_fusions', 0)} genome wide fusions"
-                )
+                labels["genome_fusions"].text = f"{fusion_data.get('genome_fusions', 0)} genome wide fusions"
+            if "panel" in labels:
+                panel = _get_analysis_panel(state["sample_dir"])
+                labels["panel"].text = f"Panel: {panel}"
 
     except Exception as e:
         logging.exception(f"[Summary] Failed to update analysis data: {e}")
+
+
+def _get_analysis_panel(sample_dir: Path) -> str:
+    """Get the analysis panel from master.csv"""
+    try:
+        master_csv_path = sample_dir / "master.csv"
+        if master_csv_path.exists():
+            import pandas as pd
+            df = pd.read_csv(master_csv_path)
+            if not df.empty and "analysis_panel" in df.columns:
+                panel = df.iloc[0]["analysis_panel"]
+                if panel and str(panel).strip() != "":
+                    return str(panel).strip()
+        return "rCNS2"  # Default fallback
+    except Exception:
+        return "rCNS2"  # Default fallback
 
 
 def _extract_run_information(sample_dir: Path, sample_id: str) -> Dict[str, str]:
@@ -569,6 +637,7 @@ def _extract_run_information(sample_dir: Path, sample_id: str) -> Dict[str, str]
         "model": "Not available",
         "device": "Not available",
         "flow_cell": "Not available",
+        "panel": "Not available",
     }
 
     try:
@@ -645,6 +714,10 @@ def _extract_run_information(sample_dir: Path, sample_id: str) -> Dict[str, str]
                                 ) or get_ci(row, "flowcell_ids")
                                 if flowcell_val and flowcell_val.strip():
                                     run_info["flow_cell"] = flowcell_val.strip()
+
+                                panel_val = get_ci(row, "analysis_panel")
+                                if panel_val and panel_val.strip():
+                                    run_info["panel"] = panel_val.strip()
 
                                 run_time_val = get_ci(row, "run_info_run_time")
                                 if run_time_val and run_time_val.strip():
@@ -1246,6 +1319,16 @@ def _get_confidence_level(confidence: float, classifier: str = "default") -> str
     return get_classifier_confidence_level(classifier, confidence)
 
 
+def _get_confidence_badge_classes(confidence: float) -> str:
+    """Get CSS classes for confidence level badge based on confidence score."""
+    if confidence >= 80:
+        return "px-2 py-1 text-xs font-medium rounded-full bg-green-100 text-green-800"
+    elif confidence >= 50:
+        return "px-2 py-1 text-xs font-medium rounded-full bg-yellow-100 text-yellow-800"
+    else:
+        return "px-2 py-1 text-xs font-medium rounded-full bg-red-100 text-red-800"
+
+
 def _get_methylation_badge_color(methylation: str) -> str:
     """Get the appropriate badge color for methylation value."""
     try:
@@ -1259,3 +1342,5 @@ def _get_methylation_badge_color(methylation: str) -> str:
     except Exception as e:
         logging.debug(f"   Methylation: <access denied>: {e}")
         return "grey"
+
+

@@ -8,6 +8,7 @@ import sys
 import click
 import logging
 from pathlib import Path
+from typing import Optional
 
 from robin.reporting.report import create_pdf
 
@@ -31,7 +32,7 @@ from robin.reporting.report import create_pdf
 )
 @click.option("--debug", is_flag=True, help="Enable debug logging")
 def main(
-    filename: str, output: str, center: str, export_csv_dir: str | None, zip: bool, debug: bool
+    filename: str, output: str, center: str, export_csv_dir: Optional[str], zip: bool, debug: bool
 ):
     """Create a PDF report from ROBIN analysis results.
 

@@ -114,170 +114,260 @@ class CoverageSection(ReportSection):
 
     def _create_chromosome_coverage_plot(self):
         """Create a bar plot showing coverage by chromosome."""
-        plt.figure(figsize=(8, 4))  # Reduced from default size
-        # Filter out chrM and get data
-        filtered_data = [d for d in self.chromosome_data if d["name"] != "chrM"]
-        chromosomes = [d["name"] for d in filtered_data]
-        coverages = [d["mean_coverage"] for d in filtered_data]
+        try:
+            # Check if data is available
+            if not self.chromosome_data:
+                plt.figure(figsize=(8, 4))
+                plt.text(0.5, 0.5, "No chromosome coverage data available", 
+                        ha='center', va='center', transform=plt.gca().transAxes,
+                        fontsize=14, color='gray')
+                plt.title("Per Chromosome Coverage")
+                plt.axis('off')
+            else:
+                plt.figure(figsize=(8, 4))  # Reduced from default size
+                # Filter out chrM and get data
+                filtered_data = [d for d in self.chromosome_data if d["name"] != "chrM"]
+                chromosomes = [d["name"] for d in filtered_data]
+                coverages = [d["mean_coverage"] for d in filtered_data]
 
-        # Convert reportlab color to matplotlib color (hex string)
-        plot_color = (
-            "#" + self.styles.COLORS["primary"].hexval()[2:]
-        )  # Convert 0x... to #...
-        plt.bar(chromosomes, coverages, color=plot_color)
-        plt.title("Per Chromosome Coverage")
-        plt.xlabel("Chromosome")
-        plt.ylabel("Mean Coverage Depth")
-        plt.grid(True, alpha=0.3)
-        plt.xticks(rotation=45)
-        plt.tight_layout()
+                # Convert reportlab color to matplotlib color (hex string)
+                plot_color = (
+                    "#" + self.styles.COLORS["primary"].hexval()[2:]
+                )  # Convert 0x... to #...
+                plt.bar(chromosomes, coverages, color=plot_color)
+                plt.title("Per Chromosome Coverage")
+                plt.xlabel("Chromosome")
+                plt.ylabel("Mean Coverage Depth")
+                plt.grid(True, alpha=0.3)
+                plt.xticks(rotation=45)
+                plt.tight_layout()
 
-        # Save plot to bytes buffer
-        buf = io.BytesIO()
-        plt.savefig(buf, format="png", dpi=300)
-        plt.close()
-        buf.seek(0)
-        return buf
+            # Save plot to bytes buffer
+            buf = io.BytesIO()
+            plt.savefig(buf, format="png", dpi=300, bbox_inches='tight')
+            plt.close()
+            buf.seek(0)
+            
+            # Verify the buffer has data
+            if buf.getvalue():
+                return buf
+            else:
+                return self._create_empty_plot_buffer()
+                
+        except Exception as e:
+            logger.warning(f"Error creating chromosome coverage plot: {e}")
+            plt.close('all')  # Close any open figures
+            return self._create_empty_plot_buffer()
 
     def _create_target_coverage_plot(self):
         """Create a plot showing coverage distribution across targets."""
-        # Calculate target statistics
-        self.bedcov_df_main["length"] = (
-            self.bedcov_df_main["endpos"] - self.bedcov_df_main["startpos"] + 1
-        )
-        grouped = (
-            self.bedcov_df_main.groupby("chrom")
-            .agg({"bases": "sum", "length": "sum"})
-            .reset_index()
-        )
-        groupeddf = grouped.sort_values(
-            by="chrom",
-            key=lambda x: np.argsort(natsort.index_natsorted(grouped["chrom"])),
-        )
-        groupeddf = groupeddf[groupeddf["chrom"] != "chrM"]
-        groupeddf["meandepth"] = groupeddf["bases"] / groupeddf["length"]
+        try:
+            # Check if data is available
+            if self.bedcov_df_main.empty or self.cov_df_main.empty:
+                # Create empty plot with message
+                plt.figure(figsize=(8, 4))
+                plt.text(0.5, 0.5, "No coverage data available", 
+                        ha='center', va='center', transform=plt.gca().transAxes,
+                        fontsize=14, color='gray')
+                plt.title("Target vs Off-Target Coverage by Chromosome")
+                plt.axis('off')
+            else:
+                # Calculate target statistics
+                self.bedcov_df_main["length"] = (
+                    self.bedcov_df_main["endpos"] - self.bedcov_df_main["startpos"] + 1
+                )
+                grouped = (
+                    self.bedcov_df_main.groupby("chrom")
+                    .agg({"bases": "sum", "length": "sum"})
+                    .reset_index()
+                )
+                groupeddf = grouped.sort_values(
+                    by="chrom",
+                    key=lambda x: np.argsort(natsort.index_natsorted(grouped["chrom"])),
+                )
+                groupeddf = groupeddf[groupeddf["chrom"] != "chrM"]
+                groupeddf["meandepth"] = groupeddf["bases"] / groupeddf["length"]
 
-        # Filter and sort chromosomes for off-target data
-        pattern = r"^chr([0-9]+|X|Y)$"
-        temp_covdf = self.cov_df_main[self.cov_df_main["#rname"].str.match(pattern)]
-        sorteddf = temp_covdf.sort_values(
-            by="#rname",
-            key=lambda x: np.argsort(natsort.index_natsorted(temp_covdf["#rname"])),
-        )
-        sorteddf = sorteddf[sorteddf["#rname"] != "chrM"]
+                # Filter and sort chromosomes for off-target data
+                pattern = r"^chr([0-9]+|X|Y)$"
+                temp_covdf = self.cov_df_main[self.cov_df_main["#rname"].str.match(pattern)]
+                sorteddf = temp_covdf.sort_values(
+                    by="#rname",
+                    key=lambda x: np.argsort(natsort.index_natsorted(temp_covdf["#rname"])),
+                )
+                sorteddf = sorteddf[sorteddf["#rname"] != "chrM"]
 
-        # Create the plot
-        plt.figure(figsize=(8, 4))  # Reduced size
-        plt.scatter(
-            sorteddf["#rname"],
-            sorteddf["meandepth"],
-            label="Off Target",
-            color="#E74C3C",
-            s=50,
-        )  # Reduced marker size
-        plt.scatter(
-            groupeddf["chrom"],
-            groupeddf["meandepth"],
-            label="On Target",
-            color="#2C3E50",
-            s=50,
-        )  # Reduced marker size
-        plt.xlabel("Chromosome")
-        plt.ylabel("Coverage Depth")
-        plt.title("Target vs Off-Target Coverage by Chromosome")
-        plt.xticks(rotation=45)
-        plt.grid(True, alpha=0.3)
-        plt.legend()
-        plt.tight_layout()
+                # Create the plot
+                plt.figure(figsize=(8, 4))  # Reduced size
+                if not sorteddf.empty:
+                    plt.scatter(
+                        sorteddf["#rname"],
+                        sorteddf["meandepth"],
+                        label="Off Target",
+                        color="#E74C3C",
+                        s=50,
+                    )  # Reduced marker size
+                if not groupeddf.empty:
+                    plt.scatter(
+                        groupeddf["chrom"],
+                        groupeddf["meandepth"],
+                        label="On Target",
+                        color="#2C3E50",
+                        s=50,
+                    )  # Reduced marker size
+                plt.xlabel("Chromosome")
+                plt.ylabel("Coverage Depth")
+                plt.title("Target vs Off-Target Coverage by Chromosome")
+                plt.xticks(rotation=45)
+                plt.grid(True, alpha=0.3)
+                plt.legend()
+                plt.tight_layout()
 
-        # Save plot to bytes buffer
-        buf = io.BytesIO()
-        plt.savefig(buf, format="png", dpi=300)
-        plt.close()
-        buf.seek(0)
-        return buf
+            # Save plot to bytes buffer
+            buf = io.BytesIO()
+            plt.savefig(buf, format="png", dpi=300, bbox_inches='tight')
+            plt.close()
+            buf.seek(0)
+            
+            # Verify the buffer has data
+            if buf.getvalue():
+                return buf
+            else:
+                # Return a minimal valid PNG if buffer is empty
+                return self._create_empty_plot_buffer()
+                
+        except Exception as e:
+            logger.warning(f"Error creating target coverage plot: {e}")
+            plt.close('all')  # Close any open figures
+            return self._create_empty_plot_buffer()
+
+    def _create_empty_plot_buffer(self):
+        """Create a minimal valid PNG buffer for empty plots."""
+        try:
+            plt.figure(figsize=(8, 4))
+            plt.text(0.5, 0.5, "No data available", 
+                    ha='center', va='center', transform=plt.gca().transAxes,
+                    fontsize=14, color='gray')
+            plt.title("Coverage Plot")
+            plt.axis('off')
+            
+            buf = io.BytesIO()
+            plt.savefig(buf, format="png", dpi=300, bbox_inches='tight')
+            plt.close()
+            buf.seek(0)
+            return buf
+        except Exception:
+            # If even this fails, return a minimal PNG
+            import base64
+            # Minimal 1x1 transparent PNG
+            png_data = base64.b64decode(
+                'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
+            )
+            buf = io.BytesIO(png_data)
+            buf.seek(0)
+            return buf
 
     def _create_target_boxplot(self):
         """Create a boxplot showing coverage distribution for targets."""
-        # Prepare data
-        self.target_coverage_df["coverage"] = self.target_coverage_df["coverage"].round(
-            2
-        )
-
-        # Create figure and boxplot
-        plt.figure(figsize=(8, 4))  # Reduced size
-
-        # Get sorted unique chromosomes
-        sorted_chroms = sorted(
-            self.target_coverage_df["chrom"].unique(), key=natsort.natsort_keygen()
-        )
-
-        # Create boxplot
-        bp = plt.boxplot(
-            [
-                self.target_coverage_df[self.target_coverage_df["chrom"] == chrom][
-                    "coverage"
-                ]
-                for chrom in sorted_chroms
-            ],
-            patch_artist=True,
-        )
-
-        # Style the boxplot
-        plt.setp(bp["boxes"], facecolor="#2C3E50", alpha=0.6)
-        plt.setp(bp["medians"], color="#E74C3C")
-        plt.setp(bp["fliers"], marker="o", markerfacecolor="#C0392B")
-
-        # Function to identify outliers for a chromosome
-        def identify_outliers(chrom_data):
-            Q1 = chrom_data["coverage"].quantile(0.25)
-            Q3 = chrom_data["coverage"].quantile(0.75)
-            IQR = Q3 - Q1
-            lower_bound = Q1 - 1.5 * IQR
-            upper_bound = Q3 + 1.5 * IQR
-            outliers = chrom_data[
-                (chrom_data["coverage"] < lower_bound)
-                | (chrom_data["coverage"] > upper_bound)
-            ]
-            return outliers
-
-        # Add outlier labels
-        for idx, chrom in enumerate(sorted_chroms, 1):
-            chrom_data = self.target_coverage_df[
-                self.target_coverage_df["chrom"] == chrom
-            ]
-            outliers = identify_outliers(chrom_data)
-
-            for _, outlier in outliers.iterrows():
-                # Add label with gene name and coverage
-                label = f"{outlier['name']} ({outlier['coverage']:.1f}x)"
-                plt.annotate(
-                    label,
-                    xy=(idx, outlier["coverage"]),
-                    xytext=(5, 5),
-                    textcoords="offset points",
-                    fontsize=8,
-                    rotation=45,
-                    ha="left",
-                    va="bottom",
+        try:
+            # Check if data is available
+            if self.target_coverage_df.empty:
+                plt.figure(figsize=(8, 4))
+                plt.text(0.5, 0.5, "No target coverage data available", 
+                        ha='center', va='center', transform=plt.gca().transAxes,
+                        fontsize=14, color='gray')
+                plt.title("Target Coverage Distribution")
+                plt.axis('off')
+            else:
+                # Prepare data
+                self.target_coverage_df["coverage"] = self.target_coverage_df["coverage"].round(
+                    2
                 )
 
-        # Customize plot
-        plt.xlabel("Chromosome")
-        plt.ylabel("Coverage Depth")
-        plt.title("Coverage Distribution by Chromosome")
-        plt.xticks(range(1, len(sorted_chroms) + 1), sorted_chroms, rotation=45)
-        plt.grid(True, alpha=0.3)
+                # Create figure and boxplot
+                plt.figure(figsize=(8, 4))  # Reduced size
 
-        # Adjust layout to prevent label cutoff
-        plt.tight_layout()
+                # Get sorted unique chromosomes
+                sorted_chroms = sorted(
+                    self.target_coverage_df["chrom"].unique(), key=natsort.natsort_keygen()
+                )
 
-        # Save plot to bytes buffer
-        buf = io.BytesIO()
-        plt.savefig(buf, format="png", dpi=300, bbox_inches="tight")
-        plt.close()
-        buf.seek(0)
-        return buf
+                # Create boxplot
+                bp = plt.boxplot(
+                    [
+                        self.target_coverage_df[self.target_coverage_df["chrom"] == chrom][
+                            "coverage"
+                        ]
+                        for chrom in sorted_chroms
+                    ],
+                    patch_artist=True,
+                )
+
+                # Style the boxplot
+                plt.setp(bp["boxes"], facecolor="#2C3E50", alpha=0.6)
+                plt.setp(bp["medians"], color="#E74C3C")
+                plt.setp(bp["fliers"], marker="o", markerfacecolor="#C0392B")
+
+                # Function to identify outliers for a chromosome
+                def identify_outliers(chrom_data):
+                    Q1 = chrom_data["coverage"].quantile(0.25)
+                    Q3 = chrom_data["coverage"].quantile(0.75)
+                    IQR = Q3 - Q1
+                    lower_bound = Q1 - 1.5 * IQR
+                    upper_bound = Q3 + 1.5 * IQR
+                    outliers = chrom_data[
+                        (chrom_data["coverage"] < lower_bound)
+                        | (chrom_data["coverage"] > upper_bound)
+                    ]
+                    return outliers
+
+                # Add outlier labels
+                for idx, chrom in enumerate(sorted_chroms, 1):
+                    chrom_data = self.target_coverage_df[
+                        self.target_coverage_df["chrom"] == chrom
+                    ]
+                    outliers = identify_outliers(chrom_data)
+
+                    for _, outlier in outliers.iterrows():
+                        # Add label with gene name and coverage
+                        label = f"{outlier['name']} ({outlier['coverage']:.1f}x)"
+                        plt.annotate(
+                            label,
+                            xy=(idx, outlier["coverage"]),
+                            xytext=(5, 5),
+                            textcoords="offset points",
+                            fontsize=8,
+                            rotation=45,
+                            ha="left",
+                            va="bottom",
+                        )
+
+                # Customize plot
+                plt.xlabel("Chromosome")
+                plt.ylabel("Coverage Depth")
+                plt.title("Coverage Distribution by Chromosome")
+                plt.xticks(range(1, len(sorted_chroms) + 1), sorted_chroms, rotation=45)
+                plt.grid(True, alpha=0.3)
+
+                # Adjust layout to prevent label cutoff
+                plt.tight_layout()
+
+            # Save plot to bytes buffer
+            buf = io.BytesIO()
+            plt.savefig(buf, format="png", dpi=300, bbox_inches="tight")
+            plt.close()
+            buf.seek(0)
+            
+            # Verify the buffer has data
+            if buf.getvalue():
+                return buf
+            else:
+                return self._create_empty_plot_buffer()
+                
+        except Exception as e:
+            logger.warning(f"Error creating target boxplot: {e}")
+            plt.close('all')  # Close any open figures
+            return self._create_empty_plot_buffer()
 
     def add_content(self):
         """Add the coverage analysis content to the report."""

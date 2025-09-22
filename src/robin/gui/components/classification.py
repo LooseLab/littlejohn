@@ -3,6 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List
 import csv
+import asyncio
+import concurrent.futures
+import logging
 
 try:
     from nicegui import ui
@@ -11,15 +14,15 @@ except ImportError:  # pragma: no cover
 
 # Import centralized classification configuration
 try:
-    from robin.classification_config import get_classifier_thresholds
+    from robin.classification_config import CLASSIFIER_CONFIDENCE_THRESHOLDS
 except ImportError:  # pragma: no cover
-    get_classifier_thresholds = None
+    CLASSIFIER_CONFIDENCE_THRESHOLDS = None
 
 
 def add_classification_section(sample_dir: Path) -> None:
     """Build the Classification section (Sturgeon, NanoDX, PanNanoDX, RF)."""
     with ui.card().classes("w-full"):
-        ui.label("🧪 Classification").classes("text-lg font-semibold mb-2")
+        ui.label("Classification").classes("text-lg font-semibold mb-2")
         tool_to_file = {
             "Sturgeon": {"file": "sturgeon_scores.csv", "mode": "fraction"},
             "NanoDX": {"file": "NanoDX_scores.csv", "mode": "fraction"},
@@ -269,6 +272,44 @@ def add_classification_section(sample_dir: Path) -> None:
             values = [round(v, 2) for _, v in top][::-1]
             bar.options["yAxis"]["data"] = labels
             bar.options["series"][0]["data"] = values
+            
+            # Add thresholds to bar chart as well
+            if CLASSIFIER_CONFIDENCE_THRESHOLDS:
+                classifier_key_map = {
+                    "Sturgeon": "sturgeon",
+                    "NanoDX": "nanodx", 
+                    "PanNanoDX": "pannanodx",
+                    "Random Forest": "random_forest"
+                }
+                
+                classifier_key = classifier_key_map.get(tool_name)
+                if classifier_key and classifier_key in CLASSIFIER_CONFIDENCE_THRESHOLDS:
+                    thresholds = CLASSIFIER_CONFIDENCE_THRESHOLDS[classifier_key]
+                    if thresholds and thresholds.get("medium") and thresholds.get("high"):
+                        # Add markLine to bar chart
+                        bar.options["series"][0]["markLine"] = {
+                            "silent": True,
+                            "lineStyle": {"type": "dashed", "color": "#999"},
+                            "data": [
+                                {
+                                    "xAxis": thresholds["medium"],
+                                    "label": {
+                                        "show": True,
+                                        "formatter": f"Medium ({thresholds['medium']:.0f}%)",
+                                        "position": "insideEndTop"
+                                    }
+                                },
+                                {
+                                    "xAxis": thresholds["high"],
+                                    "label": {
+                                        "show": True,
+                                        "formatter": f"High ({thresholds['high']:.0f}%)",
+                                        "position": "insideEndTop"
+                                    }
+                                }
+                            ]
+                        }
+            
             bar.update()
             ts.options["series"] = []
             if data.get("has_time"):
@@ -296,7 +337,7 @@ def add_classification_section(sample_dir: Path) -> None:
                         }
                     )
             # Add thresholds for all classification tools using centralized configuration
-            if get_classifier_thresholds:
+            if CLASSIFIER_CONFIDENCE_THRESHOLDS:
                 # Map tool names to classifier config keys
                 classifier_key_map = {
                     "Sturgeon": "sturgeon",
@@ -306,8 +347,8 @@ def add_classification_section(sample_dir: Path) -> None:
                 }
                 
                 classifier_key = classifier_key_map.get(tool_name)
-                if classifier_key:
-                    thresholds = get_classifier_thresholds(classifier_key)
+                if classifier_key and classifier_key in CLASSIFIER_CONFIDENCE_THRESHOLDS:
+                    thresholds = CLASSIFIER_CONFIDENCE_THRESHOLDS[classifier_key]
                     if thresholds and thresholds.get("medium") and thresholds.get("high"):
                         ts.options.setdefault("series", [])
                         ts.options["series"].append(
@@ -390,18 +431,37 @@ def add_classification_section(sample_dir: Path) -> None:
         except Exception:
             pass
 
-    def _refresh_classification() -> None:
-        for tool_name, cfg in tool_to_file.items():
-            file_path = sample_dir / cfg["file"] if sample_dir else None
-            try:
-                if file_path and file_path.exists():
-                    mtime = file_path.stat().st_mtime
-                    if charts[tool_name].get("last_mtime") is None or mtime > charts[
-                        tool_name
-                    ].get("last_mtime", 0):
-                        _update_charts_from_file(tool_name, cfg["file"])
-                        charts[tool_name]["last_mtime"] = mtime
-            except Exception:
-                pass
+    async def _refresh_classification_async() -> None:
+        """Refresh classification data asynchronously."""
+        try:
+            # Run file operations in background thread
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                futures = []
+                for tool_name, cfg in tool_to_file.items():
+                    file_path = sample_dir / cfg["file"] if sample_dir else None
+                    if file_path:
+                        future = executor.submit(_check_and_update_file, tool_name, cfg["file"], file_path, charts)
+                        futures.append(future)
+                
+                # Wait for all file operations to complete
+                for future in futures:
+                    try:
+                        await asyncio.wrap_future(future)
+                    except Exception:
+                        pass
+        except Exception as e:
+            logging.exception(f"[Classification] Async refresh failed: {e}")
 
-    ui.timer(30.0, _refresh_classification, active=True)
+    def _check_and_update_file(tool_name: str, filename: str, file_path: Path, charts: Dict[str, Any]) -> None:
+        """Check file and update charts if needed - runs in background thread."""
+        try:
+            if file_path.exists():
+                mtime = file_path.stat().st_mtime
+                if charts[tool_name].get("last_mtime") is None or mtime > charts[tool_name].get("last_mtime", 0):
+                    _update_charts_from_file(tool_name, filename)
+                    charts[tool_name]["last_mtime"] = mtime
+        except Exception:
+            pass
+
+    # Start the refresh timer (every 30 seconds) with async function
+    ui.timer(30.0, lambda: ui.timer(0.1, _refresh_classification_async, once=True), active=True)

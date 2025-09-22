@@ -33,27 +33,30 @@ robin is a specialized bioinformatics workflow engine designed for processing BA
 
 ### Prerequisites
 
-1. **Git LFS**: This repository uses Git Large File Storage (LFS) for model files. Ensure you have Git LFS installed:
-   ```bash
-   # Install Git LFS
-   git lfs install
-   ```
-
-2. **Conda**: Install Miniconda or Anaconda if you haven't already.
+1. **Conda**: Install Miniconda or Anaconda if you haven't already.
+2. **jq** (optional): For advanced asset management. Install with `brew install jq` (macOS) or `apt-get install jq` (Ubuntu).
 
 ### Installation Steps
 
 1. **Clone the repository with submodules**:
    ```bash
-   git clone --recursive https://github.com/yourusername/robin.git
-   cd robin
+   git clone --recursive https://github.com/LooseLab/littlejohn.git
+   cd littlejohn
+   
+   # Switch to the branch with Git LFS removal
+   git checkout remove_LFS
    ```
 
-2. **Initialize Git LFS and pull large files**:
+2. **Download required model assets**:
    ```bash
-   git lfs pull
+   # Download all models automatically
+   python setup_models.py
+   
+   # Or download individual models
+   python scripts/fetch_asset.py general_model src/robin/models/general.zip
+   python scripts/fetch_asset.py capper_model src/robin/models/Capper_et_al_NN.pkl
+   python scripts/fetch_asset.py pancan_model src/robin/models/pancan_devel_v5i_NN.pkl
    ```
-   *This downloads the large model files stored in Git LFS*
 
 3. **Update and initialize submodules**:
    ```bash
@@ -84,23 +87,25 @@ If you prefer not to use conda, you can install from source, but you'll need to 
 1. **Install system dependencies**:
    ```bash
    # Ubuntu/Debian
-   sudo apt-get install git-lfs samtools bedtools r-base
+   sudo apt-get install samtools bedtools r-base jq
    
    # macOS
-   brew install git-lfs samtools bedtools r
+   brew install samtools bedtools r jq
    ```
 
 2. **Clone with submodules**:
    ```bash
-   git clone --recursive https://github.com/yourusername/robin.git
-   cd robin
+   git clone --recursive https://github.com/LooseLab/littlejohn.git
+   cd littlejohn
+   
+   # Switch to the branch with Git LFS removal
+   git checkout remove_LFS
    ```
 
-3. **Initialize Git LFS and pull large files**:
+3. **Download required model assets**:
    ```bash
-   git lfs pull
+   python setup_models.py
    ```
-   *This downloads the large model files stored in Git LFS*
 
 4. **Update and initialize submodules**:
    ```bash
@@ -112,6 +117,52 @@ If you prefer not to use conda, you can install from source, but you'll need to 
    ```bash
    pip install -e .
    ```
+
+## Asset Management
+
+Robin uses a release asset system instead of Git LFS for managing large model files. This provides better performance and reliability.
+
+### Available Assets
+
+The following model assets are available:
+
+- **general_model**: `general.zip` (1.7GB) - General machine learning model archive
+- **capper_model**: `Capper_et_al_NN.pkl` (132MB) - Capper et al neural network model  
+- **pancan_model**: `pancan_devel_v5i_NN.pkl` (194MB) - Pan-cancer development v5i neural network model
+
+### Downloading Assets
+
+**Automatic setup** (recommended):
+```bash
+python setup_models.py
+```
+
+**Manual download**:
+```bash
+# Download individual models
+python scripts/fetch_asset.py general_model src/robin/models/general.zip
+python scripts/fetch_asset.py capper_model src/robin/models/Capper_et_al_NN.pkl
+python scripts/fetch_asset.py pancan_model src/robin/models/pancan_devel_v5i_NN.pkl
+```
+
+**Using shell script**:
+```bash
+./scripts/fetch_asset.sh general_model src/robin/models/general.zip
+./scripts/fetch_asset.sh capper_model src/robin/models/Capper_et_al_NN.pkl
+./scripts/fetch_asset.sh pancan_model src/robin/models/pancan_devel_v5i_NN.pkl
+```
+
+### Authentication
+
+For private repositories, set your GitHub token:
+```bash
+export GITHUB_TOKEN=your_personal_access_token
+python setup_models.py
+```
+
+### Asset Verification
+
+All assets are automatically verified using SHA256 checksums. If verification fails, the download will be retried or the corrupted file will be removed.
 
 ## Main Usage
 

@@ -27,6 +27,10 @@ import warnings
 warnings.filterwarnings(
     "ignore", message="pkg_resources is deprecated", category=UserWarning
 )
+# Suppress matplotlib tight_layout warnings
+warnings.filterwarnings(
+    "ignore", message="The figure layout has changed to tight", category=UserWarning
+)
 
 import os
 import time
@@ -42,6 +46,12 @@ import ray
 from tqdm import tqdm
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
+
+# Import memory management
+try:
+    from robin.memory_manager import MemoryManager
+except ImportError:
+    MemoryManager = None
 
 # Optional GUI hook integration
 try:
@@ -294,6 +304,22 @@ def _wrap_real_handler(
     py_handler: Optional[Callable[[Job], None]], job_type: str
 ) -> Callable[[Job], WorkflowContext]:
     def _impl(job: Job) -> WorkflowContext:
+        # Initialize memory manager for this handler execution
+        memory_manager = None
+        if MemoryManager is not None:
+            try:
+                # Configure memory management based on job type
+                gc_every = 10 if job_type in {"mgmt", "cnv", "target", "fusion"} else 25
+                rss_trigger = 512 if job_type in {"mgmt", "cnv", "target", "fusion"} else 1024
+                memory_manager = MemoryManager(
+                    gc_every=gc_every,
+                    rss_trigger_mb=rss_trigger,
+                    enable_malloc_trim=True
+                )
+            except Exception:
+                # Fallback if memory manager fails to initialize
+                pass
+        
         # Ensure per-process logging honors global level
         try:
             _configure_logging(global_level=GLOBAL_LOG_LEVEL)
@@ -327,9 +353,11 @@ def _wrap_real_handler(
                 sig = inspect.signature(py_handler)
                 # Check if handler accepts reference parameter
                 accepts_reference = "reference" in sig.parameters
+                accepts_target_panel = "target_panel" in sig.parameters
 
                 # Get reference from job metadata if available
                 reference = job.context.metadata.get("reference")
+                target_panel = job.context.metadata.get("target_panel", "rCNS2")
 
                 # Call handler with appropriate parameters
                 if (
@@ -337,12 +365,20 @@ def _wrap_real_handler(
                     and work_dir
                     and (job_type in NEEDS_WORK_DIR)
                 ):
-                    if accepts_reference and reference:
+                    if accepts_reference and reference and accepts_target_panel and job_type in ["fusion", "target"]:
+                        py_handler(job, work_dir=work_dir, reference=reference, target_panel=target_panel)
+                    elif accepts_reference and reference:
                         py_handler(job, work_dir=work_dir, reference=reference)
+                    elif accepts_target_panel and job_type in ["fusion", "target"]:
+                        py_handler(job, work_dir=work_dir, target_panel=target_panel)
                     else:
                         py_handler(job, work_dir=work_dir)
+                elif accepts_reference and reference and accepts_target_panel and job_type in ["fusion", "target"]:
+                    py_handler(job, reference=reference, target_panel=target_panel)
                 elif accepts_reference and reference:
                     py_handler(job, reference=reference)
+                elif accepts_target_panel and job_type in ["fusion", "target"]:
+                    py_handler(job, target_panel=target_panel)
                 else:
                     py_handler(job)
             except Exception:
@@ -380,6 +416,19 @@ def _wrap_real_handler(
             # Mark result if user handler didn't
             if job_type not in job.context.results:
                 job.context.add_result(job_type, f"{job_type}_ok")
+            
+            # Trigger memory cleanup after handler execution
+            # Handlers are always idle after completion, so force cleanup
+            if memory_manager is not None:
+                try:
+                    cleanup_stats = memory_manager.check_and_cleanup(force=True, is_idle=True)
+                    # Log memory cleanup if it was triggered
+                    if cleanup_stats.get('gc_triggered', False):
+                        logger.debug(f"Memory cleanup: {cleanup_stats}")
+                except Exception:
+                    # Silently continue if memory management fails
+                    pass
+        
         return job.context
 
     return _impl
@@ -416,10 +465,42 @@ class TypeProcessor:
         self.job_type = job_type
         self.remote_func = remote_func
         self.resource_options = resource_options or {}
+        
+        # Initialize memory manager for long-running actor
+        self.memory_manager = None
+        if MemoryManager is not None:
+            try:
+                # Configure memory management based on job type
+                gc_every = 25 if job_type in {"mgmt", "cnv", "target", "fusion"} else 50
+                rss_trigger = 1024 if job_type in {"mgmt", "cnv", "target", "fusion"} else 2048
+                restart_every = 5000 if job_type in {"mgmt", "cnv", "target", "fusion"} else 10000
+                restart_rss_trigger = 2048 if job_type in {"mgmt", "cnv", "target", "fusion"} else 4096
+                self.memory_manager = MemoryManager(
+                    gc_every=gc_every,
+                    rss_trigger_mb=rss_trigger,
+                    enable_malloc_trim=True,
+                    restart_every=restart_every,
+                    restart_rss_trigger_mb=restart_rss_trigger
+                )
+            except Exception as e:
+                # Fallback if memory manager fails to initialize
+                pass
 
     def update_handler(self, remote_func, resource_options: Dict[str, Any]):
         self.remote_func = remote_func
         self.resource_options = resource_options or {}
+    
+    def should_restart(self) -> bool:
+        """Check if actor should restart due to memory management."""
+        if self.memory_manager is not None:
+            return self.memory_manager.is_restart_requested()
+        return False
+    
+    def get_restart_reason(self) -> Optional[str]:
+        """Get the reason for restart request."""
+        if self.memory_manager is not None:
+            return self.memory_manager.get_restart_reason()
+        return None
 
     async def process(self, job: Job):
         # Submit the real handler task and await the result to avoid nested ObjectRefs
@@ -429,6 +510,20 @@ class TypeProcessor:
         except Exception:
             # Propagate error to coordinator; it will handle ok=False
             raise
+        
+        # Trigger memory cleanup after processing (actor is idle after job completion)
+        if self.memory_manager is not None:
+            try:
+                cleanup_stats = self.memory_manager.check_and_cleanup(is_idle=True)
+                # Log memory cleanup if it was triggered
+                if cleanup_stats.get('gc_triggered', False):
+                    pass  # Memory cleanup performed
+                
+                # Actor restart mechanism disabled - no restart checks
+            except Exception as e:
+                # Silently continue if memory management fails
+                pass
+        
         return ctx
 
 
@@ -439,6 +534,7 @@ class Coordinator:
         analysis_workers: int = 1,
         preset: Optional[str] = None,
         reference: Optional[str] = None,
+        target_panel: str = "rCNS2",
     ):
         # dedup maps
         self.pending: Dict[Tuple[str, str], int] = {}
@@ -454,6 +550,7 @@ class Coordinator:
         self.active: Dict[int, Dict[str, Any]] = {}
 
         self.analysis_workers = analysis_workers
+        self.target_panel = target_panel
 
         # Per-sample per-type serialization tracking
         self.running_by_type_sample: Dict[Tuple[str, str], int] = {}
@@ -500,6 +597,10 @@ class Coordinator:
     def get_reference(self) -> Optional[str]:
         """Get the reference genome path."""
         return self.reference
+
+    def get_target_panel(self) -> str:
+        """Get the target panel for fusion analysis."""
+        return self.target_panel
 
     # ----- handler registration API -----
     async def register_handler(self, job_type: str, remote_func) -> None:
@@ -1463,6 +1564,26 @@ class Pool:
         self._coordinator_name: Optional[str] = None
         self._inflight: Set[ray.ObjectRef] = set()
         self._running_count: int = 0
+        
+        # Initialize memory manager for long-running pool actor
+        self.memory_manager = None
+        if MemoryManager is not None:
+            try:
+                # Configure memory management based on queue type
+                gc_every = 30 if queue_name in {"analysis", "classif"} else 50
+                rss_trigger = 1536 if queue_name in {"analysis", "classif"} else 2048
+                restart_every = 7500 if queue_name in {"analysis", "classif"} else 10000
+                restart_rss_trigger = 3072 if queue_name in {"analysis", "classif"} else 4096
+                self.memory_manager = MemoryManager(
+                    gc_every=gc_every,
+                    rss_trigger_mb=rss_trigger,
+                    enable_malloc_trim=True,
+                    restart_every=restart_every,
+                    restart_rss_trigger_mb=restart_rss_trigger
+                )
+            except Exception as e:
+                # Fallback if memory manager fails to initialize
+                pass
 
     async def set_coordinator_name(self, coord_name: str):
         # store Coordinator actor name; resolve handle lazily
@@ -1480,6 +1601,18 @@ class Pool:
             except Exception:
                 self._coordinator = None
         return self._coordinator
+    
+    def should_restart(self) -> bool:
+        """Check if actor should restart due to memory management."""
+        if self.memory_manager is not None:
+            return self.memory_manager.is_restart_requested()
+        return False
+    
+    def get_restart_reason(self) -> Optional[str]:
+        """Get the reason for restart request."""
+        if self.memory_manager is not None:
+            return self.memory_manager.get_restart_reason()
+        return None
 
     async def register_handler(
         self, job_type: str, remote_func, resource_options: Dict[str, Any]
@@ -1528,6 +1661,21 @@ class Pool:
             self._inflight.discard(r)
             if self._running_count > 0:
                 self._running_count -= 1
+            
+            # Trigger memory cleanup after job completion
+            # Check if pool is idle (no running jobs) before cleanup
+            if self.memory_manager is not None:
+                try:
+                    is_idle = self._running_count == 0
+                    cleanup_stats = self.memory_manager.check_and_cleanup(is_idle=is_idle)
+                    # Log memory cleanup if it was triggered
+                    if cleanup_stats.get('gc_triggered', False):
+                        pass  # Memory cleanup performed
+                    
+                    # Actor restart mechanism disabled - no restart checks
+                except Exception as e:
+                    # Silently continue if memory management fails
+                    pass
 
         asyncio.create_task(_wait(ref))
 
@@ -1603,6 +1751,14 @@ async def submit_existing_paths(
                             j.context.add_metadata("reference", coord_reference)
                 except Exception:
                     pass  # Silently continue if reference unavailable
+                # Add target panel to job metadata if available
+                try:
+                    coord_target_panel = ray.get(coord.get_target_panel.remote())
+                    if coord_target_panel:
+                        for j in jobs:
+                            j.context.add_metadata("target_panel", coord_target_panel)
+                except Exception:
+                    pass  # Silently continue if target_panel unavailable
                 seed_jobs += jobs
         elif pth.is_dir():
             # Stream directory walk in small batches; avoid building huge lists
@@ -1627,6 +1783,14 @@ async def submit_existing_paths(
                             j.context.add_metadata("reference", coord_reference)
                 except Exception:
                     pass  # Silently continue if reference unavailable
+                # Add target panel to job metadata if available
+                try:
+                    coord_target_panel = ray.get(coord.get_target_panel.remote())
+                    if coord_target_panel:
+                        for j in jobs:
+                            j.context.add_metadata("target_panel", coord_target_panel)
+                except Exception:
+                    pass  # Silently continue if target_panel unavailable
                 batch += jobs
                 if len(batch) >= 256:
                     await coord.submit_jobs.remote(batch)
@@ -1859,6 +2023,7 @@ async def run(
     gui_host: str = "0.0.0.0",
     gui_port: int = 8081,
     center: str = None,
+    target_panel: str = "rCNS2",
 ):
     global GLOBAL_LOG_LEVEL
     GLOBAL_LOG_LEVEL = (log_level or "INFO").upper()
@@ -1903,11 +2068,11 @@ async def run(
     # Start a fresh coordinator (not detached)
     try:
         coord = Coordinator.options(name="robin_coordinator", num_cpus=0).remote(
-            analysis_workers=analysis_workers, preset=preset, reference=reference
+            analysis_workers=analysis_workers, preset=preset, reference=reference, target_panel=target_panel
         )
     except Exception:
         coord = Coordinator.options(name="robin_coordinator").remote(
-            analysis_workers=analysis_workers, preset=preset, reference=reference
+            analysis_workers=analysis_workers, preset=preset, reference=reference, target_panel=target_panel
         )
 
     # Set global coordinator reference for external access
@@ -1920,45 +2085,17 @@ async def run(
     except Exception:
         pass
 
-    if process_existing and paths:
-        await submit_existing_paths(
-            coord,
-            paths,
-            plan,
-            patterns=patterns,
-            ignore_patterns=ignore_patterns,
-            recursive=recursive,
-            work_dir=work_dir,
-        )
-
-    observer = None
-    watcher = None
-    if watch and paths:
-        observer = Observer()
-        watcher = RayFileWatcher(
-            coord,
-            plan,
-            patterns=patterns,
-            ignore_patterns=ignore_patterns,
-            recursive=recursive,
-            work_dir=work_dir,
-        )
-        for p in paths:
-            if Path(p).is_dir():
-                observer.schedule(watcher, p, recursive=recursive)
-        observer.start()
-
-    tasks = []
-    if monitor:
-        tasks.append(asyncio.create_task(tqdm_monitor(coord, continuous=watch)))
-
-    # Optional GUI integration
+    # Launch GUI early - immediately after coordinator setup but before job submission
+    # This ensures the GUI is available as soon as possible, before any jobs start
+    gui_launcher = None
+    gui_publish_task = None
     try:
         if _GUIUpdateType is None:
             print("GUI not launched: GUI modules unavailable on this environment.")
         elif not work_dir:
             print("GUI not launched: --work-dir not provided.")
         else:
+            print("Launching GUI early to ensure immediate availability...")
             launcher = _gui_launch(
                 host=gui_host,
                 port=gui_port,
@@ -1967,16 +2104,18 @@ async def run(
                 monitored_directory=work_dir,
                 center=center,
             )
+            gui_launcher = launcher
             try:
                 url = (
                     launcher.get_gui_url()
                     if hasattr(launcher, "get_gui_url")
                     else "http://localhost:8081"
                 )
-                print(f"NiceGUI ready to go on {url}")
+                print(f"GUI launched successfully on {url}")
             except Exception:
-                print("NiceGUI launched.")
+                print("GUI launched successfully")
 
+            # Start GUI update publishing task immediately
             async def _publish_gui():
                 while True:
                     try:
@@ -2172,9 +2311,46 @@ async def run(
                     except Exception:
                         await asyncio.sleep(1.0)
 
-            tasks.append(asyncio.create_task(_publish_gui()))
+            gui_publish_task = asyncio.create_task(_publish_gui())
+            print("GUI monitoring started - workflow status will be updated in real-time")
     except Exception as e:
         print(f"Warning: GUI failed to launch: {e}")
+
+    if process_existing and paths:
+        await submit_existing_paths(
+            coord,
+            paths,
+            plan,
+            patterns=patterns,
+            ignore_patterns=ignore_patterns,
+            recursive=recursive,
+            work_dir=work_dir,
+        )
+
+    observer = None
+    watcher = None
+    if watch and paths:
+        observer = Observer()
+        watcher = RayFileWatcher(
+            coord,
+            plan,
+            patterns=patterns,
+            ignore_patterns=ignore_patterns,
+            recursive=recursive,
+            work_dir=work_dir,
+        )
+        for p in paths:
+            if Path(p).is_dir():
+                observer.schedule(watcher, p, recursive=recursive)
+        observer.start()
+
+    tasks = []
+    if monitor:
+        tasks.append(asyncio.create_task(tqdm_monitor(coord, continuous=watch)))
+    
+    # Add GUI publish task if GUI was launched
+    if gui_publish_task is not None:
+        tasks.append(gui_publish_task)
 
     try:
         if tasks:
@@ -2307,3 +2483,4 @@ if __name__ == "__main__":
         )
     except KeyboardInterrupt:
         pass
+        

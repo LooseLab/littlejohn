@@ -26,6 +26,10 @@ import json
 warnings.filterwarnings(
     "ignore", message="pkg_resources is deprecated", category=UserWarning
 )
+# Suppress matplotlib tight_layout warnings
+warnings.filterwarnings(
+    "ignore", message="The figure layout has changed to tight", category=UserWarning
+)
 
 def merge_modkit_files(
     new_files: List[str],
@@ -469,7 +473,7 @@ def merge_modkit_files(
                 # Don't re-raise the exception - allow processing to continue
 
         logging.debug(
-            f"✅ Merged with optimized Polars and cache saved to: {output_file}"
+            f"Merged with optimized Polars and cache saved to: {output_file}"
         )
 
     except Exception as e:

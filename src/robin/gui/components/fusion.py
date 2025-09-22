@@ -5,6 +5,9 @@ from pathlib import Path
 import logging
 import pickle
 import os
+import hashlib
+import asyncio
+import concurrent.futures
 
 import pandas as pd
 import numpy as np
@@ -23,6 +26,8 @@ except ImportError:
     DNA_FEATURES_AVAILABLE = False
     logging.warning("DNA Features Viewer not available - using fallback visualization")
 
+    
+# chrov ideograms removed - not working properly
 
 try:
     from nicegui import ui
@@ -57,6 +62,43 @@ def _rename_and_sort(df: pd.DataFrame) -> pd.DataFrame:
         return df.rename(columns=rename_map)
 
 
+def _create_data_hash(data: Dict[str, Any]) -> str:
+    """Create a hash of the fusion data to detect actual content changes."""
+    try:
+        if not data:
+            return ""
+        
+        # Create hash from key data components
+        hash_components = []
+        
+        # Hash the annotated data DataFrame
+        if "annotated_data" in data and data["annotated_data"] is not None:
+            df_str = data["annotated_data"].to_string()
+            df_hash = hashlib.md5(df_str.encode()).hexdigest()
+            hash_components.append(f"df:{df_hash}")
+        
+        # Hash the goodpairs Series
+        if "goodpairs" in data and data["goodpairs"] is not None:
+            pairs_str = data["goodpairs"].to_string()
+            pairs_hash = hashlib.md5(pairs_str.encode()).hexdigest()
+            hash_components.append(f"pairs:{pairs_hash}")
+        
+        # Hash gene groups
+        if "gene_groups" in data and data["gene_groups"] is not None:
+            groups_str = str(sorted(data["gene_groups"]))
+            groups_hash = hashlib.md5(groups_str.encode()).hexdigest()
+            hash_components.append(f"groups:{groups_hash}")
+        
+        # Hash candidate count
+        if "candidate_count" in data:
+            hash_components.append(f"count:{data['candidate_count']}")
+        
+        return hashlib.md5("|".join(hash_components).encode()).hexdigest()
+    except Exception as e:
+        logging.warning(f"[Fusion] Failed to create data hash: {e}")
+        return ""
+
+
 def _load_processed_pickle(file_path: Path) -> Optional[Dict[str, Any]]:
     """Load the preprocessed fusion data structure written by preprocess_fusion_data_standalone.
 
@@ -65,8 +107,23 @@ def _load_processed_pickle(file_path: Path) -> Optional[Dict[str, Any]]:
     try:
         if not file_path.exists() or file_path.stat().st_size == 0:
             return None
+        
+        # Try to load the pickle with better error handling
         with open(file_path, "rb") as f:
-            data = pickle.load(f)
+            try:
+                data = pickle.load(f)
+            except (pickle.UnpicklingError, EOFError) as e:
+                # If pickle is truncated, try to load what we can
+                logging.warning(f"[Fusion] Pickle file appears truncated, attempting recovery: {file_path}")
+                f.seek(0)
+                try:
+                    # Try loading with protocol 0 which is more forgiving
+                    data = pickle.load(f)
+                except:
+                    # If all else fails, return None and let the system regenerate
+                    logging.error(f"[Fusion] Could not recover truncated pickle: {file_path}")
+                    return None
+        
         # Expected keys: annotated_data (DataFrame), goodpairs (Series), gene_groups (list), candidate_count (int)
         return data if isinstance(data, dict) else None
     except Exception as e:
@@ -131,8 +188,8 @@ def _plot_gene_group(
         # Clear container and create advanced visualization
         container.clear()
         with container:
-            # Create matplotlib element for the sophisticated plot
-            mpl_element = ui.matplotlib(figsize=(19, 5)).classes("w-full")
+            # Create matplotlib element for the sophisticated plot with ideograms
+            mpl_element = ui.matplotlib(figsize=(20, 10)).classes("w-full")
 
             # Create the advanced fusion plot
             fig = _create_advanced_fusion_plot(
@@ -185,10 +242,12 @@ def _create_advanced_fusion_plot(
     if len(unique_genes) == 0:
         return _create_simple_fallback_plot(gene_group, subset)
 
-    # Create the unified side-by-side layout like the original code
+    # Create the unified side-by-side layout without ideograms
     # For 2 genes, we'll create 2 columns with 2 rows each (gene structure + read mapping)
     num_genes = len(unique_genes)
-    fig, axes = plt.subplots(2, num_genes, figsize=(19, 5))
+    logging.info(f"[Fusion] Creating {num_genes} gene layout with 2 rows (gene structure + read mapping)")
+    # Increase figure size and add more padding to prevent tight layout warnings
+    fig, axes = plt.subplots(2, num_genes, figsize=(20, 10))
 
     # Handle single gene case
     if num_genes == 1:
@@ -206,31 +265,59 @@ def _create_advanced_fusion_plot(
         gene_end = gene_data["reference_end"].max()
         gene_chrom = gene_data["reference_id"].iloc[0]
 
-        # Row 0: Gene structure with DNA Features Viewer (exactly as original)
+        # Row 0: Gene structure with DNA Features Viewer
         ax_gene = axes[0, col_idx]
         _plot_gene_structure_with_dna_features(
             ax_gene, gene_name, gene_chrom, gene_start, gene_end, gene_table
         )
 
-        # Row 1: Read mapping visualization (exactly as original)
+        # Row 1: Read mapping visualization
         ax_reads = axes[1, col_idx]
         _plot_read_mapping_sophisticated(
             ax_reads, gene_data, gene_name, gene_chrom, gene_start, gene_end
         )
 
-    # Adjust layout using tight_layout for better compatibility
-    try:
-        plt.tight_layout()
-    except Exception:
-        # Fallback to manual adjustment if tight_layout fails
-        plt.subplots_adjust(hspace=0.4, wspace=0.3)
-
-    # Add overall title
+    # Add overall title first
     fig.suptitle(
         f"Fusion Analysis: {', '.join(gene_group)}", fontsize=14, fontweight="bold"
     )
 
+    # Use constrained_layout for better automatic spacing
+    try:
+        # Enable constrained layout for automatic spacing
+        fig.set_constrained_layout(True)
+        fig.set_constrained_layout_pads(w_pad=0.1, h_pad=0.1)
+    except Exception as e:
+        logging.warning(f"[Fusion] Constrained layout failed, using manual adjustment: {e}")
+        # Fallback to manual adjustment with more space
+        plt.subplots_adjust(
+            top=0.85,  # Leave space for suptitle
+            bottom=0.1,
+            left=0.1,
+            right=0.95,
+            hspace=0.4,  # More space between rows
+            wspace=0.3   # Space between columns
+        )
+
     return fig
+
+
+
+
+def _format_ticks_to_megabases(ax: plt.Axes) -> None:
+    """Safely format x-axis ticks to megabases, handling custom formatters from DNA Features Viewer."""
+    try:
+        ticks = ax.get_xticks()
+        # Set the tick positions first, then the labels to avoid warnings
+        ax.set_xticks(ticks)
+        ax.set_xticklabels([f'{t/1e6:.1f}' for t in ticks])
+    except Exception as e:
+        logging.warning(f"Could not format ticks to megabases: {e}")
+        # Fallback: try to use ticklabel_format if possible
+        try:
+            ax.ticklabel_format(style='scientific', axis='x', scilimits=(0,0))
+        except Exception:
+            pass  # If both methods fail, just leave the default formatting
 
 
 def _load_gene_annotations() -> Optional[pd.DataFrame]:
@@ -267,7 +354,7 @@ def _plot_gene_structure_with_dna_features(
 
         if gene_info.empty:
             # Fallback if no gene info found
-            ax.set_title(f"Gene Structure: {gene_name}", fontsize=10, fontweight="bold")
+            ax.set_title(f"Gene Structure: {gene_name} ({chrom})", fontsize=10, fontweight="bold")
             # Extend plot range to show full context
             plot_start = start - (end - start) * 0.1
             plot_end = end + (end - start) * 0.1
@@ -282,6 +369,10 @@ def _plot_gene_structure_with_dna_features(
                 va="center",
                 bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.7),
             )
+            # Convert x-axis to megabases
+            ax.set_xlabel(f"Position (Mb) - {chrom}", fontsize=10)
+            # Convert tick labels to megabases
+            _format_ticks_to_megabases(ax)
             return
 
         # Create DNA Features Viewer visualization
@@ -326,13 +417,15 @@ def _plot_gene_structure_with_dna_features(
             record.plot(
                 ax=ax, with_ruler=False, draw_line=True, strand_in_label_threshold=4
             )
-            ax.set_title(f"Gene Structure: {gene_name}", fontsize=10, fontweight="bold")
-            ax.set_xlabel(f"Position (Mb) - {chrom} - {gene_name}", fontsize=10)
+            ax.set_title(f"Gene Structure: {gene_name} ({chrom})", fontsize=10, fontweight="bold")
+            ax.set_xlabel(f"Position (Mb) - {chrom}", fontsize=10)
             # Extend plot range to show full context
             ax.margins(x=0.15, y=0.1)
+            # Convert tick labels to megabases (avoid ticklabel_format due to DNA Features Viewer formatter)
+            _format_ticks_to_megabases(ax)
         else:
             # Fallback if no features found
-            ax.set_title(f"Gene Structure: {gene_name}", fontsize=10, fontweight="bold")
+            ax.set_title(f"Gene Structure: {gene_name} ({chrom})", fontsize=10, fontweight="bold")
             # Extend plot range to show full context
             plot_start = start - (end - start) * 0.1
             plot_end = end + (end - start) * 0.1
@@ -347,11 +440,15 @@ def _plot_gene_structure_with_dna_features(
                 va="center",
                 bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.7),
             )
+            # Convert x-axis to megabases
+            ax.set_xlabel(f"Position (Mb) - {chrom}", fontsize=10)
+        # Convert tick labels to megabases
+        _format_ticks_to_megabases(ax)
 
     except Exception as e:
         logging.error(f"Error plotting gene structure with DNA Features Viewer: {e}")
         # Fallback to simple text
-        ax.set_title(f"Gene Structure: {gene_name}", fontsize=10, fontweight="bold")
+        ax.set_title(f"Gene Structure: {gene_name} ({chrom})", fontsize=10, fontweight="bold")
         # Extend plot range to show full context
         plot_start = start - (end - start) * 0.1
         plot_end = end + (end - start) * 0.1
@@ -366,6 +463,10 @@ def _plot_gene_structure_with_dna_features(
             va="center",
             color="red",
         )
+        # Convert x-axis to megabases even in error case
+        ax.set_xlabel(f"Position (Mb) - {chrom}", fontsize=10)
+        # Convert tick labels to megabases
+        _format_ticks_to_megabases(ax)
 
 
 def _plot_read_mapping_sophisticated(
@@ -441,16 +542,25 @@ def _plot_read_mapping_sophisticated(
                 )
 
         # Customize plot
-        ax.set_title(f"Read Mapping: {gene_name}", fontsize=10, fontweight="bold")
+        ax.set_title(f"Read Mapping: {gene_name} ({chrom})", fontsize=10, fontweight="bold")
         # Extend plot range to clearly show read ends
         plot_start = start - (end - start) * 0.15
         plot_end = end + (end - start) * 0.15
         ax.set_xlim(plot_start, plot_end)
-        ax.set_xlabel("Genomic Position")
+        ax.set_xlabel(f"Position (Mb) - {chrom}")
         ax.set_ylabel("Reads")
+
+        # Convert x-axis to megabases
+        _format_ticks_to_megabases(ax)
 
         # Add grid
         ax.grid(True, alpha=0.3)
+        
+        # Remove box edges/borders
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['bottom'].set_visible(False)
+        ax.spines['left'].set_visible(False)
 
         # Add legend if not too many reads and we have labeled artists
         if len(unique_reads) <= 10 and len(ax.get_legend_handles_labels()[0]) > 0:
@@ -459,6 +569,7 @@ def _plot_read_mapping_sophisticated(
     except Exception as e:
         logging.error(f"Error plotting sophisticated read mapping: {e}")
         # Fallback to simple text
+        ax.set_title(f"Read Mapping: {gene_name} ({chrom})", fontsize=10, fontweight="bold")
         ax.text(
             0.5,
             0.5,
@@ -468,6 +579,12 @@ def _plot_read_mapping_sophisticated(
             va="center",
             color="red",
         )
+        # Convert x-axis to megabases even in error case
+        ax.set_xlabel(f"Position (Mb) - {chrom}")
+        # Format x-axis ticks to show megabases
+        ax.ticklabel_format(style='scientific', axis='x', scilimits=(0,0))
+        # Convert tick labels to megabases
+        _format_ticks_to_megabases(ax)
 
 
 def _process_reads_for_original_plot(subset: pd.DataFrame) -> pd.DataFrame:
@@ -519,7 +636,7 @@ def _plot_gene_structure_original(
     try:
         # This would need access to the gene_table data from the original code
         # For now, create a placeholder that matches the original structure
-        ax.set_title(f"Gene Structure: {data['gene']}", fontsize=10, fontweight="bold")
+        ax.set_title(f"Gene Structure: {data['gene']} ({chrom})", fontsize=10, fontweight="bold")
         ax.set_xlim(start, end)
         ax.set_ylim(0, 1)
 
@@ -534,8 +651,10 @@ def _plot_gene_structure_original(
             bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.7),
         )
 
-        ax.set_xlabel("Genomic Position")
+        ax.set_xlabel(f"Position (Mb) - {chrom}")
         ax.set_ylabel("Gene Structure")
+        # Convert x-axis to megabases
+        _format_ticks_to_megabases(ax)
 
     except Exception as e:
         logging.error(f"Error plotting gene structure: {e}")
@@ -573,7 +692,7 @@ def _plot_read_mapping_original(
         # This would need the original plotting logic with overlapping ranges, ranks, etc.
 
         # For now, create a simplified version that shows the structure
-        ax.set_title(f"Read Mapping: {data['gene']}", fontsize=10, fontweight="bold")
+        ax.set_title(f"Read Mapping: {data['gene']} ({chrom})", fontsize=10, fontweight="bold")
         # Extend plot range to clearly show read ends
         plot_start = start - (end - start) * 0.15
         plot_end = end + (end - start) * 0.15
@@ -585,9 +704,17 @@ def _plot_read_mapping_original(
             read_end = read["reference_end"]
             ax.plot([read_start, read_end], [i, i], linewidth=2, alpha=0.8)
 
-        ax.set_xlabel("Genomic Position")
+        ax.set_xlabel(f"Position (Mb) - {chrom}")
         ax.set_ylabel("Reads")
+        # Convert x-axis to megabases
+        _format_ticks_to_megabases(ax)
         ax.grid(True, alpha=0.3)
+        
+        # Remove box edges/borders
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['bottom'].set_visible(False)
+        ax.spines['left'].set_visible(False)
 
     except Exception as e:
         logging.error(f"Error plotting read mapping: {e}")
@@ -609,7 +736,7 @@ def _plot_gene_structure(
     try:
         # This would integrate with your gene annotation data
         # For now, create a placeholder gene structure
-        ax.set_title(f"Gene Structure: {gene_name}", fontsize=10, fontweight="bold")
+        ax.set_title(f"Gene Structure: {gene_name} ({chrom})", fontsize=10, fontweight="bold")
         ax.set_xlim(start, end)
         ax.set_ylim(0, 1)
 
@@ -624,8 +751,10 @@ def _plot_gene_structure(
             bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.7),
         )
 
-        ax.set_xlabel("Genomic Position")
+        ax.set_xlabel(f"Position (Mb) - {chrom}")
         ax.set_ylabel("Gene Structure")
+        # Convert x-axis to megabases
+        _format_ticks_to_megabases(ax)
 
     except Exception as e:
         logging.error(f"Error plotting gene structure for {gene_name}: {e}")
@@ -678,16 +807,25 @@ def _plot_read_mapping(
             )  # Limit legend to first 10 reads
 
         # Customize plot
-        ax.set_title(f"Read Mapping: {gene_name}", fontsize=10, fontweight="bold")
+        ax.set_title(f"Read Mapping: {gene_name} ({chrom})", fontsize=10, fontweight="bold")
         # Extend plot range to clearly show read ends
         plot_start = start - (end - start) * 0.15
         plot_end = end + (end - start) * 0.15
         ax.set_xlim(plot_start, plot_end)
-        ax.set_xlabel("Genomic Position")
+        ax.set_xlabel(f"Position (Mb) - {chrom}")
         ax.set_ylabel("Reads")
+
+        # Convert x-axis to megabases
+        _format_ticks_to_megabases(ax)
 
         # Add grid
         ax.grid(True, alpha=0.3)
+        
+        # Remove box edges/borders
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['bottom'].set_visible(False)
+        ax.spines['left'].set_visible(False)
 
         # Add legend if not too many reads and we have labeled artists
         if len(unique_reads) <= 10 and len(ax.get_legend_handles_labels()[0]) > 0:
@@ -747,6 +885,7 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
         "target": {
             "data": None,
             "mtime": None,
+            "data_hash": None,
             "table_container": None,
             "table": None,
             "plot_container": None,
@@ -755,6 +894,7 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
         "genome": {
             "data": None,
             "mtime": None,
+            "data_hash": None,
             "table_container": None,
             "table": None,
             "plot_container": None,
@@ -762,22 +902,52 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
         },
     }
 
-    def refresh() -> None:
+    async def refresh_async() -> None:
+        """Refresh fusion data asynchronously."""
         try:
-            if sample_dir is None or not sample_dir.exists():
+            # Check directory existence in background thread
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(lambda: sample_dir and sample_dir.exists())
+                dir_exists = await asyncio.wrap_future(future)
+            
+            if not dir_exists:
                 return
+            
+            # Run all file operations in background thread
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(refresh_sync, sample_dir, state)
+                await asyncio.wrap_future(future)
+                
+        except Exception as e:
+            logging.exception(f"[Fusion] Async refresh failed: {e}")
+
+    def refresh_sync(sample_dir: Path, state: Dict[str, Any]) -> None:
+        """Synchronous fusion refresh - runs in background thread."""
+        try:
             # Load target panel processed
             target_file = sample_dir / "fusion_candidates_master_processed.csv"
             genome_file = sample_dir / "fusion_candidates_all_processed.csv"
 
             t = _load_processed_pickle(target_file)
             g = _load_processed_pickle(genome_file)
+            
+            # Debug logging
+            logging.info(f"[Fusion] Loaded target data: {t is not None}")
+            logging.info(f"[Fusion] Loaded genome-wide data: {g is not None}")
+            if g is not None:
+                logging.info(f"[Fusion] Genome-wide candidate count: {g.get('candidate_count', 0)}")
+                logging.info(f"[Fusion] Genome-wide gene groups: {len(g.get('gene_groups', []))}")
 
             # Update target panel UI
             target_mtime = target_file.stat().st_mtime if target_file.exists() else None
+            target_data_hash = _create_data_hash(t) if t is not None else None
+            
+            # Always update summary and table when file changes
             if t is not None and target_mtime != state["target"].get("mtime"):
                 state["target"]["data"] = t
                 state["target"]["mtime"] = target_mtime
+                state["target"]["data_hash"] = target_data_hash
+                
                 # summary
                 try:
                     if "summary" in state and state["summary"].get("target_lbl"):
@@ -797,6 +967,39 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     state["target"]["table_container"],
                     t.get("annotated_data", pd.DataFrame()),
                 )
+                
+                # Create visualization on first load or when data changes
+                try:
+                    state["target"]["plot_container"].clear()
+                except Exception:
+                    pass
+                if t.get("candidate_count", 0) > 0 and t.get("gene_groups"):
+                    with state["target"]["plot_container"].classes("w-full"):
+                        with ui.row().classes("w-full"):
+                            ui.select(
+                                options=t.get("gene_groups", []),
+                                with_input=True,
+                                on_change=lambda e, t=t: (
+                                    state["target"]["card"].clear(),
+                                    state["target"]["card"].classes("w-full"),
+                                    _plot_gene_group(
+                                        state["target"]["card"],
+                                        e.value,
+                                        t.get("annotated_data"),
+                                        t.get("goodpairs"),
+                                    ),
+                                ),
+                            ).classes("w-40")
+                        with ui.row().classes("w-full"):
+                            state["target"]["card"] = ui.card()
+                            with state["target"]["card"]:
+                                ui.label("Select gene pair to see results.").classes(
+                                    "drop-shadow font-bold"
+                                )
+            
+            # Only update visualization when data content actually changes (for background refreshes)
+            elif t is not None and target_data_hash != state["target"].get("data_hash"):
+                state["target"]["data_hash"] = target_data_hash
                 # plot area
                 try:
                     state["target"]["plot_container"].clear()
@@ -822,15 +1025,21 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                         with ui.row().classes("w-full"):
                             state["target"]["card"] = ui.card()
                             with state["target"]["card"]:
-                                ui.label("Select gene pair to see results.").tailwind(
-                                    "drop-shadow", "font-bold"
+                                ui.label("Select gene pair to see results.").classes(
+                                    "drop-shadow font-bold"
                                 )
 
             # Update genome-wide UI
             genome_mtime = genome_file.stat().st_mtime if genome_file.exists() else None
+            genome_data_hash = _create_data_hash(g) if g is not None else None
+            logging.info(f"[Fusion] Genome-wide update check: g={g is not None}, mtime_changed={genome_mtime != state['genome'].get('mtime')}")
+            
+            # Always update summary and table when file changes
             if g is not None and genome_mtime != state["genome"].get("mtime"):
                 state["genome"]["data"] = g
                 state["genome"]["mtime"] = genome_mtime
+                state["genome"]["data_hash"] = genome_data_hash
+                
                 # summary
                 try:
                     if "summary" in state and state["summary"].get("genome_lbl"):
@@ -848,11 +1057,13 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     state["genome"]["table_container"],
                     g.get("annotated_data", pd.DataFrame()),
                 )
-                # plot area
+                
+                # Create visualization on first load or when data changes
                 try:
                     state["genome"]["plot_container"].clear()
                 except Exception:
                     pass
+                logging.info(f"[Fusion] Genome-wide plotting check: candidate_count={g.get('candidate_count', 0)}, gene_groups={len(g.get('gene_groups', []))}")
                 if g.get("candidate_count", 0) > 0 and g.get("gene_groups"):
                     with state["genome"]["plot_container"].classes("w-full"):
                         with ui.row().classes("w-full"):
@@ -873,8 +1084,41 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                         with ui.row().classes("w-full"):
                             state["genome"]["card"] = ui.card()
                             with state["genome"]["card"]:
-                                ui.label("Select gene pair to see results.").tailwind(
-                                    "drop-shadow", "font-bold"
+                                ui.label("Select gene pair to see results.").classes(
+                                    "drop-shadow font-bold"
+                                )
+            
+            # Only update visualization when data content actually changes (for background refreshes)
+            elif g is not None and genome_data_hash != state["genome"].get("data_hash"):
+                state["genome"]["data_hash"] = genome_data_hash
+                # plot area
+                try:
+                    state["genome"]["plot_container"].clear()
+                except Exception:
+                    pass
+                logging.info(f"[Fusion] Genome-wide plotting check: candidate_count={g.get('candidate_count', 0)}, gene_groups={len(g.get('gene_groups', []))}")
+                if g.get("candidate_count", 0) > 0 and g.get("gene_groups"):
+                    with state["genome"]["plot_container"].classes("w-full"):
+                        with ui.row().classes("w-full"):
+                            ui.select(
+                                options=g.get("gene_groups", []),
+                                with_input=True,
+                                on_change=lambda e, g=g: (
+                                    state["genome"]["card"].clear(),
+                                    state["genome"]["card"].classes("w-full"),
+                                    _plot_gene_group(
+                                        state["genome"]["card"],
+                                        e.value,
+                                        g.get("annotated_data"),
+                                        g.get("goodpairs"),
+                                    ),
+                                ),
+                            ).classes("w-40")
+                        with ui.row().classes("w-full"):
+                            state["genome"]["card"] = ui.card()
+                            with state["genome"]["card"]:
+                                ui.label("Select gene pair to see results.").classes(
+                                    "drop-shadow font-bold"
                                 )
         except Exception as e:
             logging.exception(f"[Fusion] Refresh failed: {e}")
@@ -897,14 +1141,14 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
 
         # Target Panel
         ui.label("Target Panel").classes("text-base font-medium mt-1 mb-1")
-        state["target"]["table_container"] = ui.column().classes("w-full")
-        state["target"]["plot_container"] = ui.column().classes("w-full mt-2")
+        state["target"]["plot_container"] = ui.column().classes("w-full")
+        state["target"]["table_container"] = ui.column().classes("w-full mt-2")
 
         # Genome-wide
         ui.separator()
         ui.label("Genome-wide").classes("text-base font-medium mt-2 mb-1")
-        state["genome"]["table_container"] = ui.column().classes("w-full")
-        state["genome"]["plot_container"] = ui.column().classes("w-full mt-2")
+        state["genome"]["plot_container"] = ui.column().classes("w-full")
+        state["genome"]["table_container"] = ui.column().classes("w-full mt-2")
 
     # Initial refresh and timer
     try:
@@ -938,7 +1182,8 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     pass
         except Exception:
             pass
-        refresh()
-        ui.timer(10.0, refresh)
+        
+        # Start the refresh timer (every 10 seconds) with async function
+        ui.timer(10.0, lambda: ui.timer(0.1, refresh_async, once=True), active=True)
     except Exception:
         pass

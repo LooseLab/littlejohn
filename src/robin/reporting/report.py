@@ -167,7 +167,7 @@ class RobinReport:
                     )
                     # Add error card to report for better user feedback
                     error_content = f"""
-                    <b>⚠️ Section Processing Error</b><br/>
+                    <b>Section Processing Error</b><br/>
                     Section: {section.__class__.__name__}<br/>
                     Error: {str(e)[:100]}{'...' if len(str(e)) > 100 else ''}<br/>
                     <i>This section was skipped due to processing errors.</i>
@@ -214,7 +214,7 @@ class RobinReport:
 
             # Add success message to report
             success_content = f"""
-            <b>✅ Report Generation Complete</b><br/>
+            <b>Report Generation Complete</b><br/>
             PDF file: {os.path.basename(self.filename)}<br/>
             Total sections processed: {len(self.sections)}<br/>
             Report type: {report_type.title()}

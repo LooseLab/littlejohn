@@ -50,13 +50,48 @@ import nicegui.air
 
 from pathlib import Path
 
-from robin.gui import images
-from robin import __about__
+# These will be set by the get_imagefile() and get_version() functions
+IMAGEFILE = None
+__about__ = None
 
 
 import os
 import psutil
 import platform
+
+# Check if we're in development mode
+is_development_mode = os.environ.get("ROBIN_DEV_MODE", "").lower() in ("1", "true", "yes", "on")
+
+
+def get_imagefile():
+    """Get the path to the ROBIN logo image file."""
+    global IMAGEFILE
+    if IMAGEFILE is None:
+        try:
+            from robin.gui import images
+            IMAGEFILE = os.path.join(
+                os.path.dirname(os.path.abspath(images.__file__)), "ROBIN_logo_small.png"
+            )
+        except (ImportError, AttributeError):
+            # Fallback path when running standalone
+            IMAGEFILE = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "images", "ROBIN_logo_small.png"
+            )
+    return IMAGEFILE
+
+
+def get_about():
+    """Get the __about__ module with version information."""
+    global __about__
+    if __about__ is None:
+        try:
+            from robin import __about__
+        except ImportError:
+            # Fallback when running standalone - create a minimal __about__ object
+            class MockAbout:
+                __version__ = "standalone-test"
+            __about__ = MockAbout()
+    return __about__
 
 
 def get_version_from_github():
@@ -110,9 +145,17 @@ async def check_version():
     Check the current version against the remote version on GitHub.
     Shows a notification or dialog to the user about their version status.
     """
-    # Check if version has already been checked in this session
-    if app.storage.tab.get("version_checked", False):
+    # Skip version check in development mode
+    if is_development_mode:
         return
+        
+    # Check if version has already been checked in this session
+    try:
+        if app.storage.tab.get("version_checked", False):
+            return
+    except RuntimeError:
+        # Tab storage not available in this context, continue with version check
+        pass
 
     try:
         remote_version_str = await run.io_bound(get_version_from_github)
@@ -131,7 +174,7 @@ async def check_version():
             dialog.open()
             return
 
-        local_version = version.parse(__about__.__version__)
+        local_version = version.parse(get_about().__version__)
         remote_version = version.parse(remote_version_str)
 
         if local_version == remote_version:
@@ -203,13 +246,14 @@ async def check_version():
         dialog.open()
 
     # Mark version as checked for this session
-    app.storage.tab["version_checked"] = True
+    try:
+        app.storage.tab["version_checked"] = True
+    except RuntimeError:
+        # Tab storage not available in this context, skip setting the flag
+        pass
 
 
-# Define the path to the image file used in the header and footer
-IMAGEFILE = os.path.join(
-    os.path.dirname(os.path.abspath(images.__file__)), "ROBIN_logo_small.png"
-)
+# IMAGEFILE is now defined above with fallback handling
 
 # Module-level variables
 quitdialog = None
@@ -270,7 +314,17 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
 
     # Create disclaimer dialog that appears on first visit with M3 styling
     async def show_disclaimer():
-        if not app.storage.tab.get("disclaimer_acknowledged", False):
+        # Skip disclaimer in development mode
+        if is_development_mode:
+            return
+            
+        try:
+            disclaimer_acknowledged = app.storage.tab.get("disclaimer_acknowledged", False)
+        except RuntimeError:
+            # Tab storage not available in this context, show disclaimer
+            disclaimer_acknowledged = False
+        
+        if not disclaimer_acknowledged:
             with ui.dialog().props(
                 "persistent"
             ) as disclaimer_dialog, ui.card().classes("w-160 elevation-4 rounded-xl"):
@@ -299,7 +353,11 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
                     ).classes("text-body-medium")
 
                 def acknowledge():
-                    app.storage.tab["disclaimer_acknowledged"] = True
+                    try:
+                        app.storage.tab["disclaimer_acknowledged"] = True
+                    except RuntimeError:
+                        # Tab storage not available in this context, skip setting the flag
+                        pass
                     disclaimer_dialog.close()
 
                 ui.button("I agree", on_click=acknowledge).classes(
@@ -343,17 +401,17 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
     with ui.header(elevated=True).classes(header_classes):
         with ui.grid(columns=2).style("width: 100%"):
             with ui.row().classes(
-                f"max-[{MENU_BREAKPOINT}px]:hidden items-center align-left"
+                f"max-[{MENU_BREAKPOINT}px]:hidden items-center align-left px-4"
             ):
-                ui.html(navtitle).classes("text-headline-medium").style(
+                ui.html(navtitle).classes("text-headline-medium drop-shadow font-bold").style(
                     "font-weight: 600; font-family: var(--font-primary)"
-                ).tailwind("drop-shadow", "font-bold")
+                )
             with ui.row().classes(
-                f"min-[{MENU_BREAKPOINT+1}px]:hidden items-center align-left"
+                f"min-[{MENU_BREAKPOINT+1}px]:hidden items-center align-left px-4"
             ):
-                ui.html(smalltitle).classes("text-headline-medium").style(
+                ui.html(smalltitle).classes("text-headline-medium drop-shadow font-bold").style(
                     "font-weight: 600; font-family: var(--font-primary)"
-                ).tailwind("drop-shadow", "font-bold")
+                )
             with ui.row().classes("ml-auto align-top"):
                 with ui.row().classes("items-center m-auto gap-3"):
                     ui.label(f"Viewing: {platform.node()}").classes(
@@ -433,7 +491,7 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
                             ui.button(
                                 "Quit", icon="logout", on_click=quitdialog.open
                             ).classes("bg-error text-white rounded-md")
-                    ui.image(IMAGEFILE).style("width: 50px")
+                    ui.image(get_imagefile()).style("width: 50px")
 
     with ui.column().classes(
         "w-full h-full max-w-full overflow-hidden"
@@ -475,7 +533,7 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
             ui.button("Close", on_click=dialog.close).classes(
                 "bg-primary text-white rounded-md"
             )
-        ui.image(IMAGEFILE).style("width: 40px")
+        ui.image(get_imagefile()).style("width: 40px")
         ui.colors(primary="#4F9153")  # Green primary color
         ui.button("Links", on_click=dialog.open).classes("rounded-md")
 
@@ -484,7 +542,7 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
                 ui.label().bind_text_from(
                     app, "urls", backward=lambda n: f"Available urls: {n}"
                 ).classes("text-body-medium")
-                ui.label("Version: " + __about__.__version__).classes(
+                ui.label("Version: " + get_about().__version__).classes(
                     "text-body-medium"
                 )
         ui.label(
@@ -583,19 +641,106 @@ def use_on_air(args: events.ValueChangeEventArguments):
         nicegui.air.disconnect()
 
 
-@ui.page("/")
-def my_page():
+def create_home_page():
+    """Create the home page content."""
     with frame(
         "<strong>R</strong>apid nanop<strong>O</strong>re <strong>B</strong>rain intraoperat<strong>I</strong>ve classificatio<strong>N</strong>",
         smalltitle="<strong>R.O.B.I.N</strong>",
     ):
+        
         ui.label("Welcome to the Application").classes(
             "text-headline-large text-center"
         )
+        
+        with ui.card().classes("w-full").style("border: 2px solid var(--md-primary)"):
+            with ui.row().classes("w-full flex justify-between items-center"):
+                ui.label('Sample Name').classes("text-headline-medium ")
+                ui.button("Button").classes("bg-primary text-white rounded-md")
+            ui.separator().classes().style("border: 1px solid var(--md-primary)")
+            with ui.card().classes("w-full bg-gradient-to-r from-blue-50 to-indigo-50"):
+                ui.label("Run Information").classes("text-lg font-semibold mb-3 text-blue-800")
+                with ui.row().classes("w-full gap-8 items-center flex-wrap"):
+                    ui.label("Run").classes("text-body-medium")
+                    ui.label("Model").classes("text-body-medium")
+                    ui.label("Device").classes("text-body-medium")
+                    ui.label("Flow Cell").classes("text-body-medium")
+                    ui.label("Sample").classes("text-body-medium")
 
 
-@ui.page("/workflow")
-def workflow_page():
+            with ui.card().classes("w-full"):
+                ui.label("Classification Results").classes("text-lg font-semibold mb-3 text-blue-800")
+                with ui.row().classes("w-full flex justify-between items-center"):
+                    with ui.card().classes("flex-1 elevation-4 rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50 border-l-4 border-blue-500"):
+                        ui.label("Sturgeon Classification").classes("font-bold text-blue-800 mb-2")
+                        ui.label("Class: --").classes("font-bold text-medium text-blue-600")
+                        ui.label("Confidence: --%").classes("text-sm text-blue-600")
+                        ui.label("Probes: --").classes("text-sm text-blue-600")
+                        ui.label("Model: --").classes("text-sm text-blue-600")
+                        ui.label("Features: --").classes("text-sm text-blue-600")
+
+                    with ui.card().classes("flex-1 elevation-4 rounded-xl bg-gradient-to-br from-green-50 to-green-100 border-l-4 border-green-500"):
+                        ui.label("NanoDX Classification").classes("font-bold text-green-800 mb-2")
+                        ui.label("Class: --").classes("font-bold text-medium text-green-600")
+                        ui.label("Confidence: --%").classes("text-sm text-green-600")
+                        ui.label("Probes: --").classes("text-sm text-green-600")
+                        ui.label("Model: --").classes("text-sm text-blue-600")
+                        ui.label("Features: --").classes("text-sm text-blue-600")
+
+                    
+                    with ui.card().classes("flex-1 elevation-4 rounded-xl bg-gradient-to-br from-purple-50 to-purple-100 border-l-4 border-purple-500"):
+                        ui.label("PanNanoDX Classification").classes("font-bold text-purple-800 mb-2")
+                        ui.label("Class: --").classes("font-bold text-medium text-purple-600")
+                        ui.label("Confidence: --%").classes("text-sm text-purple-600")
+                        ui.label("Probes: --").classes("text-sm text-purple-600")
+                        ui.label("Model: --").classes("text-sm text-blue-600")
+                        ui.label("Features: --").classes("text-sm text-blue-600")
+
+                    
+                    with ui.card().classes("flex-1 elevation-4 rounded-xl bg-gradient-to-br from-orange-50 to-orange-100 border-l-4 border-orange-500"):
+                        ui.label("Random Forest Classification").classes("font-bold text-orange-800 mb-2")
+                        ui.label("Class: --").classes("font-bold text-medium text-orange-600")
+                        ui.label("Confidence: --%").classes("text-sm text-orange-600")
+                        ui.label("Probes: --").classes("text-sm text-orange-600")
+                        ui.label("Model: --").classes("text-sm text-blue-600")
+                        ui.label("Features: --").classes("text-sm text-blue-600")
+
+
+            ui.label('text below').classes("text-body-medium")
+            with ui.card_section():
+                ui.image('https://picsum.photos/id/684/640/360').classes()
+                ui.label('Lorem ipsum dolor sit amet, consectetur adipiscing elit, ...')
+
+
+def create_standalone_page():
+    """Create a simplified standalone page without storage dependencies."""
+    # Add custom HTML and CSS to the head of the page
+    ui.add_head_html(
+        '<script src="https://cdn.jsdelivr.net/npm/igv@3.2.0/dist/igv.min.js"></script>'
+    )
+    ui.add_head_html(
+        HEADER_HTML + f"<style>{STYLE_CSS}</style><style>{M3_COMPONENTS_CSS}</style>"
+    )
+    
+    # Create a simple header
+    with ui.header(elevated=True).classes("items-center duration-200 p-0 px-4 no-wrap elevation-1"):
+        ui.html("<strong>R.O.B.I.N</strong>").classes("text-headline-medium drop-shadow font-bold").style(
+            "font-weight: 600; font-family: var(--font-primary)"
+        )
+        ui.image(get_imagefile()).style("width: 50px").classes("ml-auto")
+    
+    # Create main content
+    with ui.column().classes("w-full h-full max-w-full overflow-hidden p-8"):
+        ui.label("Welcome to ROBIN Theme Test").classes("text-headline-large text-center")
+        ui.label("This is a standalone test of the ROBIN theme system.").classes("text-body-large text-center mt-4")
+        ui.label(f"Version: {get_about().__version__}").classes("text-body-medium text-center mt-2")
+    
+    # Create a simple footer
+    with ui.footer().classes("items-center elevation-1"):
+        ui.image(get_imagefile()).style("width: 40px")
+        ui.label("ROBIN Theme Test - Standalone Mode").classes("text-body-small")
+
+
+def create_workflow_page():
     """Display the ROBIN workflow diagram with M3 styling."""
     with frame(
         "ROBIN Workflow",
@@ -618,7 +763,7 @@ flowchart TD
     classDef headerLabel fill:#ffffff00,stroke:#ffffff00,color:#1C1B1F,font-size:18px,font-weight:700
 
     %% Custom header nodes
-    robinLabel["<b>R.O.B.I.N v{__about__.__version__}</b>"]:::headerLabel
+    robinLabel["<b>R.O.B.I.N v{get_about().__version__}</b>"]:::headerLabel
     minKNOWLabel["<b>MinKNOW Pipeline</b>"]:::headerLabel
 
     %% MinKNOW pipeline
@@ -693,7 +838,18 @@ flowchart TD
                 "look": "neo",
                 "flowchart": {"curve": "basis", "defaultRenderer": "elk"},
             },
-        ).classes("w-full elevation-2 rounded-lg")
+        ).classes("w-full elevation-2 rounded-xl")
+
+
+def register_theme_pages():
+    """Register the theme pages. This function should be called when the module is imported."""
+    @ui.page("/")
+    def home_page():
+        create_home_page()
+
+    @ui.page("/workflow")
+    def workflow_page():
+        create_workflow_page()
 
 
 def get_modkit_version():
@@ -784,8 +940,8 @@ def main():
         <style>
             /* Apple HIG: System font fallbacks */
             :root {
-                --font-primary: "SF Pro Display", "SF Pro", -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-                --font-mono: "SF Mono", "Monaco", "Menlo", "JetBrains Mono", "Consolas", "Liberation Mono", "Courier New", monospace;
+                --font-primary: "Inter", "SF Pro Display", "SF Pro", -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+                --font-mono: "JetBrains Mono", "SF Mono", "Monaco", "Menlo", "Consolas", "Liberation Mono", "Courier New", monospace;
             }
         </style>
     """
@@ -796,8 +952,16 @@ def main():
     if fonts_dir.exists():
         app.add_static_files("/fonts", str(fonts_dir))
 
+    # For standalone execution, create UI directly without @ui.page decorators
+    # This completely avoids the global scope issue with NiceGUI
+    create_standalone_page()
+
     ui.run(storage_secret="robin")
 
+
+# Register theme pages when module is imported (but not when run as main)
+if __name__ not in {"__main__", "__mp_main__"}:
+    register_theme_pages()
 
 if __name__ in {"__main__", "__mp_main__"}:
     main()

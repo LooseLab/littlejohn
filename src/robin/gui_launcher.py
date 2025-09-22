@@ -11,7 +11,12 @@ import warnings
 warnings.filterwarnings(
     "ignore", message="pkg_resources is deprecated", category=UserWarning
 )
+# Suppress matplotlib tight_layout warnings
+warnings.filterwarnings(
+    "ignore", message="The figure layout has changed to tight", category=UserWarning
+)
 
+import asyncio
 import threading
 import time
 import logging
@@ -108,6 +113,10 @@ class GUILauncher:
         self._known_sample_ids: set[str] = set()
         self._preexisting_sample_ids: set[str] = set()
         self._preexisting_scanned: bool = False
+        
+        # Caching for samples data
+        self._last_cache_time: float = 0.0
+        self._cache_duration: float = 30.0  # Cache for 30 seconds
         # MGMT per-sample cache (latest count seen)
         self._mgmt_state: Dict[str, Dict[str, Any]] = {}
         # Coverage per-sample cache (file mtimes, computed metrics)
@@ -240,7 +249,8 @@ class GUILauncher:
             elif update.update_type == UpdateType.ERROR_UPDATE:
                 self._update_errors(update.data)
             elif update.update_type == UpdateType.SAMPLES_UPDATE:
-                self._update_samples_table(update.data)
+                # Use async version to avoid blocking UI
+                ui.timer(0.1, lambda: self._update_samples_table_async(update.data), once=True)
 
         except Exception as e:
             logging.debug(f"Error handling GUI update: {e}")
@@ -497,24 +507,32 @@ class GUILauncher:
             @ui.page("/")
             def welcome_page():
                 """Welcome page at root route."""
+                _setup_global_resources()
+                _setup_global_timers()
                 self._create_welcome_page()
 
             # Create the workflow monitoring page
             @ui.page("/robin")
             def workflow_monitor():
                 """Workflow monitoring page under /robin route."""
+                _setup_global_resources()
+                _setup_global_timers()
                 self._create_workflow_monitor()
 
             # Create the samples overview page
             @ui.page("/live_data")
             def samples_overview():
                 """Samples overview page showing all tracked samples."""
+                _setup_global_resources()
+                _setup_global_timers()
                 self._create_samples_overview()
 
             # Create individual sample detail pages
             @ui.page("/live_data/{sample_id}")
             def sample_detail(sample_id: str):
                 """Individual sample detail page."""
+                _setup_global_resources()
+                _setup_global_timers()
 
                 # Add a page visit handler to refresh plots
                 def on_page_visit():
@@ -540,37 +558,43 @@ class GUILauncher:
 
                 self._create_sample_detail_page(sample_id)
 
-            # Enable global update processing regardless of which page is open
-            try:
-                self.gui_ready.set()
-                ui.timer(0.3, self._drain_updates_on_ui, active=True)
-                # Seed pre-existing samples shortly after startup, then poll for new ones
-                ui.timer(
-                    0.5,
-                    lambda: self._scan_and_seed_samples(preexisting=True),
-                    once=True,
-                )
-                ui.timer(3.0, self._scan_for_new_samples, active=True)
-            except Exception:
-                pass
-            ui.add_css(
+            # Setup global CSS and static files - moved to a helper function
+            def _setup_global_resources():
+                """Setup global CSS and static file resources."""
+                ui.add_css(
+                    """
+                    .shadows-into light-regular {
+                        font-family: "Shadows Into Light", cursive;
+                        font-weight: 800;
+                        font-style: normal;
+                    }
                 """
-                .shadows-into light-regular {
-                    font-family: "Shadows Into Light", cursive;
-                    font-weight: 800;
-                    font-style: normal;
-                }
-            """
-            )
-            # Register fonts from the GUI package if available
-            try:
-                fonts_dir = Path(__file__).parent / "gui" / "fonts"
-                if fonts_dir.exists():
-                    app.add_static_files("/fonts", str(fonts_dir))
-                else:
-                    logging.debug(f"Fonts directory not found: {fonts_dir}")
-            except Exception as e:
-                logging.debug(f"Could not register fonts static dir: {e}")
+                )
+                # Register fonts from the GUI package if available
+                try:
+                    fonts_dir = Path(__file__).parent / "gui" / "fonts"
+                    if fonts_dir.exists():
+                        app.add_static_files("/fonts", str(fonts_dir))
+                    else:
+                        logging.debug(f"Fonts directory not found: {fonts_dir}")
+                except Exception as e:
+                    logging.debug(f"Could not register fonts static dir: {e}")
+
+            # Setup global timers and processing - moved to a helper function
+            def _setup_global_timers():
+                """Setup global timers and update processing."""
+                try:
+                    self.gui_ready.set()
+                    ui.timer(0.3, self._drain_updates_on_ui, active=True)
+                    # Seed pre-existing samples shortly after startup, then poll for new ones
+                    ui.timer(
+                        0.5,
+                        lambda: self._scan_and_seed_samples_async(preexisting=True),
+                        once=True,
+                    )
+                    ui.timer(3.0, self._scan_for_new_samples_async, active=True)
+                except Exception:
+                    pass
 
             try:
                 iconfile = os.path.join(
@@ -592,7 +616,7 @@ class GUILauncher:
                 favicon=iconfile,
             )
         except Exception as e:
-            print(f"❌ GUI worker error: {e}")
+            print(f"GUI worker error: {e}")
             import traceback
 
             traceback.print_exc()
@@ -637,20 +661,20 @@ class GUILauncher:
 
                         # Action buttons - responsive grid layout
                         with ui.grid(columns=2).classes("w-full gap-4 mb-8"):
-                            ui.link("📊 View All Samples", "/live_data").classes(
+                            ui.link("View All Samples", "/live_data").classes(
                                 "bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors text-center"
                             )
-                            ui.link("📊 Open Workflow Monitor", "/robin").classes(
+                            ui.link("Open Workflow Monitor", "/robin").classes(
                                 "bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors text-center"
                             )
                             ui.button(
-                                "🚀 Launch New Workflow",
+                                "Launch New Workflow",
                                 on_click=lambda: self._launch_workflow_button_clicked(),
                             ).classes(
                                 "bg-green-600 hover:bg-green-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors"
                             )
                             ui.link(
-                                "📋 View Documentation",
+                                "View Documentation",
                                 "https://looselab.github.io/ROBIN/",
                             ).classes(
                                 "bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors text-center"
@@ -683,7 +707,7 @@ class GUILauncher:
                 with ui.card().classes(
                     "w-full bg-gradient-to-r from-blue-50 to-indigo-50"
                 ):
-                    ui.label("📊 Sample Statistics").classes(
+                    ui.label("Sample Statistics").classes(
                         "text-lg font-semibold mb-4 text-blue-800"
                     )
 
@@ -695,13 +719,18 @@ class GUILauncher:
                 # Samples table
                 with ui.card().classes("w-full"):
                     with ui.row().classes("w-full items-center justify-between mb-4"):
-                        ui.label("📋 All Tracked Samples").classes(
+                        ui.label("All Tracked Samples").classes(
                             "text-lg font-semibold"
                         )
-                        ui.button(
-                            "🔄 Refresh All Plots",
-                            on_click=lambda: self._refresh_all_sample_plots(),
-                        ).classes("q-btn--secondary")
+                        
+                        # Loading indicator
+                        self.samples_loading_indicator = ui.spinner(size="sm", color="primary")
+                        self.samples_loading_indicator.set_visibility(False)
+                        
+                        #ui.button(
+                        #    "Refresh All Plots",
+                        #    on_click=lambda: self._refresh_all_sample_plots(),
+                        #).classes("q-btn--secondary")
 
                     # Filters row
                     with ui.row().classes("items-center gap-2 mb-2"):
@@ -744,6 +773,13 @@ class GUILauncher:
                             )
                         )
 
+                    # Loading state container
+                    self.samples_loading_container = ui.card().classes("w-full p-8 text-center")
+                    with self.samples_loading_container:
+                        ui.spinner(size="lg", color="primary")
+                        ui.label("Loading samples...").classes("ml-2 text-lg")
+                        ui.label("This may take a moment for large directories").classes("text-sm text-gray-500 mt-2")
+                    
                     # Create a placeholder table that will be updated later
                     from robin.gui.theme import styled_table
 
@@ -833,6 +869,20 @@ class GUILauncher:
                     )
                     try:
                         self.samples_table.props("rows-per-page-options=[10,20,50,0]")
+                    except Exception:
+                        pass
+                    
+                    # Set default sorting by last activity in reverse chronological order
+                    try:
+                        # Try multiple approaches to set default sorting
+                        self.samples_table.props("default-sort=last_seen desc")
+                        # Alternative approach using sort property
+                        self.samples_table.props("sort=last_seen desc")
+                        # Set initial sort on the column
+                        for col in self.samples_table.columns:
+                            if col.get("field") == "last_seen":
+                                col["sort"] = "desc"
+                                break
                     except Exception:
                         pass
 
@@ -1090,12 +1140,19 @@ class GUILauncher:
                     if self._last_samples_rows:
                         try:
                             self._apply_samples_table_filters()
+                            # Hide loading container if we have data
+                            if hasattr(self, "samples_loading_container"):
+                                self.samples_loading_container.set_visibility(False)
                             # No selection behavior needed; per-row buttons handle navigation
                         except Exception:
                             pass
+                    else:
+                        # Show loading container if no cached data
+                        if hasattr(self, "samples_loading_container"):
+                            self.samples_loading_container.set_visibility(True)
 
-    def _update_samples_table(self, data: Dict[str, Any]):
-        """Update the samples overview table with new data."""
+    def _update_samples_table_sync(self, data: Dict[str, Any]) -> None:
+        """Synchronous version of samples table update - runs in background thread"""
         try:
             if not hasattr(self, "samples_table"):
                 return
@@ -1110,7 +1167,7 @@ class GUILauncher:
                 if not existing or last_seen >= existing.get("_last_seen_raw", 0):
                     origin_value = (
                         "Pre-existing"
-                        if sid in self._preexisting_sample_ids
+                        if sid in self._preexisting_sample_ids and (time.time() - last_seen) >= 3600
                         else "Live"
                     )
                     # Flip Live samples to Complete if inactive for 60 minutes
@@ -1136,7 +1193,129 @@ class GUILauncher:
                             else str(s.get("job_types", ""))
                         ),
                         "last_seen": time.strftime(
-                            "%H:%M:%S", time.localtime(last_seen)
+                            "%Y-%m-%d %H:%M:%S", time.localtime(last_seen)
+                        ),
+                        "actions": "View",
+                        "_last_seen_raw": last_seen,
+                    }
+
+            # Patch from master.csv and persist the new overview values for later reload
+            try:
+                base = (
+                    Path(self.monitored_directory) if self.monitored_directory else None
+                )
+                manager = (
+                    MasterCSVManager(str(base)) if base and base.exists() else None
+                )
+            except Exception:
+                base, manager = None, None
+
+            for sid, row in by_id.items():
+                try:
+                    # Persist overview numbers to master.csv so we can restore later
+                    if manager is not None:
+                        persist_payload = {
+                            "active_jobs": int(row.get("active_jobs", 0)),
+                            "total_jobs": int(row.get("total_jobs", 0)),
+                            "completed_jobs": int(row.get("completed_jobs", 0)),
+                            "failed_jobs": int(row.get("failed_jobs", 0)),
+                            "job_types": row.get("job_types", ""),
+                            "last_seen": float(row.get("_last_seen_raw", time.time())),
+                        }
+                        manager.update_sample_overview(sid, persist_payload)
+
+                    # Read run info from master.csv to display in table
+                    if base is not None:
+                        csv_path = base / sid / "master.csv"
+                        if csv_path.exists():
+                            with csv_path.open("r", newline="") as fh:
+                                reader = csv.DictReader(fh)
+                                first_row = next(reader, None)
+                            if first_row:
+                                row["run_start"] = self._format_timestamp_for_display(
+                                    first_row.get("run_info_run_time", "")
+                                )
+                                row["device"] = first_row.get("run_info_device", "")
+                                row["flowcell"] = first_row.get(
+                                    "run_info_flow_cell", ""
+                                )
+                except Exception:
+                    pass
+
+            # Merge with preexisting scans if any
+            existing_rows_by_id = {
+                r["sample_id"]: r for r in (self._last_samples_rows or [])
+            }
+            for sid, row in by_id.items():
+                existing_rows_by_id[sid] = row
+            rows = list(existing_rows_by_id.values())
+            # Replace rows to avoid duplicates then apply filters
+            self._last_samples_rows = rows
+            return rows
+
+        except Exception as e:
+            logging.debug(f"Error updating samples table: {e}")
+            return []
+
+    async def _update_samples_table_async(self, data: Dict[str, Any]) -> None:
+        """Asynchronous version of samples table update"""
+        try:
+            # Run the synchronous file operations in a background thread
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(self._update_samples_table_sync, data)
+                rows = await asyncio.wrap_future(future)
+            
+            # Update UI on main thread
+            if rows and hasattr(self, "samples_table"):
+                self._apply_samples_table_filters()
+                
+        except Exception as e:
+            logging.error(f"Error in async samples table update: {e}")
+
+    def _update_samples_table(self, data: Dict[str, Any]):
+        """Update the samples overview table with new data."""
+        try:
+            if not hasattr(self, "samples_table"):
+                return
+            samples = data.get("samples", [])
+
+            # Deduplicate by sample_id taking the newest last_seen
+            by_id: Dict[str, Dict[str, Any]] = {}
+            for s in samples:
+                sid = s.get("sample_id", "") or "unknown"
+                last_seen = float(s.get("last_seen", time.time()))
+                existing = by_id.get(sid)
+                if not existing or last_seen >= existing.get("_last_seen_raw", 0):
+                    origin_value = (
+                        "Pre-existing"
+                        if sid in self._preexisting_sample_ids and (time.time() - last_seen) >= 3600
+                        else "Live"
+                    )
+                    # Flip Live samples to Complete if inactive for 60 minutes
+                    try:
+                        if origin_value == "Live" and (time.time() - last_seen) >= 3600:
+                            origin_value = "Complete"
+                    except Exception:
+                        pass
+                    by_id[sid] = {
+                        "sample_id": sid,
+                        "origin": origin_value,
+                        # Persisted run info will be patched in below from master.csv
+                        "run_start": "",
+                        "device": "",
+                        "flowcell": "",
+                        "active_jobs": s.get("active_jobs", 0),
+                        "total_jobs": s.get("total_jobs", 0),
+                        "completed_jobs": s.get("completed_jobs", 0),
+                        "failed_jobs": s.get("failed_jobs", 0),
+                        "job_types": (
+                            ",".join(sorted(set(s.get("job_types", []))))
+                            if isinstance(s.get("job_types", []), list)
+                            else str(s.get("job_types", ""))
+                        ),
+                        "last_seen": time.strftime(
+                            "%Y-%m-%d %H:%M:%S", time.localtime(last_seen)
                         ),
                         "actions": "View",
                         "_last_seen_raw": last_seen,
@@ -1321,6 +1500,16 @@ class GUILauncher:
                 except Exception:
                     r["export"] = False
 
+            # Sort rows by last activity in reverse chronological order (newest first)
+            try:
+                rows.sort(key=lambda r: float(r.get("_last_seen_raw", 0)), reverse=True)
+            except Exception:
+                # Fallback to sorting by last_seen string if _last_seen_raw is not available
+                try:
+                    rows.sort(key=lambda r: r.get("last_seen", ""), reverse=True)
+                except Exception:
+                    pass
+
             self.samples_table.rows = rows
             self.samples_table.update()
         except Exception:
@@ -1364,6 +1553,7 @@ class GUILauncher:
         except Exception as e:
             logging.debug(f"Failed to refresh sample plots for {sample_id}: {e}")
 
+    '''
     def _refresh_all_sample_plots(self):
         """Refresh all sample plots by resetting modification time caches."""
         try:
@@ -1389,9 +1579,146 @@ class GUILauncher:
         except Exception as e:
             ui.notify(f"Failed to refresh all plots: {e}", type="negative")
             logging.exception("Failed to refresh all sample plots")
-
+    '''
+    
     def _create_sample_detail_page(self, sample_id: str):
         """Create the individual sample detail page."""
+        
+        # Check if this is a page refresh vs navigation
+        # Use browser storage to detect if this is a refresh
+        is_page_refresh = False
+        try:
+            # Check if we have a flag indicating this page was recently loaded
+            if hasattr(ui, 'storage') and hasattr(ui.storage, 'browser'):
+                last_load_time = ui.storage.browser.get(f'sample_{sample_id}_last_load', 0)
+                current_time = time.time()
+                # If last load was very recent (< 2 seconds), it's likely a page refresh
+                is_page_refresh = (current_time - last_load_time) < 2.0
+                
+                # Update the last load time
+                ui.storage.browser[f'sample_{sample_id}_last_load'] = current_time
+        except Exception:
+            # If storage is not available, assume it's navigation (show loading)
+            is_page_refresh = False
+        
+        # Show loading spinner unless it's a page refresh
+        show_loading = not is_page_refresh
+        
+        async def confirm_report_generation():
+            """Show a confirmation dialog before generating the report."""
+            report_types = {
+                "summary": "Summary Only",
+                "detailed": "Detailed",
+            }
+            state: Dict[str, Any] = {
+                "type": "detailed",
+                "export_csv": False,
+            }
+
+            with ui.dialog() as dialog, ui.card().classes("w-96 p-4"):
+                ui.label("Generate Report").classes(
+                    "text-h6 font-bold mb-4"
+                )
+
+                # Report type selector
+                with ui.column().classes("mb-4"):
+                    ui.label("Report Type").classes("font-bold mb-2")
+                    ui.toggle(
+                        report_types,
+                        value="detailed",
+                        on_change=lambda e: state.update({"type": e.value}),
+                    )
+
+                # Disclaimer section
+                with ui.column().classes("mb-4"):
+                    ui.label("Disclaimer").classes("font-bold mb-2")
+                    formatted_text = EXTENDED_DISCLAIMER_TEXT.replace(
+                        "\n\n", "<br><br>"
+                    ).replace("\n", " ")
+                    ui.label(formatted_text).classes(
+                        "text-sm text-gray-600 mb-4"
+                    )
+
+                # Data export options
+                with ui.column().classes("mb-4"):
+                    ui.label("Include Data").classes("font-bold mb-2")
+                    ui.checkbox(
+                        "CSV data (ZIP)",
+                        value=False,
+                        on_change=lambda e: state.update(
+                            {"export_csv": bool(e.value)}
+                        ),
+                    )
+
+                ui.label(
+                    "Are you sure you want to generate a report?"
+                ).classes("mb-4")
+
+                # Buttons
+                with ui.row().classes("justify-end gap-2"):
+                    ui.button(
+                        "No", on_click=lambda: dialog.submit(("No", None))
+                    ).props("flat")
+                    ui.button(
+                        "Yes",
+                        on_click=lambda: dialog.submit(("Yes", state)),
+                    ).props("color=primary")
+
+            dialog_result = await dialog
+            if dialog_result is None:
+                return
+            result, state_val = dialog_result
+            if result == "Yes" and isinstance(state_val, dict):
+                await download_report(state_val)
+
+        async def download_report(state: Dict[str, Any]):
+            """Generate and download the report for this sample."""
+            try:
+                # Import here to avoid global dependency if GUI isn't used
+                from nicegui import run as ng_run  # type: ignore
+
+                # Check directory existence asynchronously
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(lambda: sample_dir and sample_dir.exists())
+                    dir_exists = await asyncio.wrap_future(future)
+                
+                if not dir_exists:
+                    ui.notify(
+                        "Output directory not available for this sample",
+                        type="warning",
+                    )
+                    return
+                ui.notify("Generating report…")
+                filename = f"{sample_id}_run_report.pdf"
+                pdf_path = os.path.join(str(sample_dir), filename)
+                os.makedirs(str(sample_dir), exist_ok=True)
+                export_csv_dir = None
+                if bool(state.get("export_csv", False)):
+                    export_csv_dir = os.path.join(
+                        str(sample_dir), "report_csv"
+                    )
+                pdf_file = await ng_run.io_bound(
+                    create_pdf,
+                    pdf_path,
+                    str(sample_dir),
+                    state.get("type", "detailed"),
+                    export_csv_dir=export_csv_dir,
+                    export_xlsx=False,
+                    export_zip=bool(state.get("export_csv", False)),
+                )
+                ui.download(pdf_file)
+                # Also offer CSV ZIP if requested
+                if bool(state.get("export_csv", False)) and export_csv_dir:
+                    zip_path = os.path.join(
+                        export_csv_dir, f"{sample_id}_report_data.zip"
+                    )
+                    if os.path.exists(zip_path):
+                        ui.download(zip_path)
+                ui.notify("Report downloaded")
+            except Exception as e:
+                ui.notify(f"Report generation failed: {e}", type="error")
+                
         with theme.frame(
             f"R.O.B.I.N - Sample {sample_id}",
             smalltitle="Samples",
@@ -1428,350 +1755,252 @@ class GUILauncher:
                 ui.notify(f"Opening sample {sample_id}", type="info")
             except Exception:
                 pass
-            if not sample_dir or not sample_dir.exists():
+            
+            # Check directory existence asynchronously to avoid blocking
+            async def check_directory_and_notify():
                 try:
-                    ui.notify(
-                        f"Sample output directory not found for {sample_id}",
-                        type="warning",
-                    )
+                    if not sample_dir or not sample_dir.exists():
+                        ui.notify(
+                            f"Sample output directory not found for {sample_id}",
+                            type="warning",
+                        )
                 except Exception:
                     pass
+            
+            # Start directory check in background
+            ui.timer(0.1, check_directory_and_notify, once=True)
 
-            # Page title and navigation
-            with ui.row().classes(
-                "w-full"
-            ):  #'w-full bg-blue-600 text-white p-4 items-center justify-between'):
-                with ui.row().classes("items-center"):
-                    ui.label(f"{sample_id}").classes("text-2xl font-bold")
-                    ui.label("Detailed sample information.").classes(
-                        "text-sm ml-4 opacity-80"
-                    )
-                with ui.row().classes("w-full"):
-                    # ui.link('📋 Sample Overview', '/live_data').classes('text-white hover:text-blue-200 text-sm')
-                    # ui.link('📊 Workflow Monitor', '/robin').classes('text-white hover:text-blue-200 text-sm')
-                    # Report generation (confirmation dialog + download)
-                    async def confirm_report_generation():
-                        """Show a confirmation dialog before generating the report."""
-                        report_types = {
-                            "summary": "Summary Only",
-                            "detailed": "Detailed",
-                        }
-                        state: Dict[str, Any] = {
-                            "type": "detailed",
-                            "export_csv": False,
-                        }
-
-                        with ui.dialog() as dialog, ui.card().classes("w-96 p-4"):
-                            ui.label("Generate Report").classes(
-                                "text-h6 font-bold mb-4"
+            with ui.card().classes("w-full").style("border: 2px solid var(--md-primary)"):
+                with ui.row().classes("w-full flex justify-between items-center"):
+                    with ui.column():
+                        ui.label(f"{sample_id}").classes("text-2xl font-bold")
+                        ui.label("Detailed sample information.").classes(
+                            "text-sm ml-4 opacity-80"
+                        )
+                    with ui.column():
+                        ui.button(
+                            "Generate Report", on_click=confirm_report_generation
+                        ).classes(
+                            "object-right ml-auto text-sm font-semibold px-3 py-1 rounded"
+                        )
+                ui.separator().classes().style("border: 1px solid var(--md-primary)")
+                # Main content area with conditional loading state
+                with ui.column().classes("w-full p-4 gap-4"):
+                    if show_loading:
+                        # Loading container that will be hidden when data is ready
+                        loading_container = ui.column().classes(
+                            "w-full items-center justify-center p-8"
+                        )
+                        with loading_container:
+                            ui.spinner("bars", size="4em").classes("mb-4")
+                            ui.label("Loading sample data...").classes("text-lg text-gray-600")
+                            ui.label("This may take a moment for large datasets").classes(
+                                "text-sm text-gray-500"
                             )
 
-                            # Report type selector
-                            with ui.column().classes("mb-4"):
-                                ui.label("Report Type").classes("font-bold mb-2")
-                                ui.toggle(
-                                    report_types,
-                                    value="detailed",
-                                    on_change=lambda e: state.update({"type": e.value}),
-                                )
+                        # Content container that will be shown when data is ready
+                        content_container = (
+                            ui.column().classes("w-full gap-4").style("display: none")
+                        )
+                    else:
+                        # For page refreshes, show content immediately
+                        content_container = ui.column().classes("w-full gap-4")
+                        loading_container = None
 
-                            # Disclaimer section
-                            with ui.column().classes("mb-4"):
-                                ui.label("Disclaimer").classes("font-bold mb-2")
-                                formatted_text = EXTENDED_DISCLAIMER_TEXT.replace(
-                                    "\n\n", "<br><br>"
-                                ).replace("\n", " ")
-                                ui.label(formatted_text).classes(
-                                    "text-sm text-gray-600 mb-4"
-                                )
-
-                            # Data export options
-                            with ui.column().classes("mb-4"):
-                                ui.label("Include Data").classes("font-bold mb-2")
-                                ui.checkbox(
-                                    "CSV data (ZIP)",
-                                    value=False,
-                                    on_change=lambda e: state.update(
-                                        {"export_csv": bool(e.value)}
-                                    ),
-                                )
-
-                            ui.label(
-                                "Are you sure you want to generate a report?"
-                            ).classes("mb-4")
-
-                            # Buttons
-                            with ui.row().classes("justify-end gap-2"):
-                                ui.button(
-                                    "No", on_click=lambda: dialog.submit(("No", None))
-                                ).props("flat")
-                                ui.button(
-                                    "Yes",
-                                    on_click=lambda: dialog.submit(("Yes", state)),
-                                ).props("color=primary")
-
-                        dialog_result = await dialog
-                        if dialog_result is None:
-                            return
-                        result, state_val = dialog_result
-                        if result == "Yes" and isinstance(state_val, dict):
-                            await download_report(state_val)
-
-                    async def download_report(state: Dict[str, Any]):
-                        """Generate and download the report for this sample."""
+                    with content_container:
+                        # Summary section (new component) - create UI immediately, load data async
                         try:
-                            # Import here to avoid global dependency if GUI isn't used
-                            from nicegui import run as ng_run  # type: ignore
+                            try:
+                                from .gui.components.summary import add_summary_section  # type: ignore
+                            except ImportError:
+                                # Try absolute import if relative fails
+                                from robin.gui.components.summary import add_summary_section
 
-                            if not sample_dir or not sample_dir.exists():
-                                ui.notify(
-                                    "Output directory not available for this sample",
-                                    type="warning",
-                                )
-                                return
-                            ui.notify("Generating report…")
-                            filename = f"{sample_id}_run_report.pdf"
-                            pdf_path = os.path.join(str(sample_dir), filename)
-                            os.makedirs(str(sample_dir), exist_ok=True)
-                            export_csv_dir = None
-                            if bool(state.get("export_csv", False)):
-                                export_csv_dir = os.path.join(
-                                    str(sample_dir), "report_csv"
-                                )
-                            pdf_file = await ng_run.io_bound(
-                                create_pdf,
-                                pdf_path,
-                                str(sample_dir),
-                                state.get("type", "detailed"),
-                                export_csv_dir=export_csv_dir,
-                                export_xlsx=False,
-                                export_zip=bool(state.get("export_csv", False)),
-                            )
-                            ui.download(pdf_file)
-                            # Also offer CSV ZIP if requested
-                            if bool(state.get("export_csv", False)) and export_csv_dir:
-                                zip_path = os.path.join(
-                                    export_csv_dir, f"{sample_id}_report_data.zip"
-                                )
-                                if os.path.exists(zip_path):
-                                    ui.download(zip_path)
-                            ui.notify("Report downloaded")
+                            # Create the UI components immediately on the main thread
+                            add_summary_section(sample_dir, sample_id)
                         except Exception as e:
-                            ui.notify(f"Report generation failed: {e}", type="error")
+                            logging.exception(f"[GUI] Summary section failed: {e}")
+                            try:
+                                ui.notify(f"Summary section failed: {e}", type="warning")
+                            except Exception:
+                                pass
 
-                    ui.button(
-                        "Generate Report", on_click=confirm_report_generation
-                    ).classes(
-                        "object-right ml-auto text-sm font-semibold px-3 py-1 rounded"
-                    )
-
-            # Main content area with loading state
-            with ui.column().classes("w-full p-4 gap-4"):
-                # Loading container that will be hidden when data is ready
-                loading_container = ui.column().classes(
-                    "w-full items-center justify-center p-8"
-                )
-                with loading_container:
-                    ui.spinner("bars", size="4em").classes("mb-4")
-                    ui.label("Loading sample data...").classes("text-lg text-gray-600")
-                    ui.label("This may take a moment for large datasets").classes(
-                        "text-sm text-gray-500"
-                    )
-
-                # Content container that will be shown when data is ready
-                content_container = (
-                    ui.column().classes("w-full gap-4").style("display: none")
-                )
-
-                with content_container:
-                    # Summary section (new component)
-                    try:
+                        # Classification section (refactored component) - create UI immediately
                         try:
-                            from .gui.components.summary import add_summary_section  # type: ignore
-                        except ImportError:
-                            # Try absolute import if relative fails
-                            from robin.gui.components.summary import add_summary_section
+                            try:
+                                from .gui.components.classification import add_classification_section  # type: ignore
+                            except ImportError:
+                                # Try absolute import if relative fails
+                                from robin.gui.components.classification import (
+                                    add_classification_section,
+                                )
 
-                        add_summary_section(sample_dir, sample_id)
-                    except Exception as e:
-                        logging.exception(f"[GUI] Summary section failed: {e}")
-                        try:
-                            ui.notify(f"Summary section failed: {e}", type="warning")
-                        except Exception:
-                            pass
+                            # Create the UI components immediately on the main thread
+                            add_classification_section(sample_dir)
+                        except Exception as e:
+                            logging.exception(f"[GUI] Classification section failed: {e}")
+                            try:
+                                ui.notify(
+                                    f"Classification section failed: {e}", type="warning"
+                                )
+                            except Exception:
+                                pass
 
-                    # Classification section (refactored component)
-                    try:
+                        # Coverage section (refactored component) - create UI immediately
                         try:
-                            from .gui.components.classification import add_classification_section  # type: ignore
-                        except ImportError:
-                            # Try absolute import if relative fails
-                            from robin.gui.components.classification import (
-                                add_classification_section,
+                            try:
+                                from .gui.components.coverage import add_coverage_section  # type: ignore
+                            except ImportError:
+                                # Try absolute import if relative fails
+                                from robin.gui.components.coverage import (
+                                    add_coverage_section,
+                                )
+
+                            # Create the UI components immediately on the main thread
+                            add_coverage_section(self, sample_dir)
+                        except Exception as e:
+                            try:
+                                ui.notify(f"Coverage section failed: {e}", type="warning")
+                            except Exception:
+                                pass
+
+                        # MGMT section (refactored component) - create UI immediately
+                        try:
+                            try:
+                                from .gui.components.mgmt import add_mgmt_section  # type: ignore
+                            except ImportError:
+                                # Try absolute import if relative fails
+                                from robin.gui.components.mgmt import add_mgmt_section
+
+                            # Create the UI components immediately on the main thread
+                            add_mgmt_section(self, sample_dir)
+                        except Exception as e:
+                            logging.exception(f"[GUI] MGMT section failed: {e}")
+                            try:
+                                ui.notify(f"MGMT section failed: {e}", type="warning")
+                            except Exception:
+                                pass
+
+                        # CNV section (refactored component) - create UI immediately
+                        try:
+                            try:
+                                from .gui.components.cnv import add_cnv_section  # type: ignore
+                            except ImportError:
+                                # Try absolute import if relative fails
+                                from robin.gui.components.cnv import add_cnv_section
+
+                            # Create the UI components immediately on the main thread
+                            # Pass launcher for shared state access (launcher._cnv_state)
+                            add_cnv_section(self, sample_dir)
+                        except Exception as e:
+                            logging.exception(f"[GUI] CNV section failed: {e}")
+                            try:
+                                ui.notify(f"CNV section failed: {e}", type="warning")
+                            except Exception:
+                                pass
+
+                        # Fusion section (target and genome-wide; excludes full SV UI) - create UI immediately
+                        try:
+                            try:
+                                from .gui.components.fusion import add_fusion_section  # type: ignore
+                            except ImportError:
+                                # Try absolute import if relative fails
+                                from robin.gui.components.fusion import add_fusion_section
+
+                            # Create the UI components immediately on the main thread
+                            add_fusion_section(self, sample_dir)
+                        except Exception as e:
+                            logging.exception(f"[GUI] Fusion section failed: {e}")
+                            try:
+                                ui.notify(f"Fusion section failed: {e}", type="warning")
+                            except Exception:
+                                pass
+
+                        # Files in output directory
+                        with ui.card().classes("w-full"):
+                            ui.label("Output Files").classes(
+                                "text-lg font-semibold mb-2"
                             )
+                            with ui.row().classes("items-center gap-3 mb-2"):
+                                files_search = ui.input("Search files…").props(
+                                    "borderless dense clearable"
+                                )
+                            from robin.gui.theme import styled_table
 
-                        add_classification_section(sample_dir)
-                    except Exception as e:
-                        logging.exception(f"[GUI] Classification section failed: {e}")
-                        try:
-                            ui.notify(
-                                f"Classification section failed: {e}", type="warning"
+                            _files_container, files_table = styled_table(
+                                columns=[
+                                    {
+                                        "name": "name",
+                                        "label": "File",
+                                        "field": "name",
+                                        "sortable": True,
+                                    },
+                                    {
+                                        "name": "size",
+                                        "label": "Size (bytes)",
+                                        "field": "size",
+                                        "sortable": True,
+                                    },
+                                    {
+                                        "name": "mtime",
+                                        "label": "Last Modified",
+                                        "field": "mtime",
+                                        "sortable": True,
+                                    },
+                                ],
+                                rows=[],
+                                pagination=20,
+                                class_size="table-xs",
                             )
-                        except Exception:
-                            pass
+                            try:
+                                files_table.props(
+                                    'multi-sort rows-per-page-options="[10,20,50,0]"'
+                                )
+                                files_search.bind_value(files_table, "filter")
+                            except Exception:
+                                pass
 
-                    # Coverage section (refactored component)
-                    try:
-                        try:
-                            from .gui.components.coverage import add_coverage_section  # type: ignore
-                        except ImportError:
-                            # Try absolute import if relative fails
-                            from robin.gui.components.coverage import (
-                                add_coverage_section,
+                        # master.csv summary
+                        with ui.card().classes("w-full"):
+                            ui.label("master.csv Summary").classes(
+                                "text-lg font-semibold mb-2"
                             )
+                            with ui.row().classes("items-center gap-3 mb-2"):
+                                summary_search = ui.input("Search fields…").props(
+                                    "borderless dense clearable"
+                                )
+                            from robin.gui.theme import styled_table
 
-                        add_coverage_section(self, sample_dir)
-                    except Exception as e:
-                        try:
-                            ui.notify(f"Coverage section failed: {e}", type="warning")
-                        except Exception:
-                            pass
-
-                    # MGMT section (refactored component)
-                    try:
-                        try:
-                            from .gui.components.mgmt import add_mgmt_section  # type: ignore
-                        except ImportError:
-                            # Try absolute import if relative fails
-                            from robin.gui.components.mgmt import add_mgmt_section
-
-                        add_mgmt_section(self, sample_dir)
-                    except Exception as e:
-                        logging.exception(f"[GUI] MGMT section failed: {e}")
-                        try:
-                            ui.notify(f"MGMT section failed: {e}", type="warning")
-                        except Exception:
-                            pass
-
-                    # CNV section (refactored component)
-                    try:
-                        try:
-                            from .gui.components.cnv import add_cnv_section  # type: ignore
-                        except ImportError:
-                            # Try absolute import if relative fails
-                            from robin.gui.components.cnv import add_cnv_section
-
-                        # Pass launcher for shared state access (launcher._cnv_state)
-                        add_cnv_section(self, sample_dir)
-                    except Exception as e:
-                        logging.exception(f"[GUI] CNV section failed: {e}")
-                        try:
-                            ui.notify(f"CNV section failed: {e}", type="warning")
-                        except Exception:
-                            pass
-
-                    # Fusion section (target and genome-wide; excludes full SV UI)
-                    try:
-                        try:
-                            from .gui.components.fusion import add_fusion_section  # type: ignore
-                        except ImportError:
-                            # Try absolute import if relative fails
-                            from robin.gui.components.fusion import add_fusion_section
-
-                        add_fusion_section(self, sample_dir)
-                    except Exception as e:
-                        logging.exception(f"[GUI] Fusion section failed: {e}")
-                        try:
-                            ui.notify(f"Fusion section failed: {e}", type="warning")
-                        except Exception:
-                            pass
-
-                    # Files in output directory
-                    with ui.card().classes("w-full"):
-                        ui.label("📁 Output Files").classes(
-                            "text-lg font-semibold mb-2"
-                        )
-                        with ui.row().classes("items-center gap-3 mb-2"):
-                            files_search = ui.input("Search files…").props(
-                                "borderless dense clearable"
+                            _summary_container, summary_table = styled_table(
+                                columns=[
+                                    {
+                                        "name": "key",
+                                        "label": "Field",
+                                        "field": "key",
+                                        "sortable": True,
+                                    },
+                                    {
+                                        "name": "value",
+                                        "label": "Value",
+                                        "field": "value",
+                                        "sortable": True,
+                                    },
+                                ],
+                                rows=[],
+                                pagination=0,
+                                class_size="table-xs",
                             )
-                        from robin.gui.theme import styled_table
+                            try:
+                                summary_table.props("multi-sort")
+                                summary_search.bind_value(summary_table, "filter")
+                            except Exception:
+                                pass
 
-                        _files_container, files_table = styled_table(
-                            columns=[
-                                {
-                                    "name": "name",
-                                    "label": "File",
-                                    "field": "name",
-                                    "sortable": True,
-                                },
-                                {
-                                    "name": "size",
-                                    "label": "Size (bytes)",
-                                    "field": "size",
-                                    "sortable": True,
-                                },
-                                {
-                                    "name": "mtime",
-                                    "label": "Last Modified",
-                                    "field": "mtime",
-                                    "sortable": True,
-                                },
-                            ],
-                            rows=[],
-                            pagination=20,
-                            class_size="table-xs",
-                        )
-                        try:
-                            files_table.props(
-                                'multi-sort rows-per-page-options="[10,20,50,0]"'
-                            )
-                            files_search.bind_value(files_table, "filter")
-                        except Exception:
-                            pass
+                    # Periodic refresher for files table and master.csv summary
+                    _notify_state = {"files_error": False, "csv_error": False}
 
-                    # master.csv summary
-                    with ui.card().classes("w-full"):
-                        ui.label("📊 master.csv Summary").classes(
-                            "text-lg font-semibold mb-2"
-                        )
-                        with ui.row().classes("items-center gap-3 mb-2"):
-                            summary_search = ui.input("Search fields…").props(
-                                "borderless dense clearable"
-                            )
-                        from robin.gui.theme import styled_table
-
-                        _summary_container, summary_table = styled_table(
-                            columns=[
-                                {
-                                    "name": "key",
-                                    "label": "Field",
-                                    "field": "key",
-                                    "sortable": True,
-                                },
-                                {
-                                    "name": "value",
-                                    "label": "Value",
-                                    "field": "value",
-                                    "sortable": True,
-                                },
-                            ],
-                            rows=[],
-                            pagination=0,
-                            class_size="table-xs",
-                        )
-                        try:
-                            summary_table.props("multi-sort")
-                            summary_search.bind_value(summary_table, "filter")
-                        except Exception:
-                            pass
-
-                # Periodic refresher for files table and master.csv summary
-                _notify_state = {"files_error": False, "csv_error": False}
-
-                def _refresh_sample_detail() -> None:
-                    # Refresh files list
-                    try:
+                    def _refresh_files_list_sync() -> List[Dict[str, Any]]:
+                        """Synchronous file list refresh - runs in background thread"""
                         rows = []
                         if sample_dir and sample_dir.exists():
                             for f in sorted(sample_dir.iterdir()):
@@ -1790,91 +2019,160 @@ class GUILauncher:
                                         )
                                     except Exception:
                                         continue
-                        files_table.rows = rows
-                        files_table.update()
-                    except Exception as e:
-                        if not _notify_state["files_error"]:
-                            try:
-                                ui.notify(
-                                    f"Failed to list output files for {sample_id}: {e}",
-                                    type="warning",
-                                )
-                            except Exception:
-                                pass
-                            _notify_state["files_error"] = True
+                        return rows
 
-                    # Refresh master.csv summary
-                    try:
-                        if sample_dir:
-                            csv_path = sample_dir / "master.csv"
-                            if csv_path.exists():
-                                with csv_path.open("r", newline="") as fh:
-                                    reader = csv.DictReader(fh)
-                                    first_row = next(reader, None)
-                                if first_row:
-                                    preferred_keys = [
-                                        "counter_bam_passed",
-                                        "counter_bam_failed",
-                                        "counter_bases_count",
-                                        "counter_mapped_count",
-                                        "counter_unmapped_count",
-                                        "run_info_run_time",
-                                        "run_info_device",
-                                        "run_info_model",
-                                        "run_info_flow_cell",
-                                        "bam_tracking_counter",
-                                        "bam_tracking_total_files",
-                                    ]
-                                    rows2 = []
-                                    for k in preferred_keys:
-                                        if k in first_row:
-                                            rows2.append(
-                                                {
-                                                    "key": k,
-                                                    "value": first_row.get(k, ""),
-                                                }
-                                            )
-                                    if not rows2:
-                                        rows2 = [
-                                            {"key": k, "value": v}
-                                            for k, v in first_row.items()
-                                        ]
-                                    summary_table.rows = rows2
-                                    summary_table.update()
-                            else:
-                                summary_table.rows = [
-                                    {"key": "Status", "value": "master.csv not found"}
+                    def _refresh_csv_summary_sync() -> List[Dict[str, Any]]:
+                        """Synchronous CSV summary refresh - runs in background thread"""
+                        if not sample_dir:
+                            return [{"key": "Status", "value": "No sample directory"}]
+                            
+                        csv_path = sample_dir / "master.csv"
+                        if not csv_path.exists():
+                            return [{"key": "Status", "value": "master.csv not found"}]
+                            
+                        try:
+                            with csv_path.open("r", newline="") as fh:
+                                reader = csv.DictReader(fh)
+                                first_row = next(reader, None)
+                            if first_row:
+                                preferred_keys = [
+                                    "counter_bam_passed",
+                                    "counter_bam_failed",
+                                    "counter_bases_count",
+                                    "counter_mapped_count",
+                                    "counter_unmapped_count",
+                                    "run_info_run_time",
+                                    "run_info_device",
+                                    "run_info_model",
+                                    "run_info_flow_cell",
+                                    "bam_tracking_counter",
+                                    "bam_tracking_total_files",
                                 ]
-                                summary_table.update()
-                    except Exception as e:
-                        if not _notify_state["csv_error"]:
+                                rows2 = []
+                                for k in preferred_keys:
+                                    if k in first_row:
+                                        rows2.append(
+                                            {
+                                                "key": k,
+                                                "value": first_row.get(k, ""),
+                                            }
+                                        )
+                                if not rows2:
+                                    rows2 = [
+                                        {"key": k, "value": v}
+                                        for k, v in first_row.items()
+                                    ]
+                                return rows2
+                        except Exception:
+                            return [{"key": "Error", "value": "Failed to read CSV"}]
+
+                    async def _refresh_sample_detail_async() -> None:
+                        """Asynchronous version of sample detail refresh"""
+                        try:
+                            # Run file operations in background threads
+                            import concurrent.futures
+                            with concurrent.futures.ThreadPoolExecutor() as executor:
+                                files_future = executor.submit(_refresh_files_list_sync)
+                                csv_future = executor.submit(_refresh_csv_summary_sync)
+                                
+                                files_result = await asyncio.wrap_future(files_future)
+                                csv_result = await asyncio.wrap_future(csv_future)
+                            
+                            # Update UI with results
+                            files_table.rows = files_result
+                            files_table.update()
+                            
+                            summary_table.rows = csv_result
+                            summary_table.update()
+                            
+                            # Reset error states on success
+                            _notify_state["files_error"] = False
+                            _notify_state["csv_error"] = False
+                            
+                        except Exception as e:
+                            logging.error(f"Error in async sample detail refresh: {e}")
+                            # Only show error notification once per error type
+                            if not _notify_state["files_error"]:
+                                try:
+                                    ui.notify(
+                                        f"Failed to refresh sample data for {sample_id}: {e}",
+                                        type="warning",
+                                    )
+                                except Exception:
+                                    pass
+                                _notify_state["files_error"] = True
+
+                    def _refresh_sample_detail() -> None:
+                        """Synchronous version - kept for backward compatibility"""
+                        # Refresh files list
+                        try:
+                            rows = _refresh_files_list_sync()
+                            files_table.rows = rows
+                            files_table.update()
+                        except Exception as e:
+                            if not _notify_state["files_error"]:
+                                try:
+                                    ui.notify(
+                                        f"Failed to list output files for {sample_id}: {e}",
+                                        type="warning",
+                                    )
+                                except Exception:
+                                    pass
+                                _notify_state["files_error"] = True
+
+                        # Refresh master.csv summary
+                        try:
+                            rows2 = _refresh_csv_summary_sync()
+                            summary_table.rows = rows2
+                            summary_table.update()
+                        except Exception as e:
+                            if not _notify_state["csv_error"]:
+                                try:
+                                    ui.notify(
+                                        f"Failed to read master.csv for {sample_id}: {e}",
+                                        type="warning",
+                                    )
+                                except Exception:
+                                    pass
+                                _notify_state["csv_error"] = True
+
+                    # Show content and hide loading after initial data load (only when showing loading)
+                    if show_loading and loading_container:
+                        async def _load_initial_data_and_show():
+                            """Load initial data asynchronously then show content"""
                             try:
-                                ui.notify(
-                                    f"Failed to read master.csv for {sample_id}: {e}",
-                                    type="warning",
-                                )
-                            except Exception:
-                                pass
-                            _notify_state["csv_error"] = True
+                                # Load initial data
+                                await _refresh_sample_detail_async()
+                                
+                                # Show content and hide loading
+                                loading_container.style("display: none")
+                                content_container.style("display: flex")
+                                
+                            except Exception as e:
+                                logging.error(f"Error loading initial data: {e}")
+                                # Show content anyway to avoid infinite loading
+                                loading_container.style("display: none")
+                                content_container.style("display: flex")
 
-                # Show content and hide loading after initial data load
-                def _show_content():
-                    loading_container.style("display: none")
-                    content_container.style("display: flex")
+                        # Start initial data loading
+                        try:
+                            ui.timer(0.1, _load_initial_data_and_show, once=True)
+                        except Exception:
+                            # Fallback: show content immediately if timer fails
+                            loading_container.style("display: none")
+                            content_container.style("display: flex")
+                    else:
+                        # For page refreshes, load data immediately
+                        try:
+                            ui.timer(0.1, _refresh_sample_detail_async, once=True)
+                        except Exception:
+                            pass
 
-                # Initial data load with loading state
-                try:
-                    # Use a timer to simulate async loading and then show content
-                    ui.timer(0.1, _show_content, once=True)
-                except Exception:
-                    # Fallback: show content immediately if timer fails
-                    _show_content()
-
-                # Start periodic refresh
-                try:
-                    ui.timer(5.0, _refresh_sample_detail)
-                except Exception:
-                    pass
+                    # Start periodic refresh with async version
+                    try:
+                        ui.timer(5.0, _refresh_sample_detail_async)
+                    except Exception:
+                        pass
 
     def _create_workflow_monitor(self):
         """Create the main workflow monitoring page."""
@@ -1887,7 +2185,7 @@ class GUILauncher:
             # Page title and navigation
             with ui.row().classes("w-full p-4 items-center justify-between"):
                 with ui.row().classes("items-center"):
-                    ui.label("📊 robin Workflow Monitor").classes("text-2xl font-bold")
+                    ui.label("robin Workflow Monitor").classes("text-2xl font-bold")
                     ui.label("Real-time workflow monitoring and control").classes(
                         "text-sm ml-4 opacity-80"
                     )
@@ -1898,7 +2196,7 @@ class GUILauncher:
                 with ui.card().classes(
                     "w-full bg-gradient-to-r from-blue-50 to-indigo-50"
                 ):
-                    ui.label("🚀 Workflow Status Overview").classes(
+                    ui.label("Workflow Status Overview").classes(
                         "text-lg font-semibold mb-4 text-blue-800"
                     )
 
@@ -1948,13 +2246,13 @@ class GUILauncher:
 
                 # Queue Status
                 with ui.card().classes("w-full"):
-                    ui.label("📋 Queue Status").classes("text-lg font-semibold mb-4")
+                    ui.label("Queue Status").classes("text-lg font-semibold mb-4")
 
                     # Queue status grid
                     with ui.grid(columns=4).classes("w-full gap-4"):
                         # Preprocessing
                         with ui.card().classes("bg-green-50 p-4"):
-                            ui.label("🔬 Preprocessing").classes(
+                            ui.label("Preprocessing").classes(
                                 "text-sm font-medium text-green-800"
                             )
                             self.preprocessing_status = ui.label("0/0").classes(
@@ -1972,7 +2270,7 @@ class GUILauncher:
 
                         # Classification
                         with ui.card().classes("bg-purple-50 p-4"):
-                            ui.label("🎯 Classification").classes(
+                            ui.label("Classification").classes(
                                 "text-sm font-medium text-purple-800"
                             )
                             self.classification_status = ui.label("0/0").classes(
@@ -1981,7 +2279,7 @@ class GUILauncher:
 
                         # Other
                         with ui.card().classes("bg-gray-50 p-4"):
-                            ui.label("⚙️ Other").classes(
+                            ui.label("Other").classes(
                                 "text-sm font-medium text-gray-800"
                             )
                             self.other_status = ui.label("0/0").classes(
@@ -1997,7 +2295,7 @@ class GUILauncher:
 
                 # Active Jobs
                 with ui.card().classes("w-full"):
-                    ui.label("⚡ Active Jobs").classes("text-lg font-semibold mb-4")
+                    ui.label("Active Jobs").classes("text-lg font-semibold mb-4")
 
                     with ui.row().classes("items-center gap-3 mb-2"):
                         self.active_jobs_search = ui.input("Search…").props(
@@ -2090,7 +2388,7 @@ class GUILauncher:
 
                 # Live Logs
                 with ui.card().classes("w-full"):
-                    ui.label("📝 Live Logs").classes("text-lg font-semibold mb-4")
+                    ui.label("Live Logs").classes("text-lg font-semibold mb-4")
 
                     # Log controls
                     with ui.row().classes("w-full justify-between items-center mb-2"):
@@ -2113,7 +2411,7 @@ class GUILauncher:
 
                 # Configuration
                 with ui.card().classes("w-full"):
-                    ui.label("⚙️ Workflow Configuration").classes(
+                    ui.label("Workflow Configuration").classes(
                         "text-lg font-semibold mb-4"
                     )
 
@@ -2147,7 +2445,7 @@ class GUILauncher:
 
                 # Error Summary & Troubleshooting
                 with ui.card().classes("w-full"):
-                    ui.label("⚠️ Error Summary & Troubleshooting").classes(
+                    ui.label("Error Summary & Troubleshooting").classes(
                         "text-lg font-semibold mb-2"
                     )
 
@@ -2221,6 +2519,7 @@ class GUILauncher:
             pass
 
     def _scan_and_seed_samples(self, preexisting: bool = False) -> None:
+        """Synchronous version - kept for backward compatibility and io_bound calls"""
         try:
             base = Path(self.monitored_directory) if self.monitored_directory else None
             if not base or not base.exists():
@@ -2281,7 +2580,7 @@ class GUILauncher:
                         pass
                     origin_value = (
                         "Pre-existing"
-                        if sid in self._preexisting_sample_ids
+                        if sid in self._preexisting_sample_ids and (time.time() - last_seen) >= 3600
                         else "Live"
                     )
                     try:
@@ -2302,7 +2601,7 @@ class GUILauncher:
                             "failed_jobs": ov_failed,
                             "job_types": ov_job_types,
                             "last_seen": time.strftime(
-                                "%H:%M:%S", time.localtime(last_seen)
+                                "%Y-%m-%d %H:%M:%S", time.localtime(last_seen)
                             ),
                             "_last_seen_raw": last_seen,
                         }
@@ -2313,6 +2612,16 @@ class GUILauncher:
                 for r in rows:
                     existing[r["sample_id"]] = r
                 merged = list(existing.values())
+                # Sort rows by last activity in reverse chronological order (newest first)
+                try:
+                    merged.sort(key=lambda r: float(r.get("_last_seen_raw", 0)), reverse=True)
+                except Exception:
+                    # Fallback to sorting by last_seen string if _last_seen_raw is not available
+                    try:
+                        merged.sort(key=lambda r: r.get("last_seen", ""), reverse=True)
+                    except Exception:
+                        pass
+                
                 if hasattr(self, "samples_table"):
                     try:
                         self.samples_table.rows = merged
@@ -2325,6 +2634,247 @@ class GUILauncher:
                 self._preexisting_scanned = True
         except Exception:
             pass
+
+    def _get_cached_samples(self) -> Optional[List[Dict[str, Any]]]:
+        """Return cached sample data if available and recent"""
+        if self._last_samples_rows and time.time() - self._last_cache_time < self._cache_duration:
+            return self._last_samples_rows
+        return None
+
+    async def _load_samples_progressively(self, sample_dirs: List[Path], batch_size: int = 10) -> None:
+        """Load samples in small batches to avoid blocking the UI"""
+        try:
+            total_dirs = len(sample_dirs)
+            processed = 0
+            
+            # Show progress
+            if hasattr(self, "samples_loading_container"):
+                self.samples_loading_container.clear()
+                with self.samples_loading_container:
+                    ui.spinner(size="lg", color="primary")
+                    ui.label("Loading samples...").classes("ml-2 text-lg")
+                    progress_label = ui.label(f"Processing {processed}/{total_dirs} samples").classes("text-sm text-gray-500 mt-2")
+            
+            rows: List[Dict[str, Any]] = []
+            
+            for i in range(0, total_dirs, batch_size):
+                batch = sample_dirs[i:i + batch_size]
+                
+                # Process batch synchronously in background
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(self._process_sample_batch, batch)
+                    batch_rows = await asyncio.wrap_future(future)
+                rows.extend(batch_rows)
+                
+                processed += len(batch)
+                
+                # Update progress
+                if hasattr(self, "samples_loading_container") and 'progress_label' in locals():
+                    progress_label.set_text(f"Processing {processed}/{total_dirs} samples")
+                
+                # Small delay to keep UI responsive
+                await asyncio.sleep(0.1)
+            
+            # Update table with all rows
+            if rows:
+                self._last_samples_rows = rows
+                self._last_cache_time = time.time()
+                
+                if hasattr(self, "samples_table"):
+                    try:
+                        self.samples_table.rows = rows
+                        self.samples_table.update()
+                    except Exception:
+                        pass
+            
+            # Hide loading container
+            if hasattr(self, "samples_loading_container"):
+                self.samples_loading_container.set_visibility(False)
+                
+            ui.notify(f"Loaded {len(rows)} samples successfully", type="positive", timeout=2000)
+            
+        except Exception as e:
+            logging.error(f"Error in progressive loading: {e}")
+            ui.notify(f"Error loading samples: {str(e)}", type="error", timeout=3000)
+            if hasattr(self, "samples_loading_container"):
+                self.samples_loading_container.set_visibility(False)
+
+    def _process_sample_batch(self, sample_dirs: List[Path]) -> List[Dict[str, Any]]:
+        """Process a batch of sample directories synchronously"""
+        rows: List[Dict[str, Any]] = []
+        
+        for sample_dir in sample_dirs:
+            if not sample_dir.is_dir():
+                continue
+                
+            master = sample_dir / "master.csv"
+            if master.exists():
+                sid = sample_dir.name
+                
+                # Determine last_seen from file mtime
+                last_seen = master.stat().st_mtime
+                
+                # Try to load persisted overview and run info
+                run_start = ""
+                device = ""
+                flowcell = ""
+                ov_active = 0
+                ov_total = 0
+                ov_completed = 0
+                ov_failed = 0
+                ov_job_types = ""
+                
+                try:
+                    with master.open("r", newline="") as fh:
+                        reader = csv.DictReader(fh)
+                        first_row = next(reader, None)
+                    if first_row:
+                        run_start = first_row.get("run_info_run_time", "")
+                        device = first_row.get("run_info_device", "")
+                        flowcell = first_row.get("run_info_flow_cell", "")
+                        
+                        # Use saved last_seen if present
+                        try:
+                            saved_last = float(
+                                first_row.get("samples_overview_last_seen", 0.0)
+                            )
+                            if saved_last:
+                                last_seen = saved_last
+                        except Exception:
+                            pass
+                            
+                        ov_active = int(
+                            first_row.get("samples_overview_active_jobs", 0) or 0
+                        )
+                        ov_total = int(
+                            first_row.get("samples_overview_total_jobs", 0) or 0
+                        )
+                        ov_completed = int(
+                            first_row.get("samples_overview_completed_jobs", 0) or 0
+                        )
+                        ov_failed = int(
+                            first_row.get("samples_overview_failed_jobs", 0) or 0
+                        )
+                        ov_job_types = str(
+                            first_row.get("samples_overview_job_types", "") or ""
+                        )
+                except Exception:
+                    pass
+                    
+                origin_value = (
+                    "Pre-existing"
+                    if sid in self._preexisting_sample_ids and (time.time() - last_seen) >= 3600
+                    else "Live"
+                )
+                try:
+                    if origin_value == "Live" and (time.time() - last_seen) >= 3600:
+                        origin_value = "Complete"
+                except Exception:
+                    pass
+                    
+                rows.append(
+                    {
+                        "sample_id": sid,
+                        "origin": origin_value,
+                        "run_start": self._format_timestamp_for_display(run_start),
+                        "device": device,
+                        "flowcell": flowcell,
+                        "active_jobs": ov_active,
+                        "total_jobs": ov_total,
+                        "completed_jobs": ov_completed,
+                        "failed_jobs": ov_failed,
+                        "job_types": ov_job_types,
+                        "last_seen": time.strftime(
+                            "%Y-%m-%d %H:%M:%S", time.localtime(last_seen)
+                        ),
+                        "_last_seen_raw": last_seen,
+                    }
+                )
+        
+        return rows
+
+    async def _scan_and_seed_samples_async(self, preexisting: bool = False) -> None:
+        """Asynchronous version that runs file operations in background thread"""
+        try:
+            # Check if we have recent cached data
+            cached_data = self._get_cached_samples()
+            if cached_data and not preexisting:
+                # Use cached data and update UI immediately
+                if hasattr(self, "samples_table"):
+                    try:
+                        self.samples_table.rows = cached_data
+                        self.samples_table.update()
+                        # Hide loading indicator
+                        if hasattr(self, "samples_loading_container"):
+                            self.samples_loading_container.set_visibility(False)
+                    except Exception:
+                        pass
+                return
+            
+            # Check if we need progressive loading for large directories
+            base = Path(self.monitored_directory) if self.monitored_directory else None
+            if base and base.exists():
+                sample_dirs = [d for d in base.iterdir() if d.is_dir()]
+                
+                # Use progressive loading for directories with many samples
+                if len(sample_dirs) > 20:
+                    await self._load_samples_progressively(sample_dirs)
+                    return
+            
+            # Show loading notification for smaller directories
+            ui.notify("Loading samples...", type="info", timeout=2000)
+            
+            # Show loading indicator
+            if hasattr(self, "samples_loading_indicator"):
+                self.samples_loading_indicator.set_visibility(True)
+            
+            # Run the synchronous file operations in a background thread
+            # Use threading instead of ui.run.io_bound for compatibility
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(self._scan_and_seed_samples, preexisting)
+                result = await asyncio.wrap_future(future)
+            
+            # Update cache timestamp
+            self._last_cache_time = time.time()
+            
+            # Hide loading indicator
+            if hasattr(self, "samples_loading_indicator"):
+                self.samples_loading_indicator.set_visibility(False)
+            if hasattr(self, "samples_loading_container"):
+                self.samples_loading_container.set_visibility(False)
+            
+            # Show success notification
+            if result is not None:
+                ui.notify("Samples loaded successfully", type="positive", timeout=1500)
+            
+        except Exception as e:
+            logging.error(f"Error in async sample scanning: {e}")
+            ui.notify(f"Error loading samples: {str(e)}", type="error", timeout=3000)
+            
+            # Hide loading indicators on error
+            if hasattr(self, "samples_loading_indicator"):
+                self.samples_loading_indicator.set_visibility(False)
+            if hasattr(self, "samples_loading_container"):
+                self.samples_loading_container.set_visibility(False)
+
+    async def _scan_for_new_samples_async(self) -> None:
+        """Asynchronous version of new samples scanning"""
+        try:
+            # Check cache first
+            cached_data = self._get_cached_samples()
+            if cached_data:
+                return  # Use cached data
+            
+            # Run synchronous scanning in background
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(self._scan_for_new_samples)
+                await asyncio.wrap_future(future)
+            
+        except Exception as e:
+            logging.error(f"Error in async new samples scanning: {e}")
 
     def _scan_for_new_samples(self) -> None:
         try:
@@ -2650,16 +3200,16 @@ if __name__ == "__main__":
     if args.monitored_directory:
         monitored_path = Path(args.monitored_directory)
         if not monitored_path.exists():
-            print(f"❌ Error: Directory '{args.monitored_directory}' does not exist")
+            print(f"Error: Directory '{args.monitored_directory}' does not exist")
             sys.exit(1)
         if not monitored_path.is_dir():
-            print(f"❌ Error: '{args.monitored_directory}' is not a directory")
+            print(f"Error: '{args.monitored_directory}' is not a directory")
             sys.exit(1)
-        print(f"📁 Will monitor: {monitored_path.resolve()}")
+        print(f"Will monitor: {monitored_path.resolve()}")
 
     try:
         # Create and launch GUI directly to avoid relative import issues
-        print("🚀 Creating GUI launcher...")
+        print("Creating GUI launcher...")
 
         # Create the GUI launcher directly
         launcher = GUILauncher(
@@ -2672,8 +3222,8 @@ if __name__ == "__main__":
         if args.monitored_directory:
             launcher.monitored_directory = str(Path(args.monitored_directory).resolve())
 
-        print(f"🚀 Launching full GUI on http://{args.host}:{args.port}")
-        print("💡 Use Ctrl+C to stop the GUI")
+        print(f"Launching full GUI on http://{args.host}:{args.port}")
+        print("Use Ctrl+C to stop the GUI")
 
         # Launch the GUI directly
         success = launcher.launch_gui(
@@ -2683,9 +3233,9 @@ if __name__ == "__main__":
         )
 
         if success:
-            print("✅ GUI launched successfully!")
+            print("GUI launched successfully!")
             print("🌐 Open your browser to the URL above")
-            print("💡 Press Ctrl+C to stop the GUI")
+            print("Press Ctrl+C to stop the GUI")
 
             # Keep the main thread alive while GUI runs
             try:
@@ -2694,15 +3244,15 @@ if __name__ == "__main__":
             except KeyboardInterrupt:
                 print("\n🛑 Shutting down GUI...")
                 launcher.stop_gui()
-                print("👋 GUI stopped")
+                print("GUI stopped")
         else:
-            print("❌ Failed to launch GUI")
+            print("Failed to launch GUI")
             sys.exit(1)
 
     except KeyboardInterrupt:
-        print("\n👋 GUI stopped by user")
+        print("\nGUI stopped by user")
     except Exception as e:
-        print(f"❌ GUI failed to start: {e}")
+        print(f"GUI failed to start: {e}")
         import traceback
 
         traceback.print_exc()

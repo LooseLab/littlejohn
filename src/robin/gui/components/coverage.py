@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Any
 import time
 import os
+import asyncio
+import concurrent.futures
 
 import natsort
 import numpy as np
@@ -28,7 +30,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
     is_development_mode = os.environ.get("ROBIN_DEV_MODE", "").lower() in ("1", "true", "yes", "on")
     
     with ui.card().classes("w-full"):
-        ui.label("🧫 Coverage").classes("text-lg font-semibold mb-2")
+        ui.label("Coverage").classes("text-lg font-semibold mb-2")
         # Summary row (quality + metrics)
         with ui.row().classes("w-full items-center justify-between mb-2"):
             with ui.column().classes("gap-1"):
@@ -108,7 +110,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 ).classes("w-full h-64")
 
         with ui.card().classes("w-full"):
-            ui.label("📈 Coverage Over Time").classes("text-lg font-semibold mb-2")
+            ui.label("Coverage Over Time").classes("text-lg font-semibold mb-2")
             echart_time = ui.echart(
                 {
                     "backgroundColor": "transparent",
@@ -133,12 +135,218 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             ).classes("w-full h-64")
 
         with ui.card().classes("w-full"):
-            ui.label("🎯 Target Coverage").classes("text-lg font-semibold mb-2")
+            with ui.row().classes("w-full items-center justify-between mb-2"):
+                ui.label("Target Coverage").classes("text-lg font-semibold")
+                target_coverage_back_button = ui.button(
+                    "← Back to Overview", 
+                    on_click=lambda: _show_target_coverage_overview()
+                ).props("flat dense").classes("hidden")
+            
+            # Add target panel legend
+            def _get_target_panel_info():
+                """Get the target panel information from master.csv"""
+                try:
+                    # Read from master.csv
+                    master_csv_path = sample_dir / "master.csv"
+                    if master_csv_path.exists():
+                        import pandas as pd
+                        df = pd.read_csv(master_csv_path)
+                        if not df.empty and "analysis_panel" in df.columns:
+                            panel = df.iloc[0]["analysis_panel"]
+                            if panel and str(panel).strip() != "":
+                                return str(panel).strip()
+                    return "rCNS2"  # Default fallback
+                except Exception as e:
+                    _log_notify(f"Exception in _get_target_panel_info: {e}", level="error", notify=False)
+                    return "rCNS2"  # Default fallback
+            
+            target_panel = _get_target_panel_info()
+            
+            # Panel legend with color coding
+            panel_colors = {
+                "rCNS2": ("bg-blue-100", "text-blue-800", "rCNS2 Panel"),
+                "AML": ("bg-green-100", "text-green-800", "AML Panel"), 
+                "PanCan": ("bg-purple-100", "text-purple-800", "Pan-Cancer Panel")
+            }
+            
+            panel_color_classes, panel_text_classes, panel_display_name = panel_colors.get(
+                target_panel, ("bg-gray-100", "text-gray-800", f"{target_panel} Panel")
+            )
+            
+            # Store panel information in state for use by other functions
+            key = str(sample_dir)
+            if key not in launcher._coverage_state:
+                launcher._coverage_state[key] = {}
+            launcher._coverage_state[key]["panel_display_name"] = panel_display_name
+            
+            with ui.row().classes("w-full items-center gap-2 mb-2"):
+                ui.label("Panel:").classes("text-sm font-medium text-gray-600")
+                ui.label(panel_display_name).classes(f"px-2 py-1 rounded text-sm font-medium {panel_color_classes} {panel_text_classes}")
+                ui.label("•").classes("text-gray-400")
+                ui.label("Target regions defined by gene panel").classes("text-xs text-gray-500")
+            
+            # Add detailed panel information in an expansion
+            with ui.expansion().classes("w-full mb-2").props("icon=info dense"):
+                ui.label("Panel Details").classes("text-sm font-medium mb-2")
+                
+                # Get the BED file name for the current panel
+                bed_file_mapping = {
+                    "rCNS2": "rCNS2_panel_name_uniq.bed",
+                    "AML": "AML_panel_name_uniq.bed", 
+                    "PanCan": "PanCan_panel_name_uniq.bed"
+                }
+                
+                bed_filename = bed_file_mapping.get(target_panel, "Unknown")
+                
+                with ui.column().classes("gap-1 text-sm"):
+                    with ui.row().classes("items-center gap-2"):
+                        ui.label("Panel:").classes("font-medium w-20")
+                        ui.label(target_panel).classes("font-mono")
+                    
+                    with ui.row().classes("items-center gap-2"):
+                        ui.label("BED File:").classes("font-medium w-20")
+                        ui.label(bed_filename).classes("font-mono text-xs")
+                    
+                    with ui.row().classes("items-center gap-2"):
+                        ui.label("Description:").classes("font-medium w-20")
+                        panel_descriptions = {
+                            "rCNS2": "Central Nervous System genes (244 regions)",
+                            "AML": "Acute Myeloid Leukemia genes (1,181 regions)", 
+                            "PanCan": "Pan-Cancer comprehensive gene set (1,389 regions)"
+                        }
+                        ui.label(panel_descriptions.get(target_panel, "Custom gene panel")).classes("text-xs")
+            
+            # Define helper functions before chart creation
+            def _show_chromosome_scatter(chromosome: str) -> None:
+                """Show scatter plot for individual genes on a specific chromosome"""
+                try:
+                    # Get the bed coverage data
+                    bed_cov = sample_dir / "bed_coverage_main.csv"
+                    if not bed_cov.exists():
+                        ui.notify("No coverage data available", type="warning")
+                        return
+                    
+                    # Read the data
+                    df = pd.read_csv(bed_cov)
+                    if "coverage" not in df.columns:
+                        df["length"] = (df["endpos"] - df["startpos"] + 1).astype(float)
+                        df["coverage"] = df["bases"] / df["length"]
+                    
+                    # Filter for the selected chromosome
+                    chrom_data = df[df["chrom"].astype(str) == chromosome].copy()
+                    
+                    if chrom_data.empty:
+                        ui.notify(f"No data found for chromosome {chromosome}", type="warning")
+                        return
+                    
+                    # Sort by position for better visualization
+                    chrom_data = chrom_data.sort_values("startpos")
+                    
+                    # Create scatter plot data
+                    scatter_data = []
+                    for _, row in chrom_data.iterrows():
+                        scatter_data.append([
+                            row["name"],
+                            row["coverage"],
+                            row["startpos"],
+                            row["endpos"]
+                        ])
+                    
+                    # Update chart to show scatter plot
+                    target_boxplot.options["title"]["text"] = f"Gene Coverage - {chromosome}"
+                    target_boxplot.options["title"]["subtext"] = f"{len(scatter_data)} genes"
+                    
+                    # Update x-axis to show gene names
+                    gene_names = chrom_data["name"].tolist()
+                    target_boxplot.options["xAxis"]["data"] = gene_names
+                    target_boxplot.options["xAxis"]["axisLabel"]["rotate"] = 45
+                    target_boxplot.options["xAxis"]["axisLabel"]["interval"] = 0
+                    
+                    # Update series to show scatter plot
+                    target_boxplot.options["series"] = [
+                        {
+                            "name": "Gene Coverage",
+                            "type": "scatter",
+                            "id": "coverage_data",  # Add ID for universal transition
+                            "data": scatter_data,
+                            "symbolSize": 8,
+                            "universalTransition": True,  # Enable universal transition
+                            "animationDurationUpdate": 1000,  # Set transition duration
+                            "itemStyle": {
+                                "color": "#3b82f6",
+                                "opacity": 0.7
+                            },
+                            "emphasis": {
+                                "itemStyle": {
+                                    "color": "#1d4ed8",
+                                    "opacity": 1,
+                                    "borderColor": "#000",
+                                    "borderWidth": 2
+                                }
+                            },
+                            "label": {
+                                "show": True,
+                                "position": "top",
+                                "formatter": "{@[1]:.2f}x",
+                                "fontSize": 10
+                            },
+                            "tooltip": {
+                                "formatter": "function(params) { const data = params.data; return `Gene: ${data[0]}<br/>Coverage: ${data[1].toFixed(2)}x<br/>Position: ${data[2].toLocaleString()}-${data[3].toLocaleString()}`; }"
+                            }
+                        }
+                    ]
+                    
+                    # Hide legend for scatter view
+                    target_boxplot.options["legend"]["show"] = False
+                    
+                    # Update chart
+                    target_boxplot.update()
+                    
+                    # Show back button
+                    target_coverage_back_button.classes("", replace="")
+                    
+                    _log_notify(f"Showing gene coverage for {chromosome}", level="info", notify=False)
+                    
+                except Exception as e:
+                    _log_notify(f"Failed to show chromosome scatter: {e}", level="error", notify=True)
+            
+            def _show_target_coverage_overview() -> None:
+                """Return to the original box plot overview"""
+                try:
+                    # Reload the original box plot data by calling _update_boxplot
+                    bed_cov = sample_dir / "bed_coverage_main.csv"
+                    if bed_cov.exists():
+                        df = pd.read_csv(bed_cov)
+                        _update_boxplot(df, panel_display_name)
+                    else:
+                        ui.notify("No coverage data available", type="warning")
+                        return
+                    
+                    # Hide back button
+                    target_coverage_back_button.classes("hidden", replace="")
+                    
+                    _log_notify("Returned to target coverage overview", level="info", notify=False)
+                    
+                except Exception as e:
+                    _log_notify(f"Failed to show overview: {e}", level="error", notify=True)
+            
+            # Define click handler function before chart creation
+            def handle_boxplot_click(params):
+                """Handle clicks on the ECharts box plot and show chromosome scatter"""
+                try:
+                    if params.series_name == 'box plot' and params.data:
+                        chromosome = params.name
+                        ui.notify(f"Showing coverage for chromosome: {chromosome}", type="info")
+                        _log_notify(f"User clicked on chromosome: {chromosome}", level="info", notify=False)
+                        _show_chromosome_scatter(chromosome)
+                except Exception as e:
+                    _log_notify(f"Error handling chart click: {e}", level="warning", notify=False)
+            
             target_boxplot = ui.echart(
                 {
                     "backgroundColor": "transparent",
                     "title": {
-                        "text": "Target Coverage",
+                        "text": f"Target Coverage ({panel_display_name})",
                         "left": "center",
                         "top": 10,
                         "textStyle": {"fontSize": 16, "color": "#000"},
@@ -243,7 +451,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             },
                         },
                     ],
-                }
+                },
+                on_point_click=handle_boxplot_click
             ).classes("w-full h-80")
         with ui.card().classes("w-full"):
             with ui.row().classes("items-center gap-3"):
@@ -307,7 +516,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
             # IGV viewer section
             with ui.card().classes("w-full"):
-                ui.label("🧬 IGV").classes("text-lg font-semibold mb-2")
+                ui.label("IGV").classes("text-lg font-semibold mb-2")
                 igv_div = ui.element("div").classes("w-full h-[600px] border")
                 igv_div._props["id"] = "igv-container"
                 igv_status = ui.label("Checking for IGV-ready BAM files...").classes(
@@ -949,9 +1158,9 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
         # IGV control buttons
         with ui.row().classes("items-center gap-2 mt-2"):
-            ui.button("🔄 Refresh IGV Check", on_click=_refresh_igv_check)
-            ui.button("🗂️ Clear Data Tracks", on_click=_clear_igv_tracks)
-            ui.button("📁 Reload BAM", on_click=_reload_bam_track)
+            ui.button("Refresh IGV Check", on_click=_refresh_igv_check)
+            ui.button("Clear Data Tracks", on_click=_clear_igv_tracks)
+            ui.button("Reload BAM", on_click=_reload_bam_track)
 
         # Add IGV library status check timer once after a delay
         ui.timer(3.0, _check_igv_library, once=True)
@@ -1070,7 +1279,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
     # SNP Analysis section (only shown in development mode)
     if is_development_mode:
         with ui.card().classes("w-full"):
-            ui.label("🧬 SNP Analysis").classes("text-lg font-semibold mb-2")
+            ui.label("SNP Analysis").classes("text-lg font-semibold mb-2")
 
             # SNP Analysis controls and status
             with ui.row().classes("w-full items-center justify-between mb-4"):
@@ -1620,7 +1829,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                     if not target_bam.exists():
                         snp_files_status.set_text(
-                            "❌ Missing target.bam - run target analysis first"
+                            " Missing target.bam - run target analysis first"
                         )
                         snp_files_status.classes(replace="text-xs text-red-500")
                         snp_analysis_button.disable()
@@ -1628,7 +1837,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                     if not targets_bed.exists():
                         snp_files_status.set_text(
-                            "❌ Missing targets_exceeding_threshold.bed - run target analysis first"
+                            " Missing targets_exceeding_threshold.bed - run target analysis first"
                         )
                         snp_files_status.classes(replace="text-xs text-red-500")
                         snp_analysis_button.disable()
@@ -1641,25 +1850,25 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                         if not bed_content:
                             snp_files_status.set_text(
-                                "⚠️ BED file is empty - no regions exceed threshold"
+                                "BED file is empty - no regions exceed threshold"
                             )
                             snp_files_status.classes(replace="text-xs text-yellow-500")
                             snp_analysis_button.disable()
                             return False
                         else:
-                            snp_files_status.set_text("✅ All required files available")
+                            snp_files_status.set_text("All required files available")
                             snp_files_status.classes(replace="text-xs text-green-500")
                             snp_analysis_button.enable()
                             return True
 
                     except Exception as e:
-                        snp_files_status.set_text(f"❌ Error reading BED file: {e}")
+                        snp_files_status.set_text(f" Error reading BED file: {e}")
                         snp_files_status.classes(replace="text-xs text-red-500")
                         snp_analysis_button.disable()
                         return False
 
                 except Exception as e:
-                    snp_files_status.set_text(f"❌ Error checking files: {e}")
+                    snp_files_status.set_text(f" Error checking files: {e}")
                     snp_files_status.classes(replace="text-xs text-red-500")
                     snp_analysis_button.disable()
                     return False
@@ -1754,18 +1963,18 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                     print(f"workflow_runner.reference: {reference_genome}")
                                     if reference_genome:
                                         print(
-                                            f"✅ SUCCESS: Using reference genome from workflow runner: {reference_genome}"
+                                            f"SUCCESS: Using reference genome from workflow runner: {reference_genome}"
                                         )
                                     else:
                                         print(
-                                            "❌ FAILED: No reference genome in workflow runner"
+                                            " FAILED: No reference genome in workflow runner"
                                         )
                                 else:
-                                    print("❌ Workflow runner has no reference attribute")
+                                    print(" Workflow runner has no reference attribute")
                             else:
-                                print("❌ Workflow runner is None")
+                                print(" Workflow runner is None")
                         else:
-                            print("❌ No workflow runner attribute found")
+                            print(" No workflow runner attribute found")
 
                         print("=== END REFERENCE GENOME DEBUGGING ===")
 
@@ -1785,7 +1994,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             )
                         else:
                             ui.notify(
-                                f"✅ Reference genome found: {os.path.basename(reference_genome)}",
+                                f"Reference genome found: {os.path.basename(reference_genome)}",
                                 type="positive",
                             )
 
@@ -1960,7 +2169,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
     # Lightweight Gene Analysis section (only shown in development mode)
     if is_development_mode:
         with ui.card().classes("w-full"):
-            ui.label("🧬 Lightweight Variant Analysis").classes(
+            ui.label("Lightweight Variant Analysis").classes(
                 "text-lg font-semibold mb-2"
             )
 
@@ -2091,8 +2300,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             ).classes("flex-1")
 
                             # Add debug info
-                            print(f"🔧 GUI: Created view button with path: {json_report}")
-                            print(f"🔧 GUI: Button object: {view_button}")
+                            print(f" GUI: Created view button with path: {json_report}")
+                            print(f" GUI: Button object: {view_button}")
 
                     # Update button state
                     lga_analysis_button.set_text("Rerun Variant Analysis")
@@ -2103,17 +2312,17 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     try:
                         import json
 
-                        print(f"🔧 GUI: Function called with path: {json_path}")
-                        print(f"🔧 GUI: Path type: {type(json_path)}")
+                        print(f" GUI: Function called with path: {json_path}")
+                        print(f" GUI: Path type: {type(json_path)}")
 
                         # Convert to Path object if it's a string
                         if isinstance(json_path, str):
                             json_path = Path(json_path)
 
-                        print(f"🔧 GUI: Attempting to load JSON from: {json_path}")
-                        print(f"🔧 GUI: File exists: {json_path.exists()}")
+                        print(f" GUI: Attempting to load JSON from: {json_path}")
+                        print(f" GUI: File exists: {json_path.exists()}")
                         print(
-                            f"🔧 GUI: File size: {json_path.stat().st_size if json_path.exists() else 'N/A'} bytes"
+                            f" GUI: File size: {json_path.stat().st_size if json_path.exists() else 'N/A'} bytes"
                         )
 
                         # Read and parse JSON
@@ -2121,7 +2330,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             data = json.load(f)
 
                         print(
-                            f"🔧 GUI: Successfully loaded JSON with {len(data.get('genes', {}))} genes"
+                            f" GUI: Successfully loaded JSON with {len(data.get('genes', {}))} genes"
                         )
 
                         # Clear previous results and display inline
@@ -2129,13 +2338,13 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                         with lga_results_container:
                             # Header
-                            ui.label("🧬 Lightweight Variant Analysis Results").classes(
+                            ui.label("Lightweight Variant Analysis Results").classes(
                                 "text-2xl font-bold mb-6"
                             )
 
                             # Metadata summary
                             with ui.card().classes("w-full mb-6"):
-                                ui.label("📊 Analysis Summary").classes(
+                                ui.label("Analysis Summary").classes(
                                     "text-xl font-semibold mb-4"
                                 )
                                 metadata = data.get("metadata", {})
@@ -2188,7 +2397,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                         )
 
                             # Gene analysis sections - linear layout, no tabs
-                            ui.label("📊 Gene Analysis Results").classes(
+                            ui.label("Gene Analysis Results").classes(
                                 "text-2xl font-bold mt-8 mb-6"
                             )
 
@@ -2206,7 +2415,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                     on_click=lambda: _hide_lga_results(),
                                 ).props("color=secondary")
 
-                        print("🔧 GUI: Results displayed inline successfully")
+                        print(" GUI: Results displayed inline successfully")
 
                     except Exception as e:
                         ui.notify(f"Error viewing results: {e}", type="error")
@@ -2219,7 +2428,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 def _hide_lga_results():
                     """Hide the inline results and restore the original simple view"""
                     try:
-                        print("🔧 GUI: Hiding results...")
+                        print(" GUI: Hiding results...")
 
                         # Clear the results container
                         lga_results_container.clear()
@@ -2253,10 +2462,10 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                     ),
                                 ).classes("flex-1")
 
-                        print("🔧 GUI: Results hidden successfully")
+                        print(" GUI: Results hidden successfully")
 
                     except Exception as e:
-                        print(f"🔧 GUI: Error hiding results: {e}")
+                        print(f" GUI: Error hiding results: {e}")
                         import traceback
 
                         traceback.print_exc()
@@ -2291,7 +2500,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                         # Create coverage distribution chart
                         with ui.card().classes("w-full mb-4"):
-                            ui.label("📈 Coverage Distribution by Gene").classes(
+                            ui.label("Coverage Distribution by Gene").classes(
                                 "text-lg font-semibold mb-2"
                             )
 
@@ -2408,7 +2617,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                         # Summary statistics
                         with ui.card().classes("w-full mb-4"):
-                            ui.label("📊 Summary Statistics").classes(
+                            ui.label("Summary Statistics").classes(
                                 "text-lg font-semibold mb-2"
                             )
 
@@ -2468,7 +2677,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                         # Gene list with quick stats
                         with ui.card().classes("w-full"):
-                            ui.label("🧬 Gene List with Coverage Status").classes(
+                            ui.label("Gene List with Coverage Status").classes(
                                 "text-lg font-semibold mb-2"
                             )
 
@@ -2550,7 +2759,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             return
 
                         ui.label(
-                            f"🔍 Found {len(high_coverage_genes)} genes with high coverage variants"
+                            f"Found {len(high_coverage_genes)} genes with high coverage variants"
                         ).classes("text-lg font-semibold mb-4")
 
                         # Display each gene with its high coverage variants
@@ -2600,7 +2809,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 ]
 
                                 if high_cov_variants:
-                                    ui.label("✅ High Coverage Variants (≥10x):").classes(
+                                    ui.label("High Coverage Variants (≥10x):").classes(
                                         "text-sm font-medium mb-2"
                                     )
 
@@ -2710,7 +2919,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             return
 
                         ui.label(
-                            f"⚠️ Found {len(low_coverage_genes)} genes with only low coverage variants"
+                            f"Found {len(low_coverage_genes)} genes with only low coverage variants"
                         ).classes("text-lg font-semibold mb-4")
 
                         # Create summary table
@@ -2797,7 +3006,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 # Gene header
                                 with ui.card().classes("w-full mb-4"):
                                     ui.label(
-                                        f"🧬 {selected_gene} - Gene Analysis Details"
+                                        f"{selected_gene} - Gene Analysis Details"
                                     ).classes("text-xl font-semibold mb-2")
 
                                     # Linear layout for gene stats
@@ -2844,7 +3053,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                                 # Variants table
                                 if variants:
-                                    ui.label("🔍 Variant Details").classes(
+                                    ui.label("Variant Details").classes(
                                         "text-lg font-semibold mb-2"
                                     )
 
@@ -3014,7 +3223,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                 if not target_bam.exists():
                     lga_files_status.set_text(
-                        "❌ Missing target.bam - run target analysis first"
+                        " Missing target.bam - run target analysis first"
                     )
                     lga_files_status.classes(replace="text-xs text-red-500")
                     lga_analysis_button.disable()
@@ -3022,7 +3231,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                 if not targets_bed.exists():
                     lga_files_status.set_text(
-                        "❌ Missing targets_exceeding_threshold.bed - run target analysis first"
+                        " Missing targets_exceeding_threshold.bed - run target analysis first"
                     )
                     lga_files_status.classes(replace="text-xs text-red-500")
                     lga_analysis_button.disable()
@@ -3035,25 +3244,25 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                     if not bed_content:
                         lga_files_status.set_text(
-                            "⚠️ BED file is empty - no regions exceed threshold"
+                            "BED file is empty - no regions exceed threshold"
                         )
                         lga_files_status.classes(replace="text-xs text-yellow-500")
                         lga_analysis_button.disable()
                         return False
                     else:
-                        lga_files_status.set_text("✅ All required files available")
+                        lga_files_status.set_text("All required files available")
                         lga_files_status.classes(replace="text-xs text-green-500")
                         lga_analysis_button.enable()
                         return True
 
                 except Exception as e:
-                    lga_files_status.set_text(f"❌ Error reading BED file: {e}")
+                    lga_files_status.set_text(f" Error reading BED file: {e}")
                     lga_files_status.classes(replace="text-xs text-red-500")
                     lga_analysis_button.disable()
                     return False
 
             except Exception as e:
-                lga_files_status.set_text(f"❌ Error checking files: {e}")
+                lga_files_status.set_text(f" Error checking files: {e}")
                 lga_files_status.classes(replace="text-xs text-red-500")
                 lga_analysis_button.disable()
                 return False
@@ -3106,12 +3315,12 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 lga_status_label.set_text("Starting lightweight variant analysis...")
                 lga_status_label.classes(replace="text-sm text-blue-600")
 
-                print("🔧 GUI: Starting lightweight variant analysis...")
+                print(" GUI: Starting lightweight variant analysis...")
 
                 # Create and submit lightweight variant analysis job
                 try:
                     # Import required modules
-                    print("🔧 GUI: Importing required modules...")
+                    print(" GUI: Importing required modules...")
                     from robin.analysis.lightweight_gene_analysis import (
                         lightweight_gene_analysis_handler,
                     )
@@ -3133,7 +3342,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         if env_reference and os.path.exists(env_reference):
                             reference_genome = env_reference
 
-                    print(f"🔧 GUI: Reference genome: {reference_genome}")
+                    print(f" GUI: Reference genome: {reference_genome}")
 
                     # Use monitored_directory as work_dir, or fall back to sample_dir if not available
                     work_dir = (
@@ -3141,7 +3350,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         if launcher.monitored_directory
                         else str(sample_dir)
                     )
-                    print(f"🔧 GUI: Work directory: {work_dir}")
+                    print(f" GUI: Work directory: {work_dir}")
 
                     metadata = {
                         "work_dir": work_dir,
@@ -3150,10 +3359,10 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         "force_regenerate": lga_force_regenerate_checkbox.value,
                     }
 
-                    print(f"🔧 GUI: Job metadata: {metadata}")
+                    print(f" GUI: Job metadata: {metadata}")
 
                     # Create workflow context
-                    print("🔧 GUI: Creating workflow context...")
+                    print(" GUI: Creating workflow context...")
                     context = WorkflowContext(
                         filepath=str(sample_dir), metadata=metadata
                     )
@@ -3167,7 +3376,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     context.add_error = lambda key, value: None  # Mock for now
 
                     # Create job
-                    print("🔧 GUI: Creating job object...")
+                    print(" GUI: Creating job object...")
                     job = Job(
                         job_id=hash(f"lightweight_gene_analysis_{sample_dir.name}")
                         % 1000000,  # Simple hash-based ID
@@ -3177,11 +3386,11 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         workflow=["fast:lightweight_gene_analysis"],
                     )
 
-                    print(f"🔧 GUI: Job created with ID: {job.job_id}")
+                    print(f" GUI: Job created with ID: {job.job_id}")
 
                     # For now, let's force direct execution to see our debug prints
                     # TODO: Re-enable workflow submission once we understand how it works
-                    print("🔧 Forcing direct execution to see debug output...")
+                    print(" Forcing direct execution to see debug output...")
 
                     # Use a shared variable to communicate between threads
                     lga_status = {"status": "running", "message": "", "error": None}
@@ -3189,14 +3398,14 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     def run_lga_analysis_direct():
                         try:
                             print(
-                                "🚀 Starting lightweight gene analysis in background thread..."
+                                "Starting lightweight gene analysis in background thread..."
                             )
                             # Use the work_dir variable we calculated earlier
                             lightweight_gene_analysis_handler(job, work_dir=work_dir)
 
                             # Update UI on completion using the main thread
                             print(
-                                "✅ Lightweight variant analysis completed successfully!"
+                                "Lightweight variant analysis completed successfully!"
                             )
                             lga_status["status"] = "completed"
                             lga_status["message"] = (
@@ -3204,7 +3413,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             )
 
                         except Exception as e:
-                            print(f"❌ Error in background thread: {e}")
+                            print(f" Error in background thread: {e}")
                             lga_status["status"] = "error"
                             lga_status["error"] = str(e)
 
@@ -3228,7 +3437,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 lga_analysis_button.set_text("Rerun Variant Analysis")
                                 lga_analysis_button.props("color=secondary")
                             except Exception as e:
-                                print(f"❌ Error updating UI: {e}")
+                                print(f" Error updating UI: {e}")
                             return False  # Stop checking
                         elif lga_status["status"] == "error":
                             try:
@@ -3238,7 +3447,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 lga_status_label.classes(replace="text-sm text-red-600")
                                 lga_analysis_button.enable()
                             except Exception as e:
-                                print(f"❌ Error updating UI: {e}")
+                                print(f" Error updating UI: {e}")
                             return False  # Stop checking
                         return True  # Keep checking
 
@@ -3388,7 +3597,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 notify=False,
             )
 
-    def _update_boxplot(bed_df: pd.DataFrame) -> None:
+    def _update_boxplot(bed_df: pd.DataFrame, panel_display_name: str = "Target Coverage") -> None:
         try:
             df = bed_df.copy()
             if "coverage" not in df.columns:
@@ -3437,6 +3646,64 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             target_boxplot.options["dataset"][2]["source"] = out_rows
             target_boxplot.options["dataset"][3]["source"] = glob_rows
             target_boxplot.options["xAxis"]["data"] = chroms
+            
+            # Restore original series configuration
+            target_boxplot.options["series"] = [
+                {
+                    "name": "box plot",
+                    "type": "boxplot",
+                    "id": "coverage_data",  # Add ID for universal transition
+                    "datasetId": "raw",
+                    "universalTransition": True,  # Enable universal transition
+                    "animationDurationUpdate": 1000,  # Set transition duration
+                    "encode": {
+                        "x": "chrom",
+                        "y": ["min", "Q1", "median", "Q3", "max"],
+                        "itemName": ["chrom"],
+                        "tooltip": ["min", "Q1", "median", "Q3", "max"],
+                    },
+                },
+                {
+                    "name": "outliers",
+                    "type": "scatter",
+                    "datasetId": "outliers",
+                    "symbolSize": 6,
+                    "label": {
+                        "show": True,
+                        "position": "right",
+                        "formatter": "{@name}",
+                    },
+                    "encode": {
+                        "x": "chrom",
+                        "y": "coverage",
+                        "label": ["name"],
+                        "tooltip": ["name", "coverage"],
+                    },
+                },
+                {
+                    "name": "global outliers",
+                    "type": "scatter",
+                    "datasetId": "globaloutliers",
+                    "symbolSize": 6,
+                    "label": {
+                        "show": True,
+                        "position": "right",
+                        "formatter": "{@name}",
+                    },
+                    "encode": {
+                        "x": "chrom",
+                        "y": "coverage",
+                        "label": ["name"],
+                        "tooltip": ["name", "coverage"],
+                    },
+                },
+            ]
+            
+            # Restore original title and legend
+            target_boxplot.options["title"]["text"] = f"Target Coverage ({panel_display_name})"
+            target_boxplot.options["title"]["subtext"] = ""
+            target_boxplot.options["legend"]["show"] = True
+            
             target_boxplot.update()
         except Exception as e:
             _log_notify(
@@ -3470,15 +3737,35 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 f"Target table update failed: {e}", level="warning", notify=False
             )
 
-    def _refresh_coverage() -> None:
+    async def _refresh_coverage_async() -> None:
+        """Refresh coverage data asynchronously."""
         try:
-            if not sample_dir or not sample_dir.exists():
+            # Check directory existence in background thread
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(lambda: sample_dir and sample_dir.exists())
+                dir_exists = await asyncio.wrap_future(future)
+            
+            if not dir_exists:
                 _log_notify(
                     f"Sample directory not found: {sample_dir}",
                     level="warning",
                     notify=True,
                 )
                 return
+            
+            # Run all file operations in background thread
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(_refresh_coverage_sync, sample_dir, launcher)
+                await asyncio.wrap_future(future)
+                
+        except Exception as e:
+            _log_notify(
+                f"Unexpected coverage refresh error: {e}", level="error", notify=True
+            )
+
+    def _refresh_coverage_sync(sample_dir: Path, launcher: Any) -> None:
+        """Synchronous coverage refresh - runs in background thread."""
+        try:
             key = str(sample_dir)
             state = launcher._coverage_state.get(key, {})
             cov_main = sample_dir / "coverage_main.csv"
@@ -3518,7 +3805,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     try:
                         bed_df = pd.read_csv(bed_cov)
                         state["bed_df"] = bed_df
-                        _update_boxplot(bed_df)
+                        panel_display_name = state.get("panel_display_name", "Target Coverage")
+                        _update_boxplot(bed_df, panel_display_name)
                         if state.get("cov_df") is not None:
                             _update_target_cov(state["cov_df"], bed_df)
                         state["bed_cov_mtime"] = m  # only set on success
@@ -3760,5 +4048,5 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             )
 
     # Trigger an immediate refresh on page load, then continue with periodic refreshes
-    ui.timer(0.5, _refresh_coverage, once=True)
-    ui.timer(30.0, _refresh_coverage, active=True)
+    ui.timer(0.5, lambda: ui.timer(0.1, _refresh_coverage_async, once=True), once=True)
+    ui.timer(30.0, lambda: ui.timer(0.1, _refresh_coverage_async, once=True), active=True)

@@ -1,11 +1,11 @@
 """
-Centralized configuration for classification confidence thresholds.
+Centralized configuration for classification confidence thresholds and CNV analysis rules.
 
 This module provides a single source of truth for confidence thresholds
-used across the robin application (GUI, reporting, etc.).
+and CNV classification rules used across the robin application (GUI, reporting, etc.).
 """
 
-from typing import Dict
+from typing import Dict, Tuple
 
 # Confidence thresholds for different classifiers
 CLASSIFIER_CONFIDENCE_THRESHOLDS: Dict[str, Dict[str, float]] = {
@@ -87,16 +87,156 @@ def get_confidence_status(classifier: str, confidence: float) -> tuple[str, str]
     else:
         return "Low", "#DC2626"  # Red
 
-def get_classifier_thresholds(classifier: str) -> Dict[str, float]:
+# CNV Analysis Configuration
+CNV_THRESHOLDS = {
+    "autosomes": {
+        "gain": 0.4,
+        "loss": -0.4,
+    },
+    "chrX": {
+        "male": {
+            "gain": 0.3,
+            "loss": -0.3,
+        },
+        "female": {
+            "gain": 0.75,
+            "loss": -0.75,
+        }
+    },
+    "chrY": {
+        "male": {
+            "gain": 0.5,
+            "loss": -0.5,
+        },
+        "female": {
+            "gain": 0.2,  # Fixed: positive threshold for gains
+            "loss": -1.0,
+        }
+    }
+}
+
+# CNV Event Detection Rules
+CNV_EVENT_RULES = {
+    "whole_chromosome": {
+        "min_proportion_affected": 0.7,  # 70% of bins must support the event
+        "min_arm_proportion": 0.4,  # Each arm must show at least 40% effect
+        "single_arm_multiplier": 1.5,  # For single-arm chromosomes, use 1.5x threshold
+    },
+    "arm_specific": {
+        "min_proportion_affected": 0.4,  # 40% of arm must be affected (reduced from 70%)
+    },
+    "resolution": {
+        "max_bin_width": 10_000_000,  # 10Mb - resolution too low for accurate CNV calling
+    }
+}
+
+def get_cnv_thresholds(chromosome: str, sex_estimate: str) -> Tuple[float, float]:
     """
-    Get the confidence thresholds for a specific classifier.
+    Get CNV gain/loss thresholds for a specific chromosome and sex.
     
     Args:
-        classifier: Name of the classifier
+        chromosome: Chromosome name (e.g., 'chr1', 'chrX', 'chrY')
+        sex_estimate: Sex estimate ('XY', 'XX', 'Male', 'Female')
     
     Returns:
-        Dictionary with 'high', 'medium', 'low' threshold values
+        Tuple of (gain_threshold, loss_threshold)
     """
-    return CLASSIFIER_CONFIDENCE_THRESHOLDS.get(
-        classifier, DEFAULT_CONFIDENCE_THRESHOLDS
+    # Normalize sex estimate
+    sex_key = "male" if sex_estimate.upper() in ("XY", "MALE") else "female"
+    
+    if chromosome == "chrX":
+        thresholds = CNV_THRESHOLDS["chrX"][sex_key]
+    elif chromosome == "chrY":
+        thresholds = CNV_THRESHOLDS["chrY"][sex_key]
+    else:
+        # Autosomes
+        thresholds = CNV_THRESHOLDS["autosomes"]
+    
+    return thresholds["gain"], thresholds["loss"]
+
+def is_whole_chromosome_event(
+    p_arm_mean: float, 
+    q_arm_mean: float, 
+    p_arm_proportion: float, 
+    q_arm_proportion: float,
+    gain_threshold: float,
+    loss_threshold: float
+) -> Tuple[bool, str]:
+    """
+    Determine if a chromosome shows a whole chromosome event.
+    
+    Args:
+        p_arm_mean: Mean CNV value for p-arm
+        q_arm_mean: Mean CNV value for q-arm  
+        p_arm_proportion: Proportion of p-arm affected
+        q_arm_proportion: Proportion of q-arm affected
+        gain_threshold: Gain threshold for this chromosome
+        loss_threshold: Loss threshold for this chromosome
+    
+    Returns:
+        Tuple of (is_whole_chr_event, event_type) where event_type is 'GAIN', 'LOSS', or 'NORMAL'
+    """
+    rules = CNV_EVENT_RULES["whole_chromosome"]
+    
+    # Check for gains - both arms must show gains, but with more nuanced proportion requirements
+    both_arms_gained = (
+        p_arm_mean > gain_threshold
+        and q_arm_mean > gain_threshold
+        and (p_arm_proportion > rules["min_proportion_affected"] or q_arm_proportion > rules["min_proportion_affected"])  # At least one arm > 70%
+        and (p_arm_proportion > rules["min_arm_proportion"] and q_arm_proportion > rules["min_arm_proportion"])  # Both arms > 40%
     )
+    
+    # Check for losses - both arms must show losses, but with more nuanced proportion requirements
+    both_arms_lost = (
+        p_arm_mean < loss_threshold
+        and q_arm_mean < loss_threshold
+        and (p_arm_proportion > rules["min_proportion_affected"] or q_arm_proportion > rules["min_proportion_affected"])  # At least one arm > 70%
+        and (p_arm_proportion > rules["min_arm_proportion"] and q_arm_proportion > rules["min_arm_proportion"])  # Both arms > 40%
+    )
+    
+    if both_arms_gained:
+        return True, "GAIN"
+    elif both_arms_lost:
+        return True, "LOSS"
+    else:
+        return False, "NORMAL"
+
+def is_arm_event(
+    arm_mean: float,
+    arm_proportion: float,
+    gain_threshold: float,
+    loss_threshold: float
+) -> Tuple[bool, str]:
+    """
+    Determine if a chromosome arm shows a significant event.
+    
+    Args:
+        arm_mean: Mean CNV value for the arm
+        arm_proportion: Proportion of arm affected
+        gain_threshold: Gain threshold for this chromosome
+        loss_threshold: Loss threshold for this chromosome
+    
+    Returns:
+        Tuple of (is_arm_event, event_type) where event_type is 'GAIN', 'LOSS', or 'NORMAL'
+    """
+    rules = CNV_EVENT_RULES["arm_specific"]
+    
+    if arm_proportion > rules["min_proportion_affected"]:
+        if arm_mean > gain_threshold:
+            return True, "GAIN"
+        elif arm_mean < loss_threshold:
+            return True, "LOSS"
+    
+    return False, "NORMAL"
+
+def is_resolution_sufficient(bin_width: int) -> bool:
+    """
+    Check if the resolution is sufficient for CNV calling.
+    
+    Args:
+        bin_width: Bin width in base pairs
+    
+    Returns:
+        True if resolution is sufficient for CNV calling
+    """
+    return bin_width <= CNV_EVENT_RULES["resolution"]["max_bin_width"]
