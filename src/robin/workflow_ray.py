@@ -575,6 +575,8 @@ class Coordinator:
         self.waiting_by_type_global: Dict[str, List[Job]] = {}
         # per-sample tracking for GUI
         self.samples_by_id: Dict[str, Dict[str, Any]] = {}
+        # shutdown flag for graceful termination
+        self._shutdown_requested = False
         # defer setup/registration to async setup()
 
         # Preset controls how processing actors are created and their concurrency
@@ -763,6 +765,10 @@ class Coordinator:
 
     # ----- submission & lifecycle -----
     async def submit_jobs(self, jobs: List[Job]) -> None:
+        # Check if shutdown has been requested
+        if self._shutdown_requested:
+            return
+        
         for job in jobs:
             sample_id = job.context.get_sample_id()
             if job.job_type in DEDUP_TYPES:
@@ -1551,6 +1557,50 @@ class Coordinator:
             "samples": samples_payload,
         }
 
+    async def shutdown(self) -> bool:
+        """
+        Gracefully shutdown the coordinator and all its actors.
+        
+        Returns:
+            True if shutdown was successful
+        """
+        try:
+            # Stop accepting new jobs
+            self._shutdown_requested = True
+            
+            # Cancel all inflight tasks
+            if hasattr(self, '_inflight') and self._inflight:
+                for ref in list(self._inflight.keys()):
+                    try:
+                        ray.cancel(ref)
+                    except Exception:
+                        pass
+            
+            # Shutdown all pool actors gracefully first
+            if hasattr(self, 'queues') and self.queues:
+                for queue_name, actors in self.queues.items():
+                    for actor in actors:
+                        try:
+                            await actor.shutdown.remote()
+                        except Exception:
+                            pass
+                        try:
+                            ray.kill(actor)
+                        except Exception:
+                            pass
+            
+            # Kill all processor actors
+            if hasattr(self, 'processors') and self.processors:
+                for processor in self.processors.values():
+                    try:
+                        ray.kill(processor)
+                    except Exception:
+                        pass
+            
+            return True
+        except Exception:
+            return False
+
 
 @ray.remote
 class Pool:
@@ -1564,6 +1614,7 @@ class Pool:
         self._coordinator_name: Optional[str] = None
         self._inflight: Set[ray.ObjectRef] = set()
         self._running_count: int = 0
+        self._shutdown_requested: bool = False
         
         # Initialize memory manager for long-running pool actor
         self.memory_manager = None
@@ -1620,6 +1671,10 @@ class Pool:
         self.handlers[job_type] = (remote_func, resource_options)
 
     async def enqueue(self, job: Job):
+        # Check if shutdown has been requested
+        if self._shutdown_requested:
+            return
+        
         # tell coordinator that we're starting this job (updates dedup maps)
         # We cannot call back into Coordinator directly from here without a reference;
         # pass coordinator handle via callback's bound actor method (Ray passes actor ref implicitly).
@@ -1678,6 +1733,29 @@ class Pool:
                     pass
 
         asyncio.create_task(_wait(ref))
+
+    async def shutdown(self) -> bool:
+        """
+        Gracefully shutdown the pool actor.
+        
+        Returns:
+            True if shutdown was successful
+        """
+        try:
+            # Stop accepting new jobs
+            self._shutdown_requested = True
+            
+            # Cancel all inflight tasks
+            if self._inflight:
+                for ref in list(self._inflight):
+                    try:
+                        ray.cancel(ref)
+                    except Exception:
+                        pass
+            
+            return True
+        except Exception:
+            return False
 
     # Adapter so callers using TypeProcessor-style .process() keep working
     async def process(self, job: Job):
@@ -2355,6 +2433,27 @@ async def run(
     try:
         if tasks:
             await asyncio.gather(*tasks)
+    except KeyboardInterrupt:
+        print("Stopping workflow...")
+        # Cancel all running tasks gracefully
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        # Signal coordinator to stop accepting new jobs
+        try:
+            await coord.shutdown.remote()
+        except Exception:
+            pass
+        # Kill all Ray actors gracefully
+        try:
+            ray.kill(coord)
+        except Exception:
+            pass
+        print("Workflow stopped gracefully")
     finally:
         if watcher is not None:
             try:
@@ -2364,6 +2463,14 @@ async def run(
         if observer is not None:
             observer.stop()
             observer.join()
+        
+        # Final cleanup: ensure Ray is properly shut down
+        try:
+            import ray
+            if ray.is_initialized():
+                ray.shutdown()
+        except Exception:
+            pass
 
 
 def parse_args():

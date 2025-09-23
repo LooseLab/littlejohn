@@ -188,7 +188,7 @@ class FileWatcher:
             print(f"Ignore patterns: {self.ignore_patterns}")
 
         existing_files = []
-
+        
         # Find all existing files that match patterns
         for pattern in self.patterns:
             if pattern == "*":

@@ -1733,6 +1733,20 @@ def workflow(
                 )
             except KeyboardInterrupt:
                 print("Stopping workflow...")
+                # Attempt to shutdown Ray gracefully
+                try:
+                    import ray
+                    if ray.is_initialized():
+                        # Get the coordinator and shutdown gracefully
+                        try:
+                            coord = ray.get_actor("robin_coordinator")
+                            ray.kill(coord)
+                        except Exception:
+                            pass
+                        # Shutdown Ray
+                        ray.shutdown()
+                except Exception:
+                    pass
                 # Attempt to shutdown GUI server if running
                 try:
                     from robin.gui.app import get_gui_launcher as _get  # type: ignore
