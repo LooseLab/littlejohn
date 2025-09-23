@@ -85,7 +85,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 ],
                 "dataZoom": [
                     {"type": "slider", "xAxisIndex": [0]},
-                    {"type": "slider", "yAxisIndex": [0, 1], "right": 20},
+                    {"type": "slider", "yAxisIndex": [0, 1], "right": 20, "startValue": 0, "endValue": 6},
                 ],
                 "series": [
                     {"type": "scatter", "name": "CNV", "symbolSize": 3, "data": []},
@@ -136,7 +136,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 ],
                 "dataZoom": [
                     {"type": "slider", "xAxisIndex": [0]},
-                    {"type": "slider", "yAxisIndex": [0, 1], "right": 20},
+                    {"type": "slider", "yAxisIndex": [0, 1], "right": 20, "startValue": -4, "endValue": 4},
                 ],
                 "series": [
                     {"type": "scatter", "name": "CNV Δ", "symbolSize": 3, "data": []},
