@@ -1737,34 +1737,48 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                     if hasattr(arr, "dtype") and "name" in arr.dtype.names:
                         binw = state.get("cnv_dict", {}).get("bin_width", 1000000)
                         state["bp_array"] = arr
-                        dens: Dict[int, int] = {}
-                        for r in arr:
-                            end = int(r["end_pos"])
-                            bin_idx = end // binw
-                            dens[bin_idx] = dens.get(bin_idx, 0) + 1
-                        dens_pts = [[k * binw, v] for k, v in sorted(dens.items())]
-                        # Only add density overlay in single-chromosome view; preserve existing diff series
+                        # Filter breakpoints by selected chromosome
                         selected = launcher._cnv_state.setdefault(
                             str(sample_dir), {}
                         ).get("selected_chrom", "All")
+                        filtered_breakpoints = 0
+                        breakpoint_lines = []
+                        for r in arr:
+                            if selected == "All" or r["name"] == selected:
+                                # Use the midpoint of the breakpoint as the line position
+                                start_pos = int(r["start"])
+                                end_pos = int(r["end"])
+                                midpoint = (start_pos + end_pos) // 2
+                                breakpoint_lines.append(midpoint)
+                                filtered_breakpoints += 1
+                        # Only add density overlay in single-chromosome view; preserve existing diff series
                         current_series = [
                             s
                             for s in cnv_diff.options["series"]
-                            if s.get("name") != "Breakpoint Density"
+                            if not s.get("name", "").startswith("Breakpoint")
                         ]
                         if selected != "All" and state.get("show_bp", True):
-                            current_series.append(
-                                {
-                                    "type": "scatter",
-                                    "name": "Breakpoint Density",
-                                    "yAxisIndex": 1,
-                                    "symbolSize": 8,
-                                    "data": dens_pts,
+                            # Add breakpoint lines as markLine to the main series
+                            if current_series:
+                                main_series = current_series[0]  # Use the first series as the main one
+                                markLine_data = []
+                                for bp_pos in breakpoint_lines:
+                                    markLine_data.append({
+                                        "xAxis": bp_pos,
+                                        "lineStyle": {"type": "dashed", "color": "#ff6b6b", "width": 3}
+                                    })
+                                main_series["markLine"] = {
+                                    "data": markLine_data,
+                                    "symbol": "none",
+                                    "lineStyle": {"type": "dashed", "color": "#ff6b6b", "width": 3}
                                 }
-                            )
+                        else:
+                            # Clear markLine when breakpoints are hidden
+                            if current_series:
+                                current_series[0].pop("markLine", None)
                         cnv_diff.options["series"] = current_series
                         cnv_diff.update()
-                except Exception:
+                except Exception as e:
                     pass
             launcher._cnv_state[key] = state
         except Exception:
@@ -1819,7 +1833,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
 
         def _on_bp(ev):
             st = launcher._cnv_state.setdefault(str(sample_dir), {})
-            st["show_bp"] = _val(ev, "show") == "show"
+            show_bp = _val(ev, "show") == "show"
+            st["show_bp"] = show_bp
             # Trigger immediate refresh to update all UI elements
             ui.timer(0.1, _refresh_cnv_async, once=True)
 
