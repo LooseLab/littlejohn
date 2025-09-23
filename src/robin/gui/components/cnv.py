@@ -908,6 +908,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 color_mode = "value"
             else:
                 color_mode = "chromosome"
+            
             cnv_abs.options["yAxis"][0]["type"] = "log" if use_log else "value"
             cnv_abs.options["yAxis"][0]["logBase"] = 10 if use_log else None
             # ensure xAxis sane when switching modes
@@ -1517,19 +1518,11 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
     async def _refresh_cnv_async() -> None:
         """Refresh CNV data asynchronously."""
         try:
-            # Check directory existence in background thread
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(lambda: sample_dir and sample_dir.exists())
-                dir_exists = await asyncio.wrap_future(future)
-            
+            dir_exists = sample_dir and sample_dir.exists()
             if not dir_exists:
                 return
             
-            # Run all file operations in background thread
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(_refresh_cnv_sync, sample_dir, launcher)
-                await asyncio.wrap_future(future)
-                
+            _refresh_cnv_sync(sample_dir, launcher)
         except Exception as e:
             logging.exception(f"[CNV] Async refresh failed: {e}")
 
@@ -1565,7 +1558,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                         state["show_bp"] = desired
                         ui_changed = True
                 ui_color = getattr(cnv_color, "value", None)
-                if ui_color and ui_color != state.get("color_mode"):
+                current_color_mode = state.get("color_mode", "chromosome")
+                if ui_color and ui_color != current_color_mode:
                     state["color_mode"] = ui_color
                     ui_changed = True
             except Exception:
@@ -1650,10 +1644,13 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                         state["_chrom_opts_set"] = True
                     except Exception:
                         pass
-                # Only re-render when data or UI state changed, or on first render
-                if changed or ui_changed or not state.get("_rendered_once"):
+                # Only re-render when data or UI state changed, or on first render, or forced color refresh
+                force_color_refresh = state.get("_force_color_refresh", False)
+                if changed or ui_changed or not state.get("_rendered_once") or force_color_refresh:
                     _render_cnv_from_state(state)
                     state["_rendered_once"] = True
+                    if force_color_refresh:
+                        state.pop("_force_color_refresh", None)  # Clear the flag after use
                 
                 # Update CNV events analysis
                 _update_cnv_events_analysis(state)
@@ -1701,6 +1698,12 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
     try:
 
         def _val(ev, default=None):
+            # Handle toggle events which have args like [index, {'value': X, 'label': 'Y'}]
+            if hasattr(ev, "args") and ev.args and isinstance(ev.args, list) and len(ev.args) >= 2:
+                if isinstance(ev.args[1], dict):
+                    # Extract the label from the toggle event structure
+                    return ev.args[1].get("label", default)
+            # Fallback to standard value extraction
             return (
                 getattr(ev, "value", None)
                 if hasattr(ev, "value")
@@ -1748,7 +1751,9 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 st["color_mode"] = "value"
             else:
                 st["color_mode"] = "chromosome"
-            logging.debug(f"CNV color mode -> {st['color_mode']} (raw={val})")
+            # Force a refresh by setting a flag that bypasses the state sync logic
+            st["_force_color_refresh"] = True
+            
             # Trigger immediate refresh to update all UI elements
             ui.timer(0.1, _refresh_cnv_async, once=True)
 
