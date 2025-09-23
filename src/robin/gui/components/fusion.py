@@ -981,16 +981,19 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             if not dir_exists:
                 return
             
-            # Run all file operations in background thread
+            # Run file operations in background thread, then update UI on main thread
             with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(refresh_sync, sample_dir, state)
-                await asyncio.wrap_future(future)
+                future = executor.submit(_load_fusion_data, sample_dir)
+                fusion_data = await asyncio.wrap_future(future)
+                
+            # Update UI on main thread using timer
+            ui.timer(0.1, lambda: _update_fusion_ui(fusion_data, state), once=True)
                 
         except Exception as e:
             logging.exception(f"[Fusion] Async refresh failed: {e}")
 
-    def refresh_sync(sample_dir: Path, state: Dict[str, Any]) -> None:
-        """Synchronous fusion refresh - runs in background thread."""
+    def _load_fusion_data(sample_dir: Path) -> Dict[str, Any]:
+        """Load fusion data from files - runs in background thread."""
         try:
             # Load target panel processed
             target_file = sample_dir / "fusion_candidates_master_processed.csv"
@@ -1006,9 +1009,43 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 logging.info(f"[Fusion] Genome-wide candidate count: {g.get('candidate_count', 0)}")
                 logging.info(f"[Fusion] Genome-wide gene groups: {len(g.get('gene_groups', []))}")
 
-            # Update target panel UI
+            # Get file modification times
             target_mtime = target_file.stat().st_mtime if target_file.exists() else None
+            genome_mtime = genome_file.stat().st_mtime if genome_file.exists() else None
+            
+            # Create data hashes
             target_data_hash = _create_data_hash(t) if t is not None else None
+            genome_data_hash = _create_data_hash(g) if g is not None else None
+            
+            return {
+                "target": {
+                    "data": t,
+                    "mtime": target_mtime,
+                    "data_hash": target_data_hash
+                },
+                "genome": {
+                    "data": g,
+                    "mtime": genome_mtime,
+                    "data_hash": genome_data_hash
+                }
+            }
+        except Exception as e:
+            logging.exception(f"[Fusion] Failed to load fusion data: {e}")
+            return {"target": {"data": None, "mtime": None, "data_hash": None}, 
+                   "genome": {"data": None, "mtime": None, "data_hash": None}}
+
+    def _update_fusion_ui(fusion_data: Dict[str, Any], state: Dict[str, Any]) -> None:
+        """Update fusion UI elements - runs on main UI thread."""
+        try:
+            target_data = fusion_data.get("target", {})
+            genome_data = fusion_data.get("genome", {})
+            
+            t = target_data.get("data")
+            g = genome_data.get("data")
+            
+            # Update target panel UI
+            target_mtime = target_data.get("mtime")
+            target_data_hash = target_data.get("data_hash")
             
             # Always update summary and table when file changes
             if t is not None and target_mtime != state["target"].get("mtime"):
@@ -1098,8 +1135,8 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                                 )
 
             # Update genome-wide UI
-            genome_mtime = genome_file.stat().st_mtime if genome_file.exists() else None
-            genome_data_hash = _create_data_hash(g) if g is not None else None
+            genome_mtime = genome_data.get("mtime")
+            genome_data_hash = genome_data.get("data_hash")
             logging.info(f"[Fusion] Genome-wide update check: g={g is not None}, mtime_changed={genome_mtime != state['genome'].get('mtime')}")
             
             # Always update summary and table when file changes

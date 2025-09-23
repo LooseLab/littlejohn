@@ -2305,11 +2305,11 @@ async def run(
                             priority=1,
                         )
 
-                        await asyncio.sleep(1.0)
+                        await asyncio.sleep(15.0)
                     except asyncio.CancelledError:
                         break
                     except Exception:
-                        await asyncio.sleep(1.0)
+                        await asyncio.sleep(15.0)
 
             gui_publish_task = asyncio.create_task(_publish_gui())
             print("GUI monitoring started - workflow status will be updated in real-time")
