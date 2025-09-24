@@ -85,7 +85,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 ],
                 "dataZoom": [
                     {"type": "slider", "xAxisIndex": [0]},
-                    {"type": "slider", "yAxisIndex": [0, 1], "right": 20},
+                    {"type": "slider", "yAxisIndex": [0, 1], "right": 20, "startValue": 0, "endValue": 6},
                 ],
                 "series": [
                     {"type": "scatter", "name": "CNV", "symbolSize": 3, "data": []},
@@ -136,7 +136,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 ],
                 "dataZoom": [
                     {"type": "slider", "xAxisIndex": [0]},
-                    {"type": "slider", "yAxisIndex": [0, 1], "right": 20},
+                    {"type": "slider", "yAxisIndex": [0, 1], "right": 20, "startValue": -4, "endValue": 4},
                 ],
                 "series": [
                     {"type": "scatter", "name": "CNV Δ", "symbolSize": 3, "data": []},
@@ -908,6 +908,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 color_mode = "value"
             else:
                 color_mode = "chromosome"
+            
             cnv_abs.options["yAxis"][0]["type"] = "log" if use_log else "value"
             cnv_abs.options["yAxis"][0]["logBase"] = 10 if use_log else None
             # ensure xAxis sane when switching modes
@@ -1320,8 +1321,9 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                 gene_opts[str(gr["gene"])] = str(gr["gene"])
                             try:
                                 cnv_gene_select.set_options(gene_opts)
-                            except Exception:
+                            except Exception as e:
                                 pass
+                            
                             # annotate genes on main series
                             if series_abs:
                                 main = series_abs[0]
@@ -1337,7 +1339,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                                     "position": "insideTop",
                                                     "color": "#000",
                                                     "fontSize": 11,
-                                                },
+                                                }
                                             },
                                             {"xAxis": float(gr["end_pos"])},
                                         ]
@@ -1348,28 +1350,10 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                 ) + mark
                                 # ensure series_abs[0] updated
                                 series_abs[0] = main
-                            # zoom to selected gene if any
-                            sel_gene = launcher._cnv_state.setdefault(
-                                str(sample_dir), {}
-                            ).get("selected_gene", "All")
-                            if sel_gene and sel_gene != "All":
-                                row = gchr[gchr["gene"] == sel_gene]
-                                if not row.empty:
-                                    s_bp = int(row.iloc[0]["start_pos"])
-                                    e_bp = int(row.iloc[0]["end_pos"])
-                                    pad = int(0.1 * (e_bp - s_bp + 1))
-                                    for chart in (cnv_abs, cnv_diff):
-                                        try:
-                                            chart.options["dataZoom"][0].update(
-                                                {
-                                                    "startValue": max(0, s_bp - pad),
-                                                    "endValue": e_bp + pad,
-                                                }
-                                            )
-                                        except Exception:
-                                            pass
-                        except Exception:
+                            
+                        except Exception as e:
                             pass
+                        
                         # Breakpoint candidates as dashed vertical lines
                         try:
                             idx_cyto_abs = next(
@@ -1411,6 +1395,50 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 pass
             # Adaptive thinning based on current zoom and cap total points
             _thin_chart_series(cnv_abs, MAX_POINTS_PER_CHART)
+            
+            # Apply gene zoom before updating chart
+            try:
+                sel_gene = launcher._cnv_state.setdefault(
+                    str(sample_dir), {}
+                ).get("selected_gene", "All")
+                
+                if sel_gene and sel_gene != "All":
+                    # Load gene data for zoom if not already loaded
+                    gene_df = _load_gene_bed(sample_dir)
+                    gchr = gene_df[gene_df["chrom"] == selected]
+                    
+                    row = gchr[gchr["gene"] == sel_gene]
+                    if not row.empty:
+                        s_bp = int(row.iloc[0]["start_pos"])
+                        e_bp = int(row.iloc[0]["end_pos"])
+                        # Use 10x bin width for padding to ensure enough data points are visible
+                        pad = 10 * binw
+                        zoom_start = max(0, s_bp - pad)
+                        zoom_end = e_bp + pad
+                        try:
+                            cnv_abs.options["dataZoom"][0].update(
+                                {
+                                    "startValue": zoom_start,
+                                    "endValue": zoom_end,
+                                    "start": None,  # Remove percentage-based zoom
+                                    "end": None,    # Remove percentage-based zoom
+                                }
+                            )
+                        except Exception as e:
+                            pass
+                else:
+                    # Reset zoom when "All" is selected
+                    try:
+                        if isinstance(cnv_abs.options.get("dataZoom"), list) and cnv_abs.options["dataZoom"]:
+                            dz = cnv_abs.options["dataZoom"][0]
+                            dz.pop("startValue", None)
+                            dz.pop("endValue", None)
+                            dz.update({"start": 0, "end": 100})
+                    except Exception as e:
+                        pass
+            except Exception as e:
+                pass
+            
             cnv_abs.update()
             # Difference plot
             if cnv3_map:
@@ -1457,6 +1485,49 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                     keep = []
                 cnv_diff.options["series"] = series_diff + keep
                 _thin_chart_series(cnv_diff, MAX_POINTS_PER_CHART)
+                
+                # Apply gene zoom to difference chart before updating
+                try:
+                    sel_gene = launcher._cnv_state.setdefault(
+                        str(sample_dir), {}
+                    ).get("selected_gene", "All")
+                    
+                    if sel_gene and sel_gene != "All":
+                        gene_df = _load_gene_bed(sample_dir)
+                        gchr = gene_df[gene_df["chrom"] == selected]
+                        
+                        row = gchr[gchr["gene"] == sel_gene]
+                        if not row.empty:
+                            s_bp = int(row.iloc[0]["start_pos"])
+                            e_bp = int(row.iloc[0]["end_pos"])
+                            # Use 10x bin width for padding to ensure enough data points are visible
+                            pad = 10 * binw
+                            zoom_start = max(0, s_bp - pad)
+                            zoom_end = e_bp + pad
+                            try:
+                                cnv_diff.options["dataZoom"][0].update(
+                                    {
+                                        "startValue": zoom_start,
+                                        "endValue": zoom_end,
+                                        "start": None,  # Remove percentage-based zoom
+                                        "end": None,    # Remove percentage-based zoom
+                                    }
+                                )
+                            except Exception as e:
+                                pass
+                    else:
+                        # Reset zoom when "All" is selected
+                        try:
+                            if isinstance(cnv_diff.options.get("dataZoom"), list) and cnv_diff.options["dataZoom"]:
+                                dz = cnv_diff.options["dataZoom"][0]
+                                dz.pop("startValue", None)
+                                dz.pop("endValue", None)
+                                dz.update({"start": 0, "end": 100})
+                        except Exception as e:
+                            pass
+                except Exception as e:
+                    pass
+                
                 cnv_diff.update()
 
             # Cytoband CNV table update (whole-genome table with per-chromosome subsetting)
@@ -1517,19 +1588,11 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
     async def _refresh_cnv_async() -> None:
         """Refresh CNV data asynchronously."""
         try:
-            # Check directory existence in background thread
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(lambda: sample_dir and sample_dir.exists())
-                dir_exists = await asyncio.wrap_future(future)
-            
+            dir_exists = sample_dir and sample_dir.exists()
             if not dir_exists:
                 return
             
-            # Run all file operations in background thread
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(_refresh_cnv_sync, sample_dir, launcher)
-                await asyncio.wrap_future(future)
-                
+            _refresh_cnv_sync(sample_dir, launcher)
         except Exception as e:
             logging.exception(f"[CNV] Async refresh failed: {e}")
 
@@ -1565,7 +1628,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                         state["show_bp"] = desired
                         ui_changed = True
                 ui_color = getattr(cnv_color, "value", None)
-                if ui_color and ui_color != state.get("color_mode"):
+                current_color_mode = state.get("color_mode", "chromosome")
+                if ui_color and ui_color != current_color_mode:
                     state["color_mode"] = ui_color
                     ui_changed = True
             except Exception:
@@ -1650,10 +1714,19 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                         state["_chrom_opts_set"] = True
                     except Exception:
                         pass
-                # Only re-render when data or UI state changed, or on first render
-                if changed or ui_changed or not state.get("_rendered_once"):
+                # Only re-render when data or UI state changed, or on first render, or forced color refresh
+                force_color_refresh = state.get("_force_color_refresh", False)
+                force_gene_refresh = state.get("_force_gene_refresh", False)
+                force_chrom_refresh = state.get("_force_chrom_refresh", False)
+                if changed or ui_changed or not state.get("_rendered_once") or force_color_refresh or force_gene_refresh or force_chrom_refresh:
                     _render_cnv_from_state(state)
                     state["_rendered_once"] = True
+                    if force_color_refresh:
+                        state["_force_color_refresh"] = False
+                    if force_gene_refresh:
+                        state["_force_gene_refresh"] = False
+                    if force_chrom_refresh:
+                        state["_force_chrom_refresh"] = False
                 
                 # Update CNV events analysis
                 _update_cnv_events_analysis(state)
@@ -1664,34 +1737,48 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                     if hasattr(arr, "dtype") and "name" in arr.dtype.names:
                         binw = state.get("cnv_dict", {}).get("bin_width", 1000000)
                         state["bp_array"] = arr
-                        dens: Dict[int, int] = {}
-                        for r in arr:
-                            end = int(r["end_pos"])
-                            bin_idx = end // binw
-                            dens[bin_idx] = dens.get(bin_idx, 0) + 1
-                        dens_pts = [[k * binw, v] for k, v in sorted(dens.items())]
-                        # Only add density overlay in single-chromosome view; preserve existing diff series
+                        # Filter breakpoints by selected chromosome
                         selected = launcher._cnv_state.setdefault(
                             str(sample_dir), {}
                         ).get("selected_chrom", "All")
+                        filtered_breakpoints = 0
+                        breakpoint_lines = []
+                        for r in arr:
+                            if selected == "All" or r["name"] == selected:
+                                # Use the midpoint of the breakpoint as the line position
+                                start_pos = int(r["start"])
+                                end_pos = int(r["end"])
+                                midpoint = (start_pos + end_pos) // 2
+                                breakpoint_lines.append(midpoint)
+                                filtered_breakpoints += 1
+                        # Only add density overlay in single-chromosome view; preserve existing diff series
                         current_series = [
                             s
                             for s in cnv_diff.options["series"]
-                            if s.get("name") != "Breakpoint Density"
+                            if not s.get("name", "").startswith("Breakpoint")
                         ]
                         if selected != "All" and state.get("show_bp", True):
-                            current_series.append(
-                                {
-                                    "type": "scatter",
-                                    "name": "Breakpoint Density",
-                                    "yAxisIndex": 1,
-                                    "symbolSize": 8,
-                                    "data": dens_pts,
+                            # Add breakpoint lines as markLine to the main series
+                            if current_series:
+                                main_series = current_series[0]  # Use the first series as the main one
+                                markLine_data = []
+                                for bp_pos in breakpoint_lines:
+                                    markLine_data.append({
+                                        "xAxis": bp_pos,
+                                        "lineStyle": {"type": "dashed", "color": "#ff6b6b", "width": 3}
+                                    })
+                                main_series["markLine"] = {
+                                    "data": markLine_data,
+                                    "symbol": "none",
+                                    "lineStyle": {"type": "dashed", "color": "#ff6b6b", "width": 3}
                                 }
-                            )
+                        else:
+                            # Clear markLine when breakpoints are hidden
+                            if current_series:
+                                current_series[0].pop("markLine", None)
                         cnv_diff.options["series"] = current_series
                         cnv_diff.update()
-                except Exception:
+                except Exception as e:
                     pass
             launcher._cnv_state[key] = state
         except Exception:
@@ -1701,6 +1788,18 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
     try:
 
         def _val(ev, default=None):
+            # Handle toggle events which have args like [index, {'value': X, 'label': 'Y'}]
+            if hasattr(ev, "args") and ev.args and isinstance(ev.args, list) and len(ev.args) >= 2:
+                if isinstance(ev.args[1], dict):
+                    # Extract the label from the toggle event structure
+                    return ev.args[1].get("label", default)
+            # Handle direct value objects like {'value': 2, 'label': 'GNB1'}
+            if hasattr(ev, "value") and isinstance(ev.value, dict):
+                return ev.value.get("label", default)
+            # Handle args that are directly a dictionary with label
+            if hasattr(ev, "args") and isinstance(ev.args, dict) and "label" in ev.args:
+                return ev.args.get("label", default)
+            # Fallback to standard value extraction
             return (
                 getattr(ev, "value", None)
                 if hasattr(ev, "value")
@@ -1710,6 +1809,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
         def _on_chrom(ev):
             st = launcher._cnv_state.setdefault(str(sample_dir), {})
             st["selected_chrom"] = _val(ev, "All") or "All"
+            st["_force_chrom_refresh"] = True  # Force refresh for chromosome selection
             logging.debug(f"CNV select changed -> {st['selected_chrom']}")
             # reset x zoom when switching scope
             try:
@@ -1733,7 +1833,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
 
         def _on_bp(ev):
             st = launcher._cnv_state.setdefault(str(sample_dir), {})
-            st["show_bp"] = _val(ev, "show") == "show"
+            show_bp = _val(ev, "show") == "show"
+            st["show_bp"] = show_bp
             # Trigger immediate refresh to update all UI elements
             ui.timer(0.1, _refresh_cnv_async, once=True)
 
@@ -1748,7 +1849,9 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 st["color_mode"] = "value"
             else:
                 st["color_mode"] = "chromosome"
-            logging.debug(f"CNV color mode -> {st['color_mode']} (raw={val})")
+            # Force a refresh by setting a flag that bypasses the state sync logic
+            st["_force_color_refresh"] = True
+            
             # Trigger immediate refresh to update all UI elements
             ui.timer(0.1, _refresh_cnv_async, once=True)
 
@@ -1759,7 +1862,9 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
         # Gene selection zoom
         def _on_gene(ev):
             st = launcher._cnv_state.setdefault(str(sample_dir), {})
-            st["selected_gene"] = _val(ev, "All") or "All"
+            selected_gene = _val(ev, "All") or "All"
+            st["selected_gene"] = selected_gene
+            st["_force_gene_refresh"] = True  # Force refresh for gene selection
             # Trigger immediate refresh to update all UI elements
             ui.timer(0.1, _refresh_cnv_async, once=True)
 
