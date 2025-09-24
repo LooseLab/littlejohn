@@ -1393,11 +1393,30 @@ def preprocess_fusion_data_standalone(
                 }
             )
 
-        # Save processed data as pickle for efficient loading
+        # Save processed data as pickle for efficient loading (atomic write to prevent corruption)
         import pickle
 
-        with open(output_file, "wb") as f:
-            pickle.dump(processed_data, f)
+        def _atomic_pickle_dump(obj, target_path: str) -> None:
+            """Atomically write pickle file to prevent corruption during concurrent reads."""
+            import tempfile
+            import os
+            tmp_path = target_path + ".tmp"
+            try:
+                with open(tmp_path, "wb") as tf:
+                    pickle.dump(obj, tf)
+                    tf.flush()
+                    os.fsync(tf.fileno())  # Ensure data is written to disk
+                os.replace(tmp_path, target_path)  # Atomic rename
+            except Exception as e:
+                # Clean up temp file on error
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except:
+                    pass
+                raise e
+
+        _atomic_pickle_dump(processed_data, output_file)
         
         # Generate summary files for the summary component
         _generate_fusion_summary_files(output_file, processed_data)

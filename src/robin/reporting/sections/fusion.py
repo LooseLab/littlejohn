@@ -7,6 +7,7 @@ This module contains the fusion analysis section of the report.
 import os
 import logging
 import pickle
+import time
 from reportlab.platypus import Paragraph, Spacer, Table, TableStyle
 from reportlab.lib import colors
 from reportlab.lib.units import inch
@@ -16,6 +17,51 @@ import networkx as nx
 from reportlab.lib.styles import ParagraphStyle
 
 logger = logging.getLogger(__name__)
+
+
+def _load_pickle_with_retry(file_path: str, max_retries: int = 3):
+    """Load pickle file with retry mechanism to handle temporary file locks during writes."""
+    for attempt in range(max_retries):
+        try:
+            # Check if temporary file exists (indicates ongoing write)
+            tmp_file = file_path + ".tmp"
+            if os.path.exists(tmp_file):
+                if attempt < max_retries - 1:
+                    time.sleep(0.1 * (attempt + 1))  # Exponential backoff
+                    continue
+                else:
+                    logger.warning(f"Temporary file still exists after {max_retries} attempts: {tmp_file}")
+                    return None
+            
+            # Check file size
+            if os.path.getsize(file_path) == 0:
+                if attempt < max_retries - 1:
+                    time.sleep(0.1 * (attempt + 1))
+                    continue
+                else:
+                    return None
+            
+            # Try to load the pickle
+            with open(file_path, "rb") as f:
+                return pickle.load(f)
+                
+        except (OSError, IOError) as e:
+            # File might be locked or temporarily unavailable
+            if attempt < max_retries - 1:
+                logger.debug(f"File temporarily unavailable, retrying in {0.1 * (attempt + 1)}s: {file_path} - {e}")
+                time.sleep(0.1 * (attempt + 1))
+                continue
+            else:
+                logger.warning(f"File still unavailable after {max_retries} attempts: {file_path} - {e}")
+                return None
+        except (pickle.UnpicklingError, EOFError) as e:
+            logger.error(f"Pickle corruption detected: {file_path} - {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error loading pickle: {file_path} - {e}")
+            return None
+    
+    return None
 
 
 class FusionSection(ReportSection):
@@ -100,49 +146,51 @@ class FusionSection(ReportSection):
         try:
             # Load master fusion candidates from processed pickle
             if os.path.exists(fusion_data["master_path"]):
-                with open(fusion_data["master_path"], "rb") as f:
-                    try:
-                        processed_data = pickle.load(f)
-                        # Filter to only good pairs to reduce memory usage and processing time
-                        annotated_data = processed_data.get("annotated_data", pd.DataFrame())
-                        goodpairs = processed_data.get("goodpairs", pd.Series())
-                        
-                        if not annotated_data.empty and not goodpairs.empty:
-                            # Only keep the good pairs (same as GUI does)
-                            fusion_data["master_candidates"] = annotated_data[goodpairs]
-                        else:
-                            fusion_data["master_candidates"] = annotated_data
-                        
-                        logger.debug(
-                            f"Loaded master fusion candidates from {fusion_data['master_path']} "
-                            f"({len(fusion_data['master_candidates'])} good pairs from {len(annotated_data)} total candidates)"
-                        )
-                    except (pickle.UnpicklingError, EOFError) as e:
-                        logger.warning(f"Error loading master fusion pickle: {e}")
-                        fusion_data["master_candidates"] = pd.DataFrame()
+                # Use retry mechanism to handle temporary file locks during writes
+                processed_data = _load_pickle_with_retry(fusion_data["master_path"])
+                if processed_data:
+                    # Filter to only good pairs to reduce memory usage and processing time
+                    annotated_data = processed_data.get("annotated_data", pd.DataFrame())
+                    goodpairs = processed_data.get("goodpairs", pd.Series())
+                    
+                    if not annotated_data.empty and not goodpairs.empty:
+                        # Only keep the good pairs (same as GUI does)
+                        fusion_data["master_candidates"] = annotated_data[goodpairs]
+                    else:
+                        fusion_data["master_candidates"] = annotated_data
+                    
+                    logger.debug(
+                        f"Loaded master fusion candidates from {fusion_data['master_path']} "
+                        f"({len(fusion_data['master_candidates'])} good pairs from {len(annotated_data)} total candidates)"
+                    )
+                else:
+                    fusion_data["master_candidates"] = pd.DataFrame()
+            else:
+                fusion_data["master_candidates"] = pd.DataFrame()
 
             # Load all fusion candidates from processed pickle
             if os.path.exists(fusion_data["all_path"]):
-                with open(fusion_data["all_path"], "rb") as f:
-                    try:
-                        processed_data = pickle.load(f)
-                        # Filter to only good pairs to reduce memory usage and processing time
-                        annotated_data = processed_data.get("annotated_data", pd.DataFrame())
-                        goodpairs = processed_data.get("goodpairs", pd.Series())
-                        
-                        if not annotated_data.empty and not goodpairs.empty:
-                            # Only keep the good pairs (same as GUI does)
-                            fusion_data["all_candidates"] = annotated_data[goodpairs]
-                        else:
-                            fusion_data["all_candidates"] = annotated_data
-                        
-                        logger.debug(
-                            f"Loaded all fusion candidates from {fusion_data['all_path']} "
-                            f"({len(fusion_data['all_candidates'])} good pairs from {len(annotated_data)} total candidates)"
-                        )
-                    except (pickle.UnpicklingError, EOFError) as e:
-                        logger.warning(f"Error loading all fusion pickle: {e}")
-                        fusion_data["all_candidates"] = pd.DataFrame()
+                # Use retry mechanism to handle temporary file locks during writes
+                processed_data = _load_pickle_with_retry(fusion_data["all_path"])
+                if processed_data:
+                    # Filter to only good pairs to reduce memory usage and processing time
+                    annotated_data = processed_data.get("annotated_data", pd.DataFrame())
+                    goodpairs = processed_data.get("goodpairs", pd.Series())
+                    
+                    if not annotated_data.empty and not goodpairs.empty:
+                        # Only keep the good pairs (same as GUI does)
+                        fusion_data["all_candidates"] = annotated_data[goodpairs]
+                    else:
+                        fusion_data["all_candidates"] = annotated_data
+                    
+                    logger.debug(
+                        f"Loaded all fusion candidates from {fusion_data['all_path']} "
+                        f"({len(fusion_data['all_candidates'])} good pairs from {len(annotated_data)} total candidates)"
+                    )
+                else:
+                    fusion_data["all_candidates"] = pd.DataFrame()
+            else:
+                fusion_data["all_candidates"] = pd.DataFrame()
 
         except Exception as e:
             logger.error(f"Error loading fusion data: {str(e)}")

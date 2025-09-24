@@ -167,38 +167,73 @@ def _generate_summary_files_from_pickle(sample_dir: Path) -> bool:
         return False
 
 
-def _load_processed_pickle(file_path: Path) -> Optional[Dict[str, Any]]:
+def _load_processed_pickle(file_path: Path, max_retries: int = 3) -> Optional[Dict[str, Any]]:
     """Load the preprocessed fusion data structure written by preprocess_fusion_data_standalone.
-
+    
+    Implements retry mechanism to handle cases where file is temporarily locked during writes.
+    
     Note: Although the extension is .csv, the file is a pickle per current pipeline.
     """
-    try:
-        if not file_path.exists() or file_path.stat().st_size == 0:
-            return None
-        
-        # Try to load the pickle with better error handling
-        with open(file_path, "rb") as f:
-            try:
-                data = pickle.load(f)
-            except (pickle.UnpicklingError, EOFError) as e:
-                # If pickle is truncated, try to load what we can
-                logging.warning(f"[Fusion] Pickle file appears truncated, attempting recovery: {file_path}")
-                f.seek(0)
-                try:
-                    # Try loading with protocol 0 which is more forgiving
-                    data = pickle.load(f)
-                except:
-                    # If all else fails, return None and let the system regenerate
-                    logging.error(f"[Fusion] Could not recover truncated pickle: {file_path}")
+    import time
+    
+    for attempt in range(max_retries):
+        try:
+            if not file_path.exists():
+                return None
+                
+            # Check if file is being written to (temporary file exists)
+            tmp_file = file_path.with_suffix(file_path.suffix + ".tmp")
+            if tmp_file.exists():
+                if attempt < max_retries - 1:
+                    time.sleep(0.1 * (attempt + 1))  # Exponential backoff
+                    continue
+                else:
+                    logging.warning(f"[Fusion] Temporary file still exists after {max_retries} attempts: {tmp_file}")
                     return None
-        
-        # Expected keys: annotated_data (DataFrame), goodpairs (Series), gene_groups (list), candidate_count (int)
-        return data if isinstance(data, dict) else None
-    except Exception as e:
-        logging.exception(
-            f"[Fusion] Failed to load processed fusion pickle: {file_path} - {e}"
-        )
-        return None
+            
+            # Check file size
+            if file_path.stat().st_size == 0:
+                if attempt < max_retries - 1:
+                    time.sleep(0.1 * (attempt + 1))
+                    continue
+                else:
+                    return None
+            
+            # Try to load the pickle with better error handling
+            with open(file_path, "rb") as f:
+                try:
+                    data = pickle.load(f)
+                except (pickle.UnpicklingError, EOFError) as e:
+                    # If pickle is truncated, try to load what we can
+                    logging.warning(f"[Fusion] Pickle file appears truncated, attempting recovery: {file_path}")
+                    f.seek(0)
+                    try:
+                        # Try loading with protocol 0 which is more forgiving
+                        data = pickle.load(f)
+                    except:
+                        # If all else fails, return None and let the system regenerate
+                        logging.error(f"[Fusion] Could not recover truncated pickle: {file_path}")
+                        return None
+            
+            # Expected keys: annotated_data (DataFrame), goodpairs (Series), gene_groups (list), candidate_count (int)
+            return data if isinstance(data, dict) else None
+            
+        except (OSError, IOError) as e:
+            # File might be locked or temporarily unavailable
+            if attempt < max_retries - 1:
+                logging.debug(f"[Fusion] File temporarily unavailable, retrying in {0.1 * (attempt + 1)}s: {file_path} - {e}")
+                time.sleep(0.1 * (attempt + 1))
+                continue
+            else:
+                logging.warning(f"[Fusion] File still unavailable after {max_retries} attempts: {file_path} - {e}")
+                return None
+        except Exception as e:
+            logging.exception(
+                f"[Fusion] Failed to load processed fusion pickle: {file_path} - {e}"
+            )
+            return None
+    
+    return None
 
 
 def _make_fusion_table(container: Any, df: pd.DataFrame) -> Any:
