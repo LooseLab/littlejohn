@@ -3,8 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List
 import csv
-import asyncio
-import concurrent.futures
 import logging
 
 try:
@@ -431,29 +429,24 @@ def add_classification_section(sample_dir: Path) -> None:
         except Exception:
             pass
 
-    async def _refresh_classification_async() -> None:
-        """Refresh classification data asynchronously."""
+    def _refresh_classification() -> None:
+        """Refresh classification data."""
         try:
-            # Run file operations in background thread
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                futures = []
-                for tool_name, cfg in tool_to_file.items():
-                    file_path = sample_dir / cfg["file"] if sample_dir else None
-                    if file_path:
-                        future = executor.submit(_check_and_update_file, tool_name, cfg["file"], file_path, charts)
-                        futures.append(future)
-                
-                # Wait for all file operations to complete
-                for future in futures:
-                    try:
-                        await asyncio.wrap_future(future)
-                    except Exception:
-                        pass
+            # Check directory existence
+            if not sample_dir or not sample_dir.exists():
+                logging.warning(f"[Classification] Sample directory not found: {sample_dir}")
+                return
+            
+            # Update all classification charts directly (already in background)
+            for tool_name, cfg in tool_to_file.items():
+                file_path = sample_dir / cfg["file"] if sample_dir else None
+                if file_path:
+                    _check_and_update_file(tool_name, cfg["file"], file_path, charts)
         except Exception as e:
-            logging.exception(f"[Classification] Async refresh failed: {e}")
+            logging.exception(f"[Classification] Refresh failed: {e}")
 
     def _check_and_update_file(tool_name: str, filename: str, file_path: Path, charts: Dict[str, Any]) -> None:
-        """Check file and update charts if needed - runs in background thread."""
+        """Check file and update charts if needed."""
         try:
             if file_path.exists():
                 mtime = file_path.stat().st_mtime
@@ -463,5 +456,5 @@ def add_classification_section(sample_dir: Path) -> None:
         except Exception:
             pass
 
-    # Start the refresh timer (every 30 seconds) with async function
-    ui.timer(30.0, lambda: ui.timer(0.1, _refresh_classification_async, once=True), active=True)
+    # Start the refresh timer (every 15 seconds)
+    ui.timer(15.0, _refresh_classification, active=True, immediate=True)

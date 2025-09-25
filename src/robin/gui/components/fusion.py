@@ -6,8 +6,6 @@ import logging
 import pickle
 import os
 import hashlib
-import asyncio
-import concurrent.futures
 
 import pandas as pd
 import numpy as np
@@ -970,30 +968,25 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
         },
     }
 
-    async def refresh_async() -> None:
-        """Refresh fusion data asynchronously."""
+    def refresh_fusion() -> None:
+        """Refresh fusion data."""
         try:
-            # Check directory existence in background thread
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(lambda: sample_dir and sample_dir.exists())
-                dir_exists = await asyncio.wrap_future(future)
-            
-            if not dir_exists:
+            # Simple directory check
+            if not sample_dir or not sample_dir.exists():
+                logging.warning(f"[Fusion] Sample directory not found: {sample_dir}")
                 return
             
-            # Run file operations in background thread, then update UI on main thread
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(_load_fusion_data, sample_dir)
-                fusion_data = await asyncio.wrap_future(future)
-                
-            # Update UI on main thread using timer
-            ui.timer(0.1, lambda: _update_fusion_ui(fusion_data, state), once=True)
+            # Load fusion data directly (already in background)
+            fusion_data = _load_fusion_data(sample_dir)
+            
+            # Update UI directly
+            _update_fusion_ui(fusion_data, state)
                 
         except Exception as e:
-            logging.exception(f"[Fusion] Async refresh failed: {e}")
+            logging.exception(f"[Fusion] Refresh failed: {e}")
 
     def _load_fusion_data(sample_dir: Path) -> Dict[str, Any]:
-        """Load fusion data from files - runs in background thread."""
+        """Load fusion data from files."""
         try:
             # Load target panel processed
             target_file = sample_dir / "fusion_candidates_master_processed.csv"
@@ -1288,7 +1281,7 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
         except Exception:
             pass
         
-        # Start the refresh timer (every 10 seconds) with async function
-        ui.timer(10.0, lambda: ui.timer(0.1, refresh_async, once=True), active=True)
+        # Start the refresh timer (every 10 seconds)
+        ui.timer(10.0, refresh_fusion, active=True, immediate=True)
     except Exception:
         pass

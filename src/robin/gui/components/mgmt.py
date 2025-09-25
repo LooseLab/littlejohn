@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict, List
-import asyncio
-import concurrent.futures
 import logging
 
 import pandas as pd
@@ -139,27 +137,22 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
         except Exception:
             return []
 
-    async def _refresh_mgmt_async() -> None:
-        """Refresh MGMT data asynchronously."""
+    def _refresh_mgmt() -> None:
+        """Refresh MGMT data."""
         try:
-            # Check directory existence in background thread
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(lambda: sample_dir and sample_dir.exists())
-                dir_exists = await asyncio.wrap_future(future)
-            
-            if not dir_exists:
+            # Simple directory check
+            if not sample_dir or not sample_dir.exists():
+                logging.warning(f"[MGMT] Sample directory not found: {sample_dir}")
                 return
             
-            # Run all file operations in background thread
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(_refresh_mgmt_sync, sample_dir, launcher)
-                await asyncio.wrap_future(future)
+            # Run MGMT refresh directly (already in background)
+            _refresh_mgmt_sync(sample_dir, launcher)
                 
         except Exception as e:
-            logging.exception(f"[MGMT] Async refresh failed: {e}")
+            logging.exception(f"[MGMT] Refresh failed: {e}")
 
     def _refresh_mgmt_sync(sample_dir: Path, launcher: Any) -> None:
-        """Synchronous MGMT refresh - runs in background thread."""
+        """Synchronous MGMT refresh."""
         try:
             csv_files = list(sample_dir.glob("*_mgmt.csv"))
             if not csv_files:
@@ -280,5 +273,5 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
         except Exception as e:
             raise Exception(f"Failed to refresh MGMT section: {e}")
 
-    # Start the refresh timer (every 30 seconds) with async function
-    ui.timer(30.0, lambda: ui.timer(0.1, _refresh_mgmt_async, once=True), active=True)
+    # Start the refresh timer (every 15 seconds)
+    ui.timer(15.0, _refresh_mgmt, active=True, immediate=True)

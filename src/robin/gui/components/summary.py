@@ -7,8 +7,6 @@ import csv
 from datetime import datetime
 import hashlib
 import logging
-import asyncio
-import concurrent.futures
 
 try:
     from nicegui import ui
@@ -169,7 +167,7 @@ def add_summary_section(sample_dir: Path, sample_id: str) -> None:
         _run_info_section.refresh(),
         _classification_section.refresh(),
         _analysis_section.refresh()
-    ])
+    ], active=True, immediate=True)
 
 
 def _create_dashboard_card(title: str, value: str, icon: str, description: str) -> None:

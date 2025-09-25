@@ -4,8 +4,6 @@ from pathlib import Path
 from typing import Any
 import time
 import os
-import asyncio
-import concurrent.futures
 
 import natsort
 import numpy as np
@@ -3740,12 +3738,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
     async def _refresh_coverage_async() -> None:
         """Refresh coverage data asynchronously."""
         try:
-            # Check directory existence in background thread
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(lambda: sample_dir and sample_dir.exists())
-                dir_exists = await asyncio.wrap_future(future)
-            
-            if not dir_exists:
+            # Check directory existence
+            if not sample_dir or not sample_dir.exists():
                 _log_notify(
                     f"Sample directory not found: {sample_dir}",
                     level="warning",
@@ -3753,10 +3747,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 )
                 return
             
-            # Run all file operations in background thread
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(_refresh_coverage_sync, sample_dir, launcher)
-                await asyncio.wrap_future(future)
+            # Run coverage refresh synchronously (already in background)
+            _refresh_coverage_sync(sample_dir, launcher)
                 
         except Exception as e:
             _log_notify(
@@ -4048,5 +4040,4 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             )
 
     # Trigger an immediate refresh on page load, then continue with periodic refreshes
-    ui.timer(0.5, lambda: ui.timer(0.1, _refresh_coverage_async, once=True), once=True)
-    ui.timer(30.0, lambda: ui.timer(0.1, _refresh_coverage_async, once=True), active=True)
+    ui.timer(15.0, _refresh_coverage_async, active=True, immediate=True)  # Periodic refresh every 30 seconds
