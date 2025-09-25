@@ -135,7 +135,7 @@ def _install_manager_hooks(workflow_runner: Any) -> None:
         logging.debug(f"Failed to install manager hooks: {exc}")
 
 
-def _start_polling_updates(manager: Any, interval_seconds: float = 15.0) -> None:
+def _start_polling_updates(manager: Any, interval_seconds: float = 30.0) -> None:
     """Start a background thread that polls `manager.get_stats()` and sends GUI updates."""
     import threading
 

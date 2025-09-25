@@ -185,9 +185,27 @@ class GUILauncher:
     ):
         """Send an update to the GUI without blocking the workflow."""
         try:
+            # Rate limiting: Skip low-priority updates if queue is getting too large
+            queue_size = self.update_queue.qsize()
+            if queue_size > 100 and priority < 5:
+                logging.debug(f"[GUI] Skipping low-priority update due to queue size: {queue_size}")
+                return
+            
+            # Rate limiting: Skip duplicate updates of the same type within 1 second
+            current_time = time.time()
+            if hasattr(self, '_last_update_times'):
+                last_time = self._last_update_times.get(update_type, 0)
+                if current_time - last_time < 1.0 and priority < 8:
+                    logging.debug(f"[GUI] Skipping duplicate update: {update_type.value}")
+                    return
+            else:
+                self._last_update_times = {}
+            
+            self._last_update_times[update_type] = current_time
+            
             update = GUIUpdate(
                 update_type=update_type,
-                timestamp=time.time(),
+                timestamp=current_time,
                 data=data,
                 priority=priority,
             )
@@ -585,14 +603,19 @@ class GUILauncher:
                 """Setup global timers and update processing."""
                 try:
                     self.gui_ready.set()
-                    ui.timer(0.3, self._drain_updates_on_ui, active=True)
-                    # Seed pre-existing samples shortly after startup, then poll for new ones
+                    # Rate limit GUI updates to prevent system lockup
+                    # Increased from 0.3s to 2.0s to reduce update frequency
+                    ui.timer(2.0, self._drain_updates_on_ui, active=True)
+                    # Delay initial sample scanning to prevent startup lockup
+                    # Increased from 0.5s to 5.0s to allow GUI to fully initialize
                     ui.timer(
-                        0.5,
+                        5.0,
                         lambda: self._scan_and_seed_samples_async(preexisting=True),
                         once=True,
                     )
-                    ui.timer(3.0, self._scan_for_new_samples_async, active=True)
+                    # Increase polling interval for new samples to reduce load
+                    # Increased from 3.0s to 10.0s to reduce file system pressure
+                    ui.timer(10.0, self._scan_for_new_samples_async, active=True)
                 except Exception:
                     pass
 
@@ -2533,12 +2556,9 @@ class GUILauncher:
             for i in range(0, total_dirs, batch_size):
                 batch = sample_dirs[i:i + batch_size]
                 
-                # Process batch synchronously in background
-                #import concurrent.futures
-                #with concurrent.futures.ThreadPoolExecutor() as executor:
-                #    future = executor.submit(self._process_sample_batch, batch)
-                #    batch_rows = await asyncio.wrap_future(future)
-                batch_rows = self._process_sample_batch(batch)
+                # Process batch asynchronously in background thread
+                import asyncio
+                batch_rows = await asyncio.to_thread(self._process_sample_batch, batch)
                 rows.extend(batch_rows)
                 
                 processed += len(batch)
@@ -2703,13 +2723,11 @@ class GUILauncher:
             if hasattr(self, "samples_loading_indicator"):
                 self.samples_loading_indicator.set_visibility(True)
             
-            # Run the synchronous file operations in a background thread
-            # Use threading instead of ui.run.io_bound for compatibility
-            #import concurrent.futures
-            #with concurrent.futures.ThreadPoolExecutor() as executor:
-            #    future = executor.submit(self._scan_and_seed_samples, preexisting)
-            #    result = await asyncio.wrap_future(future)
-            result = self._scan_and_seed_samples(preexisting)
+            # Run the synchronous file operations in a background thread using asyncio.to_thread
+            # This prevents blocking the main thread and GUI updates
+            import asyncio
+            result = await asyncio.to_thread(self._scan_and_seed_samples, preexisting)
+            
             # Update cache timestamp
             self._last_cache_time = time.time()
             

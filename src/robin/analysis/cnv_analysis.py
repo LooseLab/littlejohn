@@ -82,8 +82,6 @@ import subprocess
 import sys
 from typing import Dict, Optional, List, Tuple
 from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import multiprocessing as mp
 
 import numpy as np
 import pysam
@@ -98,7 +96,7 @@ os.environ["CI"] = "1"
 
 # Global configuration for performance tuning
 CHUNK_SIZE = 1000  # For processing large arrays in chunks
-MAX_WORKERS = min(4, mp.cpu_count())  # Limit parallel processing
+# Removed MAX_WORKERS - no longer using parallel processing
 
 
 def run_cnv_analysis_subprocess(
@@ -390,48 +388,9 @@ def estimate_sex_from_cnv(cnv_data: Dict, logger) -> str:
         return "Unknown"
 
 
-def process_chromosome_breakpoints(
-    chrom_data: Tuple[str, list], bin_width: int
-) -> List[Dict]:
-    """
-    Process breakpoints for a single chromosome (for parallel processing).
-
-    Args:
-        chrom_data: Tuple of (chromosome_name, data)
-        bin_width: Width of bins
-
-    Returns:
-        List of breakpoints for this chromosome
-    """
-    key, data = chrom_data
-    breakpoints = []
-
-    if key != "chrM" and len(data) > 3:
-        try:
-            paired_changepoints = run_ruptures(
-                data, penalty_value=5, bin_width=bin_width
-            )
-
-            for start, end in paired_changepoints:
-                if start >= 0 and end > start:
-                    breakpoints.append(
-                        {
-                            "chromosome": key,
-                            "start": start,
-                            "end": end,
-                            "length": end - start,
-                        }
-                    )
-        except Exception:
-            # Silently skip chromosomes with errors
-            pass
-
-    return breakpoints
-
-
 def detect_breakpoints_from_cnv(cnv_data: Dict, bin_width: int, logger) -> List[Dict]:
     """
-    Detect breakpoints in CNV data using change point detection with parallel processing.
+    Detect breakpoints in CNV data using change point detection.
 
     Args:
         cnv_data: Dictionary containing CNV data
@@ -446,46 +405,26 @@ def detect_breakpoints_from_cnv(cnv_data: Dict, bin_width: int, logger) -> List[
     try:
         logger.debug("Detecting breakpoints in CNV data")
 
-        # Use parallel processing for large datasets
-        if len(cnv_data) > 5:  # Only parallelize if we have many chromosomes
-            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                # Submit all chromosome processing tasks
-                future_to_chrom = {
-                    executor.submit(
-                        process_chromosome_breakpoints, (key, data), bin_width
-                    ): key
-                    for key, data in cnv_data.items()
-                }
+        # Simple sequential processing for all datasets
+        for key, data in cnv_data.items():
+            if key != "chrM" and len(data) > 3:
+                try:
+                    paired_changepoints = run_ruptures(
+                        data, penalty_value=5, bin_width=bin_width
+                    )
 
-                # Collect results
-                for future in as_completed(future_to_chrom):
-                    chrom = future_to_chrom[future]
-                    try:
-                        chrom_breakpoints = future.result()
-                        breakpoints.extend(chrom_breakpoints)
-                    except Exception as e:
-                        logger.debug(f"Error processing chromosome {chrom}: {e}")
-        else:
-            # Sequential processing for small datasets
-            for key, data in cnv_data.items():
-                if key != "chrM" and len(data) > 3:
-                    try:
-                        paired_changepoints = run_ruptures(
-                            data, penalty_value=5, bin_width=bin_width
-                        )
-
-                        for start, end in paired_changepoints:
-                            if start >= 0 and end > start:
-                                breakpoints.append(
-                                    {
-                                        "chromosome": key,
-                                        "start": start,
-                                        "end": end,
-                                        "length": end - start,
-                                    }
-                                )
-                    except Exception as e:
-                        logger.debug(f"Error processing chromosome {key}: {e}")
+                    for start, end in paired_changepoints:
+                        if start >= 0 and end > start:
+                            breakpoints.append(
+                                {
+                                    "chromosome": key,
+                                    "start": start,
+                                    "end": end,
+                                    "length": end - start,
+                                }
+                            )
+                except Exception as e:
+                    logger.debug(f"Error processing chromosome {key}: {e}")
 
         logger.debug(f"Detected {len(breakpoints)} breakpoints")
         return breakpoints
