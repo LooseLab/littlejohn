@@ -319,7 +319,12 @@ def fusion_handler(job, work_dir=None, target_panel="rCNS2"):
         file_path = job.context.filepath
         metadata = job.context.metadata.get("bam_metadata", {})
 
-        logger.info(f"DEBUG: fusion_handler called with target_panel='{target_panel}'")
+        # Log and validate target panel
+        job_panel = job.context.metadata.get("target_panel", target_panel)
+        if job_panel != target_panel:
+            logger.warning(f"Panel mismatch: job metadata has '{job_panel}' but handler received '{target_panel}'. Using '{job_panel}' from metadata.")
+            target_panel = job_panel
+        logger.info(f"Using target panel: {target_panel}")
         logger.info(f"DEBUG: Job metadata: {job.context.metadata}")
 
         # Access supplementary read information

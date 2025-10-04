@@ -892,7 +892,7 @@ def process_single_bam(bam_path, metadata, work_dir, logger):
         return analysis_result
 
 
-def cnv_handler(job, work_dir=None):
+def cnv_handler(job, work_dir=None, target_panel="rCNS2"):
     """
     Handler function for CNV analysis jobs.
     This function processes BAM files for copy number variation analysis.
@@ -900,6 +900,7 @@ def cnv_handler(job, work_dir=None):
     Args:
         job: The workflow job containing file and metadata
         work_dir: Optional base directory for output (defaults to BAM file directory)
+        target_panel: Target panel type for consistency with other analysis components
     """
     # Get job-specific logger
     logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
@@ -908,6 +909,13 @@ def cnv_handler(job, work_dir=None):
     bam_path = job.context.filepath
 
     logger.info(f"Starting CNV analysis for: {os.path.basename(bam_path)}")
+    
+    # Log and validate target panel
+    job_panel = job.context.metadata.get("target_panel", target_panel)
+    if job_panel != target_panel:
+        logger.warning(f"Panel mismatch: job metadata has '{job_panel}' but handler received '{target_panel}'. Using '{job_panel}' from metadata.")
+        target_panel = job_panel
+    logger.info(f"Using target panel: {target_panel}")
 
     # Get metadata from preprocessing
     bam_metadata = job.context.metadata.get("bam_metadata", {})

@@ -1136,6 +1136,7 @@ class FileWatcher(FileSystemEventHandler):
         ignore_patterns: Optional[List[str]] = None,
         verbose: bool = False,
         show_progress: bool = True,
+        target_panel: str = "rCNS2",
     ):
         self.watch_dir = watch_dir
         self.preprocessor_func = preprocessor_func
@@ -1145,6 +1146,7 @@ class FileWatcher(FileSystemEventHandler):
         self.ignore_patterns = ignore_patterns or []
         self.verbose = verbose
         self.show_progress = show_progress
+        self.target_panel = target_panel
         self.observer = Observer()
         self.processed_files = set()
 
@@ -1178,7 +1180,13 @@ class FileWatcher(FileSystemEventHandler):
         logger.info(f"Detected new file: {filepath}")
 
         try:
-            jobs = self.preprocessor_func(filepath)
+            # Check if preprocessor function accepts target_panel parameter
+            import inspect
+            sig = inspect.signature(self.preprocessor_func)
+            if "target_panel" in sig.parameters:
+                jobs = self.preprocessor_func(filepath, target_panel=self.target_panel)
+            else:
+                jobs = self.preprocessor_func(filepath)
             self.manager.enqueue_jobs(jobs)
             logger.debug(f"Queued {len(jobs)} jobs for {filepath}")
         except Exception as e:
@@ -1294,12 +1302,13 @@ class FileWatcher(FileSystemEventHandler):
 _job_id_counter = itertools.count(1000)
 
 
-def default_file_classifier(filepath: str, workflow_plan: List[str]) -> List[Job]:
+def default_file_classifier(filepath: str, workflow_plan: List[str], target_panel: str = "rCNS2") -> List[Job]:
     """Default classifier that creates jobs for a file based on a workflow plan."""
     job_id = next(_job_id_counter)
     ctx = WorkflowContext(filepath)
     ctx.add_metadata("filename", os.path.basename(filepath))
     ctx.add_metadata("created", time.time())
+    ctx.add_metadata("target_panel", target_panel)  # Add panel metadata
 
     # Try to get file size, but don't fail if file doesn't exist
     try:
@@ -1667,7 +1676,7 @@ class WorkflowRunner:
 
         if classifier_func is None:
             classifier_func = lambda filepath: default_file_classifier(
-                filepath, workflow_plan
+                filepath, workflow_plan, self.target_panel
             )
 
         watcher = FileWatcher(
@@ -1679,6 +1688,7 @@ class WorkflowRunner:
             ignore_patterns=ignore_patterns,
             verbose=self.verbose,
             show_progress=show_progress,
+            target_panel=self.target_panel,
         )
 
         # Start worker threads first to ensure queues are consumed immediately

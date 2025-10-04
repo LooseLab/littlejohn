@@ -365,19 +365,19 @@ def _wrap_real_handler(
                     and work_dir
                     and (job_type in NEEDS_WORK_DIR)
                 ):
-                    if accepts_reference and reference and accepts_target_panel and job_type in ["fusion", "target"]:
+                    if accepts_reference and reference and accepts_target_panel and job_type in ["fusion", "target", "cnv"]:
                         py_handler(job, work_dir=work_dir, reference=reference, target_panel=target_panel)
                     elif accepts_reference and reference and job_type in ["mgmt", "target"]:
                         py_handler(job, work_dir=work_dir, reference=reference)
-                    elif accepts_target_panel and job_type in ["fusion", "target"]:
+                    elif accepts_target_panel and job_type in ["fusion", "target", "cnv"]:
                         py_handler(job, work_dir=work_dir, target_panel=target_panel)
                     else:
                         py_handler(job, work_dir=work_dir)
-                elif accepts_reference and reference and accepts_target_panel and job_type in ["fusion", "target"]:
+                elif accepts_reference and reference and accepts_target_panel and job_type in ["fusion", "target", "cnv"]:
                     py_handler(job, reference=reference, target_panel=target_panel)
                 elif accepts_reference and reference and job_type in ["mgmt", "target"]:
                     py_handler(job, reference=reference)
-                elif accepts_target_panel and job_type in ["fusion", "target"]:
+                elif accepts_target_panel and job_type in ["fusion", "target", "cnv"]:
                     py_handler(job, target_panel=target_panel)
                 else:
                     py_handler(job)

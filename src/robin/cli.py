@@ -1149,6 +1149,23 @@ def _register_handlers(
     target_panel: str = "rCNS2",
 ) -> None:
     """Register all workflow handlers with the runner."""
+    
+    # Validate target panel
+    available_panels = _get_available_panels()
+    if target_panel not in available_panels:
+        click.echo(
+            f"Warning: Target panel '{target_panel}' is not in available panels: {available_panels}. "
+            f"Using default 'rCNS2' instead.",
+            err=True,
+        )
+        target_panel = "rCNS2"
+    
+    click.echo(f"Using target panel: {target_panel}")
+    
+    # Track handlers that should accept target_panel
+    handlers_requiring_panel = {"target", "fusion", "cnv"}
+    registered_panel_handlers = set()
+    
     for (
         queue_type,
         job_type,
@@ -1171,7 +1188,7 @@ def _register_handlers(
                     handler, work_dir_path, ref_path, center_param, panel_param
                 ):
                     return lambda job: handler(
-                        job, work_dir=str(work_dir_path), reference=str(ref_path), target_panel=panel_param
+                        job, work_dir=str(work_dir_path), reference=str(ref_path), target_panel=job.context.metadata.get("target_panel", panel_param)
                     )
 
                 final_handler = create_handler_with_work_dir_and_ref(
@@ -1195,7 +1212,7 @@ def _register_handlers(
                     handler, work_dir_path, panel_param
                 ):
                     return lambda job: handler(
-                        job, work_dir=str(work_dir_path), target_panel=panel_param
+                        job, work_dir=str(work_dir_path), target_panel=job.context.metadata.get("target_panel", panel_param)
                     )
 
                 final_handler = create_fusion_handler_with_work_dir(
@@ -1203,12 +1220,12 @@ def _register_handlers(
                 )
             else:
                 # Standard work directory handling
-                if job_type == "target":
-                    # Target analysis with work_dir and target_panel
-                    def create_target_handler_with_work_dir(handler, work_dir_path, panel_param):
-                        return lambda job: handler(job, work_dir=str(work_dir_path), target_panel=panel_param)
+                if job_type in ["target", "cnv"]:
+                    # Analysis with work_dir and target_panel
+                    def create_analysis_handler_with_work_dir(handler, work_dir_path, panel_param):
+                        return lambda job: handler(job, work_dir=str(work_dir_path), target_panel=job.context.metadata.get("target_panel", panel_param))
                     
-                    final_handler = create_target_handler_with_work_dir(handler_func, work_dir, target_panel)
+                    final_handler = create_analysis_handler_with_work_dir(handler_func, work_dir, target_panel)
                 else:
                     # Standard work directory handling for other job types
                     def create_handler_with_work_dir(handler, work_dir_path, center_param):
@@ -1218,15 +1235,15 @@ def _register_handlers(
         elif reference and job_type == "target":
             # Reference genome only (no work_dir needed) with target panel
             def create_handler_with_ref(handler, ref_path, center_param, panel_param):
-                return lambda job: handler(job, reference=str(ref_path), target_panel=panel_param)
+                return lambda job: handler(job, reference=str(ref_path), target_panel=job.context.metadata.get("target_panel", panel_param))
 
             final_handler = create_handler_with_ref(handler_func, reference, center, target_panel)
-        elif job_type == "fusion":
-            # Fusion analysis with target panel only (no work_dir needed)
-            def create_fusion_handler_with_panel(handler, panel_param):
-                return lambda job: handler(job, target_panel=panel_param)
+        elif job_type in ["fusion", "cnv"]:
+            # Analysis with target panel only (no work_dir needed)
+            def create_analysis_handler_with_panel(handler, panel_param):
+                return lambda job: handler(job, target_panel=job.context.metadata.get("target_panel", panel_param))
 
-            final_handler = create_fusion_handler_with_panel(handler_func, target_panel)
+            final_handler = create_analysis_handler_with_panel(handler_func, target_panel)
         elif job_type == "preprocessing":
             # Special handling for preprocessing to pass center
             def create_preprocessing_handler(handler, center_param):
@@ -1236,6 +1253,19 @@ def _register_handlers(
         else:
             final_handler = handler_func
 
+        # Track handlers that require target_panel
+        if job_type in handlers_requiring_panel:
+            import inspect
+            sig = inspect.signature(handler_func)
+            if "target_panel" in sig.parameters:
+                registered_panel_handlers.add(job_type)
+            else:
+                click.echo(
+                    f"Warning: Handler for {job_type} does not accept target_panel parameter. "
+                    f"Panel information will not be passed to this handler.",
+                    err=True,
+                )
+
         try:
             runner.register_handler(actual_queue_type, job_type, final_handler)
         except Exception as e:
@@ -1243,6 +1273,16 @@ def _register_handlers(
                 f"Warning: Failed to register handler for {queue_type}:{job_type}: {e}",
                 err=True,
             )
+    
+    # Report on panel handler registration
+    missing_panel_handlers = handlers_requiring_panel - registered_panel_handlers
+    if missing_panel_handlers:
+        click.echo(
+            f"Warning: The following handlers do not support target_panel parameter: {missing_panel_handlers}",
+            err=True,
+        )
+    else:
+        click.echo(f"Successfully registered panel-aware handlers: {registered_panel_handlers}")
 
 
 def _register_command_handlers(
@@ -1284,11 +1324,11 @@ def _register_command_handlers(
                 )
 
 
-def _create_classifier_with_work_dir(work_dir: Path, workflow_steps: List[str]):
+def _create_classifier_with_work_dir(work_dir: Path, workflow_steps: List[str], target_panel: str = "rCNS2"):
     """Create a classifier function that includes work directory in job context."""
 
     def classifier_with_work_dir(filepath: str) -> List[Job]:
-        jobs = default_file_classifier(filepath, workflow_steps)
+        jobs = default_file_classifier(filepath, workflow_steps, target_panel)
         for job in jobs:
             job.context.add_metadata("work_dir", str(work_dir))
         return jobs
@@ -1828,7 +1868,7 @@ def workflow(
         # Create classifier function
         classifier_func = None
         if work_dir:
-            classifier_func = _create_classifier_with_work_dir(work_dir, workflow_steps)
+            classifier_func = _create_classifier_with_work_dir(work_dir, workflow_steps, target_panel)
 
         # Display configuration
         _display_workflow_config(

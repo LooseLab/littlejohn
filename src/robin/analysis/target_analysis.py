@@ -1196,6 +1196,13 @@ def target_handler(job, work_dir=None, reference=None, target_panel="rCNS2"):
         file_path = job.context.filepath
 
         logger.info(f"Starting target analysis for: {os.path.basename(file_path)}")
+        
+        # Log and validate target panel
+        job_panel = job.context.metadata.get("target_panel", target_panel)
+        if job_panel != target_panel:
+            logger.warning(f"Panel mismatch: job metadata has '{job_panel}' but handler received '{target_panel}'. Using '{job_panel}' from metadata.")
+            target_panel = job_panel
+        logger.info(f"Using target panel: {target_panel}")
 
         # Debug: Log reference genome status
         if reference:
