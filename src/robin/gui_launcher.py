@@ -576,6 +576,47 @@ class GUILauncher:
 
                 self._create_sample_detail_page(sample_id)
 
+            # Download API endpoint
+            @ui.page("/api/download/{sample_id}/{filename}")
+            def download_file(sample_id: str, filename: str):
+                """Download a file from a sample directory."""
+                try:
+                    # Security: Only allow alphanumeric characters and common file extensions
+                    import re
+                    if not re.match(r'^[a-zA-Z0-9._-]+$', filename):
+                        ui.notify("Invalid filename", type="error")
+                        return
+                    
+                    # Find the sample directory
+                    base_dir = Path(self.monitored_directory) if self.monitored_directory else None
+                    if not base_dir or not base_dir.exists():
+                        ui.notify("Sample directory not found", type="error")
+                        return
+                    
+                    sample_dir = base_dir / sample_id
+                    if not sample_dir.exists():
+                        ui.notify(f"Sample {sample_id} not found", type="error")
+                        return
+                    
+                    file_path = sample_dir / filename
+                    if not file_path.exists() or not file_path.is_file():
+                        ui.notify(f"File {filename} not found", type="error")
+                        return
+                    
+                    # Read file content
+                    with open(file_path, 'rb') as f:
+                        content = f.read()
+                    
+                    # Use NiceGUI's download functionality
+                    ui.download(
+                        content,
+                        filename=filename,
+                        media_type='application/octet-stream'
+                    )
+                    
+                except Exception as e:
+                    ui.notify(f"Download failed: {e}", type="error")
+
             # Setup global CSS and static files - moved to a helper function
             def _setup_global_resources():
                 """Setup global CSS and static file resources."""
@@ -1840,6 +1881,13 @@ class GUILauncher:
                                         "field": "mtime",
                                         "sortable": True,
                                     },
+                        {
+                            "name": "actions",
+                            "label": "Download",
+                            "field": "actions",
+                            "sortable": False,
+                            "align": "center",
+                        },
                                 ],
                                 rows=[],
                                 pagination=20,
@@ -1850,6 +1898,27 @@ class GUILauncher:
                                     'multi-sort rows-per-page-options="[10,20,50,0]"'
                                 )
                                 files_search.bind_value(files_table, "filter")
+                            except Exception:
+                                pass
+                            
+                            # Add download button slot that emits an event to trigger Python download
+                            try:
+                                files_table.add_slot(
+                                    "body-cell-actions",
+                                    """
+<q-td key="actions" :props="props">
+  <q-btn color="primary" size="sm" icon="download" 
+         @click="() => $parent.$emit('download-file', props.row.name)" 
+         title="Download file" />
+</q-td>
+""",
+                                )
+                            except Exception:
+                                pass
+                            
+                            # Add event handler for download button clicks
+                            try:
+                                files_table.on('download-file', lambda event: _download_file(event.args))
                             except Exception:
                                 pass
 
@@ -1889,6 +1958,31 @@ class GUILauncher:
                             except Exception:
                                 pass
 
+                    # Download method for individual files
+                    def _download_file(filename: str):
+                        """Download a single file from the sample directory."""
+                        try:
+                            if not sample_dir or not sample_dir.exists():
+                                ui.notify("Sample directory not found", type="error")
+                                return
+
+                            file_path = sample_dir / filename
+                            if not file_path.exists() or not file_path.is_file():
+                                ui.notify(f"File {filename} not found", type="error")
+                                return
+
+                            with open(file_path, 'rb') as f:
+                                content = f.read()
+
+                            ui.download(
+                                content,
+                                filename=filename,
+                                media_type='application/octet-stream'
+                            )
+
+                        except Exception as e:
+                            ui.notify(f"Download failed: {e}", type="error")
+
                     # Periodic refresher for files table and master.csv summary
                     _notify_state = {"files_error": False, "csv_error": False}
 
@@ -1908,6 +2002,7 @@ class GUILauncher:
                                                     "%Y-%m-%d %H:%M:%S",
                                                     time.localtime(stat.st_mtime),
                                                 ),
+                                                "actions": f.name,  # Store filename for actions
                                             }
                                         )
                                     except Exception:

@@ -403,13 +403,13 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
             with ui.row().classes(
                 f"max-[{MENU_BREAKPOINT}px]:hidden items-center align-left px-4"
             ):
-                ui.html(navtitle).classes("text-headline-medium drop-shadow font-bold").style(
+                ui.html(navtitle, sanitize=False).classes("text-headline-medium drop-shadow font-bold").style(
                     "font-weight: 600; font-family: var(--font-primary)"
                 )
             with ui.row().classes(
                 f"min-[{MENU_BREAKPOINT+1}px]:hidden items-center align-left px-4"
             ):
-                ui.html(smalltitle).classes("text-headline-medium drop-shadow font-bold").style(
+                ui.html(smalltitle, sanitize=False).classes("text-headline-medium drop-shadow font-bold").style(
                     "font-weight: 600; font-family: var(--font-primary)"
                 )
             with ui.row().classes("ml-auto align-top"):
@@ -723,7 +723,7 @@ def create_standalone_page():
     
     # Create a simple header
     with ui.header(elevated=True).classes("items-center duration-200 p-0 px-4 no-wrap elevation-1"):
-        ui.html("<strong>R.O.B.I.N</strong>").classes("text-headline-medium drop-shadow font-bold").style(
+        ui.html("<strong>R.O.B.I.N</strong>", sanitize=False).classes("text-headline-medium drop-shadow font-bold").style(
             "font-weight: 600; font-family: var(--font-primary)"
         )
         ui.image(get_imagefile()).style("width: 50px").classes("ml-auto")
