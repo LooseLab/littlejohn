@@ -26,6 +26,7 @@ from robin.analysis.utilities.merge_bedmethyl import (
 )
 import tempfile
 import gc
+import os
 import pandas as pd
 import numpy as np
 
@@ -269,14 +270,57 @@ def sturgeon_bam_background_work(parquet_path, output_path, probes_file, current
         #    load_modkit_data, parquet_path
         # )
 
-        merged_modkit_df = load_modkit_data(parquet_path)
+        # Load parquet data directly instead of using load_modkit_data
+        # which extracts only minimal columns - we want the full data
+        merged_modkit_df = pd.read_parquet(parquet_path)
         with tempfile.NamedTemporaryFile(dir=output_path, delete=True) as temp_pileup:
+            # Determine the correct fivemc_code based on the data
+            # Check what mod_code values are present in the data
+            unique_mod_codes = merged_modkit_df['mod_code'].unique() if 'mod_code' in merged_modkit_df.columns else []
+            if 'm' in unique_mod_codes:
+                fivemc_code = 'm'  # Nanopore format
+            elif 'CG' in unique_mod_codes:
+                fivemc_code = 'CG'  # Illumina format
+            else:
+                fivemc_code = 'C'  # Default
+            
             result_df = modkit_pileup_file_to_bed(
                 merged_modkit_df,
                 temp_pileup.name,
                 probes_file,
+                fivemc_code=fivemc_code,
             )
-            diagnosis = predict_sample_from_dataframe(result_df)
+            
+            # Debug: Check what was written to the BED file
+            logger.info(f"BED file created: {temp_pileup.name}")
+            logger.info(f"BED file size: {os.path.getsize(temp_pileup.name)} bytes")
+            if os.path.getsize(temp_pileup.name) > 0:
+                with open(temp_pileup.name, 'r') as f:
+                    first_lines = f.read(500)  # Read first 500 chars
+                    logger.info(f"BED file content preview:\n{first_lines}")
+            else:
+                logger.warning("BED file is empty!")
+            
+            logger.info(f"Result DataFrame shape: {result_df.shape}")
+            logger.info(f"Result DataFrame columns: {list(result_df.columns)}")
+            if len(result_df) > 0:
+                logger.info(f"Result DataFrame sample data:\n{result_df.head()}")
+            
+            # Debug: Check what was written to the BED file
+            logger.info(f"BED file created: {temp_pileup.name}")
+            logger.info(f"BED file size: {os.path.getsize(temp_pileup.name)} bytes")
+            if os.path.getsize(temp_pileup.name) > 0:
+                with open(temp_pileup.name, 'r') as f:
+                    first_lines = f.read(1000)  # Read first 1000 chars
+                    logger.info(f"BED file content preview:\n{first_lines}")
+            else:
+                logger.warning("BED file is empty!")
+            
+            # Use the existing run_sturgeon_mem_free function directly
+            modelfile = os.path.join(
+                os.path.dirname(os.path.abspath(models.__file__)), "general.zip"
+            )
+            diagnosis = run_sturgeon_mem_free(modelfile, temp_pileup.name)
             mydf_to_save = diagnosis
             mydf_to_save["timestamp"] = currenttime
 
@@ -493,6 +537,10 @@ def run_sturgeon_mem_free(model_file, bed_file):
             header=0,
             index_col=None,
         )
+        logging.info(f"Loaded probes DataFrame shape: {probes_df.shape}")
+        logging.info(f"Loaded probes DataFrame columns: {list(probes_df.columns)}")
+        if len(probes_df) > 0:
+            logging.info(f"Loaded probes DataFrame sample data:\n{probes_df.head()}")
 
         logging.debug("Loading the decoding dict")
         decoding_dict = json.load(zipf.open("decoding.json"))
@@ -519,7 +567,12 @@ def run_sturgeon_mem_free(model_file, bed_file):
             requires_calibration = True
 
         logging.info("Loading bed file: {}".format(bed_file))
-        x = bed_to_numpy(bed_df=load_bed_file(bed_file), probes_df=probes_df)
+        bed_df = load_bed_file(bed_file)
+        logging.info(f"Loaded BED file shape: {bed_df.shape}")
+        logging.info(f"Loaded BED file columns: {list(bed_df.columns)}")
+        if len(bed_df) > 0:
+            logging.info(f"Loaded BED file sample data:\n{bed_df.head()}")
+        x = bed_to_numpy(bed_df=bed_df, probes_df=probes_df)
         scores = model_forward(x, inference_session)
 
         calibrated_scores = np.empty_like(scores)

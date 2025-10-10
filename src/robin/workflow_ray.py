@@ -418,10 +418,10 @@ def _wrap_real_handler(
                 job.context.add_result(job_type, f"{job_type}_ok")
             
             # Trigger memory cleanup after handler execution
-            # Handlers are always idle after completion, so force cleanup
+            # Let memory manager decide if cleanup is needed based on its heuristics
             if memory_manager is not None:
                 try:
-                    cleanup_stats = memory_manager.check_and_cleanup(force=True, is_idle=True)
+                    cleanup_stats = memory_manager.check_and_cleanup(is_idle=True)
                     # Log memory cleanup if it was triggered
                     if cleanup_stats.get('gc_triggered', False):
                         logger.debug(f"Memory cleanup: {cleanup_stats}")
@@ -595,6 +595,16 @@ class Coordinator:
 
         # Keep references to any CPU limiter actors
         self._cpu_limiters: List[Any] = []
+        
+        # CSV buffering for performance (write in batches instead of per-job)
+        self._csv_buffer: List[Dict[str, Any]] = []
+        self._csv_buffer_size: int = 100  # Flush every 100 jobs
+        self._csv_buffer_lock = asyncio.Lock() if asyncio else None
+        
+        # Stats caching for performance (avoid recomputing stats on every GUI update)
+        self._stats_cache: Optional[Dict[str, Any]] = None
+        self._stats_cache_time: float = 0.0
+        self._stats_cache_ttl: float = 5.0  # Cache stats for 5 seconds
 
     def get_reference(self) -> Optional[str]:
         """Get the reference genome path."""
@@ -999,6 +1009,66 @@ class Coordinator:
         is_ready = len(missing_files) == 0
         return is_ready, missing_files
 
+    async def _flush_csv_buffer(self) -> None:
+        """Flush buffered CSV entries to disk."""
+        if not self._csv_buffer:
+            return
+        
+        # Use lock to prevent concurrent flushes
+        if self._csv_buffer_lock:
+            async with self._csv_buffer_lock:
+                buffer_to_write = self._csv_buffer[:]
+                self._csv_buffer.clear()
+        else:
+            buffer_to_write = self._csv_buffer[:]
+            self._csv_buffer.clear()
+        
+        if not buffer_to_write:
+            return
+        
+        # Group entries by work_dir to minimize file operations
+        entries_by_dir: Dict[str, List[Dict[str, Any]]] = {}
+        for entry in buffer_to_write:
+            work_dir = entry.get('work_dir', '')
+            if work_dir not in entries_by_dir:
+                entries_by_dir[work_dir] = []
+            entries_by_dir[work_dir].append(entry)
+        
+        # Write each group to its respective file
+        for work_dir, entries in entries_by_dir.items():
+            try:
+                out_path = (
+                    os.path.join(work_dir, "job_durations.csv")
+                    if work_dir
+                    else "job_durations.csv"
+                )
+                
+                # Create parent directory if needed
+                try:
+                    parent = os.path.dirname(out_path)
+                    if parent:
+                        os.makedirs(parent, exist_ok=True)
+                except Exception:
+                    pass
+                
+                # Check if we need to write header
+                new_file = not os.path.exists(out_path)
+                
+                with open(out_path, "a", encoding="utf-8") as fh:
+                    if new_file:
+                        fh.write(
+                            "timestamp_iso,sample_id,job_id,job_type,queue,filepath,duration_seconds,status,error\n"
+                        )
+                    
+                    for entry in entries:
+                        fh.write(
+                            f"{entry['timestamp_iso']},{entry['sample_id']},{entry['job_id']},"
+                            f"{entry['job_type']},{entry['queue']},{entry['filepath']},"
+                            f"{entry['duration_seconds']},{entry['status']},{entry['error']}\n"
+                        )
+            except Exception:
+                pass  # Silently continue on write errors
+
     async def _on_finish(
         self, job: Job, ok: bool, ctx: WorkflowContext, err: Optional[str]
     ):
@@ -1036,7 +1106,7 @@ class Coordinator:
             else ("skipped" if is_skipped else "failed")
         )
 
-        # Append per-job duration entry
+        # Append per-job duration entry to buffer (for batched writes)
         try:
             end_time = time.time()
             duration = (end_time - float(start_time)) if start_time else None
@@ -1054,34 +1124,40 @@ class Coordinator:
                 )
             except Exception:
                 work_dir = None
-            out_path = (
-                os.path.join(work_dir, "job_durations.csv")
-                if work_dir
-                else "job_durations.csv"
+            
+            ts_iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(end_time))
+            dur_str = (
+                f"{duration:.3f}" if isinstance(duration, (int, float)) else ""
             )
-            try:
-                parent = os.path.dirname(out_path)
-                if parent:
-                    os.makedirs(parent, exist_ok=True)
-            except Exception:
-                pass
-            new_file = not os.path.exists(out_path)
-            with open(out_path, "a", encoding="utf-8") as fh:
-                if new_file:
-                    fh.write(
-                        "timestamp_iso,sample_id,job_id,job_type,queue,filepath,duration_seconds,status,error\n"
-                    )
-                ts_iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(end_time))
-                dur_str = (
-                    f"{duration:.3f}" if isinstance(duration, (int, float)) else ""
-                )
-                fp = filepath or (ctx.filepath if hasattr(ctx, "filepath") else "")
-                err_short = (err or "").replace("\n", " ").replace(",", " ")[:500]
-                fh.write(
-                    f"{ts_iso},{sample_id},{job.job_id},{job.job_type},{queue_name or ''},{os.path.basename(fp)},{dur_str},{status},{err_short}\n"
-                )
+            fp = filepath or (ctx.filepath if hasattr(ctx, "filepath") else "")
+            err_short = (err or "").replace("\n", " ").replace(",", " ")[:500]
+            
+            # Add entry to buffer
+            self._csv_buffer.append({
+                'timestamp_iso': ts_iso,
+                'sample_id': sample_id,
+                'job_id': job.job_id,
+                'job_type': job.job_type,
+                'queue': queue_name or '',
+                'filepath': os.path.basename(fp),
+                'duration_seconds': dur_str,
+                'status': status,
+                'error': err_short,
+                'work_dir': work_dir or ''
+            })
+            
+            # Flush buffer if it reaches threshold
+            if len(self._csv_buffer) >= self._csv_buffer_size:
+                try:
+                    asyncio.create_task(self._flush_csv_buffer())
+                except Exception:
+                    pass
         except Exception:
             pass
+        
+        # Invalidate stats cache since we're updating stats
+        self._stats_cache = None
+        
         if ok:
             if not is_skipped:
                 self.completed.append(job.job_id)
@@ -1461,9 +1537,13 @@ class Coordinator:
             self.running[key] = self.running.get(key, 0) + 1
 
     async def stats(self) -> Dict[str, Any]:
+        # Check cache first for performance
+        now = time.time()
+        if self._stats_cache and (now - self._stats_cache_time) < self._stats_cache_ttl:
+            return self._stats_cache
+        
         # per-queue active summary (also expose as 'active_by_worker' for GUI compat)
         active_by_queue: Dict[str, List[Dict[str, Any]]] = {}
-        now = time.time()
         for jid, info in self.active.items():
             q = info["queue"]
             active_by_queue.setdefault(q, []).append(
@@ -1540,7 +1620,7 @@ class Coordinator:
         except Exception:
             samples_payload = []
 
-        return {
+        result = {
             "completed": len(self.completed),
             "failed": len(self.failed),
             "total_enqueued": self.total_enqueued,
@@ -1556,6 +1636,12 @@ class Coordinator:
             "totals_by_category": totals_counts,
             "samples": samples_payload,
         }
+        
+        # Cache the result for future calls
+        self._stats_cache = result
+        self._stats_cache_time = now
+        
+        return result
 
     async def shutdown(self) -> bool:
         """
@@ -1567,6 +1653,12 @@ class Coordinator:
         try:
             # Stop accepting new jobs
             self._shutdown_requested = True
+            
+            # Flush any remaining CSV buffer entries
+            try:
+                await self._flush_csv_buffer()
+            except Exception:
+                pass
             
             # Cancel all inflight tasks
             if hasattr(self, '_inflight') and self._inflight:
@@ -2042,6 +2134,11 @@ class RayFileWatcher(FileSystemEventHandler):
     def on_modified(self, event):
         if not event.is_directory:
             self._handle(event.src_path)
+
+    def on_moved(self, event):
+        """Handle file move events (common with rsync default behavior)."""
+        if not event.is_directory:
+            self._handle(event.dest_path)  # Use dest_path for the final location
 
     # Ensure remaining jobs are flushed on shutdown
     def flush_remaining(self):

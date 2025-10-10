@@ -1202,6 +1202,11 @@ class FileWatcher(FileSystemEventHandler):
         if not event.is_directory and self._should_process_file(event.src_path):
             self.handle_file(event.src_path)
 
+    def on_moved(self, event) -> None:
+        """Handle file move events (common with rsync default behavior)."""
+        if not event.is_directory and self._should_process_file(event.dest_path):
+            self.handle_file(event.dest_path)  # Use dest_path for the final location
+
     def start(self, process_existing: bool = True) -> None:
         """Start watching the directory."""
         if process_existing:

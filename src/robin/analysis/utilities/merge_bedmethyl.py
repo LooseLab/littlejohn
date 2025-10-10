@@ -216,8 +216,9 @@ def modkit_pileup_file_to_bed(
             )
 
         # For minimal data, we expect only the essential columns
-        if isinstance(input_data, pd.DataFrame) and len(modkit_df.columns) == 5:
-            # Minimal data format - columns should already be named correctly
+        if isinstance(input_data, pd.DataFrame) and len(modkit_df.columns) in [5, 9]:
+            # Minimal data format (5 columns) or optimized parquet format (9 columns)
+            # Columns should already be named correctly
             expected_columns = [
                 "chrom",
                 "chromStart",
@@ -225,8 +226,12 @@ def modkit_pileup_file_to_bed(
                 "mod_code",
                 "strand",
             ]
-            if list(modkit_df.columns) == expected_columns:
+            if len(modkit_df.columns) == 5 and list(modkit_df.columns) == expected_columns:
                 # Data is already in minimal format, just filter by mod_code
+                modkit_df = modkit_df[modkit_df["mod_code"] == fivemc_code]
+            elif len(modkit_df.columns) == 9:
+                # Optimized parquet format - select only the essential columns
+                modkit_df = modkit_df[expected_columns].copy()
                 modkit_df = modkit_df[modkit_df["mod_code"] == fivemc_code]
             else:
                 # Assign column names for minimal data
@@ -303,14 +308,17 @@ def modkit_pileup_file_to_bed(
         ]
 
         # Load probes file
-        probes_df = read_probes_file(probes_file)
+        # Use custom BED file parser instead of sturgeon.utils.read_probes_file
+        # which seems to have issues with tab-separated parsing
+        probes_df = pd.read_csv(probes_file, sep='\t', header=None, 
+                              names=['chr', 'start', 'end', 'probe_name'])
 
         # Ensure chromosome names match
-        probes_df["chr"] = probes_df["chr"].astype(str)  # Make sure probes are strings
+        probes_df["chr"] = probes_df["chr"].astype(str).str.replace("^chr", "", regex=True)  # Remove "chr" prefix
         modkit_df["chr"] = (
             modkit_df["chr"].astype(str).str.replace("^chr", "", regex=True)
         )  # Remove "chr" prefix
-
+        
         # Print to verify
         # print("Normalized Chromosomes in probes:", np.unique(probes_df['chr']))
         # print("Normalized Chromosomes in modkit:", np.unique(modkit_df['chr']))
@@ -345,6 +353,10 @@ def modkit_pileup_file_to_bed(
                 neg_threshold=neg_threshold,
                 pos_threshold=pos_threshold,
             )
+
+            # Rename 'probe_name' to 'probe_id' for consistency
+            if 'probe_name' in calls_per_probe_chr.columns:
+                calls_per_probe_chr = calls_per_probe_chr.rename(columns={'probe_name': 'probe_id'})
 
             calls_per_probe.append(calls_per_probe_chr)
 
@@ -390,6 +402,10 @@ def modkit_pileup_file_to_bed(
 
         # Store result for return
         result_df = calls_per_probe.copy()
+        
+        # Rename 'probe_name' to 'probe_id' for Sturgeon compatibility
+        if 'probe_name' in result_df.columns:
+            result_df = result_df.rename(columns={'probe_name': 'probe_id'})
 
     finally:
         # Clean up large DataFrames that are no longer needed

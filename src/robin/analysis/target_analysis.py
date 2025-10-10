@@ -182,15 +182,15 @@ def get_covdfs(bamfile, bedfile=None):
 
         newcovdf = pd.read_csv(StringIO(coverage_output), sep="\t")
 
-        logger.info(f"Raw pysam.coverage columns: {list(newcovdf.columns)}")
-        logger.info(f"Sample raw coverage data: {newcovdf.head(2).to_dict('records')}")
+        logger.debug(f"Raw pysam.coverage columns: {list(newcovdf.columns)}")
+        logger.debug(f"Sample raw coverage data: {newcovdf.head(2).to_dict('records')}")
 
         newcovdf.drop(
             columns=["coverage", "meanbaseq", "meanmapq"],
             inplace=True,
         )
 
-        logger.info(f"After dropping columns: {list(newcovdf.columns)}")
+        logger.debug(f"After dropping columns: {list(newcovdf.columns)}")
 
         # Find target BED file - use provided bedfile or fallback to unique_genes.bed
         target_bed = bedfile
@@ -270,17 +270,17 @@ def run_bedmerge(newcovdf, cov_df_main, bedcovdf, bedcov_df_main):
     """
     logger = logging.getLogger("robin.target")
 
-    logger.info("Starting coverage merge:")
-    logger.info(
+    logger.debug("Starting coverage merge:")
+    logger.debug(
         f"  New genome coverage: {len(newcovdf) if newcovdf is not None else 0} regions"
     )
-    logger.info(
+    logger.debug(
         f"  Existing genome coverage: {len(cov_df_main) if cov_df_main is not None else 0} regions"
     )
-    logger.info(
+    logger.debug(
         f"  New target coverage: {len(bedcovdf) if bedcovdf is not None else 0} targets"
     )
-    logger.info(
+    logger.debug(
         f"  Existing target coverage: {len(bedcov_df_main) if bedcov_df_main is not None else 0} targets"
     )
 
@@ -308,15 +308,15 @@ def run_bedmerge(newcovdf, cov_df_main, bedcovdf, bedcov_df_main):
             inplace=True,
         )
 
-        logger.info(
+        logger.debug(
             f"Merged genome coverage: {len(cov_df_main)} + {len(newcovdf)} -> {len(merged_df)} regions"
         )
-        logger.info(
+        logger.debug(
             f"Sample merged genome data: {merged_df.head(3).to_dict('records')}"
         )
     else:
         merged_df = newcovdf
-        logger.info(
+        logger.debug(
             f"No existing genome coverage, using new data: {len(merged_df)} regions"
         )
 
@@ -331,15 +331,15 @@ def run_bedmerge(newcovdf, cov_df_main, bedcovdf, bedcov_df_main):
         merged_bed_df["bases"] = merged_bed_df["bases_df1"] + merged_bed_df["bases_df2"]
         merged_bed_df.drop(columns=["bases_df1", "bases_df2"], inplace=True)
 
-        logger.info(
+        logger.debug(
             f"Merged target coverage: {len(bedcov_df_main)} + {len(bedcovdf)} -> {len(merged_bed_df)} targets"
         )
-        logger.info(
+        logger.debug(
             f"Sample merged target data: {merged_bed_df.head(3).to_dict('records')}"
         )
     else:
         merged_bed_df = bedcovdf
-        logger.info(
+        logger.debug(
             f"No existing target coverage, using new data: {len(merged_bed_df)} targets"
         )
 
@@ -657,14 +657,14 @@ class TargetAnalysis:
                 logger.info(
                     f"Coverage calculated: {coverage:.4f} ({bases} bases / {genome} genome)"
                 )
-                logger.info(f"Coverage data shape: {updated_covdf.shape}")
-                logger.info(f"Coverage columns: {list(updated_covdf.columns)}")
-                logger.info("Sample coverage data:")
-                logger.info(
+                logger.debug(f"Coverage data shape: {updated_covdf.shape}")
+                logger.debug(f"Coverage columns: {list(updated_covdf.columns)}")
+                logger.debug("Sample coverage data:")
+                logger.debug(
                     f"  First few rows: {updated_covdf.head(3).to_dict('records')}"
                 )
-                logger.info(f"  covbases sum: {bases}")
-                logger.info(f"  endpos sum: {genome}")
+                logger.debug(f"  covbases sum: {bases}")
+                logger.debug(f"  endpos sum: {genome}")
 
                 # Step 10: Track coverage over time
                 if self.simtime and timestamp:
@@ -1044,7 +1044,7 @@ class TargetAnalysis:
         if os.path.exists(file_path):
             try:
                 df = pd.read_csv(file_path)
-                logger.info(
+                logger.debug(
                     f"Loaded existing coverage data from {filename}: {df.shape}"
                 )
 
@@ -1056,7 +1056,7 @@ class TargetAnalysis:
                 ):
                     # Extract only the raw data columns: chrom,startpos,endpos,name,bases
                     df = df[["chrom", "startpos", "endpos", "name", "bases"]]
-                    logger.info(
+                    logger.debug(
                         f"Extracted raw data columns from {filename}: {df.shape}"
                     )
 
@@ -1076,7 +1076,7 @@ class TargetAnalysis:
         if os.path.exists(file_path):
             try:
                 data = np.load(file_path)
-                logger.info(f"Loaded existing coverage over time data: {data.shape}")
+                logger.debug(f"Loaded existing coverage over time data: {data.shape}")
                 return data
             except Exception as e:
                 logger.warning(f"Error loading existing coverage over time data: {e}")

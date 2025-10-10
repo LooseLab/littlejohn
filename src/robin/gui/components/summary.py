@@ -171,21 +171,21 @@ def add_summary_section(sample_dir: Path, sample_id: str) -> None:
 
 
 def _create_dashboard_card(title: str, value: str, icon: str, description: str) -> None:
-    """Create a compact dashboard-style card matching the design pattern."""
-    with ui.card().classes("flex-1 bg-white rounded-lg shadow-sm border border-gray-200 p-4"):
-        with ui.row().classes("flex items-center justify-between mb-2"):
+    """Create a compact dashboard-style card matching the Mosaic design pattern."""
+    with ui.card().classes("mosaic-card flex-1"):
+        with ui.row().classes("mosaic-card__header"):
             # Title
-            ui.label(title).classes("text-sm font-medium text-gray-600")
+            ui.label(title).classes("mosaic-card__title")
             
             # Icon in circular background
-            with ui.row().classes("w-7 h-7 bg-pink-100 rounded-full flex items-center justify-center"):
-                ui.icon(icon).classes("w-3.5 h-3.5 text-pink-600")
+            with ui.row().classes("mosaic-card__icon"):
+                ui.icon(icon).classes("w-5 h-5")
         
         # Main value
-        ui.label(value).classes("text-xl font-bold text-gray-900 mb-1")
+        ui.label(value).classes("mosaic-card__content text-2xl font-bold mb-2")
         
         # Description
-        ui.label(description).classes("text-xs text-gray-500")
+        ui.label(description).classes("mosaic-card__subtitle")
 
 
 def _create_classification_dashboard_card_with_data(
@@ -197,35 +197,37 @@ def _create_classification_dashboard_card_with_data(
     icon: str, 
     description: str
 ) -> None:
-    """Create a compact classification dashboard card with data."""
-    with ui.card().classes("flex-1 bg-white rounded-lg shadow-sm border border-gray-200 p-4"):
-        with ui.row().classes("flex items-center justify-between mb-2"):
+    """Create a compact classification dashboard card with Mosaic styling."""
+    with ui.card().classes("mosaic-card flex-1"):
+        with ui.row().classes("mosaic-card__header"):
             # Title
-            ui.label(title).classes("text-sm font-medium text-gray-600")
+            ui.label(title).classes("mosaic-card__title")
             
             # Icon in circular background
-            with ui.row().classes("w-7 h-7 bg-blue-100 rounded-full flex items-center justify-center"):
-                ui.icon(icon).classes("w-3.5 h-3.5 text-blue-600")
+            with ui.row().classes("mosaic-card__icon"):
+                ui.icon(icon).classes("w-5 h-5")
         
         # Main classification result with confidence badge
-        with ui.row().classes("flex items-center justify-between mb-1"):
-            ui.label(classification).classes("text-xl font-bold text-gray-900")
+        with ui.row().classes("flex items-center justify-between mb-2"):
+            ui.label(classification).classes("mosaic-card__content text-xl font-bold")
             # Confidence level badge with color coding
-            confidence_badge = ui.label(confidence_level).classes("px-2 py-1 text-xs font-medium rounded-full")
+            confidence_badge_class = "status-badge"
             if confidence >= 80:
-                confidence_badge.classes("bg-green-100 text-green-800")
+                confidence_badge_class += " status-badge--success"
             elif confidence >= 50:
-                confidence_badge.classes("bg-yellow-100 text-yellow-800")
+                confidence_badge_class += " status-badge--warning"
             else:
-                confidence_badge.classes("bg-red-100 text-red-800")
+                confidence_badge_class += " status-badge--error"
+            
+            ui.label(confidence_level).classes(confidence_badge_class)
         
         # Compact details in a single row
-        with ui.row().classes("flex items-center justify-between mb-1"):
-            ui.label(f"Confidence: {confidence:.1f}%").classes("text-xs font-medium text-gray-700")
-            ui.label(f"Features: {features:,}").classes("text-xs text-gray-500")
+        with ui.row().classes("flex items-center justify-between mb-2"):
+            ui.label(f"Confidence: {confidence:.1f}%").classes("mosaic-card__subtitle")
+            ui.label(f"Features: {features:,}").classes("mosaic-card__subtitle")
         
         # Description
-        ui.label(description).classes("text-xs text-gray-500")
+        ui.label(description).classes("mosaic-card__subtitle")
 
 
 def _create_classification_dashboard_card(title: str, classification: str, icon: str, description: str) -> Dict[str, Any]:

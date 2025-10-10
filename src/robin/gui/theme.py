@@ -266,6 +266,7 @@ HEADER_HTML = (Path(__file__).parent / "static" / "header.html").read_text()
 # Read the CSS styles for the application
 STYLE_CSS = (Path(__file__).parent / "static" / "styles.css").read_text()
 M3_COMPONENTS_CSS = (Path(__file__).parent / "static" / "m3-components.css").read_text()
+MOSAIC_COMPONENTS_CSS = (Path(__file__).parent / "static" / "mosaic-components.css").read_text()
 
 
 @contextmanager
@@ -295,7 +296,7 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
         '<script src="https://cdn.jsdelivr.net/npm/igv@3.2.0/dist/igv.min.js"></script>'
     )
     ui.add_head_html(
-        HEADER_HTML + f"<style>{STYLE_CSS}</style><style>{M3_COMPONENTS_CSS}</style>"
+        HEADER_HTML + f"<style>{STYLE_CSS}</style><style>{M3_COMPONENTS_CSS}</style><style>{MOSAIC_COMPONENTS_CSS}</style>"
     )
     ui.add_head_html(
         """
@@ -718,7 +719,7 @@ def create_standalone_page():
         '<script src="https://cdn.jsdelivr.net/npm/igv@3.2.0/dist/igv.min.js"></script>'
     )
     ui.add_head_html(
-        HEADER_HTML + f"<style>{STYLE_CSS}</style><style>{M3_COMPONENTS_CSS}</style>"
+        HEADER_HTML + f"<style>{STYLE_CSS}</style><style>{M3_COMPONENTS_CSS}</style><style>{MOSAIC_COMPONENTS_CSS}</style>"
     )
     
     # Create a simple header
