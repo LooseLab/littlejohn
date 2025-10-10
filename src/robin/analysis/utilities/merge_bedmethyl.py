@@ -314,7 +314,7 @@ def modkit_pileup_file_to_bed(
 
         # Load probes file
         # The probes file has a header and uses whitespace (spaces) as delimiter
-        probes_df = pd.read_csv(probes_file, delim_whitespace=True, header=0)
+        probes_df = pd.read_csv(probes_file, sep=r'\s+', header=0)
         
         # Rename columns to expected names if needed
         if 'ID_REF' in probes_df.columns:
