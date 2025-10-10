@@ -779,6 +779,9 @@ class Coordinator:
         if self._shutdown_requested:
             return
         
+        # Invalidate stats cache since we're submitting new jobs
+        self._stats_cache = None
+        
         for job in jobs:
             sample_id = job.context.get_sample_id()
             if job.job_type in DEDUP_TYPES:
@@ -1902,6 +1905,18 @@ async def submit_existing_paths(
     recursive: bool = True,
     work_dir: Optional[str] = None,
 ) -> None:
+    # Fetch reference and target_panel once before processing files (performance optimization)
+    coord_reference = None
+    coord_target_panel = None
+    try:
+        coord_reference = ray.get(coord.get_reference.remote())
+    except Exception:
+        pass
+    try:
+        coord_target_panel = ray.get(coord.get_target_panel.remote())
+    except Exception:
+        pass
+    
     seed_jobs: List[Job] = []
     for p in paths:
         pth = Path(p)
@@ -1914,21 +1929,13 @@ async def submit_existing_paths(
                     for j in jobs:
                         j.context.add_metadata("work_dir", work_dir)
                 # Add reference genome to job metadata if available
-                try:
-                    coord_reference = ray.get(coord.get_reference.remote())
-                    if coord_reference:
-                        for j in jobs:
-                            j.context.add_metadata("reference", coord_reference)
-                except Exception:
-                    pass  # Silently continue if reference unavailable
+                if coord_reference:
+                    for j in jobs:
+                        j.context.add_metadata("reference", coord_reference)
                 # Add target panel to job metadata if available
-                try:
-                    coord_target_panel = ray.get(coord.get_target_panel.remote())
-                    if coord_target_panel:
-                        for j in jobs:
-                            j.context.add_metadata("target_panel", coord_target_panel)
-                except Exception:
-                    pass  # Silently continue if target_panel unavailable
+                if coord_target_panel:
+                    for j in jobs:
+                        j.context.add_metadata("target_panel", coord_target_panel)
                 seed_jobs += jobs
         elif pth.is_dir():
             # Stream directory walk in small batches; avoid building huge lists
@@ -1946,21 +1953,13 @@ async def submit_existing_paths(
                     for j in jobs:
                         j.context.add_metadata("work_dir", work_dir)
                 # Add reference genome to job metadata if available
-                try:
-                    coord_reference = ray.get(coord.get_reference.remote())
-                    if coord_reference:
-                        for j in jobs:
-                            j.context.add_metadata("reference", coord_reference)
-                except Exception:
-                    pass  # Silently continue if reference unavailable
+                if coord_reference:
+                    for j in jobs:
+                        j.context.add_metadata("reference", coord_reference)
                 # Add target panel to job metadata if available
-                try:
-                    coord_target_panel = ray.get(coord.get_target_panel.remote())
-                    if coord_target_panel:
-                        for j in jobs:
-                            j.context.add_metadata("target_panel", coord_target_panel)
-                except Exception:
-                    pass  # Silently continue if target_panel unavailable
+                if coord_target_panel:
+                    for j in jobs:
+                        j.context.add_metadata("target_panel", coord_target_panel)
                 batch += jobs
                 if len(batch) >= 256:
                     await coord.submit_jobs.remote(batch)
@@ -2491,6 +2490,16 @@ async def run(
     except Exception as e:
         print(f"Warning: GUI failed to launch: {e}")
 
+    # Create monitoring tasks BEFORE submitting paths so progress appears immediately
+    tasks = []
+    if monitor:
+        tasks.append(asyncio.create_task(tqdm_monitor(coord, continuous=watch)))
+    
+    # Add GUI publish task if GUI was launched
+    if gui_publish_task is not None:
+        tasks.append(gui_publish_task)
+
+    # Now submit existing paths (this will run while monitor displays progress)
     if process_existing and paths:
         await submit_existing_paths(
             coord,
@@ -2518,14 +2527,6 @@ async def run(
             if Path(p).is_dir():
                 observer.schedule(watcher, p, recursive=recursive)
         observer.start()
-
-    tasks = []
-    if monitor:
-        tasks.append(asyncio.create_task(tqdm_monitor(coord, continuous=watch)))
-    
-    # Add GUI publish task if GUI was launched
-    if gui_publish_task is not None:
-        tasks.append(gui_publish_task)
 
     try:
         if tasks:
