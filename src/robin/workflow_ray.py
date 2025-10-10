@@ -1860,10 +1860,11 @@ class Pool:
 # ---------- Classifier & Runner ----------
 
 
-def default_file_classifier(filepath: str, plan: List[str]) -> List[Job]:
+def default_file_classifier(filepath: str, plan: List[str], target_panel: str = "rCNS2") -> List[Job]:
     ctx = WorkflowContext(filepath)
     ctx.add_metadata("filename", os.path.basename(filepath))
     ctx.add_metadata("created", time.time())
+    ctx.add_metadata("target_panel", target_panel)  # Add panel metadata
     try:
         ctx.add_metadata("file_size", os.path.getsize(filepath))
     except OSError:

@@ -313,10 +313,15 @@ def modkit_pileup_file_to_bed(
         ]
 
         # Load probes file
-        # Use custom BED file parser instead of sturgeon.utils.read_probes_file
-        # which seems to have issues with tab-separated parsing
-        probes_df = pd.read_csv(probes_file, sep='\t', header=None, 
-                              names=['chr', 'start', 'end', 'probe_name'])
+        # The probes file has a header and uses whitespace (spaces) as delimiter
+        probes_df = pd.read_csv(probes_file, delim_whitespace=True, header=0)
+        
+        # Rename columns to expected names if needed
+        if 'ID_REF' in probes_df.columns:
+            probes_df = probes_df.rename(columns={'ID_REF': 'probe_name'})
+        
+        # Keep only the columns we need
+        probes_df = probes_df[['chr', 'start', 'end', 'probe_name']].copy()
 
         # Ensure chromosome names match
         probes_df["chr"] = probes_df["chr"].astype(str).str.replace("^chr", "", regex=True)  # Remove "chr" prefix
@@ -324,15 +329,11 @@ def modkit_pileup_file_to_bed(
             modkit_df["chr"].astype(str).str.replace("^chr", "", regex=True)
         )  # Remove "chr" prefix
         
-        # Print to verify
-        # print("Normalized Chromosomes in probes:", np.unique(probes_df['chr']))
-        # print("Normalized Chromosomes in modkit:", np.unique(modkit_df['chr']))
+        # Get unique chromosomes
+        chromosomes = np.unique(probes_df["chr"].astype(str))
 
         # Copy probes data for methylation processing
         probes_methyl_df = deepcopy(probes_df)
-
-        # Get unique chromosomes
-        chromosomes = np.unique(probes_df["chr"].astype(str))
 
         # Initialize methylation count columns
         probes_methyl_df["methylation_calls"] = 0
