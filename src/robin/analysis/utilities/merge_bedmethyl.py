@@ -216,8 +216,9 @@ def modkit_pileup_file_to_bed(
             )
 
         # For minimal data, we expect only the essential columns
-        if isinstance(input_data, pd.DataFrame) and len(modkit_df.columns) in [5, 9]:
-            # Minimal data format (5 columns) or optimized parquet format (9 columns)
+        # Support various optimized formats: 5, 8, 9, or 10 columns
+        if isinstance(input_data, pd.DataFrame) and len(modkit_df.columns) <= 10:
+            # Minimal/optimized data format (5-10 columns)
             # Columns should already be named correctly
             expected_columns = [
                 "chrom",
@@ -226,16 +227,20 @@ def modkit_pileup_file_to_bed(
                 "mod_code",
                 "strand",
             ]
-            if len(modkit_df.columns) == 5 and list(modkit_df.columns) == expected_columns:
-                # Data is already in minimal format, just filter by mod_code
-                modkit_df = modkit_df[modkit_df["mod_code"] == fivemc_code]
-            elif len(modkit_df.columns) == 9:
-                # Optimized parquet format - select only the essential columns
+            # Check if all expected columns exist in the DataFrame
+            has_expected_cols = all(col in modkit_df.columns for col in expected_columns)
+            
+            if has_expected_cols:
+                # Data has the essential columns, just filter and select them
                 modkit_df = modkit_df[expected_columns].copy()
                 modkit_df = modkit_df[modkit_df["mod_code"] == fivemc_code]
-            else:
-                # Assign column names for minimal data
+            elif len(modkit_df.columns) == 5:
+                # Exactly 5 unnamed columns - assign names
                 modkit_df.columns = expected_columns
+                modkit_df = modkit_df[modkit_df["mod_code"] == fivemc_code]
+            else:
+                # Optimized format with more columns - try to extract the essential ones
+                modkit_df = modkit_df[expected_columns].copy()
                 modkit_df = modkit_df[modkit_df["mod_code"] == fivemc_code]
         else:
             # Full data format - use original logic
