@@ -594,7 +594,7 @@ class Coordinator:
         # per-sample tracking for GUI
         self.samples_by_id: Dict[str, Dict[str, Any]] = {}
         # Sample cleanup tracking to prevent unbounded memory growth
-        self._sample_cleanup_interval: int = 1000  # Clean up every N jobs
+        self._sample_cleanup_interval: int = 5000  # Clean up every N jobs (conservative)
         self._jobs_since_last_cleanup: int = 0
         # shutdown flag for graceful termination
         self._shutdown_requested = False
@@ -1038,8 +1038,14 @@ class Coordinator:
         """
         Clean up samples that have completed all their jobs.
         This prevents unbounded memory growth in samples_by_id dictionary.
+        
+        Conservative cleanup: only removes samples that have been idle for 5+ minutes.
         """
         if not self.samples_by_id:
+            return
+        
+        # Only cleanup if we have a large number of samples (> 1000)
+        if len(self.samples_by_id) < 1000:
             return
         
         # Identify samples with no active jobs and that haven't been seen recently
@@ -1051,10 +1057,14 @@ class Coordinator:
             if ent.get("active_jobs", 0) > 0:
                 continue
             
-            # Remove samples that completed all jobs and haven't been active for 60 seconds
+            # Remove samples that completed all jobs and haven't been active for 5 minutes
+            # This is very conservative to avoid removing data that might still be needed
             last_seen = ent.get("last_seen", 0)
-            if current_time - last_seen > 60:
+            if current_time - last_seen > 300:  # 5 minutes
                 samples_to_remove.append(sid)
+        
+        # Limit cleanup to 100 samples at a time to avoid disruption
+        samples_to_remove = samples_to_remove[:100]
         
         # Remove completed samples
         for sid in samples_to_remove:
@@ -1123,12 +1133,6 @@ class Coordinator:
     async def _on_finish(
         self, job: Job, ok: bool, ctx: WorkflowContext, err: Optional[str]
     ):
-        # Clean up intermediate data from context to reduce memory usage
-        try:
-            ctx.cleanup_intermediate_data()
-        except Exception:
-            pass  # Continue even if cleanup fails
-        
         # capture start info for duration logging, then update dedup maps
         active_info = self.active.pop(job.job_id, None)
         start_time = None
@@ -1203,16 +1207,16 @@ class Coordinator:
                 'work_dir': work_dir or ''
             })
             
-            # Flush buffer if it reaches threshold or force flush if max size exceeded
-            if len(self._csv_buffer) >= self._csv_buffer_max_size:
-                # Force immediate flush if buffer is too large
+            # Flush buffer if it reaches threshold (always async to avoid blocking)
+            if len(self._csv_buffer) >= self._csv_buffer_size:
                 try:
-                    await self._flush_csv_buffer()
+                    asyncio.create_task(self._flush_csv_buffer())
                 except Exception:
                     pass
-            elif len(self._csv_buffer) >= self._csv_buffer_size:
-                # Normal async flush
+            # If buffer is dangerously large, log warning but don't block
+            elif len(self._csv_buffer) >= self._csv_buffer_max_size:
                 try:
+                    # Create urgent flush task but don't await it
                     asyncio.create_task(self._flush_csv_buffer())
                 except Exception:
                     pass
