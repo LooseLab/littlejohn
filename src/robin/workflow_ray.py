@@ -193,6 +193,24 @@ class WorkflowContext:
     def get_sample_id(self) -> str:
         bam_md = self.metadata.get("bam_metadata", {})
         return bam_md.get("sample_id", "unknown")
+    
+    def cleanup_intermediate_data(self) -> None:
+        """
+        Clean up intermediate data from context to reduce memory usage.
+        This removes large data structures that are no longer needed after processing.
+        """
+        # Remove large lists from results that are stored on disk
+        for job_type in list(self.results.keys()):
+            result = self.results.get(job_type)
+            if isinstance(result, dict):
+                # Remove large lists from preprocessing results
+                if job_type == "preprocessing" and "supplementary_read_ids" in result:
+                    result["supplementary_read_ids"] = []  # Clear large list
+                    result["supplementary_read_ids_cleared"] = True
+        
+        # Keep history but limit errors list to last 10 errors
+        if len(self.errors) > 10:
+            self.errors = self.errors[-10:]
 
 
 @dataclass
@@ -539,9 +557,9 @@ class Coordinator:
         # dedup maps
         self.pending: Dict[Tuple[str, str], int] = {}
         self.running: Dict[Tuple[str, str], int] = {}
-        # stats
-        self.completed: List[int] = []
-        self.failed: List[int] = []
+        # stats - use counters instead of lists to avoid unbounded growth
+        self.completed_count: int = 0
+        self.failed_count: int = 0
         self.completed_by_type: Dict[str, int] = {}
         self.failed_by_type: Dict[str, int] = {}
         self.submitted_by_type: Dict[str, int] = {}
@@ -575,6 +593,9 @@ class Coordinator:
         self.waiting_by_type_global: Dict[str, List[Job]] = {}
         # per-sample tracking for GUI
         self.samples_by_id: Dict[str, Dict[str, Any]] = {}
+        # Sample cleanup tracking to prevent unbounded memory growth
+        self._sample_cleanup_interval: int = 1000  # Clean up every N jobs
+        self._jobs_since_last_cleanup: int = 0
         # shutdown flag for graceful termination
         self._shutdown_requested = False
         # defer setup/registration to async setup()
@@ -599,6 +620,7 @@ class Coordinator:
         # CSV buffering for performance (write in batches instead of per-job)
         self._csv_buffer: List[Dict[str, Any]] = []
         self._csv_buffer_size: int = 100  # Flush every 100 jobs
+        self._csv_buffer_max_size: int = 500  # Maximum buffer size before forced flush
         self._csv_buffer_lock = asyncio.Lock() if asyncio else None
         
         # Stats caching for performance (avoid recomputing stats on every GUI update)
@@ -1012,6 +1034,32 @@ class Coordinator:
         is_ready = len(missing_files) == 0
         return is_ready, missing_files
 
+    async def _cleanup_completed_samples(self) -> None:
+        """
+        Clean up samples that have completed all their jobs.
+        This prevents unbounded memory growth in samples_by_id dictionary.
+        """
+        if not self.samples_by_id:
+            return
+        
+        # Identify samples with no active jobs and that haven't been seen recently
+        current_time = time.time()
+        samples_to_remove = []
+        
+        for sid, ent in self.samples_by_id.items():
+            # Keep samples with active jobs
+            if ent.get("active_jobs", 0) > 0:
+                continue
+            
+            # Remove samples that completed all jobs and haven't been active for 60 seconds
+            last_seen = ent.get("last_seen", 0)
+            if current_time - last_seen > 60:
+                samples_to_remove.append(sid)
+        
+        # Remove completed samples
+        for sid in samples_to_remove:
+            self.samples_by_id.pop(sid, None)
+    
     async def _flush_csv_buffer(self) -> None:
         """Flush buffered CSV entries to disk."""
         if not self._csv_buffer:
@@ -1075,6 +1123,12 @@ class Coordinator:
     async def _on_finish(
         self, job: Job, ok: bool, ctx: WorkflowContext, err: Optional[str]
     ):
+        # Clean up intermediate data from context to reduce memory usage
+        try:
+            ctx.cleanup_intermediate_data()
+        except Exception:
+            pass  # Continue even if cleanup fails
+        
         # capture start info for duration logging, then update dedup maps
         active_info = self.active.pop(job.job_id, None)
         start_time = None
@@ -1149,8 +1203,15 @@ class Coordinator:
                 'work_dir': work_dir or ''
             })
             
-            # Flush buffer if it reaches threshold
-            if len(self._csv_buffer) >= self._csv_buffer_size:
+            # Flush buffer if it reaches threshold or force flush if max size exceeded
+            if len(self._csv_buffer) >= self._csv_buffer_max_size:
+                # Force immediate flush if buffer is too large
+                try:
+                    await self._flush_csv_buffer()
+                except Exception:
+                    pass
+            elif len(self._csv_buffer) >= self._csv_buffer_size:
+                # Normal async flush
                 try:
                     asyncio.create_task(self._flush_csv_buffer())
                 except Exception:
@@ -1163,7 +1224,7 @@ class Coordinator:
         
         if ok:
             if not is_skipped:
-                self.completed.append(job.job_id)
+                self.completed_count += 1
                 self.completed_by_type[job.job_type] = (
                     self.completed_by_type.get(job.job_type, 0) + 1
                 )
@@ -1271,7 +1332,7 @@ class Coordinator:
         else:
             # Only record as failed if not a deliberate skip
             if not is_skipped:
-                self.failed.append(job.job_id)
+                self.failed_count += 1
                 self.failed_by_type[job.job_type] = (
                     self.failed_by_type.get(job.job_type, 0) + 1
                 )
@@ -1303,6 +1364,15 @@ class Coordinator:
                 ent2["last_seen"] = time.time()
         except Exception:
             pass
+        
+        # Periodically clean up completed samples to prevent memory growth
+        self._jobs_since_last_cleanup += 1
+        if self._jobs_since_last_cleanup >= self._sample_cleanup_interval:
+            self._jobs_since_last_cleanup = 0
+            try:
+                asyncio.create_task(self._cleanup_completed_samples())
+            except Exception:
+                pass
 
         # Promote next waiting job for this (type, sample) if any (CNV-only if enabled)
         if job.job_type in SERIALIZE_BY_TYPE_PER_SAMPLE:
@@ -1624,8 +1694,8 @@ class Coordinator:
             samples_payload = []
 
         result = {
-            "completed": len(self.completed),
-            "failed": len(self.failed),
+            "completed": self.completed_count,
+            "failed": self.failed_count,
             "total_enqueued": self.total_enqueued,
             "total_skipped": self.total_skipped,
             "completed_by_type": dict(self.completed_by_type),
