@@ -701,7 +701,7 @@ def save_cnv_files(
 
 
 
-def process_single_bam(bam_path, metadata, work_dir, logger, threads=4):
+def process_single_bam(bam_path, metadata, work_dir, logger, threads=2):
     """
     Process a single BAM file for CNV analysis using the complete pipeline.
 
@@ -710,7 +710,7 @@ def process_single_bam(bam_path, metadata, work_dir, logger, threads=4):
         metadata: BamMetadata object
         work_dir: Working directory
         logger: Logger instance
-        threads: Number of threads to use for CNV analysis (default: 4)
+        threads: Number of threads to use for CNV analysis (default: 2, configurable)
 
     Returns:
         Dictionary with CNV analysis results
@@ -945,7 +945,7 @@ def process_single_bam(bam_path, metadata, work_dir, logger, threads=4):
         return analysis_result
 
 
-def cnv_handler(job, work_dir=None, target_panel="rCNS2", threads=4):
+def cnv_handler(job, work_dir=None, target_panel="rCNS2", threads=2):
     """
     Handler function for CNV analysis jobs.
     This function processes BAM files for copy number variation analysis.
@@ -954,7 +954,7 @@ def cnv_handler(job, work_dir=None, target_panel="rCNS2", threads=4):
         job: The workflow job containing file and metadata
         work_dir: Optional base directory for output (defaults to BAM file directory)
         target_panel: Target panel type for consistency with other analysis components
-        threads: Number of threads to use for CNV analysis (default: 4)
+        threads: Number of threads to use for CNV analysis (default: 2, configurable via job metadata)
     """
     # Get job-specific logger
     logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
