@@ -2063,11 +2063,13 @@ async def tqdm_monitor(coord, continuous: bool = False) -> None:
         "slow",
     ]
     bars = {
-        q: tqdm(desc=q.title(), unit="jobs", position=i, leave=True)
+        q: tqdm(desc=q.title(), unit="jobs", position=i, leave=True, ncols=120, 
+                bar_format='{l_bar}{bar:20}{r_bar}')
         for i, q in enumerate(order)
     }
     overall = tqdm(
-        desc="Overall Progress", unit="jobs", position=len(order), leave=True
+        desc="Overall Progress", unit="jobs", position=len(order), leave=True, ncols=120,
+        bar_format='{l_bar}{bar:20}{r_bar}'
     )
 
     try:
@@ -2102,7 +2104,10 @@ async def tqdm_monitor(coord, continuous: bool = False) -> None:
                     parts = []
                     for j in active_jobs_info[:2]:
                         fn = os.path.basename(j.get("filepath", ""))
-                        parts.append(f"{j['job_type']}:{fn}({j['duration']}s)")
+                        # Truncate long filenames to keep display compact
+                        if len(fn) > 25:
+                            fn = fn[:22] + "..."
+                        parts.append(f"{fn}({j['duration']}s)")
                     b.set_postfix_str(" | ".join(parts))
                 else:
                     b.set_postfix_str("")
@@ -2115,8 +2120,8 @@ async def tqdm_monitor(coord, continuous: bool = False) -> None:
             overall.total = max(overall.total or 0, total_with_waiting) or 0
             overall.n = s["completed"] + s["failed"]
             overall.set_postfix_str(
-                f"Active:{s['active_count']} | Completed:{s['completed']} | "
-                f"Failed:{s['failed']} | Skipped:{s['total_skipped']} | Total:{s['total_enqueued']}"
+                f"Act:{s['active_count']} | Done:{s['completed']} | "
+                f"Fail:{s['failed']} | Skip:{s['total_skipped']} | Tot:{s['total_enqueued']}"
             )
             overall.refresh()
 
