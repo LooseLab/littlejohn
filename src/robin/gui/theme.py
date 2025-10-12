@@ -108,7 +108,7 @@ def get_version_from_github():
 
 
 def styled_table(*, columns, rows=None, pagination=20, class_size="table-xs", **kwargs):
-    """Create a NiceGUI table with Material Design 3 styling.
+    """Create a NiceGUI table with Material Design 3 styling and compact layout.
 
     Args:
         columns: columns definition passed to ui.table
@@ -132,7 +132,7 @@ def styled_table(*, columns, rows=None, pagination=20, class_size="table-xs", **
             table.classes(replace=f"table w-full {class_size} text-xs")
         except Exception:
             table.classes(f"table w-full {class_size} text-xs")
-        # Use Quasar's dense mode with M3 styling
+        # Use Quasar's dense mode with M3 styling for maximum compactness
         try:
             table.props("dense flat wrap-cells")
         except Exception:

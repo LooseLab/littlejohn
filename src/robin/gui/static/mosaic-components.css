@@ -4,12 +4,13 @@
 .mosaic-card {
   background-color: var(--md-surface);
   border-radius: var(--radius-lg);
-  padding: var(--spacing-lg);
+  padding: var(--spacing-sm);
   box-shadow: var(--elevation-2);
   border: 1px solid var(--md-outline);
   transition: all var(--transition-base);
   position: relative;
   overflow: hidden;
+  min-width: 0; /* Allow flex items to shrink below content size */
 }
 
 .mosaic-card:hover {
@@ -30,27 +31,29 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: var(--spacing-md);
-  padding-bottom: var(--spacing-sm);
+  margin-bottom: var(--spacing-xs);
+  padding-bottom: 2px;
   border-bottom: 1px solid var(--md-outline);
 }
 
 .mosaic-card__title {
-  font-size: 18px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--md-on-surface);
   letter-spacing: -0.025em;
+  min-width: 0; /* Allow text truncation */
 }
 
 .mosaic-card__subtitle {
-  font-size: 14px;
+  font-size: 10px;
   color: var(--md-on-surface-variant);
-  margin-top: var(--spacing-xs);
+  margin-top: 2px;
+  line-height: 1.3;
 }
 
 .mosaic-card__icon {
-  width: 40px;
-  height: 40px;
+  width: 28px;
+  height: 28px;
   border-radius: var(--radius-md);
   background-color: var(--md-primary-container);
   display: flex;
@@ -62,7 +65,9 @@
 /* Card Content */
 .mosaic-card__content {
   color: var(--md-on-surface);
-  line-height: 1.6;
+  line-height: 1.2;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
 }
 
 .mosaic-card__footer {
@@ -130,12 +135,14 @@
 .status-badge {
   display: inline-flex;
   align-items: center;
-  padding: var(--spacing-xs) var(--spacing-sm);
+  padding: 2px 6px;
   border-radius: var(--radius-md);
-  font-size: 12px;
+  font-size: 9px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .status-badge--success {
@@ -190,6 +197,62 @@
 @keyframes shimmer {
   0% { transform: translateX(-100%); }
   100% { transform: translateX(100%); }
+}
+
+/* Utility classes for better text handling */
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.break-words {
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  hyphens: auto;
+}
+
+/* Compact layout utilities */
+.compact-gap {
+  gap: var(--spacing-xs);
+}
+
+.compact-padding {
+  padding: var(--spacing-sm);
+}
+
+/* Responsive card sizing */
+@media (max-width: 768px) {
+  .mosaic-card {
+    padding: var(--spacing-sm);
+  }
+  
+  .mosaic-card__title {
+    font-size: 14px;
+  }
+  
+  .mosaic-card__subtitle {
+    font-size: 11px;
+  }
+}
+
+/* Ensure text doesn't get truncated in cards */
+.mosaic-card .break-words {
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  hyphens: auto;
+  max-width: 100%;
+}
+
+/* Compact text sizing utilities */
+.text-xs-compact {
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.text-sm-compact {
+  font-size: 12px;
+  line-height: 1.3;
 }
 
 /* Data Grid - Mosaic style */

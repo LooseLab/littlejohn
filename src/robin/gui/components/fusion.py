@@ -207,19 +207,35 @@ def _make_fusion_table(container: Any, df: pd.DataFrame) -> Any:
         return None
 
     with container:
-        table = (
-            ui.table.from_pandas(
-                _rename_and_sort(df),
-                pagination=25,
-            )
-            .props("dense")
-            .classes("w-full")
-            .style("height: 900px")
-            .style("font-size: 100%; font-weight: 300")
+        # Use styled_table for consistent styling
+        from robin.gui.theme import styled_table
+        
+        # Convert DataFrame to rows format for styled_table
+        processed_df = _rename_and_sort(df)
+        
+        # Create columns definition from DataFrame
+        columns = []
+        for col in processed_df.columns:
+            columns.append({
+                "name": col,
+                "label": col.replace("_", " ").title(),
+                "field": col,
+                "sortable": True
+            })
+        
+        # Create rows from DataFrame
+        rows = processed_df.to_dict('records')
+        
+        # Create styled table
+        table_container, table = styled_table(
+            columns=columns,
+            rows=rows,
+            pagination=25,
+            class_size="table-xs"
         )
+        
+        # Add search functionality
         try:
-            for col in table.columns:
-                col["sortable"] = True
             with table.add_slot("top-right"):
                 with ui.input(placeholder="Search").props("type=search").bind_value(
                     table, "filter"
@@ -227,6 +243,7 @@ def _make_fusion_table(container: Any, df: pd.DataFrame) -> Any:
                     ui.icon("search")
         except Exception:
             pass
+        
         return table
 
 

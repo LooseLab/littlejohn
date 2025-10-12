@@ -479,7 +479,7 @@ body {
 
 /* Mosaic Modern table styling */
 .compact-table .q-table__container {
-  font-size: 14px;
+  font-size: 12px;
   border-radius: var(--radius-lg);
   overflow: hidden;
   box-shadow: var(--elevation-2);
@@ -494,10 +494,10 @@ body {
 
 .compact-table .q-table th,
 .compact-table .q-table td {
-  padding: var(--spacing-md) var(--spacing-lg);
-  line-height: 1.5;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  line-height: 1.4;
   border-bottom: 1px solid var(--md-outline);
-  font-size: 14px;
+  font-size: 12px;
   transition: background-color var(--transition-base);
 }
 
@@ -505,7 +505,7 @@ body {
   font-weight: 600;
   background-color: var(--md-surface-container-high);
   color: var(--md-on-surface-variant);
-  font-size: 14px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
@@ -516,13 +516,13 @@ body {
 
 .compact-table .q-table__separator,
 .compact-table .q-table__bottom {
-  min-height: 56px;
-  padding: var(--spacing-md) var(--spacing-lg);
+  min-height: 40px;
+  padding: var(--spacing-xs) var(--spacing-sm);
   background-color: var(--md-surface-container);
 }
 
 .compact-table .q-field--dense {
-  font-size: var(--spacing-sm);
+  font-size: 11px;
 }
 
 /* Apple HIG Form elements */

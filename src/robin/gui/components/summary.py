@@ -25,7 +25,7 @@ def _run_info_section(sample_dir: Path, sample_id: str):
         ui.label("Run Details").classes("text-lg font-semibold text-blue-800")
         ui.separator().classes().style("border: 1px solid var(--md-primary)")
         
-        with ui.row().classes("w-full gap-4"):
+        with ui.row().classes("w-full gap-1 flex-wrap"):
             _create_dashboard_card(
                 "Run Time", run_info.get("run_time", "Not available"), "schedule", "Sequencing run timestamp"
             )
@@ -55,7 +55,7 @@ def _classification_section(sample_dir: Path):
         ui.label("Classification Details").classes("text-lg font-semibold text-blue-800")
         ui.separator().classes().style("border: 1px solid var(--md-primary)")
         
-        with ui.row().classes("w-full gap-4"):
+        with ui.row().classes("w-full gap-1 flex-wrap"):
             # Sturgeon
             sturgeon_data = classification_data.get("sturgeon", {})
             _create_classification_dashboard_card_with_data(
@@ -117,7 +117,7 @@ def _analysis_section(sample_dir: Path):
         ui.label("Analysis Details").classes("text-lg font-semibold text-blue-800")
         ui.separator().classes().style("border: 1px solid var(--md-primary)")
         
-        with ui.row().classes("w-full gap-4"):
+        with ui.row().classes("w-full gap-1 flex-wrap"):
             # Coverage Analysis
             _create_coverage_dashboard_card_with_data(
                 coverage_data.get("quality", "Not available"),
@@ -172,17 +172,17 @@ def add_summary_section(sample_dir: Path, sample_id: str) -> None:
 
 def _create_dashboard_card(title: str, value: str, icon: str, description: str) -> None:
     """Create a compact dashboard-style card matching the Mosaic design pattern."""
-    with ui.card().classes("mosaic-card flex-1"):
+    with ui.card().classes("mosaic-card flex-1 min-w-0"):
         with ui.row().classes("mosaic-card__header"):
             # Title
-            ui.label(title).classes("mosaic-card__title")
+            ui.label(title).classes("mosaic-card__title truncate")
             
             # Icon in circular background
             with ui.row().classes("mosaic-card__icon"):
-                ui.icon(icon).classes("w-5 h-5")
+                ui.icon(icon).classes("w-4 h-4")
         
-        # Main value
-        ui.label(value).classes("mosaic-card__content text-2xl font-bold mb-2")
+        # Main value with text wrapping
+        ui.label(value).classes("mosaic-card__content text-sm font-bold mb-1 break-words")
         
         # Description
         ui.label(description).classes("mosaic-card__subtitle")
@@ -198,18 +198,18 @@ def _create_classification_dashboard_card_with_data(
     description: str
 ) -> None:
     """Create a compact classification dashboard card with Mosaic styling."""
-    with ui.card().classes("mosaic-card flex-1"):
+    with ui.card().classes("mosaic-card flex-1 min-w-0"):
         with ui.row().classes("mosaic-card__header"):
             # Title
-            ui.label(title).classes("mosaic-card__title")
+            ui.label(title).classes("mosaic-card__title truncate")
             
             # Icon in circular background
             with ui.row().classes("mosaic-card__icon"):
-                ui.icon(icon).classes("w-5 h-5")
+                ui.icon(icon).classes("w-4 h-4")
         
         # Main classification result with confidence badge
-        with ui.row().classes("flex items-center justify-between mb-2"):
-            ui.label(classification).classes("mosaic-card__content text-xl font-bold")
+        with ui.row().classes("flex items-start justify-between mb-1 gap-1"):
+            ui.label(classification).classes("mosaic-card__content text-sm font-bold break-words flex-1")
             # Confidence level badge with color coding
             confidence_badge_class = "status-badge"
             if confidence >= 80:
@@ -222,7 +222,7 @@ def _create_classification_dashboard_card_with_data(
             ui.label(confidence_level).classes(confidence_badge_class)
         
         # Compact details in a single row
-        with ui.row().classes("flex items-center justify-between mb-2"):
+        with ui.row().classes("flex items-center justify-between mb-1 gap-1"):
             ui.label(f"Confidence: {confidence:.1f}%").classes("mosaic-card__subtitle")
             ui.label(f"Features: {features:,}").classes("mosaic-card__subtitle")
         
@@ -296,38 +296,40 @@ def _create_coverage_dashboard_card_with_data(
     enrichment: str
 ) -> None:
     """Create a compact coverage analysis dashboard card with data."""
-    with ui.card().classes("flex-1 bg-white rounded-lg shadow-sm border border-gray-200 p-4"):
-        with ui.row().classes("flex items-center justify-between mb-2"):
+    with ui.card().classes("mosaic-card flex-1 min-w-0"):
+        with ui.row().classes("mosaic-card__header"):
             # Title
-            ui.label("Coverage Analysis").classes("text-sm font-medium text-gray-600")
+            ui.label("Coverage Analysis").classes("mosaic-card__title truncate")
             
             # Icon in circular background
-            with ui.row().classes("w-7 h-7 bg-blue-100 rounded-full flex items-center justify-center"):
-                ui.icon("analytics").classes("w-3.5 h-3.5 text-blue-600")
+            with ui.row().classes("mosaic-card__icon"):
+                ui.icon("analytics").classes("w-5 h-5")
         
         # Main quality result with badge
-        with ui.row().classes("flex items-center justify-between mb-1"):
-            ui.label(quality).classes("text-xl font-bold text-gray-900")
+        with ui.row().classes("flex items-start justify-between mb-1 gap-1"):
+            ui.label(quality).classes("mosaic-card__content text-sm font-bold break-words flex-1")
             # Coverage badge with color coding
-            coverage_badge = ui.label(target_coverage).classes("px-2 py-1 text-xs font-medium rounded-full")
+            coverage_badge_class = "status-badge"
             try:
                 coverage_num = float(target_coverage.replace("x", ""))
                 if coverage_num >= 30:
-                    coverage_badge.classes("bg-green-100 text-green-800")
+                    coverage_badge_class += " status-badge--success"
                 elif coverage_num >= 20:
-                    coverage_badge.classes("bg-blue-100 text-blue-800")
+                    coverage_badge_class += " status-badge--info"
                 elif coverage_num >= 10:
-                    coverage_badge.classes("bg-yellow-100 text-yellow-800")
+                    coverage_badge_class += " status-badge--warning"
                 else:
-                    coverage_badge.classes("bg-red-100 text-red-800")
+                    coverage_badge_class += " status-badge--error"
             except (ValueError, AttributeError):
-                coverage_badge.classes("bg-gray-100 text-gray-600")
+                coverage_badge_class += " status-badge--info"
+            
+            ui.label(target_coverage).classes(coverage_badge_class)
         
         # Coverage details in compact layout
-        with ui.column().classes("mb-2"):
-            ui.label(f"Global: {global_coverage}").classes("text-xs text-gray-600")
-            ui.label(f"Targets: {target_coverage}").classes("text-xs text-gray-600")
-            ui.label(f"Enrichment: {enrichment}").classes("text-xs text-gray-600")
+        with ui.column().classes("mb-1 gap-0.5"):
+            ui.label(f"Global: {global_coverage}").classes("mosaic-card__subtitle")
+            ui.label(f"Targets: {target_coverage}").classes("mosaic-card__subtitle")
+            ui.label(f"Enrichment: {enrichment}").classes("mosaic-card__subtitle")
         
         # Coverage thresholds as small badges
         with ui.row().classes("gap-1 flex-wrap"):
@@ -384,30 +386,30 @@ def _create_cnv_dashboard_card_with_data(
     lost: int
 ) -> None:
     """Create a compact CNV analysis dashboard card with data."""
-    with ui.card().classes("flex-1 bg-white rounded-lg shadow-sm border border-gray-200 p-4"):
-        with ui.row().classes("flex items-center justify-between mb-2"):
+    with ui.card().classes("mosaic-card flex-1 min-w-0"):
+        with ui.row().classes("mosaic-card__header"):
             # Title
-            ui.label("Copy Number Analysis").classes("text-sm font-medium text-gray-600")
+            ui.label("Copy Number Analysis").classes("mosaic-card__title truncate")
             
             # Icon in circular background
-            with ui.row().classes("w-7 h-7 bg-purple-100 rounded-full flex items-center justify-center"):
-                ui.icon("person").classes("w-3.5 h-3.5 text-purple-600")
+            with ui.row().classes("mosaic-card__icon"):
+                ui.icon("person").classes("w-5 h-5")
         
         # Main genetic sex result
-        ui.label(genetic_sex).classes("text-xl font-bold text-gray-900 mb-1")
+        ui.label(genetic_sex).classes("mosaic-card__content text-sm font-bold mb-1 break-words")
         
         # Analysis details in compact layout
-        with ui.column().classes("mb-2"):
-            ui.label(f"Bin Width: {bin_width}").classes("text-xs text-gray-600")
-            ui.label(f"Variance: {variance}").classes("text-xs text-gray-600")
+        with ui.column().classes("mb-1 gap-0.5"):
+            ui.label(f"Bin Width: {bin_width}").classes("mosaic-card__subtitle")
+            ui.label(f"Variance: {variance}").classes("mosaic-card__subtitle")
         
         # CNV counts as badges
-        with ui.row().classes("gap-2 mb-1"):
-            ui.label(f"Gained: {gained}").classes("px-2 py-1 text-xs font-medium rounded-full bg-green-100 text-green-800")
-            ui.label(f"Lost: {lost}").classes("px-2 py-1 text-xs font-medium rounded-full bg-red-100 text-red-800")
+        with ui.row().classes("gap-1 mb-1"):
+            ui.label(f"Gained: {gained}").classes("px-1 py-0.5 text-xs font-medium rounded-full bg-green-100 text-green-800")
+            ui.label(f"Lost: {lost}").classes("px-1 py-0.5 text-xs font-medium rounded-full bg-red-100 text-red-800")
         
         # Description
-        ui.label("Copy number analysis across genome with breakpoint detection").classes("text-xs text-gray-500")
+        ui.label("Copy number analysis across genome with breakpoint detection").classes("mosaic-card__subtitle")
 
 
 def _create_cnv_dashboard_card() -> Dict[str, Any]:
@@ -454,38 +456,40 @@ def _create_mgmt_dashboard_card_with_data(
     cpg_sites: str
 ) -> None:
     """Create a compact MGMT analysis dashboard card with data."""
-    with ui.card().classes("flex-1 bg-white rounded-lg shadow-sm border border-gray-200 p-4"):
-        with ui.row().classes("flex items-center justify-between mb-2"):
+    with ui.card().classes("mosaic-card flex-1 min-w-0"):
+        with ui.row().classes("mosaic-card__header"):
             # Title
-            ui.label("MGMT Analysis").classes("text-sm font-medium text-gray-600")
+            ui.label("MGMT Analysis").classes("mosaic-card__title truncate")
             
             # Icon in circular background
-            with ui.row().classes("w-7 h-7 bg-orange-100 rounded-full flex items-center justify-center"):
-                ui.icon("science").classes("w-3.5 h-3.5 text-orange-600")
+            with ui.row().classes("mosaic-card__icon"):
+                ui.icon("science").classes("w-5 h-5")
         
         # Main status result with badge
-        with ui.row().classes("flex items-center justify-between mb-1"):
-            ui.label(status).classes("text-xl font-bold text-gray-900")
+        with ui.row().classes("flex items-start justify-between mb-1 gap-1"):
+            ui.label(status).classes("mosaic-card__content text-sm font-bold break-words flex-1")
             # Methylation badge with color coding
-            methylation_badge = ui.label(methylation_percent).classes("px-2 py-1 text-xs font-medium rounded-full")
+            methylation_badge_class = "status-badge"
             try:
                 meth_num = float(methylation_percent.replace("%", ""))
                 if meth_num > 10:
-                    methylation_badge.classes("bg-green-100 text-green-800")
+                    methylation_badge_class += " status-badge--success"
                 elif meth_num > 5:
-                    methylation_badge.classes("bg-yellow-100 text-yellow-800")
+                    methylation_badge_class += " status-badge--warning"
                 else:
-                    methylation_badge.classes("bg-red-100 text-red-800")
+                    methylation_badge_class += " status-badge--error"
             except (ValueError, AttributeError):
-                methylation_badge.classes("bg-gray-100 text-gray-600")
+                methylation_badge_class += " status-badge--info"
+            
+            ui.label(methylation_percent).classes(methylation_badge_class)
         
         # Analysis details in compact layout
-        with ui.column().classes("mb-2"):
-            ui.label(f"Average: {average_methylation}").classes("text-xs text-gray-600")
-            ui.label(f"Score: {prediction_score}").classes("text-xs text-gray-600")
+        with ui.column().classes("mb-1 gap-0.5"):
+            ui.label(f"Average: {average_methylation}").classes("mosaic-card__subtitle")
+            ui.label(f"Score: {prediction_score}").classes("mosaic-card__subtitle")
         
         # Description
-        ui.label(f"MGMT status determined from methylation analysis of {cpg_sites} CpG sites").classes("text-xs text-gray-500")
+        ui.label(f"MGMT status determined from methylation analysis of {cpg_sites} CpG sites").classes("mosaic-card__subtitle")
 
 
 def _create_mgmt_dashboard_card() -> Dict[str, Any]:
@@ -528,26 +532,26 @@ def _create_fusion_dashboard_card_with_data(
     genome_fusions: int
 ) -> None:
     """Create a compact fusion analysis dashboard card with data."""
-    with ui.card().classes("flex-1 bg-white rounded-lg shadow-sm border border-gray-200 p-4"):
-        with ui.row().classes("flex items-center justify-between mb-2"):
+    with ui.card().classes("mosaic-card flex-1 min-w-0"):
+        with ui.row().classes("mosaic-card__header"):
             # Title
-            ui.label("Fusion Analysis").classes("text-sm font-medium text-gray-600")
+            ui.label("Fusion Analysis").classes("mosaic-card__title truncate")
             
             # Icon in circular background
-            with ui.row().classes("w-7 h-7 bg-green-100 rounded-full flex items-center justify-center"):
-                ui.icon("merge").classes("w-3.5 h-3.5 text-green-600")
+            with ui.row().classes("mosaic-card__icon"):
+                ui.icon("merge").classes("w-5 h-5")
         
         # Panel info and main result
-        with ui.row().classes("flex items-center justify-between mb-1"):
-            ui.label(f"Panel: {panel}").classes("text-sm font-medium text-gray-700")
-            ui.label(f"{target_fusions} target fusions").classes("px-2 py-1 text-xs font-medium rounded-full bg-blue-100 text-blue-800")
+        with ui.row().classes("flex items-start justify-between mb-1 gap-1"):
+            ui.label(f"Panel: {panel}").classes("mosaic-card__content text-sm font-medium break-words flex-1")
+            ui.label(f"{target_fusions} target fusions").classes("px-1 py-0.5 text-xs font-medium rounded-full bg-blue-100 text-blue-800")
         
         # Analysis details in compact layout
-        with ui.column().classes("mb-2"):
-            ui.label(f"{genome_fusions} genome wide fusions").classes("text-xs text-gray-600")
+        with ui.column().classes("mb-1"):
+            ui.label(f"{genome_fusions} genome wide fusions").classes("mosaic-card__subtitle")
         
         # Description
-        ui.label("Fusion candidates identified from reads with supplementary alignments").classes("text-xs text-gray-500")
+        ui.label("Fusion candidates identified from reads with supplementary alignments").classes("mosaic-card__subtitle")
 
 
 def _create_fusion_dashboard_card() -> Dict[str, Any]:
