@@ -108,55 +108,48 @@ def run_cnv_analysis_subprocess(
     threads=1,
     mapq_filter=60,
     sample_id: str = None,
-    update_cnv_dict_path: str = None,
+    copy_numbers_path: str = None,
+    timeout: int = 3600,
 ):
     """
     Run CNV analysis using cnv_from_bam in a subprocess to avoid signal handling issues.
 
     Args:
         bam_path: Path to BAM file
-        copy_numbers: Copy numbers dictionary
-        ref_cnv_dict: Reference CNV dictionary
+        copy_numbers: Copy numbers dictionary (used if copy_numbers_path not provided)
+        ref_cnv_dict: Reference CNV dictionary or path to reference pickle
         temp_dir: Temporary directory for intermediate files
         logger: Logger instance
         threads: Number of threads to use
         mapq_filter: Mapping quality filter
+        sample_id: Sample identifier
+        copy_numbers_path: Path to per-sample copy_numbers file (OPTIMIZED APPROACH)
+        timeout: Subprocess timeout in seconds (default: 3600 = 1 hour)
 
     Returns:
         Dictionary with analysis results or None if failed
     """
-    # try:
     # Ensure temp directory exists
     os.makedirs(temp_dir, exist_ok=True)
 
-    
     # Determine reference CNV dict path: if provided a path, use it; otherwise serialize dict
     if isinstance(ref_cnv_dict, str) and os.path.exists(ref_cnv_dict):
         ref_cnv_dict_path = ref_cnv_dict
     else:
         ref_cnv_dict_path = os.path.join(temp_dir, "ref_cnv_dict.pkl")
         with open(ref_cnv_dict_path, "wb") as f:
-            pickle.dump(ref_cnv_dict, f)
+            pickle.dump(ref_cnv_dict, f, protocol=pickle.HIGHEST_PROTOCOL)
 
     # Get path to the subprocess script
     script_dir = os.path.dirname(os.path.abspath(__file__))
     subprocess_script = os.path.join(script_dir, "cnv_subprocess.py")
 
-    # Run the subprocess
+    # Build command using per-sample copy_numbers file (OPTIMIZED)
     cmd = [
         sys.executable,  # Use the same Python interpreter
         subprocess_script,
         "--bam-path",
         bam_path,
-        # Prefer multi-sample update_cnv_dict with sample id to avoid extra serialization
-        "--update-cnv-dict-path",
-        (
-            update_cnv_dict_path
-            if update_cnv_dict_path
-            else os.path.join(temp_dir, "update_cnv_dict.pkl")
-        ),
-        "--sample-id",
-        sample_id if sample_id else "unknown",
         "--ref-cnv-dict-path",
         ref_cnv_dict_path,
         "--output-dir",
@@ -166,53 +159,95 @@ def run_cnv_analysis_subprocess(
         "--mapq-filter",
         str(mapq_filter),
     ]
+    
+    # Use per-sample copy_numbers file if provided (OPTIMIZED APPROACH)
+    if copy_numbers_path:
+        cmd.extend(["--copy-numbers-path", copy_numbers_path])
+        logger.debug(f"Using per-sample copy_numbers file: {copy_numbers_path}")
+    else:
+        # Fallback: serialize copy_numbers to temp file
+        temp_copy_numbers_path = os.path.join(temp_dir, "temp_copy_numbers.pkl")
+        with open(temp_copy_numbers_path, "wb") as f:
+            pickle.dump(copy_numbers, f, protocol=pickle.HIGHEST_PROTOCOL)
+        cmd.extend(["--copy-numbers-path", temp_copy_numbers_path])
+        logger.debug("Using temporary copy_numbers file (fallback)")
 
     logger.debug(f"Running CNV analysis in subprocess: {' '.join(cmd)}")
+    
+    # Log file size for performance monitoring
+    try:
+        bam_size_mb = os.path.getsize(bam_path) / (1024 * 1024)
+        logger.info(f"Processing BAM file: {bam_size_mb:.1f} MB")
+        
+        # Warn about very large files that might take a long time
+        if bam_size_mb > 500:
+            logger.warning(
+                f"Large BAM file detected ({bam_size_mb:.1f} MB) - CNV analysis may take several minutes. "
+                f"Timeout set to {timeout}s."
+            )
+    except Exception:
+        pass
 
     # Run subprocess with stdout/stderr redirected to files to avoid capture overhead
     stdout_log_path = os.path.join(temp_dir, "cnv_subprocess.stdout.log")
     stderr_log_path = os.path.join(temp_dir, "cnv_subprocess.stderr.log")
-    with open(stdout_log_path, "w") as _out, open(stderr_log_path, "w") as _err:
-        result = subprocess.run(
-            cmd,
-            stdout=_out,
-            stderr=_err,
-            timeout=3600,  # 1 hour timeout
-        )
+    
+    try:
+        with open(stdout_log_path, "w") as _out, open(stderr_log_path, "w") as _err:
+            result = subprocess.run(
+                cmd,
+                stdout=_out,
+                stderr=_err,
+                timeout=timeout,  # Configurable timeout
+            )
 
-    if result.returncode != 0:
-        logger.error(f"Subprocess failed with return code {result.returncode}")
-        try:
-            with open(stdout_log_path, "r") as f:
-                stdout_content = f.read()
-            if stdout_content.strip():
-                logger.error(f"subprocess stdout:\n{stdout_content}")
-        except Exception:
-            pass
+        if result.returncode != 0:
+            logger.error(f"Subprocess failed with return code {result.returncode}")
+            try:
+                with open(stdout_log_path, "r") as f:
+                    stdout_content = f.read()
+                if stdout_content.strip():
+                    logger.error(f"subprocess stdout:\n{stdout_content}")
+            except Exception:
+                pass
+            try:
+                with open(stderr_log_path, "r") as f:
+                    stderr_content = f.read()
+                if stderr_content.strip():
+                    logger.error(f"subprocess stderr:\n{stderr_content}")
+            except Exception:
+                pass
+            return None
+
+        # Load results
+        results_path = os.path.join(temp_dir, "cnv_analysis_results.pkl")
+        if os.path.exists(results_path):
+            with open(results_path, "rb") as f:
+                return pickle.load(f)
+        else:
+            logger.error("Results file not found")
+            return None
+    
+    except subprocess.TimeoutExpired:
+        logger.error(
+            f"CNV analysis subprocess timed out after {timeout}s for {os.path.basename(bam_path)}. "
+            f"This usually indicates a very large file or system resource constraints. "
+            f"Consider increasing timeout or checking system resources."
+        )
+        # Try to read logs for diagnostic info
         try:
             with open(stderr_log_path, "r") as f:
                 stderr_content = f.read()
             if stderr_content.strip():
-                logger.error(f"subprocess stderr:\n{stderr_content}")
+                logger.error(f"subprocess stderr before timeout:\n{stderr_content[-1000:]}")  # Last 1000 chars
         except Exception:
             pass
         return None
-
-    # Load results
-    results_path = os.path.join(temp_dir, "cnv_analysis_results.pkl")
-    if os.path.exists(results_path):
-        with open(results_path, "rb") as f:
-            return pickle.load(f)
-    else:
-        logger.error("Results file not found")
+    except Exception as e:
+        logger.error(f"Error running CNV analysis subprocess: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return None
-
-    # except subprocess.TimeoutExpired:
-    #    logger.error("CNV analysis subprocess timed out")
-    #    return None
-    # except Exception as e:
-    #    logger.error(f"Error running CNV analysis subprocess: {e}")
-    #    return None
 
 
 class Result:
@@ -578,7 +613,7 @@ def save_cnv_files(
     variance,
     breakpoints,
     sex_estimate,
-    update_cnv_dict,
+    copy_numbers,
     logger,
 ):
     """
@@ -594,7 +629,7 @@ def save_cnv_files(
         variance: Variance
         breakpoints: Detected breakpoints
         sex_estimate: Sex estimation result
-        update_cnv_dict: Accumulated copy numbers dictionary for incremental processing
+        copy_numbers: Updated copy numbers for this sample (saved separately by caller)
         logger: Logger instance
     """
     try:
@@ -623,7 +658,7 @@ def save_cnv_files(
         def _atomic_pickle_dump(obj, target_path: str) -> None:
             tmp_path = target_path + ".tmp"
             with open(tmp_path, "wb") as tf:
-                pickle.dump(obj, tf)
+                pickle.dump(obj, tf, protocol=pickle.HIGHEST_PROTOCOL)
                 tf.flush()
                 os.fsync(tf.fileno())
             os.replace(tmp_path, target_path)
@@ -631,10 +666,8 @@ def save_cnv_files(
         # Save sex estimation (atomic)
         _atomic_pickle_dump(sex_estimate, os.path.join(sample_dir, "XYestimate.pkl"))
 
-        # Save accumulated copy numbers for incremental processing (atomic)
-        _atomic_pickle_dump(
-            update_cnv_dict, os.path.join(sample_dir, "update_cnv_dict.pkl")
-        )
+        # Note: copy_numbers is now saved separately by the caller as a per-sample file
+        # This eliminates the multi-sample dictionary bottleneck
 
         # Create state directory for CNV detector
         state_dir = os.path.join(sample_dir, "cnv_detector_state")
@@ -668,7 +701,7 @@ def save_cnv_files(
 
 
 
-def process_single_bam(bam_path, metadata, work_dir, logger):
+def process_single_bam(bam_path, metadata, work_dir, logger, threads=4):
     """
     Process a single BAM file for CNV analysis using the complete pipeline.
 
@@ -677,6 +710,7 @@ def process_single_bam(bam_path, metadata, work_dir, logger):
         metadata: BamMetadata object
         work_dir: Working directory
         logger: Logger instance
+        threads: Number of threads to use for CNV analysis (default: 4)
 
     Returns:
         Dictionary with CNV analysis results
@@ -688,6 +722,7 @@ def process_single_bam(bam_path, metadata, work_dir, logger):
     # Log essential metadata only
     logger.debug(f"BAM file: {metadata.file_path} ({metadata.file_size:,} bytes)")
     logger.debug(f"Sample ID: {sample_id}")
+    logger.debug(f"Threads: {threads}")
 
     # Create sample-specific output directory
     sample_output_dir = os.path.join(work_dir, sample_id)
@@ -723,63 +758,72 @@ def process_single_bam(bam_path, metadata, work_dir, logger):
 
         analysis_result["processing_steps"].append("reads_found")
 
-        # Load accumulated copy numbers from previous iterations
-        update_cnv_dict_path = os.path.join(sample_output_dir, "update_cnv_dict.pkl")
-        if os.path.exists(update_cnv_dict_path):
-            # Robust load with retries to avoid reading while a writer is replacing the file
-            load_exc = None
-            for attempt in range(5):
-                try:
-                    with open(update_cnv_dict_path, "rb") as f:
-                        update_cnv_dict = pickle.load(f)
-                    logger.debug(
-                        "Loaded accumulated copy numbers from previous iterations"
-                    )
-                    if sample_id in update_cnv_dict:
-                        copy_numbers = update_cnv_dict[sample_id]
-                        logger.debug(f"Found existing data for {sample_id}")
-                    else:
-                        copy_numbers = {}
-                        logger.debug(
-                            f"No existing data for {sample_id}, starting fresh"
-                        )
-                    load_exc = None
-                    break
-                except Exception as e:
-                    print("Cnv LOADING failed - trying again.")
-                    load_exc = e
-                    time.sleep(0.2 * (attempt + 1))
-            if load_exc is not None:
-                logger.warning(
-                    f"Error loading accumulated copy numbers after retries: {load_exc}"
-                )
-                copy_numbers = {}
-                update_cnv_dict = {}
+        # Check file size and adjust timeout accordingly
+        bam_size_mb = os.path.getsize(bam_path) / (1024 * 1024)
+        logger.debug(f"BAM file size: {bam_size_mb:.1f} MB")
+        
+        # Adaptive timeout based on file size
+        # Base: 1 hour for files up to 100 MB
+        # Add 1 minute per additional 10 MB for large files
+        base_timeout = 3600  # 1 hour
+        if bam_size_mb > 100:
+            extra_timeout = int((bam_size_mb - 100) / 10) * 60  # 1 min per 10 MB
+            adaptive_timeout = base_timeout + extra_timeout
+            logger.info(
+                f"Large file ({bam_size_mb:.1f} MB) - using extended timeout: {adaptive_timeout}s ({adaptive_timeout/60:.1f} min)"
+            )
         else:
-            copy_numbers = {}
-            update_cnv_dict = {}
-            logger.debug("No previous copy numbers found, starting fresh")
+            adaptive_timeout = base_timeout
 
-        # Compute existing reference CNV dict path (avoid re-serializing; pass path)
+        # Use per-sample copy_numbers file (OPTIMIZED APPROACH)
+        # This eliminates the multi-sample dictionary bottleneck
+        copy_numbers_path = os.path.join(sample_output_dir, f"{sample_id}_copy_numbers.pkl")
+        
+        # Backward compatibility: Migrate from old multi-sample dict to per-sample file
+        legacy_dict_path = os.path.join(sample_output_dir, "update_cnv_dict.pkl")
+        if not os.path.exists(copy_numbers_path) and os.path.exists(legacy_dict_path):
+            logger.info("Migrating from legacy multi-sample dict to per-sample file...")
+            try:
+                with open(legacy_dict_path, "rb") as f:
+                    update_cnv_dict = pickle.load(f)
+                if sample_id in update_cnv_dict:
+                    # Extract this sample's data and save to per-sample file
+                    with open(copy_numbers_path, "wb") as f:
+                        pickle.dump(update_cnv_dict[sample_id], f, protocol=pickle.HIGHEST_PROTOCOL)
+                    logger.info(f"Migrated copy_numbers for {sample_id} to per-sample file")
+                    
+                    # Optionally remove legacy file after migration (commented out for safety)
+                    # os.remove(legacy_dict_path)
+            except Exception as e:
+                logger.warning(f"Could not migrate legacy copy_numbers: {e}")
+        
+        if os.path.exists(copy_numbers_path):
+            logger.debug(f"Found existing per-sample copy_numbers file: {copy_numbers_path}")
+        else:
+            logger.debug("No previous copy_numbers found, starting fresh")
+
+        # Get reference CNV dict path (avoid re-serializing; pass path)
         ref_cnv_path = os.path.join(
             os.path.dirname(os.path.abspath(resources.__file__)),
             "HG01280_control_new.pkl",
         )
 
         # Process BAM file with cnv_from_bam using subprocess
-        logger.debug("Processing BAM file with cnv_from_bam (subprocess)")
+        logger.debug(f"Processing BAM file with cnv_from_bam (subprocess, {threads} threads)")
+        subprocess_start = time.time()
         try:
-            # Run CNV analysis in subprocess
+            # Run CNV analysis in subprocess using per-sample file
             subprocess_result = run_cnv_analysis_subprocess(
                 bam_path,
-                copy_numbers,
+                {},  # Empty dict (not used when copy_numbers_path is provided)
                 ref_cnv_path,
                 temp_dir,
                 logger,
-                threads=4,
+                threads=threads,  # Use configurable threads parameter
                 mapq_filter=60,
                 sample_id=sample_id,
-                update_cnv_dict_path=update_cnv_dict_path,
+                copy_numbers_path=copy_numbers_path,  # PER-SAMPLE FILE (OPTIMIZED)
+                timeout=adaptive_timeout,  # Adaptive timeout based on file size
             )
 
             if subprocess_result is None or not subprocess_result.get("success", False):
@@ -797,11 +841,20 @@ def process_single_bam(bam_path, metadata, work_dir, logger):
             genome_length = subprocess_result["genome_length"]
             r2_cnv = subprocess_result["r2_cnv"]
             updated_copy_numbers = subprocess_result["updated_copy_numbers"]
+            
+            # Log timing information from subprocess
+            if "timing" in subprocess_result:
+                timing = subprocess_result["timing"]
+                logger.info(f"CNV subprocess timing: Pass1={timing['pass1_time']:.2f}s, Pass2={timing['pass2_time']:.2f}s, Total={timing['total_time']:.2f}s")
+            
+            subprocess_elapsed = time.time() - subprocess_start
+            logger.info(f"CNV subprocess completed in {subprocess_elapsed:.2f}s (total with overhead)")
 
-            # Update the copy numbers dictionary
-            if sample_id not in update_cnv_dict:
-                update_cnv_dict[sample_id] = {}
-            update_cnv_dict[sample_id] = updated_copy_numbers
+            # Save updated copy_numbers back to per-sample file (OPTIMIZED)
+            save_start = time.time()
+            with open(copy_numbers_path, "wb") as f:
+                pickle.dump(updated_copy_numbers, f, protocol=pickle.HIGHEST_PROTOCOL)
+            logger.debug(f"Saved updated copy_numbers to {copy_numbers_path} in {time.time() - save_start:.3f}s")
 
             analysis_result["processing_steps"].append("cnv_data_extracted")
             logger.debug("CNV data extracted successfully")
@@ -858,7 +911,7 @@ def process_single_bam(bam_path, metadata, work_dir, logger):
             r_var,
             breakpoints,
             sex_estimate,
-            update_cnv_dict,
+            updated_copy_numbers,  # Pass updated copy_numbers (already saved to per-sample file above)
             logger,
         )
 
@@ -892,7 +945,7 @@ def process_single_bam(bam_path, metadata, work_dir, logger):
         return analysis_result
 
 
-def cnv_handler(job, work_dir=None, target_panel="rCNS2"):
+def cnv_handler(job, work_dir=None, target_panel="rCNS2", threads=4):
     """
     Handler function for CNV analysis jobs.
     This function processes BAM files for copy number variation analysis.
@@ -901,6 +954,7 @@ def cnv_handler(job, work_dir=None, target_panel="rCNS2"):
         job: The workflow job containing file and metadata
         work_dir: Optional base directory for output (defaults to BAM file directory)
         target_panel: Target panel type for consistency with other analysis components
+        threads: Number of threads to use for CNV analysis (default: 4)
     """
     # Get job-specific logger
     logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
@@ -916,6 +970,13 @@ def cnv_handler(job, work_dir=None, target_panel="rCNS2"):
         logger.warning(f"Panel mismatch: job metadata has '{job_panel}' but handler received '{target_panel}'. Using '{job_panel}' from metadata.")
         target_panel = job_panel
     logger.info(f"Using target panel: {target_panel}")
+    
+    # Get thread count from job metadata if available, otherwise use default
+    job_threads = job.context.metadata.get("threads", threads)
+    if job_threads != threads:
+        logger.info(f"Using threads from job metadata: {job_threads}")
+        threads = job_threads
+    logger.info(f"CNV analysis will use {threads} threads")
 
     # Get metadata from preprocessing
     bam_metadata = job.context.metadata.get("bam_metadata", {})
@@ -939,8 +1000,8 @@ def cnv_handler(job, work_dir=None, target_panel="rCNS2"):
         os.makedirs(work_dir, exist_ok=True)
         logger.debug(f"Using specified work directory: {work_dir}")
 
-    # Process the BAM file
-    result = process_single_bam(bam_path, metadata, work_dir, logger)
+    # Process the BAM file with configurable threading
+    result = process_single_bam(bam_path, metadata, work_dir, logger, threads=threads)
 
     # Store results in job context
     job.context.add_metadata("cnv_analysis", result)

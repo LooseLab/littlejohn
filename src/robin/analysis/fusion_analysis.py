@@ -43,6 +43,9 @@ from robin.analysis.fusion_work import (
     _merge_fusion_metadata_objects,
     _load_fusion_metadata,
     preprocess_fusion_data_standalone,
+    process_bam_with_staging,
+    accumulate_fusion_candidates,
+    finalize_fusion_accumulation_for_sample,
 )
 
 logger = logging.getLogger(__name__)
@@ -358,22 +361,59 @@ def fusion_handler(job, work_dir=None, target_panel="rCNS2"):
             logger.info(f"Using work directory: {work_dir}")
             logger.info(f"Using target panel: {target_panel}")
 
-            # Use the target_panel parameter passed to the handler
-            # (overrides any value in metadata)
-
-            # Process the file using fusion_work.py
-            result = process_single_file(
-                file_path,
-                metadata,
-                work_dir,
-                logger,
-                target_panel,
-                has_supplementary=has_supplementary,
-                supplementary_read_ids=supplementary_read_ids,
+            # Use staging-based processing for performance
+            logger.info("Using fusion staging-based processing (fast path)")
+            
+            # Create fusion metadata
+            sample_id = metadata.get("sample_id", "unknown")
+            fusion_metadata = FusionMetadata(
+                sample_id=sample_id,
+                file_path=file_path,
+                analysis_timestamp=time.time(),
+                target_panel=target_panel,
             )
-
-            # Add result to job context
-            job.context.add_result("fusion_analysis", result)
+            
+            # Create temporary directory for processing
+            import tempfile
+            with tempfile.TemporaryDirectory() as temp_dir:
+                # Process with staging
+                analysis_results, should_accumulate = process_bam_with_staging(
+                    file_path,
+                    temp_dir,
+                    metadata,
+                    fusion_metadata,
+                    target_panel,
+                    has_supplementary=has_supplementary,
+                    supplementary_read_ids=supplementary_read_ids,
+                    work_dir=work_dir,
+                    batch_size=10,
+                )
+                
+                # Convert to result format
+                result = {
+                    "success": True,
+                    "sample_id": sample_id,
+                    "file_path": file_path,
+                    "analysis_timestamp": time.time(),
+                    "processing_steps": ["staging_complete"],
+                    "error_message": None,
+                    "analysis_results": analysis_results,
+                }
+                
+                # Add result to job context
+                job.context.add_result("fusion_analysis", result)
+                
+                # Trigger accumulation if threshold reached
+                if should_accumulate:
+                    logger.info("Fusion accumulation threshold reached - running batch accumulation")
+                    accumulation_result = accumulate_fusion_candidates(
+                        work_dir, sample_id, target_panel, force=False, batch_size=10
+                    )
+                    logger.info(f"Fusion accumulation result: {accumulation_result}")
+                    job.context.add_metadata("fusion_accumulation_result", accumulation_result)
+                
+                # Store flag for potential end-of-queue accumulation
+                job.context.add_metadata("needs_final_fusion_accumulation", True)
 
             if result["success"]:
                 logger.info(f"Fusion analysis completed successfully for {file_path}")

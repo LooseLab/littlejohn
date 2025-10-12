@@ -30,15 +30,19 @@ def run_cnv_analysis(
 
     Args:
         bam_path: Path to BAM file
-        copy_numbers_path: Path to pickle file with copy numbers
+        copy_numbers_path: Path to per-sample pickle file with copy numbers
         ref_cnv_dict_path: Path to pickle file with reference CNV data
         output_dir: Directory to save results
         threads: Number of threads to use
         mapq_filter: Mapping quality filter
+        update_cnv_dict_path: Legacy multi-sample dict path (deprecated, for backward compat)
+        sample_id: Sample ID (for legacy mode)
 
     Returns:
         Dictionary with analysis results
     """
+    import time
+    
     if os.environ.get("LJ_CNV_SUBPROCESS_DEBUG") == "1":
         print("CNV Subprocess started")
         print(f"BAM path: {bam_path}")
@@ -62,28 +66,37 @@ def run_cnv_analysis(
                 f"Reference CNV dict file not found: {ref_cnv_dict_path}"
             )
 
-        # Load copy numbers either from per-sample file or from multi-sample dict
-        if copy_numbers_path is not None:
+        # Load copy numbers from per-sample file (NEW OPTIMIZED APPROACH)
+        load_start = time.time()
+        if copy_numbers_path is not None and os.path.exists(copy_numbers_path):
+            # Per-sample file approach (optimized)
             with open(copy_numbers_path, "rb") as f:
                 copy_numbers = pickle.load(f)
-        else:
-            if update_cnv_dict_path is None or sample_id is None:
-                raise ValueError(
-                    "Either copy_numbers_path must be provided or both update_cnv_dict_path and sample_id must be provided"
-                )
+            print(f"Loaded per-sample copy_numbers from {copy_numbers_path} in {time.time() - load_start:.3f}s", file=sys.stderr)
+        elif update_cnv_dict_path is not None and sample_id is not None:
+            # Legacy multi-sample dict approach (deprecated but supported for backward compat)
             if not os.path.exists(update_cnv_dict_path):
-                # If the multi-sample file doesn't exist yet, start with empty dict
                 copy_numbers = {}
+                print(f"No existing copy_numbers found, starting fresh", file=sys.stderr)
             else:
                 with open(update_cnv_dict_path, "rb") as f:
                     multi_sample_dict = pickle.load(f)
                 copy_numbers = multi_sample_dict.get(sample_id, {})
+                print(f"Loaded copy_numbers from legacy multi-sample dict in {time.time() - load_start:.3f}s", file=sys.stderr)
+        else:
+            # No existing data
+            copy_numbers = {}
+            print(f"No existing copy_numbers, starting fresh", file=sys.stderr)
 
         # Load reference CNV data
+        ref_load_start = time.time()
         with open(ref_cnv_dict_path, "rb") as f:
             ref_cnv_dict = pickle.load(f)
+        print(f"Loaded reference CNV dict in {time.time() - ref_load_start:.3f}s", file=sys.stderr)
 
         # First pass: process sample with accumulated copy numbers
+        print(f"Starting Pass 1: Sample CNV extraction with {threads} threads", file=sys.stderr)
+        pass1_start = time.time()
         result = cnv_from_bam.iterate_bam_file(
             bam_path,
             _threads=threads,
@@ -91,8 +104,12 @@ def run_cnv_analysis(
             copy_numbers=copy_numbers,
             log_level=int(logging.ERROR),
         )
+        pass1_time = time.time() - pass1_start
+        print(f"Pass 1 completed in {pass1_time:.2f}s (bin_width: {result.bin_width}, variance: {result.variance:.6f})", file=sys.stderr)
 
         # Second pass: process against reference using the same bin width
+        print(f"Starting Pass 2: Reference CNV extraction with {threads} threads", file=sys.stderr)
+        pass2_start = time.time()
         result2 = cnv_from_bam.iterate_bam_file(
             bam_path,
             _threads=threads,
@@ -101,6 +118,9 @@ def run_cnv_analysis(
             log_level=int(logging.ERROR),
             bin_width=result.bin_width,  # Use the same bin width as the sample
         )
+        pass2_time = time.time() - pass2_start
+        print(f"Pass 2 completed in {pass2_time:.2f}s", file=sys.stderr)
+        print(f"Total CNV extraction time: {pass1_time + pass2_time:.2f}s", file=sys.stderr)
 
         # Prepare results
         analysis_results = {
@@ -111,12 +131,19 @@ def run_cnv_analysis(
             "genome_length": result.genome_length,
             "r2_cnv": result2.cnv,
             "updated_copy_numbers": copy_numbers,  # The mutated copy_numbers
+            "timing": {
+                "pass1_time": pass1_time,
+                "pass2_time": pass2_time,
+                "total_time": pass1_time + pass2_time,
+            }
         }
 
         # Save results to output directory
+        save_start = time.time()
         results_path = os.path.join(output_dir, "cnv_analysis_results.pkl")
         with open(results_path, "wb") as f:
-            pickle.dump(analysis_results, f)
+            pickle.dump(analysis_results, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"Saved results in {time.time() - save_start:.3f}s", file=sys.stderr)
 
         return analysis_results
 
