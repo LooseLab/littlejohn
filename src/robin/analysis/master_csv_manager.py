@@ -105,33 +105,31 @@ class MasterCSVManager:
             logger.error(f"Error updating master.csv for {sample_id}: {e}")
 
     def _load_existing_data(self, csv_path: str) -> Dict[str, Any]:
-        """Load existing data from CSV or create default structure"""
+        """
+        Load existing data from CSV or create default structure.
+        
+        No read locking is used because:
+        1. Writers use atomic write-and-rename, so readers never see partial files
+        2. Worst case is reading slightly stale data (acceptable for monitoring)
+        3. Keeps GUI responsive and non-blocking
+        """
         if os.path.exists(csv_path):
             try:
-                # Open file with shared lock for reading
-                with open(csv_path, 'r') as f:
-                    # Acquire shared lock (allows multiple readers, blocks writers)
-                    if not self._acquire_lock(f, exclusive=False, timeout=5.0):
-                        print(f"Warning: Could not acquire lock to read {csv_path}, using defaults")
-                        return self._get_default_structure()
-                    
-                    try:
-                        df = pd.read_csv(f)
-                        if not df.empty:
-                            data = df.iloc[0].to_dict()
-                            # Ensure string fields are properly converted to strings
-                            # to prevent float objects from being passed to split() methods
-                            string_fields = [
-                                "devices", "basecall_models", "run_time", "flowcell_ids",
-                                "run_info_run_time", "run_info_device", "run_info_model", 
-                                "run_info_flow_cell", "samples_overview_job_types", "analysis_panel"
-                            ]
-                            for field in string_fields:
-                                if field in data and data[field] is not None:
-                                    data[field] = str(data[field])
-                            return data
-                    finally:
-                        self._release_lock(f)
+                # Read without locking - atomic writes ensure we never see partial data
+                df = pd.read_csv(csv_path)
+                if not df.empty:
+                    data = df.iloc[0].to_dict()
+                    # Ensure string fields are properly converted to strings
+                    # to prevent float objects from being passed to split() methods
+                    string_fields = [
+                        "devices", "basecall_models", "run_time", "flowcell_ids",
+                        "run_info_run_time", "run_info_device", "run_info_model", 
+                        "run_info_flow_cell", "samples_overview_job_types", "analysis_panel"
+                    ]
+                    for field in string_fields:
+                        if field in data and data[field] is not None:
+                            data[field] = str(data[field])
+                    return data
             except Exception as e:
                 print(f"Warning: Error reading existing CSV: {e}")
 
