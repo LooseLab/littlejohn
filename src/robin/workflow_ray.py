@@ -694,7 +694,8 @@ class Coordinator:
 
             # Grouped Pool actors
             groups = {
-                "prep": ["preprocessing", "bed_conversion"],
+                "preprocessing": ["preprocessing"],  # Separate preprocessing pool
+                "bed_conversion": ["bed_conversion"],  # Separate bed_conversion pool
                 "mgmt": ["mgmt"],  # Separate pools for independent processing
                 "cnv": ["cnv"],
                 "target": ["target"], 
@@ -714,6 +715,9 @@ class Coordinator:
                     return 1
                 # standard preset - give analysis pools concurrency based on workers
                 if name in {"mgmt", "cnv", "target", "fusion"}:
+                    return max(1, int(self.analysis_workers))
+                # Give preprocessing and bed_conversion pools concurrency too
+                if name in {"preprocessing", "bed_conversion"}:
                     return max(1, int(self.analysis_workers))
                 return 1
 
