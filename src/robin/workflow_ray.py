@@ -280,7 +280,7 @@ RESOURCE_HINTS: Dict[str, Dict[str, Any]] = {
     "preprocessing": {"num_cpus": 1},
     "bed_conversion": {"num_cpus": 1},
     "mgmt": {"num_cpus": 1},
-    "cnv": {"num_cpus": 2},  # CNV uses 2 threads for parallel BAM processing (works on p2i and larger)
+    "cnv": {"num_cpus": 1},  # CNV uses 1 thread to avoid resource contention in standard preset
     "target": {"num_cpus": 1},
     "fusion": {"num_cpus": 1},
     # Classifiers do not require GPU by default (CPU-only)
@@ -695,7 +695,10 @@ class Coordinator:
             # Grouped Pool actors
             groups = {
                 "prep": ["preprocessing", "bed_conversion"],
-                "analysis": ["mgmt", "cnv", "target", "fusion"],
+                "mgmt": ["mgmt"],  # Separate pools for independent processing
+                "cnv": ["cnv"],
+                "target": ["target"], 
+                "fusion": ["fusion"],
                 "classif": ["sturgeon", "nanodx", "pannanodx"],
                 "rf": ["random_forest"],
                 "slow": [
@@ -709,8 +712,8 @@ class Coordinator:
                 if preset == "p2i":
                     # Concurrency 1 everywhere
                     return 1
-                # standard preset
-                if name == "analysis":
+                # standard preset - give analysis pools concurrency based on workers
+                if name in {"mgmt", "cnv", "target", "fusion"}:
                     return max(1, int(self.analysis_workers))
                 return 1
 
