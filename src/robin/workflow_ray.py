@@ -280,7 +280,7 @@ RESOURCE_HINTS: Dict[str, Dict[str, Any]] = {
     "preprocessing": {"num_cpus": 1},
     "bed_conversion": {"num_cpus": 1},
     "mgmt": {"num_cpus": 1},
-    "cnv": {"num_cpus": 2},  # CNV gets dedicated CPU resources (now has its own pool)
+    "cnv": {"num_cpus": 1},  # CNV gets dedicated CPU but only 1 thread
     "target": {"num_cpus": 1},
     "fusion": {"num_cpus": 1},
     # Classifiers do not require GPU by default (CPU-only)
