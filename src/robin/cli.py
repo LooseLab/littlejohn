@@ -1590,7 +1590,7 @@ def _display_workflow_config(
     "--preset",
     type=click.Choice(["p2i", "standard", "high"]),
     default="standard",
-    help="Execution preset for Ray Core: 'p2i' (2 CPUs cap, 4 grouped actors, concurrency 1), 'standard' (default; 4 CPUs cap, grouped actors, analysis uses analysis_workers), 'high' (per-job-type actors).",
+    help="Execution preset for Ray Core: 'p2i' (2 CPUs cap, 4 grouped actors, concurrency 1), 'standard' (default; 6 CPUs cap, grouped actors, analysis uses analysis_workers), 'high' (per-job-type actors).",
 )
 @click.option(
     "--ray-dashboard/--no-ray-dashboard",
@@ -1699,7 +1699,7 @@ def workflow(
                         )
 
                     if preset in {"p2i", "standard"}:
-                        init_kwargs["num_cpus"] = 2 if preset == "p2i" else 4
+                        init_kwargs["num_cpus"] = 2 if preset == "p2i" else 6  # Increased from 4 to 6 for standard
                     try:
                         ray.init(**init_kwargs)
                     except TypeError:

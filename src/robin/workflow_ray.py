@@ -671,7 +671,7 @@ class Coordinator:
                 total_cpus = float((ray.cluster_resources() or {}).get("CPU", 0))
             except Exception:
                 total_cpus = 0.0
-            desired_cap = 2.0 if preset == "p2i" else 4.0
+            desired_cap = 2.0 if preset == "p2i" else 6.0  # Increased from 4.0 to 6.0 for additional pools
             reserve = max(0.0, total_cpus - desired_cap)
             try:
                 if reserve >= 1.0:
