@@ -280,7 +280,7 @@ RESOURCE_HINTS: Dict[str, Dict[str, Any]] = {
     "preprocessing": {"num_cpus": 1},
     "bed_conversion": {"num_cpus": 1},
     "mgmt": {"num_cpus": 1},
-    "cnv": {"num_cpus": 1},  # CNV uses 1 thread to avoid resource contention in standard preset
+    "cnv": {"num_cpus": 2},  # CNV gets dedicated CPU resources (now has its own pool)
     "target": {"num_cpus": 1},
     "fusion": {"num_cpus": 1},
     # Classifiers do not require GPU by default (CPU-only)
@@ -692,11 +692,12 @@ class Coordinator:
             except Exception:
                 pass
 
-            # Grouped Pool actors - balanced approach
+            # Grouped Pool actors - optimized resource allocation
             groups = {
                 "prep": ["preprocessing"],  # Separate preprocessing for independence
                 "bed_conversion": ["bed_conversion"],  # Separate bed_conversion for independence
-                "analysis": ["mgmt", "cnv", "target", "fusion"],  # Keep analysis types grouped
+                "cnv": ["cnv"],  # CNV gets its own CPU (most CPU-intensive)
+                "analysis": ["mgmt", "target", "fusion"],  # Lightweight analysis types share a CPU
                 "classif": ["sturgeon", "nanodx", "pannanodx"],
                 "rf": ["random_forest"],
                 "slow": [
@@ -710,8 +711,12 @@ class Coordinator:
                 if preset == "p2i":
                     # Concurrency 1 everywhere
                     return 1
-                # standard preset - give analysis pool higher concurrency
+                # standard preset - optimized resource allocation
+                if name == "cnv":
+                    # CNV gets dedicated concurrency (most CPU-intensive)
+                    return max(1, int(self.analysis_workers))
                 if name == "analysis":
+                    # Lightweight analysis types share concurrency
                     return max(1, int(self.analysis_workers))
                 # Give preprocessing and bed_conversion pools moderate concurrency
                 if name in {"prep", "bed_conversion"}:
