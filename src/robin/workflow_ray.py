@@ -692,14 +692,11 @@ class Coordinator:
             except Exception:
                 pass
 
-            # Grouped Pool actors
+            # Grouped Pool actors - balanced approach
             groups = {
-                "preprocessing": ["preprocessing"],  # Separate preprocessing pool
-                "bed_conversion": ["bed_conversion"],  # Separate bed_conversion pool
-                "mgmt": ["mgmt"],  # Separate pools for independent processing
-                "cnv": ["cnv"],
-                "target": ["target"], 
-                "fusion": ["fusion"],
+                "prep": ["preprocessing"],  # Separate preprocessing for independence
+                "bed_conversion": ["bed_conversion"],  # Separate bed_conversion for independence
+                "analysis": ["mgmt", "cnv", "target", "fusion"],  # Keep analysis types grouped
                 "classif": ["sturgeon", "nanodx", "pannanodx"],
                 "rf": ["random_forest"],
                 "slow": [
@@ -713,11 +710,11 @@ class Coordinator:
                 if preset == "p2i":
                     # Concurrency 1 everywhere
                     return 1
-                # standard preset - give analysis pools concurrency based on workers
-                if name in {"mgmt", "cnv", "target", "fusion"}:
+                # standard preset - give analysis pool higher concurrency
+                if name == "analysis":
                     return max(1, int(self.analysis_workers))
-                # Give preprocessing and bed_conversion pools concurrency too
-                if name in {"preprocessing", "bed_conversion"}:
+                # Give preprocessing and bed_conversion pools moderate concurrency
+                if name in {"prep", "bed_conversion"}:
                     return max(1, int(self.analysis_workers))
                 return 1
 
