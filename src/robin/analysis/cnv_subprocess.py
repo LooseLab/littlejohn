@@ -88,7 +88,7 @@ def run_cnv_analysis(
             copy_numbers = {}
             print(f"No existing copy_numbers, starting fresh", file=sys.stderr)
 
-        # Load reference CNV data
+        # Load reference CNV data (this will be cached at the main process level)
         ref_load_start = time.time()
         with open(ref_cnv_dict_path, "rb") as f:
             ref_cnv_dict = pickle.load(f)

@@ -698,12 +698,12 @@ class Coordinator:
                 "bed_conversion": ["bed_conversion"],  # Separate bed_conversion for independence
                 "cnv": ["cnv"],  # CNV gets its own CPU (most CPU-intensive)
                 "analysis": ["mgmt", "target", "fusion"],  # Lightweight analysis types share a CPU
-                "classif": ["sturgeon", "nanodx", "pannanodx"],
-                "rf": ["random_forest"],
+                "classif": ["sturgeon", "nanodx", "pannanodx"],  # Fast classification jobs
+                "rf": ["random_forest"],  # Random forest needs its own actor (slow/blocking)
                 "slow": [
                     "igv_bam",
                     "snp_analysis",
-                ],  # Add slow pool for igv_bam and snp_analysis jobs
+                ],  # Slow pool for igv_bam and snp_analysis jobs
             }
 
             # Determine concurrency per pool based on preset
@@ -717,6 +717,12 @@ class Coordinator:
                     return max(1, int(self.analysis_workers))
                 if name == "analysis":
                     # Lightweight analysis types share concurrency
+                    return max(1, int(self.analysis_workers))
+                if name == "classif":
+                    # Fast classification jobs get moderate concurrency
+                    return max(1, int(self.analysis_workers))
+                if name == "rf":
+                    # Random forest gets its own concurrency (slow/blocking)
                     return max(1, int(self.analysis_workers))
                 # Give preprocessing and bed_conversion pools moderate concurrency
                 if name in {"prep", "bed_conversion"}:

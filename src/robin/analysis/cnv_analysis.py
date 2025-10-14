@@ -99,6 +99,45 @@ CHUNK_SIZE = 1000  # For processing large arrays in chunks
 # Removed MAX_WORKERS - no longer using parallel processing
 
 
+# Global cache for reference CNV dict to avoid reloading for every sample
+_ref_cnv_dict_cache = None
+_ref_cnv_dict_path_cache = None
+
+def get_cached_ref_cnv_dict(ref_cnv_dict_path: str, logger) -> dict:
+    """
+    Get reference CNV dictionary with caching to avoid reloading for every sample.
+    
+    Args:
+        ref_cnv_dict_path: Path to reference CNV pickle file
+        logger: Logger instance
+        
+    Returns:
+        Reference CNV dictionary
+    """
+    global _ref_cnv_dict_cache, _ref_cnv_dict_path_cache
+    
+    # Check if we need to load the reference dict
+    if _ref_cnv_dict_cache is None or _ref_cnv_dict_path_cache != ref_cnv_dict_path:
+        logger.info(f"Loading reference CNV dict from {ref_cnv_dict_path} (first time or path changed)")
+        load_start = time.time()
+        
+        with open(ref_cnv_dict_path, "rb") as f:
+            _ref_cnv_dict_cache = pickle.load(f)
+        _ref_cnv_dict_path_cache = ref_cnv_dict_path
+        
+        load_time = time.time() - load_start
+        logger.info(f"Reference CNV dict loaded in {load_time:.3f}s (cached for subsequent samples)")
+    else:
+        logger.debug("Using cached reference CNV dict")
+    
+    return _ref_cnv_dict_cache
+
+def clear_ref_cnv_dict_cache():
+    """Clear the reference CNV dict cache (useful when switching reference files)"""
+    global _ref_cnv_dict_cache, _ref_cnv_dict_path_cache
+    _ref_cnv_dict_cache = None
+    _ref_cnv_dict_path_cache = None
+
 def run_cnv_analysis_subprocess(
     bam_path,
     copy_numbers,
@@ -132,10 +171,15 @@ def run_cnv_analysis_subprocess(
     # Ensure temp directory exists
     os.makedirs(temp_dir, exist_ok=True)
 
-    # Determine reference CNV dict path: if provided a path, use it; otherwise serialize dict
+    # Use cached reference CNV dict to avoid reloading for every sample
     if isinstance(ref_cnv_dict, str) and os.path.exists(ref_cnv_dict):
-        ref_cnv_dict_path = ref_cnv_dict
+        # Load and cache the reference dict
+        ref_cnv_dict_loaded = get_cached_ref_cnv_dict(ref_cnv_dict, logger)
+        ref_cnv_dict_path = os.path.join(temp_dir, "ref_cnv_dict.pkl")
+        with open(ref_cnv_dict_path, "wb") as f:
+            pickle.dump(ref_cnv_dict_loaded, f, protocol=pickle.HIGHEST_PROTOCOL)
     else:
+        # Already a dict, serialize it
         ref_cnv_dict_path = os.path.join(temp_dir, "ref_cnv_dict.pkl")
         with open(ref_cnv_dict_path, "wb") as f:
             pickle.dump(ref_cnv_dict, f, protocol=pickle.HIGHEST_PROTOCOL)
