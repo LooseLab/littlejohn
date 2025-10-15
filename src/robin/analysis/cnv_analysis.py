@@ -271,28 +271,23 @@ def run_cnv_analysis_direct(
     bam_path,
     copy_numbers,
     ref_cnv_dict,
-    temp_dir,
     logger,
     threads=1,
     mapq_filter=60,
     sample_id: str = None,
-    copy_numbers_path: str = None,
-    timeout: int = 3600,
 ):
     """
     Run CNV analysis directly using cnv_from_bam without subprocess isolation.
+    OPTIMIZED: Accepts data directly to eliminate unnecessary file I/O.
 
     Args:
         bam_path: Path to BAM file
-        copy_numbers: Copy numbers dictionary (used if copy_numbers_path not provided)
-        ref_cnv_dict: Reference CNV dictionary or path to reference pickle
-        temp_dir: Temporary directory for intermediate files
+        copy_numbers: Copy numbers dictionary (passed directly, no file I/O)
+        ref_cnv_dict: Reference CNV dictionary (passed directly, no file I/O)
         logger: Logger instance
         threads: Number of threads to use
         mapq_filter: Mapping quality filter
         sample_id: Sample identifier
-        copy_numbers_path: Path to per-sample copy_numbers file (OPTIMIZED APPROACH)
-        timeout: Timeout in seconds (for compatibility, not used in direct mode)
 
     Returns:
         Dictionary with analysis results or None if failed
@@ -300,32 +295,16 @@ def run_cnv_analysis_direct(
     import cnv_from_bam
     
     try:
-        # Ensure temp directory exists
-        os.makedirs(temp_dir, exist_ok=True)
-
-        # Load copy numbers from per-sample file (OPTIMIZED APPROACH)
-        load_start = time.time()
-        if copy_numbers_path is not None and os.path.exists(copy_numbers_path):
-            # Per-sample file approach (optimized)
-            with open(copy_numbers_path, "rb") as f:
-                copy_numbers = pickle.load(f)
-            load_time = time.time() - load_start
-            logger.debug(f"Loaded per-sample copy_numbers from {copy_numbers_path} in {load_time:.3f}s")
-        elif copy_numbers is not None:
-            # Use provided copy_numbers dict
-            logger.debug(f"Using provided copy_numbers dict")
-        else:
-            # No existing data
+        # Use provided copy_numbers dict directly (no file I/O)
+        if copy_numbers is None:
             copy_numbers = {}
             logger.debug(f"No existing copy_numbers, starting fresh")
-
-        # Use cached reference CNV dict to avoid reloading for every sample
-        if isinstance(ref_cnv_dict, str) and os.path.exists(ref_cnv_dict):
-            # Load and cache the reference dict
-            ref_cnv_dict_loaded = get_cached_ref_cnv_dict(ref_cnv_dict, logger)
         else:
-            # Already a dict
-            ref_cnv_dict_loaded = ref_cnv_dict
+            logger.debug(f"Using provided copy_numbers dict directly")
+
+        # Use provided reference CNV dict directly (no file I/O)
+        ref_cnv_dict_loaded = ref_cnv_dict
+        logger.debug(f"Using provided reference CNV dict directly")
 
         # First pass: process sample with accumulated copy numbers
         logger.debug(f"Starting Pass 1: Sample CNV extraction with {threads} threads")
@@ -1136,11 +1115,12 @@ def process_single_bam(bam_path, metadata, work_dir, logger, threads=2):
             # Cache the loaded copy_numbers
             update_sample_cache(sample_id, copy_numbers=copy_numbers, copy_numbers_path=copy_numbers_path)
 
-        # Get reference CNV dict path (avoid re-serializing; pass path)
+        # Load reference CNV dict once (cached for subsequent samples)
         ref_cnv_path = os.path.join(
             os.path.dirname(os.path.abspath(resources.__file__)),
             "HG01280_control_new.pkl",
         )
+        ref_cnv_dict_loaded = get_cached_ref_cnv_dict(ref_cnv_path, logger)
 
         # Process BAM file with cnv_from_bam using configurable execution mode
         execution_mode = "subprocess" if USE_CNV_SUBPROCESS else "direct"
@@ -1163,18 +1143,15 @@ def process_single_bam(bam_path, metadata, work_dir, logger, threads=2):
                     timeout=adaptive_timeout,  # Adaptive timeout based on file size
                 )
             else:
-                # Use direct execution (new approach)
+                # Use direct execution (OPTIMIZED: pass data directly, no file I/O)
                 subprocess_result = run_cnv_analysis_direct(
                     bam_path,
-                    {},  # Empty dict (not used when copy_numbers_path is provided)
-                    ref_cnv_path,
-                    temp_dir,
+                    copy_numbers,  # Pass copy_numbers dict directly
+                    ref_cnv_dict_loaded,  # Pass reference dict directly
                     logger,
                     threads=threads,  # Use configurable threads parameter
                     mapq_filter=60,
                     sample_id=sample_id,
-                    copy_numbers_path=copy_numbers_path,  # PER-SAMPLE FILE (OPTIMIZED)
-                    timeout=adaptive_timeout,  # For compatibility
                 )
 
             if subprocess_result is None or not subprocess_result.get("success", False):
@@ -1210,6 +1187,9 @@ def process_single_bam(bam_path, metadata, work_dir, logger, threads=2):
             
             # Update cache with the saved copy_numbers
             update_sample_cache(sample_id, copy_numbers=updated_copy_numbers)
+            
+            # Update the local copy_numbers variable for subsequent processing
+            copy_numbers = updated_copy_numbers
 
             analysis_result["processing_steps"].append("cnv_data_extracted")
             logger.debug("CNV data extracted successfully")
@@ -1223,8 +1203,10 @@ def process_single_bam(bam_path, metadata, work_dir, logger, threads=2):
             analysis_result["processing_steps"].append("cnv_extraction_failed")
             return analysis_result
 
+
         # Calculate normalized CNV data (difference between sample and reference)
         logger.debug("Calculating normalized CNV data")
+        
         result3_cnv = {}
         for key in r_cnv.keys():
             if key != "chrM" and key in r2_cnv:
@@ -1236,7 +1218,7 @@ def process_single_bam(bam_path, metadata, work_dir, logger, threads=2):
                 result3_cnv[key] = moving_avg_data1 - moving_avg_data2
 
         analysis_result["processing_steps"].append("normalized_cnv_calculated")
-
+        
         # Estimate sex from CNV data
         sex_estimate = estimate_sex_from_cnv(result3_cnv, logger)
         analysis_result["sex_estimate"] = sex_estimate
@@ -1290,7 +1272,7 @@ def process_single_bam(bam_path, metadata, work_dir, logger, threads=2):
         logger.info(f"CNV analysis complete for {sample_id}")
         logger.info(f"Sex Estimate: {analysis_result['sex_estimate']}")
         logger.info(f"Breakpoints: {len(analysis_result['breakpoints'])} detected")
-
+        
         return analysis_result
 
     except Exception as e:
