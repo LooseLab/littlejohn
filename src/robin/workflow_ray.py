@@ -93,9 +93,17 @@ except Exception:
     _mgmt_handler = None
 
 try:
-    from robin.analysis.cnv_analysis import cnv_handler as _cnv_handler
+    from robin.analysis.cnv_analysis import (
+        cnv_handler as _cnv_handler,
+        clear_sample_cache,
+        get_sample_cache_stats,
+        cleanup_sample_cache_on_completion
+    )
 except Exception:
     _cnv_handler = None
+    clear_sample_cache = None
+    get_sample_cache_stats = None
+    cleanup_sample_cache_on_completion = None
 
 try:
     from robin.analysis.target_analysis import (
@@ -598,6 +606,11 @@ class Coordinator:
         self._jobs_since_last_cleanup: int = 0
         # shutdown flag for graceful termination
         self._shutdown_requested = False
+        
+        # CNV sample cache management
+        self._cnv_cache_cleanup_interval: int = 1000  # Clean up CNV cache every N jobs
+        self._jobs_since_cnv_cleanup: int = 0
+        self._completed_samples: Set[str] = set()  # Track samples that have completed CNV analysis
         # defer setup/registration to async setup()
 
         # Preset controls how processing actors are created and their concurrency
@@ -1049,6 +1062,41 @@ class Coordinator:
         is_ready = len(missing_files) == 0
         return is_ready, missing_files
 
+    async def _cleanup_cnv_cache(self) -> None:
+        """
+        Clean up CNV sample cache for completed samples to prevent unbounded memory growth.
+        """
+        if clear_sample_cache is None:
+            return  # CNV module not available
+        
+        try:
+            # Get current cache stats
+            cache_stats = get_sample_cache_stats() if get_sample_cache_stats else {}
+            current_time = time.time()
+            
+            # Clean up cache for samples that haven't been accessed recently (10 minutes)
+            samples_to_cleanup = []
+            for sample_id, details in cache_stats.get('sample_details', {}).items():
+                last_accessed = details.get('last_accessed', 0)
+                if current_time - last_accessed > 600:  # 10 minutes
+                    samples_to_cleanup.append(sample_id)
+            
+            # Limit cleanup to 5 samples at a time to avoid disruption
+            samples_to_cleanup = samples_to_cleanup[:5]
+            
+            # Clean up old samples
+            for sample_id in samples_to_cleanup:
+                try:
+                    clear_sample_cache(sample_id)
+                except Exception:
+                    pass
+            
+            if samples_to_cleanup:
+                pass  # Cache cleanup completed
+                
+        except Exception:
+            pass  # Silently continue on cache cleanup errors
+
     async def _cleanup_completed_samples(self) -> None:
         """
         Clean up samples that have completed all their jobs.
@@ -1390,6 +1438,15 @@ class Coordinator:
             self._jobs_since_last_cleanup = 0
             try:
                 asyncio.create_task(self._cleanup_completed_samples())
+            except Exception:
+                pass
+        
+        # Periodically clean up CNV cache to prevent memory growth
+        self._jobs_since_cnv_cleanup += 1
+        if self._jobs_since_cnv_cleanup >= self._cnv_cache_cleanup_interval:
+            self._jobs_since_cnv_cleanup = 0
+            try:
+                asyncio.create_task(self._cleanup_cnv_cache())
             except Exception:
                 pass
 
@@ -1734,6 +1791,21 @@ class Coordinator:
         self._stats_cache_time = now
         
         return result
+
+    async def get_cnv_cache_stats(self) -> Dict[str, Any]:
+        """
+        Get CNV cache statistics for monitoring purposes.
+        
+        Returns:
+            Dictionary with CNV cache statistics
+        """
+        if get_sample_cache_stats is None:
+            return {"error": "CNV module not available"}
+        
+        try:
+            return get_sample_cache_stats()
+        except Exception as e:
+            return {"error": str(e)}
 
     async def shutdown(self) -> bool:
         """

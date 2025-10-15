@@ -20,7 +20,7 @@ def run_cnv_analysis(
     copy_numbers_path=None,
     ref_cnv_dict_path=None,
     output_dir=None,
-    threads=1,
+    threads=4,
     mapq_filter=60,
     update_cnv_dict_path=None,
     sample_id=None,
