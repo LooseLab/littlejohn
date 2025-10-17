@@ -305,6 +305,197 @@ def process_single_file(
         }
 
 
+def process_multiple_files(bam_paths, metadata_list, work_dir, logger, target_panel="rCNS2"):
+    """
+    Process multiple BAM files for fusion analysis using staged processing.
+    
+    This function processes multiple BAM files for the same sample using the
+    existing staging infrastructure. Each file is processed individually and
+    staged, then all staged files are accumulated in a single batch operation.
+    Only files with supplementary reads are processed.
+
+    Args:
+        bam_paths: List of paths to BAM files
+        metadata_list: List of metadata dictionaries (one per BAM file)
+        work_dir: Working directory
+        logger: Logger instance
+        target_panel: Target panel type (rCNS2, AML, PanCan)
+
+    Returns:
+        Dictionary with aggregated fusion analysis results
+    """
+    if not bam_paths or not metadata_list:
+        raise ValueError("bam_paths and metadata_list must not be empty")
+    
+    if len(bam_paths) != len(metadata_list):
+        raise ValueError("bam_paths and metadata_list must have the same length")
+    
+    # Get sample ID from first metadata (assuming all BAMs are from same sample)
+    sample_id = metadata_list[0].get("sample_id", "unknown")
+    
+    logger.info(f"🔗 Starting multi-file fusion analysis for sample: {sample_id}")
+    logger.info(f"Processing {len(bam_paths)} BAM files for sample {sample_id}")
+    
+    # Log essential metadata only
+    for i, (bam_path, metadata) in enumerate(zip(bam_paths, metadata_list)):
+        logger.debug(f"BAM file {i+1}: {os.path.basename(bam_path)}")
+
+    analysis_result = {
+        "sample_id": sample_id,
+        "bam_paths": bam_paths,
+        "analysis_timestamp": time.time(),
+        "processing_steps": [],
+        "error_message": None,
+        "files_processed": 0,
+        "files_with_supplementary": 0,
+        "total_files": len(bam_paths),
+        "fusion_data": {},
+        "target_fusion_path": None,
+        "genome_wide_fusion_path": None,
+    }
+
+    try:
+        # Filter files that have supplementary reads
+        valid_bam_paths = []
+        valid_metadata_list = []
+        
+        for bam_path, metadata in zip(bam_paths, metadata_list):
+            has_supplementary = metadata.get("has_supplementary_reads", False)
+            if has_supplementary:
+                valid_bam_paths.append(bam_path)
+                valid_metadata_list.append(metadata)
+                analysis_result["files_with_supplementary"] += 1
+                logger.debug(f"BAM {os.path.basename(bam_path)}: has supplementary reads")
+            else:
+                logger.debug(f"BAM {os.path.basename(bam_path)}: no supplementary reads - skipping")
+        
+        if not valid_bam_paths:
+            logger.info(f"No BAM files with supplementary reads found for {sample_id}")
+            analysis_result["error_message"] = "No supplementary reads found in any BAM files"
+            analysis_result["processing_steps"].append("no_supplementary_reads")
+            return analysis_result
+
+        logger.info(f"Processing {len(valid_bam_paths)} valid BAM files out of {len(bam_paths)} total")
+        analysis_result["files_processed"] = len(valid_bam_paths)
+        analysis_result["processing_steps"].append("supplementary_reads_found")
+
+        # Process each BAM file individually using staging
+        logger.info("Processing files with fusion staging (fast path)")
+        processed_files = 0
+        
+        for i, (bam_path, metadata) in enumerate(zip(valid_bam_paths, valid_metadata_list)):
+            logger.info(f"Processing BAM file {i+1}/{len(valid_bam_paths)}: {os.path.basename(bam_path)}")
+            
+            try:
+                # Get supplementary read information
+                has_supplementary = metadata.get("has_supplementary_reads", False)
+                supplementary_read_ids = metadata.get("supplementary_read_ids", [])
+                supp_ids_path = metadata.get("supplementary_read_ids_path")
+                
+                # Load supplementary read IDs from file if available
+                if (not supplementary_read_ids) and supp_ids_path and os.path.exists(supp_ids_path):
+                    try:
+                        with open(supp_ids_path, "r") as f:
+                            supplementary_read_ids = [
+                                line.strip() for line in f if line.strip()
+                            ]
+                    except Exception as e:
+                        logger.warning(f"Could not read supplementary_read_ids from {supp_ids_path}: {e}")
+                
+                # Create fusion metadata
+                fusion_metadata = FusionMetadata(
+                    sample_id=sample_id,
+                    file_path=bam_path,
+                    analysis_timestamp=time.time(),
+                    target_panel=target_panel,
+                )
+                
+                # Create temporary directory for processing
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    # Process with staging
+                    analysis_results, should_accumulate = process_bam_with_staging(
+                        bam_path,
+                        temp_dir,
+                        metadata,
+                        fusion_metadata,
+                        target_panel,
+                        has_supplementary=has_supplementary,
+                        supplementary_read_ids=supplementary_read_ids,
+                        work_dir=work_dir,
+                        batch_size=1,  # Force accumulation after each batch
+                    )
+                    
+                    if analysis_results.get("error_message"):
+                        logger.warning(f"Error processing {os.path.basename(bam_path)}: {analysis_results['error_message']}")
+                        continue
+                    
+                    processed_files += 1
+                    logger.debug(f"Successfully staged file {i+1}: {os.path.basename(bam_path)}")
+                    
+                    # Cleanup supplementary IDs file if present
+                    if supp_ids_path and os.path.exists(supp_ids_path):
+                        try:
+                            os.remove(supp_ids_path)
+                        except Exception:
+                            pass
+                
+            except Exception as e:
+                logger.warning(f"Error processing {os.path.basename(bam_path)}: {e}")
+                continue
+
+        if processed_files == 0:
+            analysis_result["error_message"] = "No files could be processed successfully"
+            analysis_result["processing_steps"].append("no_files_processed")
+            return analysis_result
+
+        analysis_result["files_processed"] = processed_files
+        analysis_result["processing_steps"].append("files_staged")
+
+        # Force accumulation of all staged files
+        logger.info(f"Accumulating {processed_files} staged fusion files for sample {sample_id}")
+        accumulation_result = accumulate_fusion_candidates(
+            work_dir, sample_id, target_panel, force=True, batch_size=1
+        )
+        
+        if accumulation_result.get("status") != "success":
+            analysis_result["error_message"] = f"Accumulation failed: {accumulation_result.get('error', 'Unknown error')}"
+            analysis_result["processing_steps"].append("accumulation_failed")
+            return analysis_result
+
+        analysis_result["processing_steps"].append("accumulation_complete")
+        logger.info(f"Fusion accumulation completed: {accumulation_result}")
+
+        # Load final accumulated data for result metadata
+        sample_output_dir = os.path.join(work_dir, sample_id)
+        
+        # Set output file paths
+        analysis_result["target_fusion_path"] = os.path.join(sample_output_dir, "target_fusion.csv")
+        analysis_result["genome_wide_fusion_path"] = os.path.join(sample_output_dir, "genome_wide_fusion.csv")
+        
+        # Store final results
+        analysis_result["fusion_data"] = {
+            "target_candidates_count": accumulation_result.get("target_candidates_count", 0),
+            "genome_wide_candidates_count": accumulation_result.get("genome_wide_candidates_count", 0),
+            "files_with_supplementary": analysis_result["files_with_supplementary"],
+            "files_processed": processed_files,
+        }
+        
+        analysis_result["processing_steps"].append("analysis_complete")
+        logger.info(f"Multi-file fusion analysis completed for {sample_id}")
+        logger.info(f"Files successfully processed: {analysis_result['files_processed']}/{analysis_result['total_files']}")
+        logger.info(f"Files with supplementary reads: {analysis_result['files_with_supplementary']}")
+        logger.info(f"Target fusion candidates: {analysis_result['fusion_data']['target_candidates_count']}")
+        logger.info(f"Genome-wide fusion candidates: {analysis_result['fusion_data']['genome_wide_candidates_count']}")
+        
+        return analysis_result
+
+    except Exception as e:
+        logger.error(f"Error in multi-file fusion analysis for {sample_id}: {e}")
+        analysis_result["error_message"] = str(e)
+        analysis_result["processing_steps"].append("analysis_failed")
+        return analysis_result
+
+
 def fusion_handler(job, work_dir=None, target_panel="rCNS2"):
     """
     Handler function for fusion analysis jobs in the workflow system.
@@ -317,130 +508,230 @@ def fusion_handler(job, work_dir=None, target_panel="rCNS2"):
     try:
         # Get logger with proper parameters
         logger = get_job_logger(str(job.job_id), "fusion", job.context.filepath)
-
-        # Extract file path and metadata from job
-        file_path = job.context.filepath
-        metadata = job.context.metadata.get("bam_metadata", {})
-
-        # Log and validate target panel
-        job_panel = job.context.metadata.get("target_panel", target_panel)
-        if job_panel != target_panel:
-            logger.warning(f"Panel mismatch: job metadata has '{job_panel}' but handler received '{target_panel}'. Using '{job_panel}' from metadata.")
-            target_panel = job_panel
-        logger.info(f"Using target panel: {target_panel}")
-        logger.info(f"DEBUG: Job metadata: {job.context.metadata}")
-
-        # Access supplementary read information
-        has_supplementary = metadata.get("has_supplementary_reads", False)
-        if has_supplementary:
-            logger.info(f"Starting fusion analysis for {file_path}")
-            logger.info(f"Metadata: {metadata}")
-
-            # Prefer disk-based supplementary read IDs if available to avoid large in-memory lists
-            supplementary_read_ids = metadata.get("supplementary_read_ids", [])
-            supp_ids_path = metadata.get("supplementary_read_ids_path")
-            if (
-                (not supplementary_read_ids)
-                and supp_ids_path
-                and os.path.exists(supp_ids_path)
-            ):
-                try:
-                    with open(supp_ids_path, "r") as f:
-                        supplementary_read_ids = [
-                            line.strip() for line in f if line.strip()
-                        ]
-                except Exception as e:
-                    logger.warning(
-                        f"Could not read supplementary_read_ids from {supp_ids_path}: {e}"
-                    )
-
-            # Set default work directory if not provided
-            if work_dir is None:
-                work_dir = "fusion_output"
-
-            logger.info(f"Using work directory: {work_dir}")
-            logger.info(f"Using target panel: {target_panel}")
-
-            # Use staging-based processing for performance
-            logger.info("Using fusion staging-based processing (fast path)")
+        
+        # Check if this is a batched job
+        batched_job = job.context.metadata.get("_batched_job")
+        if batched_job:
+            batch_size = batched_job.get_file_count()
+            sample_id = batched_job.get_sample_id()
+            batch_id = batched_job.batch_id
+            logger.info(f"Processing fusion analysis batch: {batch_size} files for sample '{sample_id}' (batch_id: {batch_id})")
             
-            # Create fusion metadata
-            sample_id = metadata.get("sample_id", "unknown")
-            fusion_metadata = FusionMetadata(
-                sample_id=sample_id,
-                file_path=file_path,
-                analysis_timestamp=time.time(),
-                target_panel=target_panel,
+            # Get all filepaths in the batch
+            filepaths = batched_job.get_filepaths()
+            
+            # Log individual files in the batch
+            for i, filepath in enumerate(filepaths):
+                logger.info(f"  Batch file {i+1}/{batch_size}: {os.path.basename(filepath)}")
+            
+            # Prepare metadata list for all BAM files in the batch
+            metadata_list = []
+            for i, bam_path in enumerate(filepaths):
+                # Get metadata from preprocessing for this specific file
+                file_metadata = batched_job.contexts[i].metadata.get("bam_metadata", {})
+                
+                # Get sample ID from preprocessing results for this specific file
+                file_context = batched_job.contexts[i]
+                file_sample_id = file_context.get_sample_id()
+                
+                # Use the sample ID from the file's context (which should have preprocessing results)
+                if file_sample_id != "unknown":
+                    file_metadata["sample_id"] = file_sample_id
+                else:
+                    file_metadata["sample_id"] = sample_id
+                
+                metadata_list.append(file_metadata)
+            
+            # Determine work directory for the batch
+            if work_dir is None:
+                # Default to first BAM file directory
+                batch_work_dir = os.path.dirname(filepaths[0])
+            else:
+                # Use specified work directory, create if it doesn't exist
+                os.makedirs(work_dir, exist_ok=True)
+                batch_work_dir = work_dir
+                logger.debug(f"Using specified work directory: {batch_work_dir}")
+            
+            # Log and validate target panel
+            job_panel = batched_job.contexts[0].metadata.get("target_panel", target_panel)
+            if job_panel != target_panel:
+                logger.warning(f"Panel mismatch: job metadata has '{job_panel}' but handler received '{target_panel}'. Using '{job_panel}' from metadata.")
+                target_panel = job_panel
+            logger.info(f"Using target panel: {target_panel}")
+            
+            # Process all BAM files in the batch using the new aggregated function
+            logger.info(f"Processing {batch_size} BAM files as aggregated batch for sample '{sample_id}'")
+            batch_result = process_multiple_files(
+                bam_paths=filepaths,
+                metadata_list=metadata_list,
+                work_dir=batch_work_dir,
+                logger=logger,
+                target_panel=target_panel
             )
             
-            # Create temporary directory for processing
-            import tempfile
-            with tempfile.TemporaryDirectory() as temp_dir:
-                # Process with staging
-                analysis_results, should_accumulate = process_bam_with_staging(
-                    file_path,
-                    temp_dir,
-                    metadata,
-                    fusion_metadata,
-                    target_panel,
-                    has_supplementary=has_supplementary,
-                    supplementary_read_ids=supplementary_read_ids,
-                    work_dir=work_dir,
-                    batch_size=10,
+            # Store batch results in job context (maintain compatibility with existing structure)
+            job.context.add_metadata("fusion_analysis", {
+                "batch_result": batch_result,  # Single aggregated result
+                "batch_size": batch_size,
+                "sample_id": sample_id,
+                "batch_id": batch_id,
+                "files_processed": batch_result.get("files_processed", batch_size),
+                "total_files": batch_result.get("total_files", batch_size)
+            })
+            
+            logger.info(f"Completed fusion analysis batch processing: {batch_size} files for sample '{sample_id}'")
+            logger.info(f"Files successfully processed: {batch_result.get('files_processed', batch_size)}/{batch_result.get('total_files', batch_size)}")
+            logger.info(f"Files with supplementary reads: {batch_result.get('files_with_supplementary', 0)}")
+            
+            if batch_result.get("error_message"):
+                logger.error(f"Batch processing completed with errors: {batch_result['error_message']}")
+                job.context.add_error("fusion_analysis", batch_result["error_message"])
+            else:
+                logger.info("Batch processing completed successfully with aggregated fusion analysis")
+                job.context.add_result(
+                    "fusion_analysis",
+                    {
+                        "success": True,
+                        "sample_id": sample_id,
+                        "analysis_time": batch_result.get("analysis_timestamp", 0),
+                        "target_candidates_count": batch_result.get("fusion_data", {}).get("target_candidates_count", 0),
+                        "genome_wide_candidates_count": batch_result.get("fusion_data", {}).get("genome_wide_candidates_count", 0),
+                        "processing_steps": batch_result.get("processing_steps", []),
+                        "target_fusion_path": batch_result.get("target_fusion_path", ""),
+                        "genome_wide_fusion_path": batch_result.get("genome_wide_fusion_path", ""),
+                        "files_processed": batch_result.get("files_processed", batch_size),
+                        "total_files": batch_result.get("total_files", batch_size),
+                        "files_with_supplementary": batch_result.get("files_with_supplementary", 0),
+                    },
+                )
+            
+            return
+            
+        else:
+            # Single file processing (backward compatibility)
+            # Extract file path and metadata from job
+            file_path = job.context.filepath
+            metadata = job.context.metadata.get("bam_metadata", {})
+
+            # Log and validate target panel
+            job_panel = job.context.metadata.get("target_panel", target_panel)
+            if job_panel != target_panel:
+                logger.warning(f"Panel mismatch: job metadata has '{job_panel}' but handler received '{target_panel}'. Using '{job_panel}' from metadata.")
+                target_panel = job_panel
+            logger.info(f"Using target panel: {target_panel}")
+            logger.info(f"DEBUG: Job metadata: {job.context.metadata}")
+
+            # Access supplementary read information
+            has_supplementary = metadata.get("has_supplementary_reads", False)
+            if has_supplementary:
+                logger.info(f"Starting fusion analysis for {file_path}")
+                logger.info(f"Metadata: {metadata}")
+
+                # Prefer disk-based supplementary read IDs if available to avoid large in-memory lists
+                supplementary_read_ids = metadata.get("supplementary_read_ids", [])
+                supp_ids_path = metadata.get("supplementary_read_ids_path")
+                if (
+                    (not supplementary_read_ids)
+                    and supp_ids_path
+                    and os.path.exists(supp_ids_path)
+                ):
+                    try:
+                        with open(supp_ids_path, "r") as f:
+                            supplementary_read_ids = [
+                                line.strip() for line in f if line.strip()
+                            ]
+                    except Exception as e:
+                        logger.warning(
+                            f"Could not read supplementary_read_ids from {supp_ids_path}: {e}"
+                        )
+
+                # Set default work directory if not provided
+                if work_dir is None:
+                    work_dir = "fusion_output"
+
+                logger.info(f"Using work directory: {work_dir}")
+                logger.info(f"Using target panel: {target_panel}")
+
+                # Use staging-based processing for performance
+                logger.info("Using fusion staging-based processing (fast path)")
+                
+                # Create fusion metadata
+                sample_id = metadata.get("sample_id", "unknown")
+                fusion_metadata = FusionMetadata(
+                    sample_id=sample_id,
+                    file_path=file_path,
+                    analysis_timestamp=time.time(),
+                    target_panel=target_panel,
                 )
                 
-                # Convert to result format
-                result = {
-                    "success": True,
-                    "sample_id": sample_id,
-                    "file_path": file_path,
-                    "analysis_timestamp": time.time(),
-                    "processing_steps": ["staging_complete"],
-                    "error_message": None,
-                    "analysis_results": analysis_results,
-                }
-                
-                # Add result to job context
-                job.context.add_result("fusion_analysis", result)
-                
-                # Trigger accumulation if threshold reached
-                if should_accumulate:
-                    logger.info("Fusion accumulation threshold reached - running batch accumulation")
-                    accumulation_result = accumulate_fusion_candidates(
-                        work_dir, sample_id, target_panel, force=False, batch_size=10
+                # Create temporary directory for processing
+                import tempfile
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    # Process with staging
+                    analysis_results, should_accumulate = process_bam_with_staging(
+                        file_path,
+                        temp_dir,
+                        metadata,
+                        fusion_metadata,
+                        target_panel,
+                        has_supplementary=has_supplementary,
+                        supplementary_read_ids=supplementary_read_ids,
+                        work_dir=work_dir,
+                        batch_size=10,
                     )
-                    logger.info(f"Fusion accumulation result: {accumulation_result}")
-                    job.context.add_metadata("fusion_accumulation_result", accumulation_result)
-                
-                # Store flag for potential end-of-queue accumulation
-                job.context.add_metadata("needs_final_fusion_accumulation", True)
+                    
+                    # Convert to result format
+                    result = {
+                        "success": True,
+                        "sample_id": sample_id,
+                        "file_path": file_path,
+                        "analysis_timestamp": time.time(),
+                        "processing_steps": ["staging_complete"],
+                        "error_message": None,
+                        "analysis_results": analysis_results,
+                    }
+                    
+                    # Add result to job context
+                    job.context.add_result("fusion_analysis", result)
+                    
+                    # Trigger accumulation if threshold reached
+                    if should_accumulate:
+                        logger.info("Fusion accumulation threshold reached - running batch accumulation")
+                        accumulation_result = accumulate_fusion_candidates(
+                            work_dir, sample_id, target_panel, force=False, batch_size=10
+                        )
+                        logger.info(f"Fusion accumulation result: {accumulation_result}")
+                        job.context.add_metadata("fusion_accumulation_result", accumulation_result)
+                    
+                    # Store flag for potential end-of-queue accumulation
+                    job.context.add_metadata("needs_final_fusion_accumulation", True)
 
-            if result["success"]:
-                logger.info(f"Fusion analysis completed successfully for {file_path}")
-                logger.info(f"Results: {result}")
-                # Cleanup supplementary IDs file if present
-                if supp_ids_path and os.path.exists(supp_ids_path):
-                    try:
-                        os.remove(supp_ids_path)
-                    except Exception:
-                        pass
+                if result["success"]:
+                    logger.info(f"Fusion analysis completed successfully for {file_path}")
+                    logger.info(f"Results: {result}")
+                    # Cleanup supplementary IDs file if present
+                    if supp_ids_path and os.path.exists(supp_ids_path):
+                        try:
+                            os.remove(supp_ids_path)
+                        except Exception:
+                            pass
+                else:
+                    error_msg = result.get("error_message", "Unknown error")
+                    logger.error(f"Fusion analysis failed for {file_path}: {error_msg}")
+                    logger.error(f"Full result: {result}")
+                    job.context.add_error("fusion_analysis", error_msg)
             else:
-                error_msg = result.get("error_message", "Unknown error")
-                logger.error(f"Fusion analysis failed for {file_path}: {error_msg}")
-                logger.error(f"Full result: {result}")
-                job.context.add_error("fusion_analysis", error_msg)
-        else:
-            logger.info(f"No supplementary reads found for {file_path}")
-            # This is not an error - just a normal skip condition
-            job.context.add_result(
-                "fusion_analysis",
-                {
-                    "success": True,
-                    "skipped": True,
-                    "reason": "No supplementary reads found",
-                    "file_path": file_path,
-                },
-            )
+                logger.info(f"No supplementary reads found for {file_path}")
+                # This is not an error - just a normal skip condition
+                job.context.add_result(
+                    "fusion_analysis",
+                    {
+                        "success": True,
+                        "skipped": True,
+                        "reason": "No supplementary reads found",
+                        "file_path": file_path,
+                    },
+                )
 
     except Exception as e:
         import traceback

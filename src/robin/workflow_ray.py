@@ -184,7 +184,7 @@ BATCH_CONFIG: Dict[str, Dict[str, Any]] = {
     "preprocessing": {"max_batch_size": 1, "timeout_seconds": 0},  # Force no batching
     "bed_conversion": {"max_batch_size": 20, "timeout_seconds": 2},
     "mgmt": {"max_batch_size": 20, "timeout_seconds": 2},
-    "cnv": {"max_batch_size": 20, "timeout_seconds": 2},
+    "cnv": {"max_batch_size": 50, "timeout_seconds": 2},
     "target": {"max_batch_size": 20, "timeout_seconds": 2},
     "fusion": {"max_batch_size": 20, "timeout_seconds": 2},
     "sturgeon": {"max_batch_size": 20, "timeout_seconds": 2},
