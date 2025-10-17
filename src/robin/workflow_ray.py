@@ -41,6 +41,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Callable
 import inspect
 from pathlib import Path
 import itertools
+from contextlib import nullcontext
 
 import ray
 from tqdm import tqdm
@@ -177,6 +178,23 @@ except Exception:
 GLOBAL_LOG_LEVEL: str = "INFO"
 
 
+# ---------- Batch Configuration ----------
+BATCH_CONFIG: Dict[str, Dict[str, Any]] = {
+    # Preprocessing should NOT be batched - each file needs individual sample ID extraction
+    "preprocessing": {"max_batch_size": 1, "timeout_seconds": 0},  # Force no batching
+    "bed_conversion": {"max_batch_size": 20, "timeout_seconds": 2},
+    "mgmt": {"max_batch_size": 20, "timeout_seconds": 2},
+    "cnv": {"max_batch_size": 20, "timeout_seconds": 2},
+    "target": {"max_batch_size": 20, "timeout_seconds": 2},
+    "fusion": {"max_batch_size": 20, "timeout_seconds": 2},
+    "sturgeon": {"max_batch_size": 20, "timeout_seconds": 2},
+    "nanodx": {"max_batch_size": 20, "timeout_seconds": 2},
+    "pannanodx": {"max_batch_size": 20, "timeout_seconds": 2},
+    "random_forest": {"max_batch_size": 20, "timeout_seconds": 2},
+    "igv_bam": {"max_batch_size": 20, "timeout_seconds": 2},
+    "snp_analysis": {"max_batch_size": 20, "timeout_seconds": 2},
+}
+
 # ---------- Shared DTOs ----------
 @dataclass
 class WorkflowContext:
@@ -185,6 +203,10 @@ class WorkflowContext:
     results: Dict[str, Any] = field(default_factory=dict)
     history: List[str] = field(default_factory=list)
     errors: List[Dict[str, Any]] = field(default_factory=list)
+    
+    # NEW: Simple batch metadata
+    batch_id: Optional[str] = None
+    batch_index: Optional[int] = None
 
     def add_metadata(self, key: str, value: Any) -> None:
         self.metadata[key] = value
@@ -199,8 +221,23 @@ class WorkflowContext:
         )
 
     def get_sample_id(self) -> str:
+        # First try to get from bam_metadata (for backward compatibility)
         bam_md = self.metadata.get("bam_metadata", {})
-        return bam_md.get("sample_id", "unknown")
+        sample_id = bam_md.get("sample_id", "unknown")
+        
+        # If not found or "unknown", try to get from preprocessing results
+        if sample_id == "unknown":
+            preprocessing_result = self.results.get("preprocessing", {})
+            sample_id = preprocessing_result.get("sample_id", "unknown")
+        
+        return sample_id
+    
+    def set_batch_info(self, batch_id: str, batch_index: int) -> None:
+        """Set batch information for this context"""
+        self.batch_id = batch_id
+        self.batch_index = batch_index
+        self.metadata["batch_id"] = batch_id
+        self.metadata["batch_index"] = batch_index
     
     def cleanup_intermediate_data(self) -> None:
         """
@@ -245,6 +282,27 @@ class Job:
             self.step + 1,
             self.context,
         )
+
+
+@dataclass
+class BatchedJob:
+    job_id: int
+    job_type: str
+    origin: str
+    workflow: List[str]
+    step: int
+    contexts: List[WorkflowContext]  # Multiple contexts for batched processing
+    batch_id: str
+    sample_id: str
+    
+    def get_sample_id(self) -> str:
+        return self.sample_id
+    
+    def get_file_count(self) -> int:
+        return len(self.contexts)
+    
+    def get_filepaths(self) -> List[str]:
+        return [ctx.filepath for ctx in self.contexts]
 
 
 # ---------- Queue mapping & triggers ----------
@@ -298,6 +356,137 @@ RESOURCE_HINTS: Dict[str, Dict[str, Any]] = {
     "random_forest": {"num_cpus": 1},
     "igv_bam": {"num_cpus": 1},
 }
+
+# ---------- Sample Job Batcher ----------
+class SampleJobBatcher:
+    def __init__(self):
+        # sample_id -> job_type -> List[Job]
+        self.pending_jobs: Dict[str, Dict[str, List[Job]]] = {}
+        # sample_id -> job_type -> timestamp
+        self.last_job_time: Dict[str, Dict[str, float]] = {}
+        self.lock = asyncio.Lock() if asyncio else None
+    
+    async def add_job(self, job: Job) -> List[BatchedJob]:
+        """Add a job and return any completed batches"""
+        sample_id = job.context.get_sample_id()
+        job_type = job.job_type
+        
+        async with self.lock if self.lock else nullcontext():
+            # Initialize if needed
+            if sample_id not in self.pending_jobs:
+                self.pending_jobs[sample_id] = {}
+                self.last_job_time[sample_id] = {}
+            
+            if job_type not in self.pending_jobs[sample_id]:
+                self.pending_jobs[sample_id][job_type] = []
+                self.last_job_time[sample_id][job_type] = time.time()
+            
+            # Add job to pending list
+            self.pending_jobs[sample_id][job_type].append(job)
+            self.last_job_time[sample_id][job_type] = time.time()
+            
+            # Check for completed batches
+            batches = self._check_and_create_batches(sample_id, job_type)
+            return batches
+    
+    def _check_and_create_batches(self, sample_id: str, job_type: str) -> List[BatchedJob]:
+        """Check if we should create batches for a sample/job_type combination"""
+        config = BATCH_CONFIG.get(job_type, {"max_batch_size": 20, "timeout_seconds": 10})
+        max_batch_size = config["max_batch_size"]
+        
+        pending = self.pending_jobs[sample_id][job_type]
+        batches = []
+        
+        # Create batches of max_batch_size
+        while len(pending) >= max_batch_size:
+            batch_jobs = pending[:max_batch_size]
+            pending = pending[max_batch_size:]
+            
+            # Create batched job
+            batched_job = self._create_batched_job(batch_jobs, sample_id, job_type)
+            batches.append(batched_job)
+        
+        # Update pending list
+        self.pending_jobs[sample_id][job_type] = pending
+        
+        return batches
+    
+    async def check_timeouts(self) -> List[BatchedJob]:
+        """Check for timed-out batches and return them"""
+        current_time = time.time()
+        timed_out_batches = []
+        
+        async with self.lock if self.lock else nullcontext():
+            for sample_id in list(self.pending_jobs.keys()):
+                for job_type in list(self.pending_jobs[sample_id].keys()):
+                    jobs = self.pending_jobs[sample_id][job_type]
+                    if not jobs:
+                        continue
+                    
+                    config = BATCH_CONFIG.get(job_type, {"timeout_seconds": 10})
+                    timeout_seconds = config["timeout_seconds"]
+                    last_time = self.last_job_time[sample_id][job_type]
+                    
+                    if (current_time - last_time) >= timeout_seconds:
+                        # Create batch with remaining jobs
+                        batch = self._create_batched_job(jobs, sample_id, job_type)
+                        timed_out_batches.append(batch)
+                        
+                        # Clear the pending jobs
+                        self.pending_jobs[sample_id][job_type] = []
+                        del self.last_job_time[sample_id][job_type]
+            
+            # Clean up empty entries
+            self._cleanup_empty_entries()
+        
+        return timed_out_batches
+    
+    def _create_batched_job(self, jobs: List[Job], sample_id: str, job_type: str) -> BatchedJob:
+        """Create a batched job from a list of individual jobs"""
+        if not jobs:
+            raise ValueError("Cannot create batched job from empty job list")
+        
+        # Validate all jobs have same sample_id and job_type
+        for job in jobs:
+            if job.context.get_sample_id() != sample_id:
+                raise ValueError(f"Mixed sample IDs in batch: {sample_id} vs {job.context.get_sample_id()}")
+            if job.job_type != job_type:
+                raise ValueError(f"Mixed job types in batch: {job_type} vs {job.job_type}")
+        
+        # Use the first job as template
+        template_job = jobs[0]
+        batch_id = f"{sample_id}_{job_type}_{int(time.time() * 1000)}"
+        
+        # Extract contexts from all jobs
+        contexts = [job.context for job in jobs]
+        
+        return BatchedJob(
+            job_id=next(_job_id_counter),
+            job_type=job_type,
+            origin=template_job.origin,
+            workflow=template_job.workflow,
+            step=template_job.step,
+            contexts=contexts,
+            batch_id=batch_id,
+            sample_id=sample_id
+        )
+    
+    def _cleanup_empty_entries(self):
+        """Remove empty entries from pending jobs and timestamps"""
+        # Remove empty job type entries
+        for sample_id in list(self.pending_jobs.keys()):
+            for job_type in list(self.pending_jobs[sample_id].keys()):
+                if not self.pending_jobs[sample_id][job_type]:
+                    del self.pending_jobs[sample_id][job_type]
+                    if job_type in self.last_job_time[sample_id]:
+                        del self.last_job_time[sample_id][job_type]
+            
+            # Remove empty sample entries
+            if not self.pending_jobs[sample_id]:
+                del self.pending_jobs[sample_id]
+                if sample_id in self.last_job_time:
+                    del self.last_job_time[sample_id]
+
 
 # ---------- Utilities ----------
 _job_id_counter = itertools.count(1000)
@@ -460,6 +649,39 @@ def _wrap_real_handler(
     return _impl
 
 
+def enhanced_handler(job: BatchedJob) -> None:
+    """Enhanced handler that processes batched jobs sequentially"""
+    
+    sample_id = job.get_sample_id()
+    job_type = job.job_type
+    batch_size = job.get_file_count()
+    
+    # Process each context sequentially
+    for i, context in enumerate(job.contexts):
+        context.set_batch_info(job.batch_id, i)
+        
+        try:
+            # Process individual file within batch
+            process_single_file_in_batch(context, job_type, i, batch_size)
+            context.add_result(job_type, f"{job_type}_ok")
+            
+        except Exception as e:
+            # Fail entire batch if any file fails
+            error_msg = f"File {i+1}/{batch_size} failed: {str(e)}"
+            for ctx in job.contexts:
+                ctx.add_error(job_type, error_msg)
+            raise  # Re-raise to fail the entire batch
+    
+    # Mark batch as completed
+    for context in job.contexts:
+        context.add_result(job_type, f"{job_type}_batch_completed")
+
+def process_single_file_in_batch(context: WorkflowContext, job_type: str, index: int, total: int) -> None:
+    """Process a single file within a batch - to be implemented per job type"""
+    # This would call the existing single-file processing logic
+    pass
+
+
 # Build remote versions with no fixed options; Pool will apply .options(**RESOURCE_HINTS[job_type])
 
 
@@ -561,6 +783,7 @@ class Coordinator:
         preset: Optional[str] = None,
         reference: Optional[str] = None,
         target_panel: str = "rCNS2",
+        enable_batching: bool = True,
     ):
         # dedup maps
         self.pending: Dict[Tuple[str, str], int] = {}
@@ -640,6 +863,10 @@ class Coordinator:
         self._stats_cache: Optional[Dict[str, Any]] = None
         self._stats_cache_time: float = 0.0
         self._stats_cache_ttl: float = 5.0  # Cache stats for 5 seconds
+        
+        # Batching support
+        self.enable_batching = enable_batching
+        self.sample_batcher = SampleJobBatcher() if enable_batching else None
 
     def get_reference(self) -> Optional[str]:
         """Get the reference genome path."""
@@ -822,6 +1049,13 @@ class Coordinator:
             asyncio.create_task(self._drain_loop())
         except Exception:
             pass
+        
+        # Start batch timeout loop if batching is enabled
+        if self.enable_batching and self.sample_batcher:
+            try:
+                asyncio.create_task(self._batch_timeout_loop())
+            except Exception:
+                pass
 
     # ----- submission & lifecycle -----
     async def submit_jobs(self, jobs: List[Job]) -> None:
@@ -832,6 +1066,29 @@ class Coordinator:
         # Invalidate stats cache since we're submitting new jobs
         self._stats_cache = None
         
+        # Process jobs through batcher if batching is enabled
+        if self.enable_batching and self.sample_batcher:
+            # Separate preprocessing jobs from other jobs
+            preprocessing_jobs = [job for job in jobs if job.job_type == "preprocessing"]
+            other_jobs = [job for job in jobs if job.job_type != "preprocessing"]
+            
+            # Submit preprocessing jobs directly (no batching)
+            if preprocessing_jobs:
+                await self._submit_jobs_internal(preprocessing_jobs)
+            
+            # Process other jobs through batcher
+            for job in other_jobs:
+                batches = await self.sample_batcher.add_job(job)
+                if batches:
+                    # Convert BatchedJob to regular Job for processing
+                    regular_jobs = self._convert_batched_jobs(batches)
+                    await self._submit_jobs_internal(regular_jobs)
+                # If no batches were created, the job is waiting in the batcher
+        else:
+            await self._submit_jobs_internal(jobs)
+    
+    async def _submit_jobs_internal(self, jobs: List[Job]) -> None:
+        """Internal job submission logic"""
         for job in jobs:
             sample_id = job.context.get_sample_id()
             if job.job_type in DEDUP_TYPES:
@@ -1386,11 +1643,43 @@ class Coordinator:
                 for t in TRIGGERS.get(job.job_type, []):
                     if (req_types is None) or (t in req_types):
                         q = job_queue_of(t)
-                        triggered_jobs.append(
-                            Job(next(_job_id_counter), t, q, [f"{q}:{t}"], 0, ctx)
-                        )
+                        
+                        # Only create CNV jobs if preprocessing completed successfully
+                        if job.job_type == "preprocessing":
+                            if 'preprocessing' not in ctx.results:
+                                continue
+                            
+                            prep_result = ctx.results['preprocessing']
+                            prep_status = prep_result.get('status', 'unknown')
+                            
+                            if prep_status != 'success':
+                                continue
+                        
+                        # Use the updated context from the worker (which has the extracted sample ID) instead of the original context
+                        cnv_job = Job(next(_job_id_counter), t, q, [f"{q}:{t}"], 0, ctx)
+                        
+                        triggered_jobs.append(cnv_job)
                 if (not is_skipped) and triggered_jobs:
-                    await self.submit_jobs(triggered_jobs)
+                    # For CNV jobs, use batching if enabled
+                    if self.enable_batching and self.sample_batcher:
+                        # Check if any of the triggered jobs are CNV jobs
+                        cnv_jobs = [j for j in triggered_jobs if j.job_type == "cnv"]
+                        other_jobs = [j for j in triggered_jobs if j.job_type != "cnv"]
+                        
+                        # Submit non-CNV jobs immediately
+                        if other_jobs:
+                            await self.submit_jobs(other_jobs)
+                        
+                        # For CNV jobs, add them to the batcher
+                        for cnv_job in cnv_jobs:
+                            batches = await self.sample_batcher.add_job(cnv_job)
+                            if batches:
+                                # Convert BatchedJob to regular Job for processing
+                                regular_jobs = self._convert_batched_jobs(batches)
+                                await self._submit_jobs_internal(regular_jobs)
+                    else:
+                        # No batching, submit all jobs normally
+                        await self.submit_jobs(triggered_jobs)
                 else:
                     # advance linear chain if any
                     nxt = job.next_job()
@@ -1676,6 +1965,67 @@ class Coordinator:
                         await self._on_finish(job, ok, ctx, err)
             except Exception:
                 await asyncio.sleep(0.1)
+    
+    async def _batch_timeout_loop(self):
+        """Periodically check for timed-out batches"""
+        while not self._shutdown_requested:
+            try:
+                # Check for timed-out batches
+                timed_out_batches = await self.sample_batcher.check_timeouts()
+                
+                # Submit timed-out batches
+                if timed_out_batches:
+                    regular_jobs = self._convert_batched_jobs(timed_out_batches)
+                    await self._submit_jobs_internal(regular_jobs)
+                
+                await asyncio.sleep(1.0)  # Check every second
+                
+            except Exception:
+                await asyncio.sleep(1.0)
+    
+    def _convert_batched_jobs(self, batched_jobs: List[BatchedJob]) -> List[Job]:
+        """Convert BatchedJob objects to regular Job objects for processing"""
+        regular_jobs = []
+        for batched_job in batched_jobs:
+            # Create a regular job that will handle the batch
+            regular_job = Job(
+                job_id=batched_job.job_id,
+                job_type=batched_job.job_type,
+                origin=batched_job.origin,
+                workflow=batched_job.workflow,
+                step=batched_job.step,
+                context=batched_job.contexts[0]  # Use first context as primary
+            )
+            # Store batch information in metadata
+            regular_job.context.metadata["_batched_job"] = batched_job
+            regular_jobs.append(regular_job)
+        
+        return regular_jobs
+    
+    def register_batched_handler(self, job_type: str, handler: Callable[[BatchedJob], None]) -> None:
+        """Register a handler that can process batched jobs"""
+        # Wrap the handler to extract BatchedJob from regular Job
+        def wrapped_handler(job: Job) -> None:
+            batched_job = job.context.metadata.get("_batched_job")
+            if batched_job:
+                handler(batched_job)
+            else:
+                # Fallback to single file processing
+                single_context = job.context
+                single_batch = BatchedJob(
+                    job_id=job.job_id,
+                    job_type=job.job_type,
+                    origin=job.origin,
+                    workflow=job.workflow,
+                    step=job.step,
+                    contexts=[single_context],
+                    batch_id=f"single_{job.job_id}",
+                    sample_id=single_context.get_sample_id()
+                )
+                handler(single_batch)
+        
+        # Register the wrapped handler
+        self.register_handler(job_type, wrapped_handler)
 
     async def mark_running(self, job: Job):
         if job.job_type in DEDUP_TYPES:
@@ -2365,6 +2715,7 @@ async def run(
     gui_port: int = 8081,
     center: str = None,
     target_panel: str = "rCNS2",
+    enable_batching: bool = True,
 ):
     global GLOBAL_LOG_LEVEL
     GLOBAL_LOG_LEVEL = (log_level or "INFO").upper()
@@ -2409,11 +2760,11 @@ async def run(
     # Start a fresh coordinator (not detached)
     try:
         coord = Coordinator.options(name="robin_coordinator", num_cpus=0).remote(
-            analysis_workers=analysis_workers, preset=preset, reference=reference, target_panel=target_panel
+            analysis_workers=analysis_workers, preset=preset, reference=reference, target_panel=target_panel, enable_batching=enable_batching
         )
     except Exception:
         coord = Coordinator.options(name="robin_coordinator").remote(
-            analysis_workers=analysis_workers, preset=preset, reference=reference, target_panel=target_panel
+            analysis_workers=analysis_workers, preset=preset, reference=reference, target_panel=target_panel, enable_batching=enable_batching
         )
 
     # Set global coordinator reference for external access

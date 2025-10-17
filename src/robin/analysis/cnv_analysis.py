@@ -1001,7 +1001,6 @@ def process_single_bam(bam_path, metadata, work_dir, logger, threads=2):
     Returns:
         Dictionary with CNV analysis results
     """
-    # print(f"Processing CNV for BAM file: {bam_path}")
     sample_id = metadata.extracted_data.get("sample_id", "unknown")
     
     # Set current sample and check if this is a new sample
@@ -1295,83 +1294,80 @@ def cnv_handler(job, work_dir=None, target_panel="rCNS2", threads=2):
     """
     # Get job-specific logger
     logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
-
-    # try:
-    bam_path = job.context.filepath
-
-    logger.info(f"Starting CNV analysis for: {os.path.basename(bam_path)}")
     
-    # Log and validate target panel
-    job_panel = job.context.metadata.get("target_panel", target_panel)
-    if job_panel != target_panel:
-        logger.warning(f"Panel mismatch: job metadata has '{job_panel}' but handler received '{target_panel}'. Using '{job_panel}' from metadata.")
-        target_panel = job_panel
-    logger.info(f"Using target panel: {target_panel}")
-    
-    # Get thread count from job metadata if available, otherwise use default
-    job_threads = job.context.metadata.get("threads", threads)
-    if job_threads != threads:
-        logger.info(f"Using threads from job metadata: {job_threads}")
-        threads = job_threads
-    logger.info(f"CNV analysis will use {threads} threads")
-
-    # Get metadata from preprocessing
-    bam_metadata = job.context.metadata.get("bam_metadata", {})
-
-    # Create BamMetadata object for compatibility
-    from robin.analysis.bam_preprocessor import BamMetadata
-
-    metadata = BamMetadata(
-        file_path=bam_path,
-        file_size=job.context.metadata.get("file_size", 0),
-        creation_time=job.context.metadata.get("creation_time", time.time()),
-        extracted_data=bam_metadata,
-    )
-
-    # Determine work directory
-    if work_dir is None:
-        # Default to BAM file directory
-        work_dir = os.path.dirname(bam_path)
+    # Check if this is a batched job
+    batched_job = job.context.metadata.get("_batched_job")
+    if batched_job:
+        batch_size = batched_job.get_file_count()
+        sample_id = batched_job.get_sample_id()
+        batch_id = batched_job.batch_id
+        logger.info(f"Processing CNV batch: {batch_size} files for sample '{sample_id}' (batch_id: {batch_id})")
+        
+        # Get all filepaths in the batch
+        filepaths = batched_job.get_filepaths()
+        
+        # Log individual files in the batch
+        for i, filepath in enumerate(filepaths):
+            logger.info(f"  Batch file {i+1}/{batch_size}: {os.path.basename(filepath)}")
+        
+        # Process each file in the batch
+        batch_results = []
+        for i, bam_path in enumerate(filepaths):
+            logger.info(f"Processing batch file {i+1}/{batch_size}: {os.path.basename(bam_path)}")
+            
+            # Get metadata from preprocessing for this specific file
+            # Note: Each file in the batch should have its own metadata
+            file_metadata = batched_job.contexts[i].metadata.get("bam_metadata", {})
+            
+            # Get sample ID from preprocessing results for this specific file
+            file_context = batched_job.contexts[i]
+            file_sample_id = file_context.get_sample_id()
+            
+            # Use the sample ID from the file's context (which should have preprocessing results)
+            if file_sample_id != "unknown":
+                file_metadata["sample_id"] = file_sample_id
+            else:
+                file_metadata["sample_id"] = sample_id
+            
+            # Create BamMetadata object for compatibility
+            from robin.analysis.bam_preprocessor import BamMetadata
+            
+            metadata = BamMetadata(
+                file_path=bam_path,
+                file_size=batched_job.contexts[i].metadata.get("file_size", 0),
+                creation_time=batched_job.contexts[i].metadata.get("creation_time", time.time()),
+                extracted_data=file_metadata,
+            )
+            
+            # Determine work directory for this file
+            if work_dir is None:
+                # Default to BAM file directory
+                file_work_dir = os.path.dirname(bam_path)
+            else:
+                # Use specified work directory, create if it doesn't exist
+                os.makedirs(work_dir, exist_ok=True)
+                file_work_dir = work_dir
+                logger.debug(f"Using specified work directory: {file_work_dir}")
+            
+            # Process the BAM file with configurable threading
+            result = process_single_bam(bam_path, metadata, file_work_dir, logger, threads=threads)
+            batch_results.append(result)
+            
+            logger.info(f"Completed batch file {i+1}/{batch_size}: {os.path.basename(bam_path)}")
+        
+        # Store batch results in job context
+        job.context.add_metadata("cnv_analysis", {
+            "batch_results": batch_results,
+            "batch_size": batch_size,
+            "sample_id": sample_id,
+            "batch_id": batch_id
+        })
+        
+        logger.info(f"Completed CNV batch processing: {batch_size} files for sample '{sample_id}'")
+        return
+        
     else:
-        # Use specified work directory, create if it doesn't exist
-        os.makedirs(work_dir, exist_ok=True)
-        logger.debug(f"Using specified work directory: {work_dir}")
-
-    # Process the BAM file with configurable threading
-    result = process_single_bam(bam_path, metadata, work_dir, logger, threads=threads)
-
-    # Store results in job context
-    job.context.add_metadata("cnv_analysis", result)
-
-    if result.get("error_message"):
-        job.context.add_error("cnv_analysis", result["error_message"])
-        logger.error(f"CNV analysis failed: {result['error_message']}")
-    else:
-        job.context.add_result(
-            "cnv_analysis",
-            {
-                "status": "success",
-                "sample_id": result.get("sample_id", "unknown"),
-                "analysis_time": result.get("analysis_timestamp", 0),
-                "sex_estimate": result.get("sex_estimate", "Unknown"),
-                "breakpoints_count": len(result.get("breakpoints", [])),
-                "processing_steps": result.get("processing_steps", []),
-                "cnv_data_path": result.get("cnv_data_path", ""),
-                "analysis_counter": result.get("analysis_counter", 0),
-            },
-        )
-        logger.info(f"CNV analysis complete for {os.path.basename(bam_path)}")
-        logger.info(f"Sample ID: {result.get('sample_id', 'unknown')}")
-        logger.info(f"Sex Estimate: {result.get('sex_estimate', 'Unknown')}")
-        logger.info(f"Breakpoints: {len(result.get('breakpoints', []))}")
-        logger.info(f"Analysis Counter: {result.get('analysis_counter', 0)}")
-        logger.debug(
-            f"Processing steps: {', '.join(result.get('processing_steps', []))}"
-        )
-        logger.debug(
-            f"Output directory: {os.path.dirname(result.get('cnv_data_path', ''))}"
-        )
-
-    # except Exception as e:
-    #    job.context.add_error('cnv_analysis', str(e))
-    #    logger.error(f"Error in CNV analysis for {job.context.filepath}: {e}")
+        # CNV jobs should always be batched - raise an error if not
+        error_msg = f"CNV job received without batching metadata. Expected batched job but got single file: {os.path.basename(job.context.filepath)}"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
