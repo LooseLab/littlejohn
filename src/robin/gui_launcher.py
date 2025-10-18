@@ -1618,7 +1618,7 @@ class GUILauncher:
                 from nicegui import run as ng_run  # type: ignore
 
                 
-                if sample_dir and sample_dir.exists():
+                if not sample_dir or not sample_dir.exists():
                     ui.notify(
                         "Output directory not available for this sample",
                         type="warning",

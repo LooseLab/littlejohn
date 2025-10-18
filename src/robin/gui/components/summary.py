@@ -917,19 +917,25 @@ def _extract_mgmt_data(sample_dir: Path) -> Dict[str, Any]:
 
     try:
         # Use the same file discovery logic as the MGMT component
-        csv_files = list(sample_dir.glob("*_mgmt.csv"))
-        if not csv_files:
-            return mgmt_data
+        # First check for final_mgmt.csv files (highest priority)
+        final_files = list(sample_dir.glob("final_mgmt.csv"))
+        if final_files:
+            latest_csv = final_files[0]
+        else:
+            # Fallback to numeric-prefixed files
+            csv_files = list(sample_dir.glob("*_mgmt.csv"))
+            if not csv_files:
+                return mgmt_data
 
-        # Find the latest MGMT CSV file (same logic as MGMT component)
-        def _count_from_name(p: Path) -> int:
-            try:
-                return int(p.name.split("_")[0])
-            except Exception as e:
-                logging.debug(f"   MGMT: <access denied>: {e}")
-                return -1
+            # Find the latest MGMT CSV file (same logic as MGMT component)
+            def _count_from_name(p: Path) -> int:
+                try:
+                    return int(p.name.split("_")[0])
+                except Exception as e:
+                    logging.debug(f"   MGMT: <access denied>: {e}")
+                    return -1
 
-        latest_csv = max(csv_files, key=_count_from_name)
+            latest_csv = max(csv_files, key=_count_from_name)
 
         # Read the latest MGMT CSV file
         try:
