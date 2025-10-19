@@ -1513,6 +1513,65 @@ class TargetAnalysis:
                     ) as f:
                         pass
                 
+                # Create target.bam file if targets exceed threshold
+                if len(run_list) > 0:
+                    logger.info("Creating target.bam file from accumulated targets...")
+                    try:
+                        # Find the original BAM files that were processed
+                        # Look for BAM files in the sample directory or parent directories
+                        original_bam_files = []
+                        
+                        # Check sample directory for BAM files
+                        for root, dirs, files in os.walk(sample_output_dir):
+                            for file in files:
+                                if file.endswith('.bam') and not file.endswith('target.bam'):
+                                    bam_path = os.path.join(root, file)
+                                    # Check if it has an index file
+                                    if os.path.exists(f"{bam_path}.bai"):
+                                        original_bam_files.append(bam_path)
+                        
+                        # If no BAM files found in sample directory, check parent directories
+                        if not original_bam_files:
+                            parent_dir = os.path.dirname(sample_output_dir)
+                            for root, dirs, files in os.walk(parent_dir):
+                                for file in files:
+                                    if file.endswith('.bam') and not file.endswith('target.bam'):
+                                        bam_path = os.path.join(root, file)
+                                        if os.path.exists(f"{bam_path}.bai"):
+                                            original_bam_files.append(bam_path)
+                        
+                        if original_bam_files:
+                            # Use the first available BAM file
+                            source_bam = original_bam_files[0]
+                            targets_bed = os.path.join(sample_output_dir, "targets_exceeding_threshold.bed")
+                            target_bam_path = os.path.join(sample_output_dir, "target.bam")
+                            
+                            logger.info(f"Creating target.bam from {source_bam} using {targets_bed}")
+                            
+                            # Create target.bam using bedtools intersect
+                            run_bedtools(source_bam, targets_bed, target_bam_path)
+                            
+                            # Verify the target.bam was created and has reads
+                            if os.path.exists(target_bam_path):
+                                try:
+                                    with pysam.AlignmentFile(target_bam_path, "rb") as bam_file:
+                                        read_count = bam_file.count(until_eof=True)
+                                        if read_count > 0:
+                                            logger.info(f"Successfully created target.bam with {read_count} reads")
+                                        else:
+                                            logger.warning("target.bam created but contains no reads")
+                                except Exception as e:
+                                    logger.warning(f"Could not verify target.bam: {e}")
+                            else:
+                                logger.error("Failed to create target.bam file")
+                        else:
+                            logger.warning("No suitable BAM files found to create target.bam")
+                            
+                    except Exception as e:
+                        logger.error(f"Error creating target.bam: {e}")
+                        import traceback
+                        logger.error(traceback.format_exc())
+                
                 # Clean up staging files
                 logger.info("Cleaning up staging files...")
                 for f in coverage_files + bedcov_files + timestamp_files:
