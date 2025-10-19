@@ -2889,11 +2889,8 @@ class GUILauncher:
     async def _scan_for_new_samples_async(self) -> None:
         """Asynchronous version of new samples scanning"""
         try:
-            # Check cache first
-            cached_data = self._get_cached_samples()
-            if cached_data:
-                return  # Use cached data
-            
+            # Always scan for new samples to ensure we get updates
+            # The cache will be updated by _scan_for_new_samples if there are changes
             self._scan_for_new_samples()
         except Exception as e:
             logging.error(f"Error in async new samples scanning: {e}")
@@ -3039,6 +3036,8 @@ class GUILauncher:
                         pass
                 self._last_samples_rows = merged
                 self._known_sample_ids = {r["sample_id"] for r in merged}
+                # Update cache timestamp when we update the samples data
+                self._last_cache_time = time.time()
         except Exception:
             pass
 
