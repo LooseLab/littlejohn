@@ -310,6 +310,364 @@ def _make_fusion_table(container: Any, df: pd.DataFrame) -> Any:
         return table
 
 
+def _cluster_fusion_reads(filtered_data: pd.DataFrame, max_distance: int = 10000) -> pd.DataFrame:
+    """Cluster fusion reads by similar mapping coordinates."""
+    fusion_summary = []
+    
+    # Group by read_id to get gene pairs
+    for read_id, group in filtered_data.groupby("read_id", observed=True):
+        genes = group["col4"].unique()
+        if len(genes) >= 2:  # Only consider multi-gene reads
+            # Sort genes for consistent pair representation
+            genes_sorted = sorted(genes)
+            gene_pair = "-".join(genes_sorted)
+            
+            # Get chromosome and position information for each gene
+            gene_info = {}
+            for gene in genes_sorted:
+                gene_data = group[group["col4"] == gene]
+                if not gene_data.empty:
+                    first_row = gene_data.iloc[0]
+                    gene_info[gene] = {
+                        "chromosome": first_row.get("reference_id", "Unknown"),
+                        "start": first_row.get("reference_start", 0),
+                        "end": first_row.get("reference_end", 0)
+                    }
+            
+            # Only add if we have info for at least 2 genes
+            if len(gene_info) >= 2:
+                genes_with_info = [g for g in genes_sorted if g in gene_info]
+                if len(genes_with_info) >= 2:
+                    gene1, gene2 = genes_with_info[0], genes_with_info[1]
+                    
+                    fusion_summary.append({
+                        "fusion_pair": gene_pair,
+                        "chr1": gene_info[gene1]["chromosome"],
+                        "chr2": gene_info[gene2]["chromosome"],
+                        "gene1": gene1,
+                        "gene1_start": gene_info[gene1]["start"],
+                        "gene1_end": gene_info[gene1]["end"],
+                        "gene2": gene2,
+                        "gene2_start": gene_info[gene2]["start"],
+                        "gene2_end": gene_info[gene2]["end"],
+                        "read_id": read_id
+                    })
+    
+    if not fusion_summary:
+        return pd.DataFrame()
+    
+    summary_df = pd.DataFrame(fusion_summary)
+    
+    # Cluster by fusion pair and similar coordinates
+    clustered_results = []
+    
+    for fusion_pair in summary_df["fusion_pair"].unique():
+        pair_data = summary_df[summary_df["fusion_pair"] == fusion_pair]
+        
+        # Group by chromosome combination
+        for (chr1, chr2), chr_group in pair_data.groupby(["chr1", "chr2"]):
+            # Cluster gene1 positions
+            gene1_positions = chr_group[["gene1_start", "gene1_end"]].values
+            gene1_clusters = _cluster_positions(gene1_positions, max_distance)
+            
+            # Cluster gene2 positions
+            gene2_positions = chr_group[["gene2_start", "gene2_end"]].values
+            gene2_clusters = _cluster_positions(gene2_positions, max_distance)
+            
+            # Create cluster combinations
+            for i, gene1_cluster in enumerate(gene1_clusters):
+                for j, gene2_cluster in enumerate(gene2_clusters):
+                    # Find reads that belong to both clusters
+                    cluster_reads = []
+                    for idx, row in chr_group.iterrows():
+                        gene1_start, gene1_end = row["gene1_start"], row["gene1_end"]
+                        gene2_start, gene2_end = row["gene2_start"], row["gene2_end"]
+                        
+                        # Check if this read belongs to both clusters
+                        if (_position_in_cluster(gene1_start, gene1_end, gene1_cluster, max_distance) and
+                            _position_in_cluster(gene2_start, gene2_end, gene2_cluster, max_distance)):
+                            cluster_reads.append(row["read_id"])
+                    
+                    if cluster_reads:
+                        # Calculate cluster boundaries
+                        gene1_min_start = min(gene1_cluster[:, 0])
+                        gene1_max_end = max(gene1_cluster[:, 1])
+                        gene2_min_start = min(gene2_cluster[:, 0])
+                        gene2_max_end = max(gene2_cluster[:, 1])
+                        
+                        clustered_results.append({
+                            "fusion_pair": fusion_pair,
+                            "chr1": chr1,
+                            "chr2": chr2,
+                            "gene1": chr_group.iloc[0]["gene1"],
+                            "gene1_position": f"{gene1_min_start}-{gene1_max_end}",
+                            "gene2": chr_group.iloc[0]["gene2"],
+                            "gene2_position": f"{gene2_min_start}-{gene2_max_end}",
+                            "reads": len(cluster_reads)
+                        })
+    
+    return pd.DataFrame(clustered_results)
+
+
+def _cluster_positions(positions: np.ndarray, max_distance: int) -> List[np.ndarray]:
+    """Cluster genomic positions based on distance."""
+    if len(positions) == 0:
+        return []
+    
+    # Simple clustering: group positions that are within max_distance
+    clusters = []
+    used = set()
+    
+    for i, (start, end) in enumerate(positions):
+        if i in used:
+            continue
+            
+        cluster = [positions[i]]
+        used.add(i)
+        
+        for j, (other_start, other_end) in enumerate(positions):
+            if j in used:
+                continue
+                
+            # Check if positions overlap or are close
+            if (_positions_overlap(start, end, other_start, other_end) or
+                _positions_close(start, end, other_start, other_end, max_distance)):
+                cluster.append(positions[j])
+                used.add(j)
+        
+        clusters.append(np.array(cluster))
+    
+    return clusters
+
+
+def _positions_overlap(start1: int, end1: int, start2: int, end2: int) -> bool:
+    """Check if two genomic positions overlap."""
+    return not (end1 < start2 or end2 < start1)
+
+
+def _positions_close(start1: int, end1: int, start2: int, end2: int, max_distance: int) -> bool:
+    """Check if two genomic positions are within max_distance."""
+    distance = min(abs(start1 - start2), abs(end1 - end2), 
+                   abs(start1 - end2), abs(end1 - start2))
+    return distance <= max_distance
+
+
+def _position_in_cluster(start: int, end: int, cluster: np.ndarray, max_distance: int) -> bool:
+    """Check if a position belongs to a cluster."""
+    for cluster_start, cluster_end in cluster:
+        if (_positions_overlap(start, end, cluster_start, cluster_end) or
+            _positions_close(start, end, cluster_start, cluster_end, max_distance)):
+            return True
+    return False
+
+
+def _make_fusion_summary_table(container: Any, annotated_data: pd.DataFrame, goodpairs: pd.Series) -> Any:
+    """Create a summary table showing fusion pairs with chromosomes, positions, and read counts."""
+    if annotated_data is None or annotated_data.empty:
+        with container:
+            ui.label("No fusion data available").classes("text-gray-600")
+        return None
+
+    with container:
+        # Use styled_table for consistent styling
+        from robin.gui.theme import styled_table
+        
+        try:
+            # Filter to good pairs if available
+            if not goodpairs.empty and goodpairs.sum() > 0:
+                # Align indices to avoid reindexing warning
+                aligned_goodpairs = goodpairs.reindex(annotated_data.index, fill_value=False)
+                filtered_data = annotated_data[aligned_goodpairs]
+            else:
+                filtered_data = annotated_data
+            
+            if filtered_data.empty:
+                ui.label("No fusion pairs found").classes("text-gray-600")
+                return None
+            
+            # Cluster fusion reads by similar coordinates
+            clustered_data = _cluster_fusion_reads(filtered_data, max_distance=10000)
+            
+            if clustered_data.empty:
+                ui.label("No fusion pairs found").classes("text-gray-600")
+                return None
+            
+            # Sort by read count (descending)
+            aggregated = clustered_data.sort_values("reads", ascending=False)
+            
+            # Create columns definition
+            columns = [
+                {"name": "fusion_pair", "label": "Fusion Pair", "field": "fusion_pair", "sortable": True},
+                {"name": "chr1", "label": "Chr 1", "field": "chr1", "sortable": True},
+                {"name": "chr2", "label": "Chr 2", "field": "chr2", "sortable": True},
+                {"name": "gene1", "label": "Gene 1", "field": "gene1", "sortable": True},
+                {"name": "gene1_position", "label": "Gene 1 Position", "field": "gene1_position", "sortable": True},
+                {"name": "gene2", "label": "Gene 2", "field": "gene2", "sortable": True},
+                {"name": "gene2_position", "label": "Gene 2 Position", "field": "gene2_position", "sortable": True},
+                {"name": "reads", "label": "Reads", "field": "reads", "sortable": True}
+            ]
+            
+            # Create rows from DataFrame
+            rows = aggregated.to_dict('records')
+            
+            # Add title
+            ui.label("Fusion Summary").classes("text-sm font-medium mb-2")
+            
+            # Create styled table
+            table_container, table = styled_table(
+                columns=columns,
+                rows=rows,
+                pagination=20,
+                class_size="table-xs"
+            )
+            
+            # Add search functionality
+            try:
+                with table.add_slot("top-right"):
+                    with ui.input(placeholder="Search fusions...").props("type=search").bind_value(
+                        table, "filter"
+                    ).add_slot("append"):
+                        ui.icon("search")
+            except Exception:
+                pass
+            
+            # Add summary information
+            total_fusions = len(aggregated)
+            total_reads = aggregated["reads"].sum()
+            ui.label(f"Total fusions: {total_fusions} | Total supporting reads: {total_reads}").classes("text-xs text-gray-500 mt-1")
+            
+            return table
+            
+        except Exception as e:
+            logging.exception(f"[Fusion] Failed to create summary table: {e}")
+            ui.label(f"Error creating fusion summary: {str(e)}").classes("text-red-600")
+            return None
+
+
+def _make_fusion_reads_table(container: Any, reads_df: pd.DataFrame, gene_pair: List[str]) -> Any:
+    """Create a table showing reads and specific locations for a selected gene pair."""
+    if reads_df is None or reads_df.empty:
+        with container:
+            ui.label("No reads found for selected gene pair").classes("text-gray-600")
+        return None
+
+    with container:
+        # Use styled_table for consistent styling
+        from robin.gui.theme import styled_table
+        
+        # The reads_df is already filtered for the gene pair, so use it directly
+        filtered_reads = reads_df.copy()
+        
+        # Debug logging
+        logging.info(f"[Fusion] Reads table - gene_pair: {gene_pair}")
+        logging.info(f"[Fusion] Reads table - filtered_reads shape: {filtered_reads.shape}")
+        logging.info(f"[Fusion] Reads table - filtered_reads columns: {list(filtered_reads.columns)}")
+        if not filtered_reads.empty:
+            logging.info(f"[Fusion] Reads table - unique genes in data: {filtered_reads['col4'].unique()}")
+            logging.info(f"[Fusion] Reads table - sample data: {filtered_reads.head(2).to_dict('records')}")
+        
+        if filtered_reads.empty:
+            ui.label("No reads found for selected gene pair").classes("text-gray-600")
+            return None
+        
+        # Select and rename relevant columns for the reads table
+        columns_to_show = [
+            "read_id", "col4", "reference_id", "reference_start", "reference_end", 
+            "mapping_quality", "strand", "read_start", "read_end", "is_secondary", 
+            "is_supplementary", "mapping_span"
+        ]
+        
+        # Only include columns that exist in the DataFrame
+        available_columns = [col for col in columns_to_show if col in filtered_reads.columns]
+        logging.info(f"[Fusion] Reads table - available columns: {available_columns}")
+        
+        if not available_columns:
+            # Fallback: show all available columns if none of the expected ones exist
+            logging.warning(f"[Fusion] No expected columns found, using all available columns: {list(filtered_reads.columns)}")
+            available_columns = list(filtered_reads.columns)
+            if not available_columns:
+                ui.label("No columns found in fusion data").classes("text-gray-600")
+                return None
+            
+        reads_subset = filtered_reads[available_columns].copy()
+        
+        # Rename columns to user-friendly names
+        column_rename_map = {
+            "read_id": "Read ID",
+            "col4": "Gene",
+            "reference_id": "Chromosome", 
+            "reference_start": "Read Start",
+            "reference_end": "Read End",
+            "mapping_quality": "Map Quality",
+            "strand": "Strand",
+            "read_start": "Query Start",
+            "read_end": "Query End",
+            "is_secondary": "Secondary",
+            "is_supplementary": "Supplementary",
+            "mapping_span": "Span"
+        }
+        
+        # Only rename columns that exist
+        final_rename_map = {k: v for k, v in column_rename_map.items() if k in reads_subset.columns}
+        reads_subset = reads_subset.rename(columns=final_rename_map)
+        
+        # Sort by gene and then by read start position (if available)
+        sort_columns = []
+        if "Gene" in reads_subset.columns:
+            sort_columns.append("Gene")
+        if "Read Start" in reads_subset.columns:
+            sort_columns.append("Read Start")
+        elif "Query Start" in reads_subset.columns:
+            sort_columns.append("Query Start")
+            
+        if sort_columns:
+            reads_subset = reads_subset.sort_values(sort_columns)
+        
+        # Create columns definition
+        columns = []
+        for col in reads_subset.columns:
+            columns.append({
+                "name": col,
+                "label": col,
+                "field": col,
+                "sortable": True
+            })
+        
+        # Create rows from DataFrame
+        rows = reads_subset.to_dict('records')
+        
+        # Add title
+        ui.label(f"Reads supporting fusion: {'-'.join(gene_pair)}").classes("text-sm font-medium mb-2")
+        
+        # Create styled table
+        table_container, table = styled_table(
+            columns=columns,
+            rows=rows,
+            pagination=20,
+            class_size="table-xs"
+        )
+        
+        # Add search functionality
+        try:
+            with table.add_slot("top-right"):
+                with ui.input(placeholder="Search reads...").props("type=search").bind_value(
+                    table, "filter"
+                ).add_slot("append"):
+                    ui.icon("search")
+        except Exception:
+            pass
+        
+        # Add summary information
+        total_reads = len(reads_subset)
+        if "Read ID" in reads_subset.columns:
+            unique_reads = len(reads_subset["Read ID"].unique())
+            ui.label(f"Total reads: {total_reads} | Unique reads: {unique_reads}").classes("text-xs text-gray-500 mt-1")
+        else:
+            ui.label(f"Total reads: {total_reads}").classes("text-xs text-gray-500 mt-1")
+        
+        return table
+
+
 def _plot_gene_group(
     container: Any,
     gene_group: List[str],
@@ -322,6 +680,7 @@ def _plot_gene_group(
     1. Gene structure with exons and annotations
     2. Read mapping positions with color coding
     3. Professional-grade visualization using DNA Features Viewer
+    4. Reads table showing specific locations and details
     """
     try:
         # For genome-wide fusions, use raw annotated_data if goodpairs filters out everything
@@ -357,17 +716,29 @@ def _plot_gene_group(
         # Clear container and create advanced visualization
         container.clear()
         with container:
-            # Create matplotlib element for the sophisticated plot with ideograms
-            mpl_element = ui.matplotlib(figsize=(20, 10)).classes("w-full")
+            # Create tabs for visualization and reads table
+            with ui.tabs().classes("w-full") as tabs:
+                visualization_tab = ui.tab("Visualization")
+                reads_tab = ui.tab("Reads Table")
+            
+            with ui.tab_panels(tabs, value=visualization_tab).classes("w-full"):
+                with ui.tab_panel(visualization_tab):
+                    # Create matplotlib element for the sophisticated plot with ideograms
+                    mpl_element = ui.matplotlib(figsize=(20, 10)).classes("w-full")
 
-            # Create the advanced fusion plot
-            fig = _create_advanced_fusion_plot(
-                gene_group, subset, annotated_data, goodpairs
-            )
+                    # Create the advanced fusion plot
+                    fig = _create_advanced_fusion_plot(
+                        gene_group, subset, annotated_data, goodpairs
+                    )
 
-            # Update the matplotlib element
-            mpl_element.figure = fig
-            mpl_element.update()
+                    # Update the matplotlib element
+                    mpl_element.figure = fig
+                    mpl_element.update()
+                
+                with ui.tab_panel(reads_tab):
+                    # Create reads table
+                    reads_table_container = ui.column().classes("w-full")
+                    _make_fusion_reads_table(reads_table_container, subset, gene_group)
 
     except Exception as e:
         logging.exception(f"[Fusion] Failed to plot gene group {gene_group}: {e}")
@@ -1057,22 +1428,45 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             "data": None,
             "mtime": None,
             "data_hash": None,
+            "summary_table_container": None,
+            "summary_table": None,
             "table_container": None,
             "table": None,
             "plot_container": None,
             "card": None,
+            "selected_gene_pair": None,  # Persist selected gene pair
+            "dropdown": None,  # Reference to dropdown for value updates
         },
         "genome": {
             "data": None,
             "mtime": None,
             "data_hash": None,
+            "summary_table_container": None,
+            "summary_table": None,
             "table_container": None,
             "table": None,
             "plot_container": None,
             "card": None,
             "status_container": None,
+            "selected_gene_pair": None,  # Persist selected gene pair
+            "dropdown": None,  # Reference to dropdown for value updates
         },
     }
+
+    def _handle_gene_pair_selection(section: str, gene_pair: List[str], data: Dict[str, Any]) -> None:
+        """Handle gene pair selection and update visualization."""
+        try:
+            state[section]["selected_gene_pair"] = gene_pair
+            state[section]["card"].clear()
+            state[section]["card"].classes("w-full")
+            _plot_gene_group(
+                state[section]["card"],
+                gene_pair,
+                data.get("annotated_data"),
+                data.get("goodpairs"),
+            )
+        except Exception as e:
+            logging.exception(f"[Fusion] Failed to handle gene pair selection: {e}")
 
     def refresh_fusion() -> None:
         """Refresh fusion data."""
@@ -1198,6 +1592,17 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                         )
                 except Exception:
                     pass
+                # summary table
+                try:
+                    state["target"]["summary_table_container"].clear()
+                except Exception:
+                    pass
+                state["target"]["summary_table"] = _make_fusion_summary_table(
+                    state["target"]["summary_table_container"],
+                    t.get("annotated_data", pd.DataFrame()),
+                    t.get("goodpairs", pd.Series()),
+                )
+                
                 # table
                 try:
                     state["target"]["table_container"].clear()
@@ -1216,19 +1621,11 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 if t.get("candidate_count", 0) > 0 and t.get("gene_groups"):
                     with state["target"]["plot_container"].classes("w-full"):
                         with ui.row().classes("w-full"):
-                            ui.select(
+                            state["target"]["dropdown"] = ui.select(
                                 options=t.get("gene_groups", []),
                                 with_input=False,
-                                on_change=lambda e, t=t: (
-                                    state["target"]["card"].clear(),
-                                    state["target"]["card"].classes("w-full"),
-                                    _plot_gene_group(
-                                        state["target"]["card"],
-                                        e.value,
-                                        t.get("annotated_data"),
-                                        t.get("goodpairs"),
-                                    ),
-                                ),
+                                on_change=lambda e, t=t: _handle_gene_pair_selection("target", e.value, t),
+                                value=state["target"]["selected_gene_pair"]
                             ).classes("w-40")
                         with ui.row().classes("w-full"):
                             state["target"]["card"] = ui.card()
@@ -1236,6 +1633,14 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                                 ui.label("Select gene pair to see results.").classes(
                                     "drop-shadow font-bold"
                                 )
+                        
+                        # Restore selected gene pair if it exists
+                        if state["target"]["selected_gene_pair"] and state["target"]["dropdown"]:
+                            try:
+                                state["target"]["dropdown"].value = state["target"]["selected_gene_pair"]
+                                _handle_gene_pair_selection("target", state["target"]["selected_gene_pair"], t)
+                            except Exception as e:
+                                logging.warning(f"[Fusion] Failed to restore target selection: {e}")
             
             # Only update visualization when data content actually changes (for background refreshes)
             elif t is not None and target_data_hash != state["target"].get("data_hash"):
@@ -1248,19 +1653,11 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 if t.get("candidate_count", 0) > 0 and t.get("gene_groups"):
                     with state["target"]["plot_container"].classes("w-full"):
                         with ui.row().classes("w-full"):
-                            ui.select(
+                            state["target"]["dropdown"] = ui.select(
                                 options=t.get("gene_groups", []),
                                 with_input=False,
-                                on_change=lambda e, t=t: (
-                                    state["target"]["card"].clear(),
-                                    state["target"]["card"].classes("w-full"),
-                                    _plot_gene_group(
-                                        state["target"]["card"],
-                                        e.value,
-                                        t.get("annotated_data"),
-                                        t.get("goodpairs"),
-                                    ),
-                                ),
+                                on_change=lambda e, t=t: _handle_gene_pair_selection("target", e.value, t),
+                                value=state["target"]["selected_gene_pair"]
                             ).classes("w-40")
                         with ui.row().classes("w-full"):
                             state["target"]["card"] = ui.card()
@@ -1268,6 +1665,14 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                                 ui.label("Select gene pair to see results.").classes(
                                     "drop-shadow font-bold"
                                 )
+                        
+                        # Restore selected gene pair if it exists
+                        if state["target"]["selected_gene_pair"] and state["target"]["dropdown"]:
+                            try:
+                                state["target"]["dropdown"].value = state["target"]["selected_gene_pair"]
+                                _handle_gene_pair_selection("target", state["target"]["selected_gene_pair"], t)
+                            except Exception as e:
+                                logging.warning(f"[Fusion] Failed to restore target selection: {e}")
 
             # Update genome-wide UI
             genome_mtime = genome_data.get("mtime")
@@ -1292,6 +1697,17 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                         ].text = f"Genome-wide fusion groups: {int(g.get('candidate_count', 0))}"
                 except Exception:
                     pass
+                # summary table
+                try:
+                    state["genome"]["summary_table_container"].clear()
+                except Exception:
+                    pass
+                state["genome"]["summary_table"] = _make_fusion_summary_table(
+                    state["genome"]["summary_table_container"],
+                    g.get("annotated_data", pd.DataFrame()),
+                    g.get("goodpairs", pd.Series()),
+                )
+                
                 # table
                 try:
                     state["genome"]["table_container"].clear()
@@ -1313,19 +1729,11 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 if g.get("gene_groups") and len(g.get("gene_groups", [])) > 0:
                     with state["genome"]["plot_container"].classes("w-full"):
                         with ui.row().classes("w-full"):
-                            ui.select(
+                            state["genome"]["dropdown"] = ui.select(
                                 options=g.get("gene_groups", []),
                                 with_input=False,
-                                on_change=lambda e, g=g: (
-                                    state["genome"]["card"].clear(),
-                                    state["genome"]["card"].classes("w-full"),
-                                    _plot_gene_group(
-                                        state["genome"]["card"],
-                                        e.value,
-                                        g.get("annotated_data"),
-                                        g.get("goodpairs"),
-                                    ),
-                                ),
+                                on_change=lambda e, g=g: _handle_gene_pair_selection("genome", e.value, g),
+                                value=state["genome"]["selected_gene_pair"]
                             ).classes("w-40")
                         with ui.row().classes("w-full"):
                             state["genome"]["card"] = ui.card()
@@ -1338,6 +1746,14 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     with state["genome"]["status_container"].classes("w-full"):
                         ui.label("Genome-wide fusion analysis not available").classes("text-gray-600 text-sm")
                         ui.label("(Requires supplementary reads in BAM file)").classes("text-gray-500 text-xs")
+                
+                # Restore selected gene pair if it exists (for both cases above)
+                if state["genome"]["selected_gene_pair"] and state["genome"]["dropdown"]:
+                    try:
+                        state["genome"]["dropdown"].value = state["genome"]["selected_gene_pair"]
+                        _handle_gene_pair_selection("genome", state["genome"]["selected_gene_pair"], g)
+                    except Exception as e:
+                        logging.warning(f"[Fusion] Failed to restore genome selection: {e}")
             
             # Only update visualization when data content actually changes (for background refreshes)
             elif g is not None and genome_data_hash != state["genome"].get("data_hash"):
@@ -1353,19 +1769,11 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 if g.get("gene_groups") and len(g.get("gene_groups", [])) > 0:
                     with state["genome"]["plot_container"].classes("w-full"):
                         with ui.row().classes("w-full"):
-                            ui.select(
+                            state["genome"]["dropdown"] = ui.select(
                                 options=g.get("gene_groups", []),
                                 with_input=False,
-                                on_change=lambda e, g=g: (
-                                    state["genome"]["card"].clear(),
-                                    state["genome"]["card"].classes("w-full"),
-                                    _plot_gene_group(
-                                        state["genome"]["card"],
-                                        e.value,
-                                        g.get("annotated_data"),
-                                        g.get("goodpairs"),
-                                    ),
-                                ),
+                                on_change=lambda e, g=g: _handle_gene_pair_selection("genome", e.value, g),
+                                value=state["genome"]["selected_gene_pair"]
                             ).classes("w-40")
                         with ui.row().classes("w-full"):
                             state["genome"]["card"] = ui.card()
@@ -1378,6 +1786,14 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     with state["genome"]["status_container"].classes("w-full"):
                         ui.label("Genome-wide fusion analysis not available").classes("text-gray-600 text-sm")
                         ui.label("(Requires supplementary reads in BAM file)").classes("text-gray-500 text-xs")
+                
+                # Restore selected gene pair if it exists (for both cases above)
+                if state["genome"]["selected_gene_pair"] and state["genome"]["dropdown"]:
+                    try:
+                        state["genome"]["dropdown"].value = state["genome"]["selected_gene_pair"]
+                        _handle_gene_pair_selection("genome", state["genome"]["selected_gene_pair"], g)
+                    except Exception as e:
+                        logging.warning(f"[Fusion] Failed to restore genome selection: {e}")
         except Exception as e:
             logging.exception(f"[Fusion] Refresh failed: {e}")
 
@@ -1399,12 +1815,14 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
 
         # Target Panel
         ui.label("Target Panel").classes("text-base font-medium mt-1 mb-1")
+        state["target"]["summary_table_container"] = ui.column().classes("w-full")
         state["target"]["plot_container"] = ui.column().classes("w-full")
         state["target"]["table_container"] = ui.column().classes("w-full mt-2")
 
         # Genome-wide
         ui.separator()
         ui.label("Genome-wide").classes("text-base font-medium mt-2 mb-1")
+        state["genome"]["summary_table_container"] = ui.column().classes("w-full")
         state["genome"]["plot_container"] = ui.column().classes("w-full")
         state["genome"]["table_container"] = ui.column().classes("w-full mt-2")
         state["genome"]["status_container"] = ui.column().classes("w-full mt-2")
