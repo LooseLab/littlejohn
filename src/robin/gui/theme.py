@@ -149,12 +149,12 @@ async def check_version():
     if is_development_mode:
         return
         
-    # Check if version has already been checked in this session
+    # Check if version has already been checked in this app session
     try:
-        if app.storage.tab.get("version_checked", False):
+        if app.storage.general.get("version_checked", False):
             return
     except RuntimeError:
-        # Tab storage not available in this context, continue with version check
+        # Storage not available in this context, continue with version check
         pass
 
     try:
@@ -245,11 +245,11 @@ async def check_version():
             )
         dialog.open()
 
-    # Mark version as checked for this session
+    # Mark version as checked for this app session
     try:
-        app.storage.tab["version_checked"] = True
+        app.storage.general["version_checked"] = True
     except RuntimeError:
-        # Tab storage not available in this context, skip setting the flag
+        # Storage not available in this context, skip setting the flag
         pass
 
 
@@ -354,9 +354,9 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
             return
             
         try:
-            disclaimer_acknowledged = app.storage.tab.get("disclaimer_acknowledged", False)
+            disclaimer_acknowledged = app.storage.general.get("disclaimer_acknowledged", False)
         except RuntimeError:
-            # Tab storage not available in this context, show disclaimer
+            # Storage not available in this context, show disclaimer
             disclaimer_acknowledged = False
         
         if not disclaimer_acknowledged:
@@ -389,9 +389,9 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
 
                 def acknowledge():
                     try:
-                        app.storage.tab["disclaimer_acknowledged"] = True
+                        app.storage.general["disclaimer_acknowledged"] = True
                     except RuntimeError:
-                        # Tab storage not available in this context, skip setting the flag
+                        # Storage not available in this context, skip setting the flag
                         pass
                     disclaimer_dialog.close()
 
