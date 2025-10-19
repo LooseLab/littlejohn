@@ -809,14 +809,18 @@ class GUILauncher:
                         self.samples_search = (
                             ui.input(placeholder="Search…")
                             .props("clearable dense")
-                            .on(
-                                "update:model-value",
-                                lambda e: self._set_samples_query(
-                                    str(getattr(e, "value", "") or "")
-                                ),
-                            )
+                            .on("change", lambda e: self._set_samples_query(self._extract_event_value(e)))
+                            .on("update:model-value", lambda e: self._set_samples_query(self._extract_event_value(e)))
                             .classes("ml-auto")
                         )
+                        
+                        # Initialize search input with current filter value
+                        try:
+                            current_query = self._samples_filters.get("query", "")
+                            if current_query:
+                                self.samples_search.value = current_query
+                        except Exception:
+                            pass
 
                         # Origin filter
                         self.origin_filter = (
@@ -826,16 +830,8 @@ class GUILauncher:
                                 label="Origin",
                             )
                             .props("dense clearable")
-                            .on(
-                                "update:model-value",
-                                lambda e: self._set_samples_origin_filter(
-                                    e.args["label"]
-                                    if e.args
-                                    and isinstance(e.args, dict)
-                                    and "label" in e.args
-                                    else "All"
-                                ),
-                            )
+                            .on("change", lambda e: self._set_samples_origin_filter(self._extract_event_value(e)))
+                            .on("update:model-value", lambda e: self._set_samples_origin_filter(self._extract_event_value(e)))
                         )
 
                     # Loading state container
@@ -1374,24 +1370,68 @@ class GUILauncher:
             normalized.append(r)
         return normalized
 
+    def _extract_event_value(self, event, default=""):
+        """Extract value from NiceGUI event arguments."""
+        try:
+            # Handle different event types
+            if hasattr(event, "value"):
+                return str(event.value or default)
+            elif hasattr(event, "args"):
+                if isinstance(event.args, dict):
+                    return str(event.args.get("value", event.args.get("label", default)))
+                elif isinstance(event.args, list) and len(event.args) > 0:
+                    return str(event.args[0] or default)
+                else:
+                    return str(event.args or default)
+            else:
+                return str(default)
+        except Exception:
+            return str(default)
+
     def _set_samples_query(self, query: str) -> None:
         try:
-            self._samples_filters["query"] = (query or "").strip().lower()
+            # Ensure we have a filters dict
+            if not hasattr(self, "_samples_filters"):
+                self._samples_filters = {"query": "", "origin": "All"}
+            
+            # Normalize the query
+            normalized_query = (query or "").strip().lower()
+            self._samples_filters["query"] = normalized_query
+            
+            # Apply filters immediately
             self._apply_samples_table_filters()
-        except Exception:
+            
+            # Debug logging
+            logging.debug(f"Search query updated: '{normalized_query}'")
+        except Exception as e:
+            logging.error(f"Error setting samples query: {e}")
             pass
 
     def _set_samples_origin_filter(self, origin_value: str) -> None:
         try:
-            self._samples_filters["origin"] = origin_value or "All"
+            # Ensure we have a filters dict
+            if not hasattr(self, "_samples_filters"):
+                self._samples_filters = {"query": "", "origin": "All"}
+            
+            # Normalize the origin value
+            normalized_origin = origin_value or "All"
+            self._samples_filters["origin"] = normalized_origin
+            
+            # Apply filters immediately
             self._apply_samples_table_filters()
-        except Exception:
+            
+            # Debug logging
+            logging.debug(f"Origin filter updated: '{normalized_origin}'")
+        except Exception as e:
+            logging.error(f"Error setting samples origin filter: {e}")
             pass
 
     def _apply_samples_table_filters(self) -> None:
         try:
             base_rows = getattr(self, "_last_samples_rows", []) or []
             rows = self._normalize_rows_for_display(base_rows)
+            
+            logging.debug(f"Applying filters to {len(rows)} base rows")
 
             # Origin filter, compute dynamic 'Complete' for display if needed
             now_ts = time.time()
@@ -1407,11 +1447,13 @@ class GUILauncher:
             origin = (self._samples_filters or {}).get("origin", "All")
             if origin and origin != "All":
                 rows = [r for r in rows if (r.get("origin") == origin)]
+                logging.debug(f"After origin filter ({origin}): {len(rows)} rows")
 
             # Global query filter
             q = (self._samples_filters or {}).get("query", "")
             if q:
                 ql = q.lower()
+                logging.debug(f"Applying search filter: '{ql}'")
 
                 def match_any(r: Dict[str, Any]) -> bool:
                     return any(
@@ -1428,6 +1470,7 @@ class GUILauncher:
                     )
 
                 rows = [r for r in rows if match_any(r)]
+                logging.debug(f"After search filter: {len(rows)} rows")
 
             # annotate export selection state per row for rightmost checkbox column
             try:
@@ -1450,9 +1493,16 @@ class GUILauncher:
                 except Exception:
                     pass
 
-            self.samples_table.rows = rows
-            self.samples_table.update()
-        except Exception:
+            # Update the table
+            if hasattr(self, "samples_table"):
+                self.samples_table.rows = rows
+                self.samples_table.update()
+                logging.debug(f"Updated samples table with {len(rows)} filtered rows")
+            else:
+                logging.warning("samples_table not found, cannot update")
+                
+        except Exception as e:
+            logging.error(f"Error applying samples table filters: {e}")
             pass
 
     def _refresh_sample_plots(self, sample_id: str):
