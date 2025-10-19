@@ -148,8 +148,8 @@ class ClassificationSection(ReportSection):
         ax.tick_params(axis="both", labelsize=8)
         plt.xticks(rotation=0)
 
-        # Adjust layout to prevent label cutoff
-        plt.subplots_adjust(top=0.85, bottom=0.15, left=0.1, right=0.95)
+        # Adjust layout to prevent label cutoff - use constrained layout instead of subplots_adjust
+        plt.tight_layout()
 
         # Save plot to bytes buffer with high DPI for crisp rendering
         buf = io.BytesIO()

@@ -260,6 +260,40 @@ quitdialog = None
 
 MENU_BREAKPOINT = 1200
 
+
+class GlobalSystemMetrics:
+    """Global system metrics singleton that provides CPU and RAM usage data."""
+    
+    _instance = None
+    _timer_active = False
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance.cpu = 0
+            cls._instance.ram = 0
+        return cls._instance
+    
+    def start_timer(self):
+        """Start the global metrics timer if not already running."""
+        if not self._timer_active:
+            self._timer_active = True
+            ui.timer(1.0, self.update_metrics)
+    
+    def update_metrics(self):
+        """Update CPU and RAM metrics."""
+        try:
+            self.cpu = round(psutil.getloadavg()[1] / os.cpu_count() * 100, 1)
+            self.ram = round(psutil.virtual_memory()[2], 1)
+        except (OSError, AttributeError):
+            # Handle cases where psutil might fail or os.cpu_count() returns None
+            self.cpu = 0
+            self.ram = 0
+
+
+# Global metrics instance
+global_metrics = GlobalSystemMetrics()
+
 # Read the HTML content for the header
 HEADER_HTML = (Path(__file__).parent / "static" / "header.html").read_text()
 
@@ -431,26 +465,12 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
                         f"max-[{MENU_BREAKPOINT}px]:hidden"
                     )
 
-                    # Create a data model for system metrics
-                    class SystemMetrics:
-                        def __init__(self):
-                            self.cpu = 0
-                            self.ram = 0
+                    # Start global metrics timer if not already running
+                    global_metrics.start_timer()
 
-                    metrics = SystemMetrics()
-
-                    # Bind the progress indicators to the model
-                    cpu_activity.bind_value_from(metrics, "cpu")
-                    ram_utilisation.bind_value_from(metrics, "ram")
-
-                    # Single timer to update both metrics
-                    def update_metrics():
-                        metrics.cpu = round(
-                            psutil.getloadavg()[1] / os.cpu_count() * 100, 1
-                        )
-                        metrics.ram = round(psutil.virtual_memory()[2], 1)
-
-                    ui.timer(1.0, update_metrics)
+                    # Bind the progress indicators to the global metrics
+                    cpu_activity.bind_value_from(global_metrics, "cpu")
+                    ram_utilisation.bind_value_from(global_metrics, "ram")
 
                     with ui.button(icon="menu").classes("rounded-md"):
                         with ui.menu() as menu:

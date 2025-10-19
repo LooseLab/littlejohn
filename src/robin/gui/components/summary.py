@@ -162,8 +162,8 @@ def add_summary_section(sample_dir: Path, sample_id: str) -> None:
     _classification_section(sample_dir)
     _analysis_section(sample_dir)
     
-    # Start periodic refresh timer (every 5 seconds)
-    ui.timer(5.0, lambda: [
+    # Start periodic refresh timer (every 30 seconds)
+    ui.timer(30.0, lambda: [
         _run_info_section.refresh(),
         _classification_section.refresh(),
         _analysis_section.refresh()
@@ -1183,27 +1183,60 @@ def _extract_classification_data(sample_dir: Path) -> Dict[str, Any]:
 def _extract_fusion_data(sample_dir: Path) -> Dict[str, Any]:
     """Extract fusion analysis data from generated summary files."""
     fusion_data = {"target_fusions": 0, "genome_fusions": 0}
+    
+    logging.info(f"[Summary] _extract_fusion_data() called with sample_dir: {sample_dir}")
 
     try:
+        # Debug: List all fusion-related files
+        fusion_files = list(sample_dir.glob("*fusion*"))
+        logging.info(f"[Summary] Found fusion files: {[f.name for f in fusion_files]}")
+        
+        # Debug: Check if genome-wide processed file exists
+        genome_file = sample_dir / "fusion_candidates_all_processed.csv"
+        logging.info(f"[Summary] Genome-wide processed file exists: {genome_file.exists()}")
+        if genome_file.exists():
+            logging.info(f"[Summary] Genome-wide processed file size: {genome_file.stat().st_size} bytes")
         # First try to read from the new fusion_summary.csv file
         summary_file = sample_dir / "fusion_summary.csv"
         if summary_file.exists():
             try:
+                with open(summary_file, "r") as f:
+                    content = f.read()
+                    
                 with open(summary_file, "r") as f:
                     reader = csv.DictReader(f)
                     for row in reader:
                         fusion_data["target_fusions"] = int(row.get("target_fusions", 0))
                         fusion_data["genome_fusions"] = int(row.get("genome_fusions", 0))
                         break
-                logging.debug(f"[Summary] Fusion data extracted from summary file - target: {fusion_data['target_fusions']}, genome: {fusion_data['genome_fusions']}")
-                return fusion_data
+                
+                # Check if the summary file has incorrect genome-wide count (0)
+                if fusion_data["genome_fusions"] == 0:
+                    # Try to regenerate the summary file with correct data
+                    try:
+                        from robin.gui.components.fusion import _generate_summary_files_from_pickle
+                        if _generate_summary_files_from_pickle(sample_dir, force_regenerate=True):
+                            # Re-read the regenerated summary file
+                            with open(summary_file, "r") as f:
+                                reader = csv.DictReader(f)
+                                for row in reader:
+                                    fusion_data["target_fusions"] = int(row.get("target_fusions", 0))
+                                    fusion_data["genome_fusions"] = int(row.get("genome_fusions", 0))
+                                    break
+                            return fusion_data
+                    except Exception as e:
+                        pass  # Don't return early, continue to pickle file loading
+                else:
+                    logging.info(f"[Summary] Fusion data extracted from summary file - target: {fusion_data['target_fusions']}, genome: {fusion_data['genome_fusions']}")
+                    logging.info(f"[Summary] Summary file path: {summary_file}")
+                    return fusion_data
             except Exception as e:
                 logging.debug(f"   Fusion: Failed to read summary file: {e}")
         
         # If summary files don't exist, try to generate them from pickle files
         try:
             from robin.gui.components.fusion import _generate_summary_files_from_pickle
-            if _generate_summary_files_from_pickle(sample_dir):
+            if _generate_summary_files_from_pickle(sample_dir, force_regenerate=False):
                 # Try reading the newly generated summary file
                 if summary_file.exists():
                     with open(summary_file, "r") as f:
@@ -1212,10 +1245,36 @@ def _extract_fusion_data(sample_dir: Path) -> Dict[str, Any]:
                             fusion_data["target_fusions"] = int(row.get("target_fusions", 0))
                             fusion_data["genome_fusions"] = int(row.get("genome_fusions", 0))
                             break
-                    logging.debug(f"[Summary] Fusion data extracted from generated summary file - target: {fusion_data['target_fusions']}, genome: {fusion_data['genome_fusions']}")
+                    logging.info(f"[Summary] Fusion data extracted from generated summary file - target: {fusion_data['target_fusions']}, genome: {fusion_data['genome_fusions']}")
                     return fusion_data
         except Exception as e:
             logging.debug(f"   Fusion: Failed to generate summary files from pickle: {e}")
+        
+        # If still no data, try to load directly from pickle files and count gene_pairs
+        try:
+            from robin.gui.components.fusion import _load_processed_pickle
+            target_file = sample_dir / "fusion_candidates_master_processed.csv"
+            genome_file = sample_dir / "fusion_candidates_all_processed.csv"
+            
+            
+            target_data = _load_processed_pickle(target_file)
+            genome_data = _load_processed_pickle(genome_file)
+            
+            
+            if target_data and isinstance(target_data, dict):
+                fusion_data["target_fusions"] = target_data.get("candidate_count", 0)
+            
+            if genome_data and isinstance(genome_data, dict):
+                # Use gene_pairs count if candidate_count is 0 (same logic as GUI)
+                genome_count = genome_data.get("candidate_count", 0)
+                if genome_count == 0 and genome_data.get("gene_pairs"):
+                    genome_count = len(genome_data.get("gene_pairs", []))
+                fusion_data["genome_fusions"] = genome_count
+            
+            logging.info(f"[Summary] Fusion data loaded directly from pickle files - target: {fusion_data['target_fusions']}, genome: {fusion_data['genome_fusions']}")
+            return fusion_data
+        except Exception as e:
+            logging.debug(f"   Fusion: Failed to load directly from pickle files: {e}")
         
         # Fallback to individual fusion_results.csv file
         fusion_results_file = sample_dir / "fusion_results.csv"

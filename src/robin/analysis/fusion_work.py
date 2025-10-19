@@ -285,7 +285,10 @@ def _load_bed_regions(bed_file: str) -> Dict[str, List[GeneRegion]]:
     regions = defaultdict(list)
 
     if not os.path.exists(bed_file):
+        logger.warning(f"DEBUG: BED file does not exist: {bed_file}")
         return dict(regions)
+    
+    logger.info(f"DEBUG: Loading BED file: {bed_file}")
 
     try:
         with open(bed_file, "r") as f:
@@ -311,11 +314,15 @@ def _load_bed_regions(bed_file: str) -> Dict[str, List[GeneRegion]]:
     except FileNotFoundError:
         # If file not found, return empty dict
         pass
-    except Exception:
+    except Exception as e:
         # If any other error, return empty dict
+        logger.error(f"DEBUG: Error loading BED file {bed_file}: {e}")
         pass
 
-    return dict(regions)
+    result = dict(regions)
+    total_regions = sum(len(regions) for regions in result.values())
+    logger.info(f"DEBUG: Loaded {total_regions} total regions from {bed_file}")
+    return result
 
 
 def _ensure_gene_regions_loaded(target_panel: str = "rCNS2") -> None:
@@ -338,8 +345,19 @@ def _ensure_gene_regions_loaded(target_panel: str = "rCNS2") -> None:
 
         # Load genome-wide gene regions (shared across all panels)
         if not _all_gene_regions_cache:
+            logger.info(f"DEBUG: Loading genome-wide gene regions from {all_gene_bed}")
             _all_gene_regions_cache["shared"] = _load_bed_regions(all_gene_bed)
             logger.info(f"Loaded {len(_all_gene_regions_cache['shared'])} chromosomes for genome-wide genes from {all_gene_bed}")
+            
+            # Debug: Log some details about loaded genome-wide regions
+            total_genome_regions = sum(len(regions) for regions in _all_gene_regions_cache["shared"].values())
+            logger.info(f"DEBUG: Total genome-wide gene regions loaded: {total_genome_regions}")
+            
+            # Debug: Log first few regions for verification
+            if _all_gene_regions_cache["shared"]:
+                first_chrom = list(_all_gene_regions_cache["shared"].keys())[0]
+                first_regions = _all_gene_regions_cache["shared"][first_chrom][:3]
+                logger.info(f"DEBUG: First few genome-wide regions on {first_chrom}: {first_regions}")
     else:
         logger.info(f"DEBUG: Gene regions for target_panel='{target_panel}' already loaded in cache")
 
@@ -710,6 +728,18 @@ def process_bam_for_fusions_work(
         logger.info(f"Target panel candidates found: {len(target_candidates) if target_candidates is not None else 0}")
 
         # Process reads for genome-wide fusions
+        logger.info(f"DEBUG: Processing genome-wide fusions using cache key 'shared'")
+        logger.info(f"DEBUG: Available genome-wide cache keys: {list(_all_gene_regions_cache.keys())}")
+        
+        if "shared" not in _all_gene_regions_cache:
+            logger.error("DEBUG: 'shared' key not found in _all_gene_regions_cache!")
+            logger.error(f"DEBUG: Available keys: {list(_all_gene_regions_cache.keys())}")
+        else:
+            shared_regions = _all_gene_regions_cache["shared"]
+            total_shared_regions = sum(len(regions) for regions in shared_regions.values())
+            logger.info(f"DEBUG: Total shared gene regions available: {total_shared_regions}")
+            logger.info(f"DEBUG: Shared regions chromosomes: {list(shared_regions.keys())[:10]}...")  # Show first 10 chromosomes
+        
         genome_wide_candidates = _process_reads_for_fusions(
             bamfile, reads_with_supp, _all_gene_regions_cache["shared"]
         )
@@ -1696,17 +1726,19 @@ def _generate_fusion_summary_files(output_file: str, processed_data: dict) -> No
             except Exception:
                 pass  # If we can't read it, we'll start fresh
         
-        # Update the appropriate count
+        # Update the appropriate count - preserve existing counts from other processing
         if is_target_panel:
             target_count = candidate_count
         else:
             genome_count = candidate_count
         
-        # Write the updated summary
+        # Write the updated summary with both counts preserved
         with open(summary_file, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["target_fusions", "genome_fusions"])
             writer.writerow([target_count, genome_count])
+        
+        logger.info(f"[Fusion] Updated summary file: target={target_count}, genome={genome_count}")
         
     except Exception as e:
         print(f"Warning: Failed to generate fusion summary files: {e}")

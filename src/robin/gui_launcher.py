@@ -526,7 +526,6 @@ class GUILauncher:
             def welcome_page():
                 """Welcome page at root route."""
                 _setup_global_resources()
-                _setup_global_timers()
                 self._create_welcome_page()
 
             # Create the workflow monitoring page
@@ -534,7 +533,6 @@ class GUILauncher:
             def workflow_monitor():
                 """Workflow monitoring page under /robin route."""
                 _setup_global_resources()
-                _setup_global_timers()
                 self._create_workflow_monitor()
 
             # Create the samples overview page
@@ -542,7 +540,6 @@ class GUILauncher:
             def samples_overview():
                 """Samples overview page showing all tracked samples."""
                 _setup_global_resources()
-                _setup_global_timers()
                 self._create_samples_overview()
 
             # Create individual sample detail pages
@@ -550,7 +547,6 @@ class GUILauncher:
             def sample_detail(sample_id: str):
                 """Individual sample detail page."""
                 _setup_global_resources()
-                _setup_global_timers()
 
                 # Add a page visit handler to refresh plots
                 def on_page_visit():
@@ -646,17 +642,17 @@ class GUILauncher:
                     self.gui_ready.set()
                     # Rate limit GUI updates to prevent system lockup
                     # Increased from 0.3s to 2.0s to reduce update frequency
-                    ui.timer(2.0, self._drain_updates_on_ui, active=True)
+                    app.timer(2.0, self._drain_updates_on_ui, active=True)
                     # Delay initial sample scanning to prevent startup lockup
                     # Increased from 0.5s to 5.0s to allow GUI to fully initialize
-                    ui.timer(
+                    app.timer(
                         5.0,
                         lambda: self._scan_and_seed_samples_async(preexisting=True),
                         once=True,
                     )
                     # Increase polling interval for new samples to reduce load
-                    # Increased from 3.0s to 10.0s to reduce file system pressure
-                    ui.timer(10.0, self._scan_for_new_samples_async, active=True)
+                    # Increased from 10.0s to 30.0s to reduce file system pressure
+                    app.timer(30.0, self._scan_for_new_samples_async, active=True)
                 except Exception:
                     pass
 
@@ -669,6 +665,10 @@ class GUILauncher:
             except Exception as e:
                 logging.error(f"Error locating favicon: {str(e)}")
                 iconfile = None
+            
+            # Setup global timers once when the app starts
+            _setup_global_timers()
+            
             # Start the GUI
             ui.run(
                 host=self.host,
@@ -2162,7 +2162,7 @@ class GUILauncher:
 
                     # Start periodic refresh with async version
                     try:
-                        ui.timer(5.0, _refresh_sample_detail_async)
+                        ui.timer(30.0, _refresh_sample_detail_async)
                     except Exception:
                         pass
 
@@ -2476,9 +2476,9 @@ class GUILauncher:
                 self.gui_ready.set()
                 logging.info("[GUI] UI created and ready to receive updates")
                 # Start a periodic UI-thread drain of the update queue
-                ui.timer(0.3, self._drain_updates_on_ui, active=True)
+                app.timer(0.3, self._drain_updates_on_ui, active=True)
                 # Start duration refresher
-                ui.timer(1.0, lambda: self._refresh_duration(), active=True)
+                app.timer(1.0, lambda: self._refresh_duration(), active=True)
 
     def _refresh_duration(self):
         if self._is_running and self._start_time and hasattr(self, "workflow_duration"):
@@ -2682,11 +2682,8 @@ class GUILauncher:
             if hasattr(self, "samples_loading_container"):
                 self.samples_loading_container.set_visibility(False)
                 
-            ui.notify(f"Loaded {len(rows)} samples successfully", type="positive", timeout=2000)
-            
         except Exception as e:
             logging.error(f"Error in progressive loading: {e}")
-            ui.notify(f"Error loading samples: {str(e)}", type="error", timeout=3000)
             if hasattr(self, "samples_loading_container"):
                 self.samples_loading_container.set_visibility(False)
 
@@ -2812,9 +2809,6 @@ class GUILauncher:
                     await self._load_samples_progressively(sample_dirs)
                     return
             
-            # Show loading notification for smaller directories
-            ui.notify("Loading samples...", type="info", timeout=2000)
-            
             # Show loading indicator
             if hasattr(self, "samples_loading_indicator"):
                 self.samples_loading_indicator.set_visibility(True)
@@ -2833,13 +2827,8 @@ class GUILauncher:
             if hasattr(self, "samples_loading_container"):
                 self.samples_loading_container.set_visibility(False)
             
-            # Show success notification
-            if result is not None:
-                ui.notify("Samples loaded successfully", type="positive", timeout=1500)
-            
         except Exception as e:
             logging.error(f"Error in async sample scanning: {e}")
-            ui.notify(f"Error loading samples: {str(e)}", type="error", timeout=3000)
             
             # Hide loading indicators on error
             if hasattr(self, "samples_loading_indicator"):

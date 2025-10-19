@@ -97,7 +97,7 @@ def _create_data_hash(data: Dict[str, Any]) -> str:
         return ""
 
 
-def _generate_summary_files_from_pickle(sample_dir: Path) -> bool:
+def _generate_summary_files_from_pickle(sample_dir: Path, force_regenerate: bool = False) -> bool:
     """Generate summary files from existing pickle files if they don't exist.
     
     This provides backward compatibility for existing analyses that were run
@@ -111,15 +111,42 @@ def _generate_summary_files_from_pickle(sample_dir: Path) -> bool:
         
         # Check if summary files already exist
         summary_file = sample_dir / "fusion_summary.csv"
-        if summary_file.exists():
+        if summary_file.exists() and not force_regenerate:
             return True  # Already have summary files
+        elif summary_file.exists() and force_regenerate:
+            pass  # Will overwrite existing file
         
         # Load data from pickle files
         target_file = sample_dir / "fusion_candidates_master_processed.csv"
         genome_file = sample_dir / "fusion_candidates_all_processed.csv"
         
+        logging.info(f"[Fusion] Checking for target file: {target_file}")
+        logging.info(f"[Fusion] Target file exists: {target_file.exists()}")
+        logging.info(f"[Fusion] Checking for genome-wide file: {genome_file}")
+        logging.info(f"[Fusion] Genome-wide file exists: {genome_file.exists()}")
+        
+        # Debug: List all fusion-related files in the directory
+        fusion_files = list(sample_dir.glob("*fusion*"))
+        logging.info(f"[Fusion] All fusion files in directory: {[f.name for f in fusion_files]}")
+        
+        # Debug: Check file sizes
+        if target_file.exists():
+            logging.info(f"[Fusion] Target file size: {target_file.stat().st_size} bytes")
+        if genome_file.exists():
+            logging.info(f"[Fusion] Genome-wide file size: {genome_file.stat().st_size} bytes")
+        
         target_data = _load_processed_pickle(target_file)
         genome_data = _load_processed_pickle(genome_file)
+        
+        if target_data is not None:
+            logging.info(f"[Fusion] Target data loaded: candidate_count={target_data.get('candidate_count', 0)}")
+        else:
+            logging.warning(f"[Fusion] Failed to load target data from: {target_file}")
+            
+        if genome_data is not None:
+            logging.info(f"[Fusion] Genome-wide data loaded: candidate_count={genome_data.get('candidate_count', 0)}")
+        else:
+            logging.warning(f"[Fusion] Failed to load genome-wide data from: {genome_file}")
         
         # Extract counts
         target_count = 0
@@ -129,13 +156,19 @@ def _generate_summary_files_from_pickle(sample_dir: Path) -> bool:
             target_count = target_data.get("candidate_count", 0)
         
         if genome_data is not None and isinstance(genome_data, dict):
+            # Use gene_pairs count if candidate_count is 0 (like reporting code does)
             genome_count = genome_data.get("candidate_count", 0)
+            if genome_count == 0 and genome_data.get("gene_pairs"):
+                genome_count = len(genome_data.get("gene_pairs", []))
+                logging.info(f"[Fusion] Summary: Using gene_pairs count for genome-wide: {genome_count}")
         
         # Generate fusion_summary.csv
         with open(summary_file, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["target_fusions", "genome_fusions"])
             writer.writerow([target_count, genome_count])
+        
+        logging.info(f"[Fusion] Generated summary file from pickle: target={target_count}, genome={genome_count}")
         
         # Generate fusion_results.csv (use the one with more data)
         results_file = sample_dir / "fusion_results.csv"
@@ -171,7 +204,12 @@ def _load_processed_pickle(file_path: Path) -> Optional[Dict[str, Any]]:
     Note: Although the extension is .csv, the file is a pickle per current pipeline.
     """
     try:
-        if not file_path.exists() or file_path.stat().st_size == 0:
+        logging.info(f"[Fusion] Attempting to load pickle from: {file_path}")
+        if not file_path.exists():
+            logging.warning(f"[Fusion] File does not exist: {file_path}")
+            return None
+        if file_path.stat().st_size == 0:
+            logging.warning(f"[Fusion] File is empty: {file_path}")
             return None
         
         # Try to load the pickle with better error handling
@@ -191,7 +229,32 @@ def _load_processed_pickle(file_path: Path) -> Optional[Dict[str, Any]]:
                     return None
         
         # Expected keys: annotated_data (DataFrame), goodpairs (Series), gene_groups (list), candidate_count (int)
-        return data if isinstance(data, dict) else None
+        if isinstance(data, dict):
+            logging.info(f"[Fusion] Loaded pickle data with keys: {list(data.keys())}")
+            logging.info(f"[Fusion] Raw candidate_count: {data.get('candidate_count', 'not found')}")
+            logging.info(f"[Fusion] Raw gene_groups count: {len(data.get('gene_groups', []))}")
+            
+            # Apply the same filtering logic as the reporting code
+            annotated_data = data.get("annotated_data", pd.DataFrame())
+            goodpairs = data.get("goodpairs", pd.Series())
+            
+            logging.info(f"[Fusion] Raw annotated_data shape: {annotated_data.shape}")
+            logging.info(f"[Fusion] Raw goodpairs length: {len(goodpairs)}")
+            
+            if not annotated_data.empty and not goodpairs.empty:
+                # Only keep the good pairs (same as reporting code does)
+                data["annotated_data"] = annotated_data[goodpairs]
+                logging.info(f"[Fusion] Filtered data: {len(annotated_data)} -> {len(data['annotated_data'])} good pairs")
+            else:
+                logging.info(f"[Fusion] No filtering applied - annotated_data empty: {annotated_data.empty}, goodpairs empty: {goodpairs.empty}")
+            
+            logging.info(f"[Fusion] Final candidate_count: {data.get('candidate_count', 'not found')}")
+            logging.info(f"[Fusion] Final gene_groups count: {len(data.get('gene_groups', []))}")
+            
+            return data
+        else:
+            logging.warning(f"[Fusion] Loaded data is not a dict, type: {type(data)}")
+            return None
     except Exception as e:
         logging.exception(
             f"[Fusion] Failed to load processed fusion pickle: {file_path} - {e}"
@@ -261,8 +324,31 @@ def _plot_gene_group(
     3. Professional-grade visualization using DNA Features Viewer
     """
     try:
-        subset = annotated_data[goodpairs]
-        subset = subset[subset["col4"].isin(gene_group)]
+        # For genome-wide fusions, use raw annotated_data if goodpairs filters out everything
+        if goodpairs.sum() == 0:
+            # No good pairs - use raw data (like reporting code does)
+            # Strip whitespace from gene names to handle leading/trailing spaces
+            subset = annotated_data[annotated_data["col4"].str.strip().isin(gene_group)]
+            logging.info(f"[Fusion] Using raw data for genome-wide gene group {gene_group}: {len(subset)} rows")
+        else:
+            # Target panel fusions - use filtered data
+            # Fix pandas reindexing warning by ensuring indices match
+            try:
+                # Align indices to avoid reindexing warning
+                aligned_goodpairs = goodpairs.reindex(annotated_data.index, fill_value=False)
+                subset = annotated_data[aligned_goodpairs]
+                
+                # Strip whitespace from gene names to handle leading/trailing spaces
+                subset = subset[subset["col4"].str.strip().isin(gene_group)]
+                
+                logging.info(f"[Fusion] Using filtered data for target gene group {gene_group}: {len(subset)} rows")
+            except Exception as e:
+                # Fallback to raw data if indexing fails
+                logging.warning(f"[Fusion] Indexing failed, using raw data: {e}")
+                # Strip whitespace from gene names to handle leading/trailing spaces
+                subset = annotated_data[annotated_data["col4"].str.strip().isin(gene_group)]
+                logging.info(f"[Fusion] Using raw data (fallback) for gene group {gene_group}: {len(subset)} rows")
+        
         if subset.empty:
             with container:
                 ui.label("No reads for selected gene group").classes("text-gray-600")
@@ -315,14 +401,18 @@ def _create_advanced_fusion_plot(
         logging.warning("Could not load gene annotations, using fallback plot")
         return _create_simple_fallback_plot(gene_group, subset)
 
-    # Create figure with tight layout - exactly as in original code
-    plt.rcParams["figure.constrained_layout.use"] = True
-    plt.rcParams["figure.constrained_layout.h_pad"] = 0.05
-    plt.rcParams["figure.constrained_layout.w_pad"] = 0.05
+    # Create figure with tight layout - disable constrained layout to avoid conflicts
+    plt.rcParams["figure.constrained_layout.use"] = False
 
     # Get unique genes and their data
     unique_genes = list(sorted(subset["col4"].unique()))
     if len(unique_genes) == 0:
+        logging.warning(f"[Fusion] No genes found for group {gene_group}, using fallback plot")
+        return _create_simple_fallback_plot(gene_group, subset)
+    
+    # Ensure we have valid data to prevent zero-size axes
+    if subset.empty:
+        logging.warning(f"[Fusion] Empty subset for group {gene_group}, using fallback plot")
         return _create_simple_fallback_plot(gene_group, subset)
 
     # Create the unified side-by-side layout without ideograms
@@ -330,7 +420,8 @@ def _create_advanced_fusion_plot(
     num_genes = len(unique_genes)
     logging.info(f"[Fusion] Creating {num_genes} gene layout with 2 rows (gene structure + read mapping)")
     # Increase figure size and add more padding to prevent tight layout warnings
-    fig, axes = plt.subplots(2, num_genes, figsize=(20, 10))
+    # Ensure minimum figure size to prevent zero-size axes warnings
+    fig, axes = plt.subplots(2, num_genes, figsize=(max(20, 5 * num_genes), 10))
 
     # Handle single gene case
     if num_genes == 1:
@@ -365,22 +456,16 @@ def _create_advanced_fusion_plot(
         f"Fusion Analysis: {', '.join(gene_group)}", fontsize=14, fontweight="bold"
     )
 
-    # Use constrained_layout for better automatic spacing
-    try:
-        # Enable constrained layout for automatic spacing
-        fig.set_constrained_layout(True)
-        fig.set_constrained_layout_pads(w_pad=0.1, h_pad=0.1)
-    except Exception as e:
-        logging.warning(f"[Fusion] Constrained layout failed, using manual adjustment: {e}")
-        # Fallback to manual adjustment with more space
-        plt.subplots_adjust(
-            top=0.85,  # Leave space for suptitle
-            bottom=0.1,
-            left=0.1,
-            right=0.95,
-            hspace=0.4,  # More space between rows
-            wspace=0.3   # Space between columns
-        )
+    # Use manual layout adjustment instead of tight_layout to avoid warnings
+    # tight_layout often fails when there are many subplots or complex decorations
+    plt.subplots_adjust(
+        top=0.90,  # Leave space for suptitle
+        bottom=0.1,
+        left=0.08,
+        right=0.95,
+        hspace=0.4,  # More space between rows
+        wspace=0.3,  # Space between columns
+    )
 
     return fig
 
@@ -960,7 +1045,10 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
     - fusion_candidates_master_processed.csv (pickle payload)
     - fusion_candidates_all_processed.csv (pickle payload)
     """
+    logging.info(f"[Fusion] add_fusion_section() called with sample_dir: {sample_dir}")
+    
     if ui is None:
+        logging.warning("[Fusion] ui is None, returning early")
         return
 
     # Local state for this section
@@ -982,19 +1070,26 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             "table": None,
             "plot_container": None,
             "card": None,
+            "status_container": None,
         },
     }
 
     def refresh_fusion() -> None:
         """Refresh fusion data."""
         try:
+            logging.info(f"[Fusion] refresh_fusion() called for sample_dir: {sample_dir}")
+            
             # Simple directory check
             if not sample_dir or not sample_dir.exists():
                 logging.warning(f"[Fusion] Sample directory not found: {sample_dir}")
                 return
             
+            logging.info(f"[Fusion] Loading fusion data from: {sample_dir}")
+            
             # Load fusion data directly (already in background)
             fusion_data = _load_fusion_data(sample_dir)
+            
+            logging.info(f"[Fusion] Loaded fusion data: {fusion_data}")
             
             # Update UI directly
             _update_fusion_ui(fusion_data, state)
@@ -1005,9 +1100,14 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
     def _load_fusion_data(sample_dir: Path) -> Dict[str, Any]:
         """Load fusion data from files."""
         try:
+            logging.info(f"[Fusion] _load_fusion_data() called with sample_dir: {sample_dir}")
+            
             # Load target panel processed
             target_file = sample_dir / "fusion_candidates_master_processed.csv"
             genome_file = sample_dir / "fusion_candidates_all_processed.csv"
+            
+            logging.info(f"[Fusion] Target file: {target_file}")
+            logging.info(f"[Fusion] Genome file: {genome_file}")
 
             t = _load_processed_pickle(target_file)
             g = _load_processed_pickle(genome_file)
@@ -1018,6 +1118,31 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             if g is not None:
                 logging.info(f"[Fusion] Genome-wide candidate count: {g.get('candidate_count', 0)}")
                 logging.info(f"[Fusion] Genome-wide gene groups: {len(g.get('gene_groups', []))}")
+                logging.info(f"[Fusion] Genome-wide gene groups content: {g.get('gene_groups', [])}")
+                logging.info(f"[Fusion] Genome-wide annotated_data shape: {g.get('annotated_data', pd.DataFrame()).shape}")
+                logging.info(f"[Fusion] Genome-wide goodpairs shape: {g.get('goodpairs', pd.Series()).shape}")
+                logging.info(f"[Fusion] Genome-wide gene_pairs count: {len(g.get('gene_pairs', []))}")
+                logging.info(f"[Fusion] Genome-wide gene_pairs: {g.get('gene_pairs', [])[:10]}...")  # Show first 10
+                
+                # Use the same logic as reporting code - count gene_pairs instead of relying on candidate_count
+                if g.get('gene_pairs') and len(g.get('gene_pairs', [])) > 0:
+                    # Override candidate_count with the actual number of gene pairs (like reporting code does)
+                    g['candidate_count'] = len(g.get('gene_pairs', []))
+                    logging.info(f"[Fusion] Override genome-wide candidate_count to: {g['candidate_count']}")
+                    
+                    # Generate gene_groups from gene_pairs if missing (like reporting code does)
+                    if not g.get('gene_groups') or len(g.get('gene_groups', [])) == 0:
+                        # Convert gene_pairs to gene_groups format
+                        gene_groups = []
+                        for gene_pair in g.get('gene_pairs', []):
+                            if isinstance(gene_pair, (tuple, list)) and len(gene_pair) >= 2:
+                                gene_groups.append(list(gene_pair))
+                        g['gene_groups'] = gene_groups
+                        logging.info(f"[Fusion] Generated {len(gene_groups)} gene_groups from gene_pairs")
+            else:
+                logging.info(f"[Fusion] Genome-wide file exists: {genome_file.exists()}")
+                if genome_file.exists():
+                    logging.info(f"[Fusion] Genome-wide file size: {genome_file.stat().st_size} bytes")
 
             # Get file modification times
             target_mtime = target_file.stat().st_mtime if target_file.exists() else None
@@ -1093,7 +1218,7 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                         with ui.row().classes("w-full"):
                             ui.select(
                                 options=t.get("gene_groups", []),
-                                with_input=True,
+                                with_input=False,
                                 on_change=lambda e, t=t: (
                                     state["target"]["card"].clear(),
                                     state["target"]["card"].classes("w-full"),
@@ -1125,7 +1250,7 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                         with ui.row().classes("w-full"):
                             ui.select(
                                 options=t.get("gene_groups", []),
-                                with_input=True,
+                                with_input=False,
                                 on_change=lambda e, t=t: (
                                     state["target"]["card"].clear(),
                                     state["target"]["card"].classes("w-full"),
@@ -1148,6 +1273,10 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             genome_mtime = genome_data.get("mtime")
             genome_data_hash = genome_data.get("data_hash")
             logging.info(f"[Fusion] Genome-wide update check: g={g is not None}, mtime_changed={genome_mtime != state['genome'].get('mtime')}")
+            if g is not None:
+                logging.info(f"[Fusion] Genome-wide UI update: candidate_count={g.get('candidate_count', 0)}, gene_groups_count={len(g.get('gene_groups', []))}")
+                logging.info(f"[Fusion] Genome-wide UI update: has_gene_groups={bool(g.get('gene_groups'))}")
+                logging.info(f"[Fusion] Genome-wide UI update: will_show_dropdown={g.get('candidate_count', 0) > 0 and bool(g.get('gene_groups'))}")
             
             # Always update summary and table when file changes
             if g is not None and genome_mtime != state["genome"].get("mtime"):
@@ -1176,15 +1305,17 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 # Create visualization on first load or when data changes
                 try:
                     state["genome"]["plot_container"].clear()
+                    state["genome"]["status_container"].clear()
                 except Exception:
                     pass
                 logging.info(f"[Fusion] Genome-wide plotting check: candidate_count={g.get('candidate_count', 0)}, gene_groups={len(g.get('gene_groups', []))}")
-                if g.get("candidate_count", 0) > 0 and g.get("gene_groups"):
+                # More permissive condition - show dropdown if we have any gene groups, even if candidate_count is 0
+                if g.get("gene_groups") and len(g.get("gene_groups", [])) > 0:
                     with state["genome"]["plot_container"].classes("w-full"):
                         with ui.row().classes("w-full"):
                             ui.select(
                                 options=g.get("gene_groups", []),
-                                with_input=True,
+                                with_input=False,
                                 on_change=lambda e, g=g: (
                                     state["genome"]["card"].clear(),
                                     state["genome"]["card"].classes("w-full"),
@@ -1202,6 +1333,11 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                                 ui.label("Select gene pair to see results.").classes(
                                     "drop-shadow font-bold"
                                 )
+                else:
+                    # Show status message when genome-wide data is not available
+                    with state["genome"]["status_container"].classes("w-full"):
+                        ui.label("Genome-wide fusion analysis not available").classes("text-gray-600 text-sm")
+                        ui.label("(Requires supplementary reads in BAM file)").classes("text-gray-500 text-xs")
             
             # Only update visualization when data content actually changes (for background refreshes)
             elif g is not None and genome_data_hash != state["genome"].get("data_hash"):
@@ -1209,15 +1345,17 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 # plot area
                 try:
                     state["genome"]["plot_container"].clear()
+                    state["genome"]["status_container"].clear()
                 except Exception:
                     pass
                 logging.info(f"[Fusion] Genome-wide plotting check: candidate_count={g.get('candidate_count', 0)}, gene_groups={len(g.get('gene_groups', []))}")
-                if g.get("candidate_count", 0) > 0 and g.get("gene_groups"):
+                # More permissive condition - show dropdown if we have any gene groups, even if candidate_count is 0
+                if g.get("gene_groups") and len(g.get("gene_groups", [])) > 0:
                     with state["genome"]["plot_container"].classes("w-full"):
                         with ui.row().classes("w-full"):
                             ui.select(
                                 options=g.get("gene_groups", []),
-                                with_input=True,
+                                with_input=False,
                                 on_change=lambda e, g=g: (
                                     state["genome"]["card"].clear(),
                                     state["genome"]["card"].classes("w-full"),
@@ -1235,6 +1373,11 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                                 ui.label("Select gene pair to see results.").classes(
                                     "drop-shadow font-bold"
                                 )
+                else:
+                    # Show status message when genome-wide data is not available
+                    with state["genome"]["status_container"].classes("w-full"):
+                        ui.label("Genome-wide fusion analysis not available").classes("text-gray-600 text-sm")
+                        ui.label("(Requires supplementary reads in BAM file)").classes("text-gray-500 text-xs")
         except Exception as e:
             logging.exception(f"[Fusion] Refresh failed: {e}")
 
@@ -1264,6 +1407,7 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
         ui.label("Genome-wide").classes("text-base font-medium mt-2 mb-1")
         state["genome"]["plot_container"] = ui.column().classes("w-full")
         state["genome"]["table_container"] = ui.column().classes("w-full mt-2")
+        state["genome"]["status_container"] = ui.column().classes("w-full mt-2")
 
     # Initial refresh and timer
     try:
@@ -1298,7 +1442,9 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
         except Exception:
             pass
         
-        # Start the refresh timer (every 10 seconds)
-        ui.timer(10.0, refresh_fusion, active=True, immediate=True)
-    except Exception:
-        pass
+        # Start the refresh timer (every 30 seconds)
+        logging.info("[Fusion] Setting up refresh timer with immediate=True")
+        ui.timer(30.0, refresh_fusion, active=True, immediate=True)
+        logging.info("[Fusion] Timer set up successfully")
+    except Exception as e:
+        logging.exception(f"[Fusion] Exception in timer setup: {e}")

@@ -280,5 +280,5 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
         except Exception as e:
             raise Exception(f"Failed to refresh MGMT section: {e}")
 
-    # Start the refresh timer (every 15 seconds)
-    ui.timer(15.0, _refresh_mgmt, active=True, immediate=True)
+    # Start the refresh timer (every 30 seconds)
+    ui.timer(30.0, _refresh_mgmt, active=True, immediate=True)
