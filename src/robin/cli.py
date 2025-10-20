@@ -515,19 +515,23 @@ def _get_available_panels() -> List[str]:
     panels = ["rCNS2", "AML", "PanCan"]  # Built-in panels
     
     try:
-        from robin import resources
-        resources_dir = Path(resources.__file__).parent
+        # Try to find the resources directory without importing robin module
+        # Look for the resources directory relative to this file
+        current_file = Path(__file__)
+        resources_dir = current_file.parent.parent / "robin" / "resources"
         
-        # Look for custom panels (files ending with _panel_name_uniq.bed)
-        for bed_file in resources_dir.glob("*_panel_name_uniq.bed"):
-            panel_name = bed_file.stem.replace("_panel_name_uniq", "")
-            if panel_name not in panels:
-                panels.append(panel_name)
+        if resources_dir.exists():
+            # Look for custom panels (files ending with _panel_name_uniq.bed)
+            for bed_file in resources_dir.glob("*_panel_name_uniq.bed"):
+                panel_name = bed_file.stem.replace("_panel_name_uniq", "")
+                if panel_name not in panels:
+                    panels.append(panel_name)
+            
+            panels.sort()
         
-        panels.sort()
-        
-    except ImportError:
-        pass  # Fallback to built-in panels only
+    except Exception:
+        # Fallback to built-in panels only - don't fail on any import or other errors
+        pass
     
     return panels
 
@@ -1154,13 +1158,13 @@ def _register_handlers(
     available_panels = _get_available_panels()
     if target_panel not in available_panels:
         click.echo(
-            f"Warning: Target panel '{target_panel}' is not in available panels: {available_panels}. "
-            f"Using default 'rCNS2' instead.",
+            f"Warning: Target panel '{target_panel}' is not in detected panels: {available_panels}. "
+            f"This may be a custom panel - proceeding with specified panel.",
             err=True,
         )
-        target_panel = "rCNS2"
-    
-    click.echo(f"Using target panel: {target_panel}")
+        # Don't reset to rCNS2 - allow custom panels to be used
+    else:
+        click.echo(f"Using target panel: {target_panel}")
     
     # Track handlers that should accept target_panel
     handlers_requiring_panel = {"target", "fusion", "cnv"}
