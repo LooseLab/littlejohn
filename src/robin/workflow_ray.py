@@ -783,10 +783,10 @@ class TypeProcessor:
 class Coordinator:
     def __init__(
         self,
+        target_panel: str,
         analysis_workers: int = 1,
         preset: Optional[str] = None,
         reference: Optional[str] = None,
-        target_panel: str,
         enable_batching: bool = True,
     ):
         # dedup maps
@@ -2764,11 +2764,11 @@ async def run(
     # Start a fresh coordinator (not detached)
     try:
         coord = Coordinator.options(name="robin_coordinator", num_cpus=0).remote(
-            analysis_workers=analysis_workers, preset=preset, reference=reference, target_panel=target_panel, enable_batching=enable_batching
+            target_panel=target_panel, analysis_workers=analysis_workers, preset=preset, reference=reference, enable_batching=enable_batching
         )
     except Exception:
         coord = Coordinator.options(name="robin_coordinator").remote(
-            analysis_workers=analysis_workers, preset=preset, reference=reference, target_panel=target_panel, enable_batching=enable_batching
+            target_panel=target_panel, analysis_workers=analysis_workers, preset=preset, reference=reference, enable_batching=enable_batching
         )
 
     # Set global coordinator reference for external access
