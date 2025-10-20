@@ -459,6 +459,56 @@ class TargetAnalysis:
 
         logger.info(f"Target Analysis initialized (staging={'enabled' if use_staging else 'disabled'}, batch_size={batch_size})")
 
+    def _get_shard_prefix(self, sample_id: str) -> str:
+        """Return the shard filename prefix used for panel-overlap shards in staging."""
+        staging_dir = self._get_staging_dir(sample_id)
+        return os.path.join(staging_dir, "target_shard_")
+
+    def _list_sorted_shards(self, sample_id: str) -> List[str]:
+        """List sorted shard BAMs in staging for a sample."""
+        staging_dir = self._get_staging_dir(sample_id)
+        return sorted(glob.glob(os.path.join(staging_dir, "target_shard_*.sorted.bam")))
+
+    def _merge_sorted_shards(self, sample_id: str) -> bool:
+        """Merge all sorted shard BAMs into sample_dir/target.bam using samtools merge.
+
+        Returns True on success, False otherwise.
+        """
+        logger = logging.getLogger("robin.target")
+        sample_output_dir = self._check_and_create_folder(self.work_dir, sample_id)
+        shards = self._list_sorted_shards(sample_id)
+        if not shards:
+            logger.info(f"No sorted shards to merge for {sample_id}")
+            return False
+
+        target_bam = os.path.join(sample_output_dir, "target.bam")
+        try:
+            # Use samtools merge for performance on sorted inputs
+            merge_cmd = [
+                "samtools",
+                "merge",
+                "-f",  # overwrite
+                "-@",
+                str(self.threads),
+                target_bam,
+            ] + shards
+            logger.info(f"Merging {len(shards)} shards into {target_bam}")
+            result = subprocess.run(merge_cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                logger.error(f"samtools merge failed: {result.stderr}")
+                return False
+
+            # Index the merged BAM
+            try:
+                pysam.index(target_bam)
+            except Exception as e:
+                logger.warning(f"Indexing merged target.bam failed: {e}")
+
+            return True
+        except Exception as e:
+            logger.error(f"Error merging shards for {sample_id}: {e}")
+            return False
+
     def _find_target_bed(self, target_panel: str = "rCNS2") -> str:
         """Find the target BED file from robin resources based on panel type"""
         logger = logging.getLogger("robin.target")
@@ -696,7 +746,48 @@ class TargetAnalysis:
             logger.info(
                 f"Staging complete for {sample_id} in {elapsed:.2f}s (vs ~{elapsed*10:.1f}s without staging)"
             )
-            
+
+            # Update/create panel-overlap target.bam in staging path
+            try:
+                sample_output_dir = self._check_and_create_folder(self.work_dir, sample_id)
+                existing_target_bam_path = os.path.join(sample_output_dir, "target.bam")
+
+                # Intersect current file with full panel BED
+                tempbamfile = tempfile.NamedTemporaryFile(dir=sample_output_dir, suffix=".bam")
+                run_bedtools(file_path, self.bedfile, tempbamfile.name)
+
+                # Only proceed if the intersect produced reads
+                if (
+                    pysam.AlignmentFile(tempbamfile.name, "rb").count(until_eof=True) > 0
+                ):
+                    # Create a sorted shard in staging instead of updating target.bam directly
+                    shard_prefix = self._get_shard_prefix(sample_id)
+                    shard_path = f"{shard_prefix}{analysis_counter:06d}.sorted.bam"
+                    try:
+                        # Sort temp intersect into a shard
+                        pysam.sort(f"-@{self.threads}", "-o", shard_path, tempbamfile.name)
+                        logger.info(f"Created sorted shard: {shard_path}")
+                    except Exception as e:
+                        logger.warning(f"Could not create sorted shard {shard_path}: {e}")
+
+                # Cleanup temp intersect index
+                try:
+                    os.remove(f"{tempbamfile.name}.bai")
+                except FileNotFoundError:
+                    pass
+
+            except Exception as e:
+                logger.warning(f"Failed to update panel-overlap target.bam in staging path: {e}")
+
+            # Periodic merge: when accumulation threshold is reached, also update target.bam
+            if should_accumulate:
+                try:
+                    merged = self._merge_sorted_shards(sample_id)
+                    if merged:
+                        logger.info("Periodic shard merge completed: target.bam updated")
+                except Exception as e:
+                    logger.warning(f"Periodic shard merge failed: {e}")
+
             return target_result, should_accumulate
             
         except Exception as e:
@@ -834,6 +925,25 @@ class TargetAnalysis:
                             f"Updated target BAM file: {existing_target_bam_path}"
                         )
 
+                        # Sort then index merged BAM to ensure coordinate order
+                        try:
+                            sorted_path = os.path.join(sample_output_dir, "target.sorted.bam")
+                            # Remove previous sorted/index if present
+                            try:
+                                if os.path.exists(sorted_path):
+                                    os.remove(sorted_path)
+                                if os.path.exists(f"{sorted_path}.bai"):
+                                    os.remove(f"{sorted_path}.bai")
+                            except Exception:
+                                pass
+                            pysam.sort(f"-@{self.threads}", "-o", sorted_path, existing_target_bam_path)
+                            shutil.copy2(sorted_path, existing_target_bam_path)
+                            pysam.index(existing_target_bam_path)
+                        except Exception as e:
+                            logger.warning(
+                                f"Could not sort/index merged target.bam ({existing_target_bam_path}): {e}"
+                            )
+
                         # Clean up temporary files
                         try:
                             os.remove(f"{tempbamholder.name}.bai")
@@ -846,6 +956,24 @@ class TargetAnalysis:
                         logger.info(
                             f"Created target BAM file: {existing_target_bam_path}"
                         )
+
+                        # Sort then index new BAM to ensure coordinate order
+                        try:
+                            sorted_path = os.path.join(sample_output_dir, "target.sorted.bam")
+                            try:
+                                if os.path.exists(sorted_path):
+                                    os.remove(sorted_path)
+                                if os.path.exists(f"{sorted_path}.bai"):
+                                    os.remove(f"{sorted_path}.bai")
+                            except Exception:
+                                pass
+                            pysam.sort(f"-@{self.threads}", "-o", sorted_path, existing_target_bam_path)
+                            shutil.copy2(sorted_path, existing_target_bam_path)
+                            pysam.index(existing_target_bam_path)
+                        except Exception as e:
+                            logger.warning(
+                                f"Could not sort/index new target.bam ({existing_target_bam_path}): {e}"
+                            )
                 else:
                     logger.info(f"No target regions found in {sample_id}")
 
@@ -1513,7 +1641,7 @@ class TargetAnalysis:
                     ) as f:
                         pass
                 
-                # Create target.bam file if targets exceed threshold
+                # Create threshold-target BAM file (do not overwrite panel-based target.bam)
                 if len(run_list) > 0:
                     logger.info("Creating target.bam file from accumulated targets...")
                     try:
@@ -1544,34 +1672,50 @@ class TargetAnalysis:
                             # Use the first available BAM file
                             source_bam = original_bam_files[0]
                             targets_bed = os.path.join(sample_output_dir, "targets_exceeding_threshold.bed")
-                            target_bam_path = os.path.join(sample_output_dir, "target.bam")
-                            
-                            logger.info(f"Creating target.bam from {source_bam} using {targets_bed}")
-                            
-                            # Create target.bam using bedtools intersect
-                            run_bedtools(source_bam, targets_bed, target_bam_path)
-                            
-                            # Verify the target.bam was created and has reads
-                            if os.path.exists(target_bam_path):
+                            threshold_target_bam_path = os.path.join(sample_output_dir, "threshold_target.bam")
+
+                            logger.info(
+                                f"Creating threshold_target.bam from {source_bam} using {targets_bed}"
+                            )
+
+                            # Create threshold-target BAM using bedtools intersect
+                            run_bedtools(source_bam, targets_bed, threshold_target_bam_path)
+
+                            # Verify the threshold_target.bam was created and has reads
+                            if os.path.exists(threshold_target_bam_path):
                                 try:
-                                    with pysam.AlignmentFile(target_bam_path, "rb") as bam_file:
+                                    with pysam.AlignmentFile(threshold_target_bam_path, "rb") as bam_file:
                                         read_count = bam_file.count(until_eof=True)
                                         if read_count > 0:
-                                            logger.info(f"Successfully created target.bam with {read_count} reads")
+                                            logger.info(
+                                                f"Successfully created threshold_target.bam with {read_count} reads"
+                                            )
                                         else:
-                                            logger.warning("target.bam created but contains no reads")
+                                            logger.warning(
+                                                "threshold_target.bam created but contains no reads"
+                                            )
                                 except Exception as e:
-                                    logger.warning(f"Could not verify target.bam: {e}")
+                                    logger.warning(
+                                        f"Could not verify threshold_target.bam: {e}"
+                                    )
                             else:
-                                logger.error("Failed to create target.bam file")
+                                logger.error("Failed to create threshold_target.bam file")
                         else:
                             logger.warning("No suitable BAM files found to create target.bam")
                             
                     except Exception as e:
-                        logger.error(f"Error creating target.bam: {e}")
+                        logger.error(f"Error creating threshold_target.bam: {e}")
                         import traceback
                         logger.error(traceback.format_exc())
                 
+                # Merge shards into target.bam at the end of accumulation (periodic/full)
+                try:
+                    merged = self._merge_sorted_shards(sample_id)
+                    if merged:
+                        logger.info("Shard merge completed during accumulation: target.bam updated")
+                except Exception as e:
+                    logger.warning(f"Shard merge during accumulation failed: {e}")
+
                 # Clean up staging files
                 logger.info("Cleaning up staging files...")
                 for f in coverage_files + bedcov_files + timestamp_files:
@@ -2171,6 +2315,14 @@ def finalize_accumulation_for_sample(
         
         # Force accumulation of remaining files
         result = target_analysis.accumulate_staged_files(sample_id, force=True)
+
+        # Final shard merge to ensure target.bam is up to date
+        try:
+            merged = target_analysis._merge_sorted_shards(sample_id)
+            if merged:
+                logger.info("Final shard merge completed: target.bam updated")
+        except Exception as e:
+            logger.warning(f"Final shard merge failed: {e}")
         
         logger.info(f"Final accumulation complete for {sample_id}: {result}")
         return result
