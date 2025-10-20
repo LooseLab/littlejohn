@@ -604,6 +604,20 @@ def bam_preprocessing_handler(job, center: str = None):
         if center:
             job.context.add_metadata("center", center)
             logger.info(f"Center set to: {center}")
+        
+        # Preserve target_panel metadata from job context (set by file classifier)
+        existing_target_panel = job.context.metadata.get("target_panel")
+        if existing_target_panel:
+            logger.info(f"Preserving target panel from job context: {existing_target_panel}")
+        else:
+            logger.warning("No target_panel found in job context - this may cause panel assignment issues")
+        
+        # Preserve reference metadata from job context (set by file classifier)
+        existing_reference = job.context.metadata.get("reference")
+        if existing_reference:
+            logger.info(f"Preserving reference from job context: {existing_reference}")
+        else:
+            logger.debug("No reference found in job context")
 
         # Check read count threshold and deliberately skip large BAMs
         try:
