@@ -47,29 +47,15 @@ robin is a specialized bioinformatics workflow engine designed for processing BA
    ```bash
    git clone --recursive https://github.com/LooseLab/littlejohn.git
    cd littlejohn
-   
-   # Switch to the branch with Git LFS removal
-   git checkout remove_LFS
    ```
 
-2. **Download required model assets**:
-   ```bash
-   # Download all models automatically
-   python setup_models.py
-   
-   # Or download individual models
-   python scripts/fetch_asset.py general_model src/robin/models/general.zip
-   python scripts/fetch_asset.py capper_model src/robin/models/Capper_et_al_NN.pkl
-   python scripts/fetch_asset.py pancan_model src/robin/models/pancan_devel_v5i_NN.pkl
-   ```
-
-3. **Update and initialize submodules**:
+2. **Update and initialize submodules**:
    ```bash
    git submodule update --init --recursive
    ```
    *This ensures all submodules (nanoDX, hv_rapidCNS2) are properly initialized*
 
-4. **Create and activate conda environment**:
+3. **Create and activate conda environment**:
    ```bash
    # For Linux/Windows
    conda env create -f robin.yml
@@ -80,9 +66,20 @@ robin is a specialized bioinformatics workflow engine designed for processing BA
    conda activate robin_0_3
    ```
 
-5. **Install robin in development mode**:
+4. **Install robin in development mode**:
    ```bash
    pip install -e .
+   ```
+
+5. **Download required model assets**:
+   ```bash
+   # Download all models automatically
+   python setup_models.py
+   
+   # Or download individual models
+   python scripts/fetch_asset.py general_model src/robin/models/general.zip
+   python scripts/fetch_asset.py capper_model src/robin/models/Capper_et_al_NN.pkl
+   python scripts/fetch_asset.py pancan_model src/robin/models/pancan_devel_v5i_NN.pkl
    ```
 
 ### Alternative Installation (without conda)
@@ -102,30 +99,27 @@ If you prefer not to use conda, you can install from source, but you'll need to 
    ```bash
    git clone --recursive https://github.com/LooseLab/littlejohn.git
    cd littlejohn
-   
-   # Switch to the branch with Git LFS removal
-   git checkout remove_LFS
    ```
 
-3. **Download required model assets**:
-   ```bash
-   python setup_models.py
-   ```
-
-4. **Update and initialize submodules**:
+3. **Update and initialize submodules**:
    ```bash
    git submodule update --init --recursive
    ```
    *This ensures all submodules (nanoDX, hv_rapidCNS2) are properly initialized*
 
-5. **Install Python dependencies**:
+4. **Install Python dependencies**:
    ```bash
    pip install -e .
    ```
 
+5. **Download required model assets**:
+   ```bash
+   python setup_models.py
+   ```
+
 ## Asset Management
 
-Robin uses a release asset system instead of Git LFS for managing large model files. This provides better performance and reliability.
+Robin uses a release asset system for managing large model files. This provides better performance and reliability compared to traditional approaches.
 
 ### Available Assets
 
@@ -554,7 +548,6 @@ robin workflow /path/to/bam/files \
 - `bedtools`: For region extraction and BED file operations
 - `samtools`: For BAM file manipulation
 - `R` and `Rscript`: For statistical analysis and classification
-- `git-lfs`: For large file storage (model files)
 
 ### Git Submodules
 - `nanoDX`: NanoDX analysis tools
