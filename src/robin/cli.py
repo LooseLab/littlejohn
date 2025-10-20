@@ -942,6 +942,7 @@ def _create_ray_workflow_runner(
                     await wrn.run(
                         plan=workflow_steps,
                         paths=[str(path)],
+                        target_panel=target_panel,
                         analysis_workers=analysis_workers_local,
                         process_existing=not no_process_existing,
                         monitor=not no_progress,
@@ -1757,6 +1758,7 @@ def workflow(
                     wrn.run(
                         plan=workflow_steps,
                         paths=[str(path)],
+                        target_panel=target_panel,
                         analysis_workers=analysis_workers,
                         process_existing=not no_process_existing,
                         monitor=not no_progress,
@@ -1772,7 +1774,6 @@ def workflow(
                         gui_host=gui_host,
                         gui_port=gui_port,
                         center=center,
-                        target_panel=target_panel,
                     )
                 )
             except KeyboardInterrupt:

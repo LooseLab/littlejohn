@@ -2703,6 +2703,7 @@ def set_coordinator(coord):
 async def run(
     plan: List[str],
     paths: List[str],
+    target_panel: str,
     analysis_workers: int = 1,
     process_existing: bool = True,
     monitor: bool = True,
@@ -2718,7 +2719,6 @@ async def run(
     gui_host: str = "0.0.0.0",
     gui_port: int = 8081,
     center: str = None,
-    target_panel: str,
     enable_batching: bool = True,
 ):
     global GLOBAL_LOG_LEVEL
