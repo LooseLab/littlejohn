@@ -113,6 +113,7 @@ class GUILauncher:
         self._known_sample_ids: set[str] = set()
         self._preexisting_sample_ids: set[str] = set()
         self._preexisting_scanned: bool = False
+        self._pending_samples_data: Optional[Dict[str, Any]] = None
         
         # Caching for samples data
         self._last_cache_time: float = 0.0
@@ -188,7 +189,7 @@ class GUILauncher:
             # Rate limiting: Skip low-priority updates if queue is getting too large
             queue_size = self.update_queue.qsize()
             if queue_size > 100 and priority < 5:
-                logging.debug(f"[GUI] Skipping low-priority update due to queue size: {queue_size}")
+                logging.error(f"[GUI] Skipping low-priority update due to queue size: {queue_size}")
                 return
             
             # Rate limiting: Skip duplicate updates of the same type within 1 second
@@ -267,8 +268,12 @@ class GUILauncher:
             elif update.update_type == UpdateType.ERROR_UPDATE:
                 self._update_errors(update.data)
             elif update.update_type == UpdateType.SAMPLES_UPDATE:
-                # Use async version to avoid blocking UI
-                ui.timer(0.1, lambda: self._update_samples_table_async(update.data), once=True)
+                # Store the data and update table directly (ui.timer fails with slot error)
+                self._pending_samples_data = update.data
+                try:
+                    self._update_samples_table_sync(self._pending_samples_data)
+                except Exception as e:
+                    logging.error(f"[GUI] Samples table update failed: {e}")
 
         except Exception as e:
             logging.debug(f"Error handling GUI update: {e}")
@@ -844,6 +849,7 @@ class GUILauncher:
                     # Create a placeholder table that will be updated later
                     from robin.gui.theme import styled_table
 
+                    # Create samples table
                     _samples_container, self.samples_table = styled_table(
                         columns=[
                             {
@@ -1212,122 +1218,114 @@ class GUILauncher:
                         if hasattr(self, "samples_loading_container"):
                             self.samples_loading_container.set_visibility(True)
 
-    
 
-    async def _update_samples_table_async(self, data: Dict[str, Any]) -> None:
-        """Asynchronous version of samples table update"""
+    def _update_samples_table_sync(self, data: Dict[str, Any]) -> None:
+        """Synchronous version of samples table update"""
         try:
-            
-            try:
-                if not hasattr(self, "samples_table"):
-                    return
-                samples = data.get("samples", [])
+            if not hasattr(self, "samples_table"):
+                return
+            samples = data.get("samples", [])
 
-                # Deduplicate by sample_id taking the newest last_seen
-                by_id: Dict[str, Dict[str, Any]] = {}
-                for s in samples:
-                    sid = s.get("sample_id", "") or "unknown"
-                    last_seen = float(s.get("last_seen", time.time()))
-                    existing = by_id.get(sid)
-                    if not existing or last_seen >= existing.get("_last_seen_raw", 0):
-                        origin_value = (
-                            "Pre-existing"
-                            if sid in self._preexisting_sample_ids and (time.time() - last_seen) >= 3600
-                            else "Live"
-                        )
-                        # Flip Live samples to Complete if inactive for 60 minutes
-                        try:
-                            if origin_value == "Live" and (time.time() - last_seen) >= 3600:
-                                origin_value = "Complete"
-                        except Exception:
-                            pass
-                        by_id[sid] = {
-                            "sample_id": sid,
-                            "origin": origin_value,
-                            # Persisted run info will be patched in below from master.csv
-                            "run_start": "",
-                            "device": "",
-                            "flowcell": "",
-                            "active_jobs": s.get("active_jobs", 0),
-                            "total_jobs": s.get("total_jobs", 0),
-                            "completed_jobs": s.get("completed_jobs", 0),
-                            "failed_jobs": s.get("failed_jobs", 0),
-                            "job_types": (
-                                ",".join(sorted(set(s.get("job_types", []))))
-                                if isinstance(s.get("job_types", []), list)
-                                else str(s.get("job_types", ""))
-                            ),
-                            "last_seen": time.strftime(
-                                "%Y-%m-%d %H:%M:%S", time.localtime(last_seen)
-                            ),
-                            "actions": "View",
-                            "_last_seen_raw": last_seen,
-                        }
-
-                # Patch from master.csv and persist the new overview values for later reload
-                try:
-                    base = (
-                        Path(self.monitored_directory) if self.monitored_directory else None
+            # Deduplicate by sample_id taking the newest last_seen
+            by_id: Dict[str, Dict[str, Any]] = {}
+            for s in samples:
+                sid = s.get("sample_id", "") or "unknown"
+                last_seen = float(s.get("last_seen", time.time()))
+                existing = by_id.get(sid)
+                if not existing or last_seen >= existing.get("_last_seen_raw", 0):
+                    origin_value = (
+                        "Pre-existing"
+                        if sid in self._preexisting_sample_ids and (time.time() - last_seen) >= 3600
+                        else "Live"
                     )
-                    manager = (
-                        MasterCSVManager(str(base)) if base and base.exists() else None
-                    )
-                except Exception:
-                    base, manager = None, None
-
-                for sid, row in by_id.items():
+                    # Flip Live samples to Complete if inactive for 60 minutes
                     try:
-                        # Persist overview numbers to master.csv so we can restore later
-                        if manager is not None:
-                            persist_payload = {
-                                "active_jobs": int(row.get("active_jobs", 0)),
-                                "total_jobs": int(row.get("total_jobs", 0)),
-                                "completed_jobs": int(row.get("completed_jobs", 0)),
-                                "failed_jobs": int(row.get("failed_jobs", 0)),
-                                "job_types": row.get("job_types", ""),
-                                "last_seen": float(row.get("_last_seen_raw", time.time())),
-                            }
-                            manager.update_sample_overview(sid, persist_payload)
-
-                        # Read run info from master.csv to display in table
-                        if base is not None:
-                            csv_path = base / sid / "master.csv"
-                            if csv_path.exists():
-                                with csv_path.open("r", newline="") as fh:
-                                    reader = csv.DictReader(fh)
-                                    first_row = next(reader, None)
-                                if first_row:
-                                    row["run_start"] = self._format_timestamp_for_display(
-                                        first_row.get("run_info_run_time", "")
-                                    )
-                                    row["device"] = first_row.get("run_info_device", "")
-                                    row["flowcell"] = first_row.get(
-                                        "run_info_flow_cell", ""
-                                    )
+                        if origin_value == "Live" and (time.time() - last_seen) >= 3600:
+                            origin_value = "Complete"
                     except Exception:
                         pass
+                    by_id[sid] = {
+                        "sample_id": sid,
+                        "origin": origin_value,
+                        # Persisted run info will be patched in below from master.csv
+                        "run_start": "",
+                        "device": "",
+                        "flowcell": "",
+                        "active_jobs": s.get("active_jobs", 0),
+                        "total_jobs": s.get("total_jobs", 0),
+                        "completed_jobs": s.get("completed_jobs", 0),
+                        "failed_jobs": s.get("failed_jobs", 0),
+                        "job_types": (
+                            ",".join(sorted(set(s.get("job_types", []))))
+                            if isinstance(s.get("job_types", []), list)
+                            else str(s.get("job_types", ""))
+                        ),
+                        "last_seen": time.strftime(
+                            "%Y-%m-%d %H:%M:%S", time.localtime(last_seen)
+                        ),
+                        "actions": "View",
+                        "_last_seen_raw": last_seen,
+                    }
 
-                # Merge with preexisting scans if any
-                existing_rows_by_id = {
-                    r["sample_id"]: r for r in (self._last_samples_rows or [])
-                }
-                for sid, row in by_id.items():
-                    existing_rows_by_id[sid] = row
-                rows = list(existing_rows_by_id.values())
-                # Replace rows to avoid duplicates then apply filters
-                self._last_samples_rows = rows
-                return rows
+            # Patch from master.csv and persist the new overview values for later reload
+            try:
+                base = (
+                    Path(self.monitored_directory) if self.monitored_directory else None
+                )
+                manager = (
+                    MasterCSVManager(str(base)) if base and base.exists() else None
+                )
+            except Exception:
+                base, manager = None, None
 
-            except Exception as e:
-                logging.debug(f"Error updating samples table: {e}")
-                return []
+            for sid, row in by_id.items():
+                try:
+                    # Persist overview numbers to master.csv so we can restore later
+                    if manager is not None:
+                        persist_payload = {
+                            "active_jobs": int(row.get("active_jobs", 0)),
+                            "total_jobs": int(row.get("total_jobs", 0)),
+                            "completed_jobs": int(row.get("completed_jobs", 0)),
+                            "failed_jobs": int(row.get("failed_jobs", 0)),
+                            "job_types": row.get("job_types", ""),
+                            "last_seen": float(row.get("_last_seen_raw", time.time())),
+                        }
+                        manager.update_sample_overview(sid, persist_payload)
+
+                    # Read run info from master.csv to display in table
+                    if base is not None:
+                        csv_path = base / sid / "master.csv"
+                        if csv_path.exists():
+                            with csv_path.open("r", newline="") as fh:
+                                reader = csv.DictReader(fh)
+                                first_row = next(reader, None)
+                            if first_row:
+                                row["run_start"] = self._format_timestamp_for_display(
+                                    first_row.get("run_info_run_time", "")
+                                )
+                                row["device"] = first_row.get("run_info_device", "")
+                                row["flowcell"] = first_row.get(
+                                    "run_info_flow_cell", ""
+                                )
+                except Exception:
+                    pass
+
+            # Merge with preexisting scans if any
+            existing_rows_by_id = {
+                r["sample_id"]: r for r in (self._last_samples_rows or [])
+            }
+            for sid, row in by_id.items():
+                existing_rows_by_id[sid] = row
+            rows = list(existing_rows_by_id.values())
+            # Replace rows to avoid duplicates then apply filters
+            self._last_samples_rows = rows
             
             # Update UI on main thread
             if rows and hasattr(self, "samples_table"):
                 self._apply_samples_table_filters()
-                
+
         except Exception as e:
-            logging.error(f"Error in async samples table update: {e}")
+            logging.error(f"Error in samples table update: {e}")
 
     # -------- Samples table helpers: search, filter, sort --------
     def _format_timestamp_for_display(self, value: Any) -> str:
@@ -2683,6 +2681,66 @@ class GUILauncher:
             return self._last_samples_rows
         return None
 
+    def _calculate_job_counts_from_files(self, sample_dir: Path) -> Dict[str, Any]:
+        """Calculate job counts and types from actual analysis result files in the sample directory."""
+        try:
+            total_jobs = 0
+            completed_jobs = 0
+            failed_jobs = 0
+            job_types = set()
+            
+            # Define job type patterns and their corresponding files
+            job_patterns = {
+                "fusion": ["fusion_candidates_master_processed.csv", "fusion_candidates_all_processed.csv", "fusion_summary.csv"],
+                "cnv": ["cnv_results.csv", "cnv_summary.csv", "copy_numbers.pkl"],
+                "mgmt": ["final_mgmt.csv", "*_mgmt.csv"],
+                "coverage": ["coverage_summary.csv", "coverage_results.csv"],
+                "igv_bam": ["*.bam", "*.bai"],
+                "bed_conversion": ["*.bed", "*.bedmethyl"],
+                "nanodx": ["nanodx_results.csv", "nanodx_summary.csv"],
+                "pannanodx": ["pannanodx_results.csv", "pannanodx_summary.csv"],
+                "random_forest": ["random_forest_results.csv", "random_forest_summary.csv"],
+                "sturgeon": ["sturgeon_results.csv", "sturgeon_summary.csv"],
+                "target": ["target_results.csv", "target_summary.csv"]
+            }
+            
+            # Check for each job type
+            for job_type, patterns in job_patterns.items():
+                job_found = False
+                for pattern in patterns:
+                    if "*" in pattern:
+                        # Use glob pattern
+                        matching_files = list(sample_dir.glob(pattern))
+                        if matching_files:
+                            job_found = True
+                            break
+                    else:
+                        # Check for exact file
+                        if (sample_dir / pattern).exists():
+                            job_found = True
+                            break
+                
+                if job_found:
+                    total_jobs += 1
+                    completed_jobs += 1  # Assume completed if files exist
+                    job_types.add(job_type)
+            
+            return {
+                "total_jobs": total_jobs,
+                "completed_jobs": completed_jobs,
+                "failed_jobs": failed_jobs,
+                "job_types": ",".join(sorted(job_types)) if job_types else ""
+            }
+            
+        except Exception as e:
+            logging.warning(f"Error calculating job counts from files for {sample_dir}: {e}")
+            return {
+                "total_jobs": 0,
+                "completed_jobs": 0,
+                "failed_jobs": 0,
+                "job_types": ""
+            }
+
     async def _load_samples_progressively(self, sample_dirs: List[Path], batch_size: int = 10) -> None:
         """Load samples in small batches to avoid blocking the UI"""
         try:
@@ -2781,6 +2839,7 @@ class GUILauncher:
                         except Exception:
                             pass
                             
+                        # Try to get overview data from master.csv first
                         ov_active = int(
                             first_row.get("samples_overview_active_jobs", 0) or 0
                         )
@@ -2796,6 +2855,14 @@ class GUILauncher:
                         ov_job_types = str(
                             first_row.get("samples_overview_job_types", "") or ""
                         )
+                        
+                        # If overview data is not available (0 values), calculate from actual analysis files
+                        if ov_total == 0 and ov_completed == 0:
+                            calculated_counts = self._calculate_job_counts_from_files(sample_dir)
+                            ov_total = calculated_counts["total_jobs"]
+                            ov_completed = calculated_counts["completed_jobs"]
+                            ov_failed = calculated_counts["failed_jobs"]
+                            ov_job_types = calculated_counts["job_types"]
                 except Exception:
                     pass
                     

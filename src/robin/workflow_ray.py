@@ -22,6 +22,8 @@ file watcher, call submit_jobs() on the Coordinator in your event handlers inste
 
 from __future__ import annotations
 
+import logging
+
 # Suppress pkg_resources deprecation warnings from sorted_nearest
 import warnings
 warnings.filterwarnings(
@@ -2105,18 +2107,18 @@ class Coordinator:
         samples_payload: List[Dict[str, Any]] = []
         try:
             for sid, ent in self.samples_by_id.items():
-                samples_payload.append(
-                    {
-                        "sample_id": sid,
-                        "active_jobs": ent.get("active_jobs", 0),
-                        "total_jobs": ent.get("total_jobs", 0),
-                        "completed_jobs": ent.get("completed_jobs", 0),
-                        "failed_jobs": ent.get("failed_jobs", 0),
-                        "job_types": list(ent.get("job_types", set())),
-                        "last_seen": ent.get("last_seen", now),
-                    }
-                )
-        except Exception:
+                sample_data = {
+                    "sample_id": sid,
+                    "active_jobs": ent.get("active_jobs", 0),
+                    "total_jobs": ent.get("total_jobs", 0),
+                    "completed_jobs": ent.get("completed_jobs", 0),
+                    "failed_jobs": ent.get("failed_jobs", 0),
+                    "job_types": list(ent.get("job_types", set())),
+                    "last_seen": ent.get("last_seen", now),
+                }
+                samples_payload.append(sample_data)
+        except Exception as e:
+            logging.error(f"[Ray] Error building samples payload: {e}")
             samples_payload = []
 
         result = {
