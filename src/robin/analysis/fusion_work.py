@@ -214,7 +214,7 @@ def _optimize_dataframe_memory(df: pd.DataFrame) -> pd.DataFrame:
 # =============================================================================
 
 
-def _setup_file_paths(target_panel: str = "rCNS2") -> Tuple[str, str]:
+def _setup_file_paths(target_panel: str) -> Tuple[str, str]:
     """Setup file paths for gene data."""
     # Try to import robin resources to get the correct path
     try:
@@ -319,7 +319,7 @@ def _load_bed_regions(bed_file: str) -> Dict[str, List[GeneRegion]]:
     return result
 
 
-def _ensure_gene_regions_loaded(target_panel: str = "rCNS2") -> None:
+def _ensure_gene_regions_loaded(target_panel: str) -> None:
     """Ensure gene regions are loaded into cache for the given target panel."""
     logger.info(f"DEBUG: _ensure_gene_regions_loaded called with target_panel='{target_panel}'")
     logger.info(f"DEBUG: Current cache keys: {list(_gene_regions_cache.keys())}")
@@ -679,7 +679,7 @@ def _filter_fusion_candidates(df: pd.DataFrame) -> Optional[pd.DataFrame]:
 
 
 def process_bam_for_fusions_work(
-    bamfile: str, target_panel: str = "rCNS2"
+    bamfile: str, target_panel: str
 ) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
     """
     Process BAM file to find fusion candidates with memory optimization.
@@ -812,7 +812,7 @@ def process_bam_with_staging(
     temp_dir: str,
     metadata: Dict[str, Any],
     fusion_metadata: FusionMetadata,
-    target_panel: str = "rCNS2",
+    target_panel: str,
     has_supplementary: bool = False,
     supplementary_read_ids: List[str] = [],
     work_dir: Optional[str] = None,
@@ -934,7 +934,7 @@ def process_bam_with_staging(
 def accumulate_fusion_candidates(
     work_dir: str,
     sample_id: str,
-    target_panel: str = "rCNS2",
+    target_panel: str,
     force: bool = False,
     batch_size: int = 10,
 ) -> Dict[str, Any]:
@@ -1918,7 +1918,7 @@ def preprocess_structural_variants_standalone(output_dir: str) -> None:
 
 
 def finalize_fusion_accumulation_for_sample(
-    sample_id: str, work_dir: str, target_panel: str = "rCNS2"
+    sample_id: str, work_dir: str, target_panel: str
 ) -> Dict[str, Any]:
     """
     Force final accumulation of any remaining staged fusion files for a sample.

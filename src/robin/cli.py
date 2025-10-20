@@ -767,10 +767,10 @@ def _create_ray_workflow_runner(
     analysis_workers: int,
     legacy_analysis_queue: bool,
     log_level: str,
+    target_panel: str,
     preprocessing_workers: int = 1,
     bed_workers: int = 1,
     reference: Optional[Path] = None,
-    target_panel: str = "rCNS2",
 ) -> Any:
     """Create and configure Ray-based workflow runner (Ray Core)."""
     try:
@@ -779,7 +779,7 @@ def _create_ray_workflow_runner(
         from robin import workflow_ray as wrn
 
         class _RayCoreWrapper:
-            def __init__(self, reference: Optional[Path] = None, target_panel: str = "rCNS2"):
+            def __init__(self, reference: Optional[Path] = None, target_panel: str = None):
                 self.manager = type(
                     "_DummyManager", (), {"get_priority_info": lambda _self: {}}
                 )()
@@ -1089,11 +1089,11 @@ def _create_workflow_runner(
     analysis_workers: int,
     legacy_analysis_queue: bool,
     log_level: str,
+    target_panel: str,
     preprocessing_workers: int = 1,
     bed_workers: int = 1,
     reference: Optional[Path] = None,
     center: str = None,
-    target_panel: str = "rCNS2",
 ) -> Any:
     """Create the appropriate workflow runner based on configuration."""
     if analysis_workers < 1:
@@ -1109,10 +1109,10 @@ def _create_workflow_runner(
             analysis_workers,
             legacy_analysis_queue,
             log_level,
+            target_panel,  # Pass target_panel parameter to Ray workflow runner
             preprocessing_workers=preprocessing_workers,
             bed_workers=bed_workers,
             reference=reference,  # Pass reference parameter to Ray workflow runner
-            target_panel=target_panel,  # Pass target_panel parameter to Ray workflow runner
         )
         if runner is None:
             # Fallback to threading-based workflow
@@ -1148,9 +1148,9 @@ def _register_handlers(
     runner: Any,
     legacy_analysis_queue: bool,
     work_dir: Optional[Path],
+    target_panel: str,
     reference: Optional[Path] = None,
     center: str = None,
-    target_panel: str = "rCNS2",
 ) -> None:
     """Register all workflow handlers with the runner."""
     
@@ -1328,7 +1328,7 @@ def _register_command_handlers(
                 )
 
 
-def _create_classifier_with_work_dir(work_dir: Path, workflow_steps: List[str], target_panel: str = "rCNS2"):
+def _create_classifier_with_work_dir(work_dir: Path, workflow_steps: List[str], target_panel: str):
     """Create a classifier function that includes work directory in job context."""
 
     def classifier_with_work_dir(filepath: str) -> List[Job]:
@@ -1604,8 +1604,8 @@ def _display_workflow_config(
 @click.option(
     "--target-panel",
     type=click.Choice(_get_available_panels()),
-    default="rCNS2",
-    help="Target gene panel for fusion analysis (default: rCNS2). Use 'robin add-panel' to add custom panels.",
+    required=True,
+    help="Target gene panel for fusion analysis. Use 'robin add-panel' to add custom panels.",
 )
 def workflow(
     path: Path,
@@ -1857,7 +1857,7 @@ def workflow(
                 click.echo(f"Job deduplication enabled for: {valid_dedup_jobs}")
 
         # Register handlers and command handlers
-        _register_handlers(runner, legacy_analysis_queue, work_dir, reference, center, target_panel)
+        _register_handlers(runner, legacy_analysis_queue, work_dir, target_panel, reference, center)
         _register_command_handlers(runner, command_map, legacy_analysis_queue)
 
         # For Ray workflow, reinitialize processors after handlers are registered

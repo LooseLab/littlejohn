@@ -1653,7 +1653,7 @@ def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, threads=2)
         return analysis_result
 
 
-def cnv_handler(job, work_dir=None, target_panel="rCNS2", threads=2):
+def cnv_handler(job, work_dir=None, target_panel=None, threads=2):
     """
     Handler function for CNV analysis jobs.
     This function processes BAM files for copy number variation analysis.
@@ -1661,9 +1661,13 @@ def cnv_handler(job, work_dir=None, target_panel="rCNS2", threads=2):
     Args:
         job: The workflow job containing file and metadata
         work_dir: Optional base directory for output (defaults to BAM file directory)
-        target_panel: Target panel type for consistency with other analysis components
+        target_panel: Target panel type (required)
         threads: Number of threads to use for CNV analysis (default: 2, configurable via job metadata)
     """
+    # Validate required parameters
+    if not target_panel:
+        raise ValueError("target_panel is required for CNV analysis")
+    
     # Get job-specific logger
     logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
     

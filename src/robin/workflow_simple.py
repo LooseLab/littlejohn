@@ -1438,7 +1438,7 @@ class FileWatcher(FileSystemEventHandler):
         ignore_patterns: Optional[List[str]] = None,
         verbose: bool = False,
         show_progress: bool = True,
-        target_panel: str = "rCNS2",
+        target_panel: str,
     ):
         self.watch_dir = watch_dir
         self.preprocessor_func = preprocessor_func
@@ -1609,7 +1609,7 @@ class FileWatcher(FileSystemEventHandler):
 _job_id_counter = itertools.count(1000)
 
 
-def default_file_classifier(filepath: str, workflow_plan: List[str], target_panel: str = "rCNS2") -> List[Job]:
+def default_file_classifier(filepath: str, workflow_plan: List[str], target_panel: str) -> List[Job]:
     """Default classifier that creates jobs for a file based on a workflow plan."""
     job_id = next(_job_id_counter)
     ctx = WorkflowContext(filepath)
@@ -1801,7 +1801,7 @@ class WorkflowRunner:
         bed_workers: int = 1,
         reference: Optional[Path] = None,
         center: str = None,
-        target_panel: str = "rCNS2",
+        target_panel: str,
         enable_batching: bool = True,
     ):
         self.manager = WorkflowManager(

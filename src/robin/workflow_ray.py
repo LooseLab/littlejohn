@@ -574,7 +574,9 @@ def _wrap_real_handler(
 
                 # Get reference from job metadata if available
                 reference = job.context.metadata.get("reference")
-                target_panel = job.context.metadata.get("target_panel", "rCNS2")
+                target_panel = job.context.metadata.get("target_panel")
+                if not target_panel:
+                    raise ValueError(f"No target_panel found in job metadata for {job_type} handler")
 
                 # Call handler with appropriate parameters
                 if (
@@ -784,7 +786,7 @@ class Coordinator:
         analysis_workers: int = 1,
         preset: Optional[str] = None,
         reference: Optional[str] = None,
-        target_panel: str = "rCNS2",
+        target_panel: str,
         enable_batching: bool = True,
     ):
         # dedup maps
@@ -2373,7 +2375,7 @@ class Pool:
 # ---------- Classifier & Runner ----------
 
 
-def default_file_classifier(filepath: str, plan: List[str], target_panel: str = "rCNS2") -> List[Job]:
+def default_file_classifier(filepath: str, plan: List[str], target_panel: str) -> List[Job]:
     ctx = WorkflowContext(filepath)
     ctx.add_metadata("filename", os.path.basename(filepath))
     ctx.add_metadata("created", time.time())
@@ -2716,7 +2718,7 @@ async def run(
     gui_host: str = "0.0.0.0",
     gui_port: int = 8081,
     center: str = None,
-    target_panel: str = "rCNS2",
+    target_panel: str,
     enable_batching: bool = True,
 ):
     global GLOBAL_LOG_LEVEL

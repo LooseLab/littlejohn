@@ -128,7 +128,7 @@ def _perform_fusion_analysis(
     temp_dir: str,
     metadata: Dict[str, Any],
     fusion_metadata: FusionMetadata,
-    target_panel: str = "rCNS2",
+    target_panel: str,
     has_supplementary: bool = False,
     supplementary_read_ids: List[str] = [],
     work_dir: str = None,
@@ -168,7 +168,7 @@ def process_single_file(
     metadata: Dict[str, Any],
     work_dir: str,
     logger=None,
-    target_panel: str = "rCNS2",
+    target_panel: str,
     has_supplementary: bool = False,
     supplementary_read_ids: List[str] = [],
 ) -> Dict[str, Any]:
@@ -305,7 +305,7 @@ def process_single_file(
         }
 
 
-def process_multiple_files(bam_paths, metadata_list, work_dir, logger, target_panel="rCNS2"):
+def process_multiple_files(bam_paths, metadata_list, work_dir, logger, target_panel=None):
     """
     Process multiple BAM files for fusion analysis using staged processing.
     
@@ -496,15 +496,19 @@ def process_multiple_files(bam_paths, metadata_list, work_dir, logger, target_pa
         return analysis_result
 
 
-def fusion_handler(job, work_dir=None, target_panel="rCNS2"):
+def fusion_handler(job, work_dir=None, target_panel=None):
     """
     Handler function for fusion analysis jobs in the workflow system.
 
     Args:
         job: Job object from the workflow system
         work_dir: Working directory for output
-        target_panel: Target gene panel for fusion analysis (rCNS2, AML, or PanCan)
+        target_panel: Target gene panel for fusion analysis (required)
     """
+    # Validate required parameters
+    if not target_panel:
+        raise ValueError("target_panel is required for fusion analysis")
+    
     try:
         # Get logger with proper parameters
         logger = get_job_logger(str(job.job_id), "fusion", job.context.filepath)

@@ -417,7 +417,7 @@ class TargetMetadata:
 class TargetAnalysis:
     """Target analysis worker"""
 
-    def __init__(self, work_dir=None, config_path=None, threads=4, target_panel="rCNS2", 
+    def __init__(self, work_dir=None, config_path=None, threads=4, target_panel=None, 
                  batch_size=10, use_staging=True):
         logger = logging.getLogger("robin.target")
 
@@ -459,7 +459,7 @@ class TargetAnalysis:
 
         logger.info(f"Target Analysis initialized (staging={'enabled' if use_staging else 'disabled'}, batch_size={batch_size})")
 
-    def _find_target_bed(self, target_panel: str = "rCNS2") -> str:
+    def _find_target_bed(self, target_panel: str) -> str:
         """Find the target BED file from robin resources based on panel type"""
         logger = logging.getLogger("robin.target")
         
@@ -1702,7 +1702,7 @@ def process_single_file(
         return analysis_result
 
 
-def process_multiple_files(bam_paths, metadata_list, work_dir, logger, reference=None, target_panel="rCNS2"):
+def process_multiple_files(bam_paths, metadata_list, work_dir, logger, reference=None, target_panel=None):
     """
     Process multiple BAM files for target analysis using staged processing.
     
@@ -1850,7 +1850,7 @@ def process_multiple_files(bam_paths, metadata_list, work_dir, logger, reference
         return analysis_result
 
 
-def target_handler(job, work_dir=None, reference=None, target_panel="rCNS2"):
+def target_handler(job, work_dir=None, reference=None, target_panel=None):
     """
     Handler function for target analysis jobs.
     This function processes files for target-specific analysis.
@@ -1859,8 +1859,12 @@ def target_handler(job, work_dir=None, reference=None, target_panel="rCNS2"):
         job: The workflow job containing file and metadata
         work_dir: Optional base directory for output (defaults to file directory)
         reference: Optional path to reference genome for SNP calling
-        target_panel: Target panel type (rCNS2, AML, PanCan)
+        target_panel: Target panel type (required)
     """
+    # Validate required parameters
+    if not target_panel:
+        raise ValueError("target_panel is required for target analysis")
+    
     # Get job-specific logger
     logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
     
@@ -2129,7 +2133,7 @@ def target_handler(job, work_dir=None, reference=None, target_panel="rCNS2"):
 
 
 def finalize_accumulation_for_sample(
-    sample_id: str, work_dir: str, target_panel: str = "rCNS2"
+    sample_id: str, work_dir: str, target_panel: str
 ) -> Dict[str, Any]:
     """
     Force final accumulation of any remaining staged files for a sample.
