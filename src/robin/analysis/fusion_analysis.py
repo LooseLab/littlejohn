@@ -167,8 +167,8 @@ def process_single_file(
     file_path: str,
     metadata: Dict[str, Any],
     work_dir: str,
-    logger=None,
     target_panel: str,
+    logger=None,
     has_supplementary: bool = False,
     supplementary_read_ids: List[str] = [],
 ) -> Dict[str, Any]:
