@@ -1433,12 +1433,12 @@ class FileWatcher(FileSystemEventHandler):
         watch_dir: str,
         preprocessor_func: Callable[[str], List[Job]],
         manager: WorkflowManager,
+        target_panel: str,
         recursive: bool = True,
         patterns: Optional[List[str]] = None,
         ignore_patterns: Optional[List[str]] = None,
         verbose: bool = False,
         show_progress: bool = True,
-        target_panel: str,
     ):
         self.watch_dir = watch_dir
         self.preprocessor_func = preprocessor_func
@@ -2031,12 +2031,12 @@ class WorkflowRunner:
             watch_dir=watch_dir,
             preprocessor_func=classifier_func,
             manager=self.manager,
+            target_panel=self.target_panel,
             recursive=recursive,
             patterns=patterns,
             ignore_patterns=ignore_patterns,
             verbose=self.verbose,
             show_progress=show_progress,
-            target_panel=self.target_panel,
         )
 
         # Start worker threads first to ensure queues are consumed immediately
