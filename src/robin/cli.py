@@ -1119,6 +1119,7 @@ def _create_workflow_runner(
             from robin.workflow_simple import WorkflowRunner
 
             runner = WorkflowRunner(
+                target_panel=target_panel,
                 verbose=verbose,
                 analysis_workers=analysis_workers,
                 use_separate_analysis_queues=not legacy_analysis_queue,
@@ -1126,13 +1127,13 @@ def _create_workflow_runner(
                 bed_workers=bed_workers,
                 reference=reference,
                 center=center,
-                target_panel=target_panel,
             )
         return runner
     else:
         from robin.workflow_simple import WorkflowRunner
 
         return WorkflowRunner(
+            target_panel=target_panel,
             verbose=verbose,
             analysis_workers=analysis_workers,
             use_separate_analysis_queues=not legacy_analysis_queue,
@@ -1140,7 +1141,6 @@ def _create_workflow_runner(
             bed_workers=bed_workers,
             reference=reference,
             center=center,
-            target_panel=target_panel,
         )
 
 

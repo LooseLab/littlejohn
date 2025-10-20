@@ -1794,6 +1794,7 @@ class WorkflowRunner:
 
     def __init__(
         self,
+        target_panel: str,
         verbose: bool = False,
         analysis_workers: int = 1,
         use_separate_analysis_queues: bool = True,
@@ -1801,7 +1802,6 @@ class WorkflowRunner:
         bed_workers: int = 1,
         reference: Optional[Path] = None,
         center: str = None,
-        target_panel: str,
         enable_batching: bool = True,
     ):
         self.manager = WorkflowManager(
