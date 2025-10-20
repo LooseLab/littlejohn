@@ -2440,7 +2440,7 @@ async def submit_existing_paths(
             if _matches_any_pattern(pth, patterns) and _matches_no_ignores(
                 pth, ignore_patterns
             ):
-                jobs = default_file_classifier(str(pth), plan)
+                jobs = default_file_classifier(str(pth), plan, coord_target_panel)
                 if work_dir:
                     for j in jobs:
                         j.context.add_metadata("work_dir", work_dir)
@@ -2464,7 +2464,7 @@ async def submit_existing_paths(
                     f, ignore_patterns
                 ):
                     continue
-                jobs = default_file_classifier(str(f), plan)
+                jobs = default_file_classifier(str(f), plan, coord_target_panel)
                 if work_dir:
                     for j in jobs:
                         j.context.add_metadata("work_dir", work_dir)
@@ -2587,6 +2587,7 @@ class RayFileWatcher(FileSystemEventHandler):
         self,
         coord,
         plan: List[str],
+        target_panel: str,
         patterns: Optional[List[str]] = None,
         ignore_patterns: Optional[List[str]] = None,
         recursive: bool = True,
@@ -2594,6 +2595,7 @@ class RayFileWatcher(FileSystemEventHandler):
     ):
         self.coord = coord
         self.plan = plan
+        self.target_panel = target_panel
         self.patterns = patterns or ["*"]
         self.ignore_patterns = ignore_patterns or []
         self.recursive = recursive
@@ -2639,7 +2641,7 @@ class RayFileWatcher(FileSystemEventHandler):
         if not self._should_process(fp):
             return
         self.processed.add(fp)
-        jobs = default_file_classifier(fp, self.plan)
+        jobs = default_file_classifier(fp, self.plan, self.target_panel)
         if self.work_dir:
             for j in jobs:
                 j.context.add_metadata("work_dir", self.work_dir)
@@ -3040,6 +3042,7 @@ async def run(
         watcher = RayFileWatcher(
             coord,
             plan,
+            target_panel,
             patterns=patterns,
             ignore_patterns=ignore_patterns,
             recursive=recursive,
