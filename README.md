@@ -1,31 +1,36 @@
 # robin
 
-A Python CLI tool for automated BAM file processing and bioinformatics analysis workflows.
+A high-performance Python CLI tool for automated BAM file processing and bioinformatics analysis workflows with advanced GUI monitoring capabilities.
 
 ## Overview
 
-robin is a specialized bioinformatics workflow engine designed for processing BAM files through automated pipelines. It provides a robust, multi-threaded system for running complex analysis workflows with built-in support for methylation analysis, copy number variation detection, fusion detection, and various classification algorithms.
+robin is a specialized bioinformatics workflow engine designed for processing BAM files through automated pipelines. It provides a robust, multi-threaded system for running complex analysis workflows with built-in support for methylation analysis, copy number variation detection, fusion detection, and various classification algorithms. The platform features an advanced web-based GUI for real-time workflow monitoring, progress tracking, and interactive data visualization.
 
 ## Key Features
 
-- **BAM-Focused Processing**: Specialized for BAM file workflows with automatic metadata extraction
-- **Multi-Queue Workflow System**: Separate queues for preprocessing, analysis, classification, and slow jobs
+- **High-Performance Processing**: Optimized for large-scale BAM file analysis with batched processing and memory management
+- **Advanced Multi-Queue Workflow System**: Separate queues for preprocessing, analysis, classification, and slow jobs with intelligent job scheduling
 - **Built-in Analysis Modules**: 
-  - MGMT methylation analysis
-  - Copy number variation (CNV) analysis
-  - Fusion detection analysis
-  - Target analysis
-  - Sturgeon classification
-  - NanoDX and PanNanoDX analysis
-  - Random Forest classification
-- **Automatic Preprocessing**: Metadata extraction and BED conversion
-- **Job Deduplication**: Prevents redundant processing per sample
-- **Configurable Logging**: Global and per-job log level control
-- **Progress Tracking**: Real-time progress bars and worker monitoring
-- **File Watching**: Monitor directories for new BAM files
-- **Master CSV Tracking**: Automatic sample-level statistics aggregation
-- **Ray Distributed Computing**: Optional distributed processing support
-- **GUI Workflow Monitor**: Built-in NiceGUI-based monitoring interface
+  - MGMT methylation analysis with enhanced accuracy
+  - Copy number variation (CNV) analysis with breakpoint detection
+  - Fusion detection analysis with structural variant calling
+  - Target analysis with comprehensive coverage metrics
+  - Sturgeon classification with improved model integration
+  - NanoDX and PanNanoDX analysis with enhanced visualization
+  - Random Forest classification with optimized performance
+- **Intelligent Preprocessing**: Automated metadata extraction and multi-file BED conversion
+- **Advanced Job Management**: Job deduplication, priority queuing, and automatic retry mechanisms
+- **Comprehensive Logging**: Multi-level logging with per-job log level control and real-time monitoring
+- **Real-Time Progress Tracking**: Live progress bars, worker monitoring, and detailed status updates
+- **Smart File Watching**: Monitor directories for new BAM files with configurable filters
+- **Master CSV Tracking**: Automatic sample-level statistics aggregation with enhanced reporting
+- **Ray Distributed Computing**: High-performance distributed processing with automatic resource management
+- **Advanced GUI Workflow Monitor**: Built-in NiceGUI 3.0+ web-based interface with:
+  - Real-time sample table updates
+  - Interactive progress monitoring
+  - Live workflow status tracking
+  - Comprehensive error reporting
+  - Downloadable results and reports
 
 ## Installation
 
@@ -68,11 +73,11 @@ robin is a specialized bioinformatics workflow engine designed for processing BA
    ```bash
    # For Linux/Windows
    conda env create -f robin.yml
-   conda activate robin_0_5
+   conda activate robin_0_3
    
    # For macOS
    conda env create -f robin_osx.yml
-   conda activate robin_0_5
+   conda activate robin_0_3
    ```
 
 5. **Install robin in development mode**:
@@ -505,6 +510,32 @@ robin workflow /path/to/bam/files \
 ```
 -->
 
+## Performance Features
+
+### Enhanced Processing Capabilities
+- **Batched Processing**: All analysis workflows now support batched processing for improved efficiency
+- **Memory Optimization**: Intelligent memory management for large datasets and long-running processes
+- **Multi-threading**: Configurable multi-threaded BAM processing via `LJ_BAM_THREADS` environment variable
+- **Async Updates**: Non-blocking GUI updates during analysis execution
+- **Smart Progress Tracking**: Streamlined progress indicators with real-time status updates
+
+### Advanced Configuration
+- **Environment Variables**: 
+  - `ROBIN_DEV_MODE`: Enable development features and debugging
+  - `LJ_CNV_SUBPROCESS_DEBUG`: Debug CNV subprocess operations
+  - `LJ_BAM_THREADS`: Configure BAM processing threads (default: 0 for single-threaded)
+  - `robin_REFERENCE`: Set reference genome path
+
+### Recent Improvements (better_loading branch)
+- **Enhanced Sample Table**: Fixed real-time updates and improved search functionality
+- **Improved Fusion Detection**: Better visualization and interaction for fusion analysis results
+- **Optimized Memory Usage**: Reduced memory footprint for large-scale analysis
+- **Better Error Handling**: Enhanced error recovery and user notification
+- **Streamlined Progress Tracking**: More efficient progress indicators and status updates
+- **Multi-file BED Conversion**: Support for processing multiple BED files simultaneously
+- **Enhanced Report Generation**: Improved PDF report creation with better formatting
+- **GUI Responsiveness**: Smoother loading states and more responsive interface
+
 ## Dependencies
 
 ### Core Dependencies
@@ -517,7 +548,7 @@ robin workflow /path/to/bam/files \
 - `ruptures>=1.1.0`: Change point detection
 - `tqdm>=4.64.0`: Progress bars
 - `ray[default]>=2.0.0`: Distributed computing
-- `nicegui>=1.4.0`: GUI framework
+- `nicegui>=3.0.4`: Advanced GUI framework with enhanced performance
 
 ### External Dependencies
 - `bedtools`: For region extraction and BED file operations
