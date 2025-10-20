@@ -452,6 +452,46 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
                     ui.label(f"Viewing: {platform.node()}").classes(
                         f"max-[{MENU_BREAKPOINT}px]:hidden text-body-medium"
                     )
+                    # Monitored directory indicator (shown globally)
+                    try:
+                        from robin.gui.app import get_gui_launcher as _get_launcher
+                        _launcher = _get_launcher()
+                        _mon_dir = (
+                            _launcher.monitored_directory
+                            if _launcher and getattr(_launcher, "monitored_directory", "")
+                            else ""
+                        )
+                    except Exception:
+                        _mon_dir = ""
+                    if _mon_dir:
+                        ui.label("Monitoring").classes(
+                            f"max-[{MENU_BREAKPOINT}px]:hidden text-body-medium"
+                        )
+                        ui.icon("folder").classes(
+                            f"max-[{MENU_BREAKPOINT}px]:hidden"
+                        )
+                        ui.label(_mon_dir).classes(
+                            f"max-[{MENU_BREAKPOINT}px]:hidden text-body-medium break-all"
+                        )
+                    # Output directory indicator
+                    try:
+                        _out_dir = (
+                            _launcher.output_directory
+                            if _launcher and getattr(_launcher, "output_directory", "")
+                            else ""
+                        )
+                    except Exception:
+                        _out_dir = ""
+                    if _out_dir:
+                        ui.label("Output").classes(
+                            f"max-[{MENU_BREAKPOINT}px]:hidden text-body-medium"
+                        )
+                        ui.icon("folder_open").classes(
+                            f"max-[{MENU_BREAKPOINT}px]:hidden"
+                        )
+                        ui.label(_out_dir).classes(
+                            f"max-[{MENU_BREAKPOINT}px]:hidden text-body-medium break-all"
+                        )
                     ui.label("CPU").classes(
                         f"max-[{MENU_BREAKPOINT}px]:hidden text-body-medium"
                     )
@@ -487,6 +527,10 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
                             ui.menu_item(
                                 "Workflow",
                                 lambda: ui.navigate.to("/workflow"),
+                            ).classes("text-body-medium")
+                            ui.menu_item(
+                                "Workflow Settings",
+                                lambda: ui.navigate.to("/workflow_settings"),
                             ).classes("text-body-medium")
                             ui.menu_item(
                                 "Documentation",
@@ -862,6 +906,127 @@ flowchart TD
         ).classes("w-full elevation-2 rounded-xl")
 
 
+def create_workflow_settings_page():
+    """Display the current workflow settings and configuration."""
+    with frame(
+        "Workflow Settings",
+        smalltitle="Settings",
+    ):
+        # Get the GUI launcher to access workflow configuration
+        from robin.gui.app import get_gui_launcher
+        launcher = get_gui_launcher()
+        
+        if not launcher or not launcher.workflow_runner:
+            ui.label("No workflow configuration available").classes("text-gray-600 text-center")
+            return
+        
+        # Extract configuration from the workflow runner
+        runner = launcher.workflow_runner
+        workflow_steps = launcher.workflow_steps or []
+        center = launcher.center or "Not specified"
+        monitored_dir = launcher.monitored_directory or "Not specified"
+        output_dir = getattr(launcher, "output_directory", "") or "Not specified"
+        
+        # Create settings cards
+        with ui.column().classes("w-full gap-6"):
+            
+            # General Settings Card
+            with ui.card().classes("w-full elevation-2 rounded-xl"):
+                ui.label("General Settings").classes("text-h6 font-semibold mb-4")
+                
+                with ui.grid(columns=2).classes("w-full gap-4"):
+                    with ui.column():
+                        ui.label("Center ID").classes("text-body-medium font-medium")
+                        ui.label(center).classes("text-body-large")
+                        
+                        ui.label("Monitored Directory").classes("text-body-medium font-medium mt-4")
+                        ui.label(monitored_dir).classes("text-body-large break-all")
+                    
+                    with ui.column():
+                        ui.label("Workflow Steps").classes("text-body-medium font-medium")
+                        if workflow_steps:
+                            with ui.column().classes("gap-1"):
+                                for step in workflow_steps:
+                                    ui.label(f"• {step}").classes("text-body-large")
+                        else:
+                            ui.label("No steps configured").classes("text-body-large text-gray-500")
+
+                # Output Directory row
+                with ui.grid(columns=2).classes("w-full gap-4 mt-2"):
+                    with ui.column():
+                        ui.label("Output Directory").classes("text-body-medium font-medium")
+                        ui.label(output_dir).classes("text-body-large break-all")
+            
+            # Workflow Runner Settings Card
+            with ui.card().classes("w-full elevation-2 rounded-xl"):
+                ui.label("Workflow Runner Settings").classes("text-h6 font-semibold mb-4")
+                
+                with ui.grid(columns=2).classes("w-full gap-4"):
+                    with ui.column():
+                        # Check if it's a Ray workflow runner
+                        if hasattr(runner, 'coordinator'):
+                            ui.label("Execution Engine").classes("text-body-medium font-medium")
+                            ui.label("Ray Distributed Computing").classes("text-body-large")
+                            
+                            if hasattr(runner.coordinator, 'analysis_workers'):
+                                ui.label("Analysis Workers").classes("text-body-medium font-medium mt-4")
+                                ui.label(str(runner.coordinator.analysis_workers)).classes("text-body-large")
+                            
+                            if hasattr(runner.coordinator, 'target_panel'):
+                                ui.label("Target Panel").classes("text-body-medium font-medium mt-4")
+                                ui.label(runner.coordinator.target_panel).classes("text-body-large")
+                            
+                            if hasattr(runner.coordinator, 'reference'):
+                                ui.label("Reference Genome").classes("text-body-medium font-medium mt-4")
+                                if runner.coordinator.reference:
+                                    ui.label(runner.coordinator.reference).classes("text-body-large break-all")
+                                else:
+                                    ui.label("Not configured").classes("text-body-large text-gray-500")
+                        
+                        # Check if it's a simple workflow runner
+                        elif hasattr(runner, 'manager'):
+                            ui.label("Execution Engine").classes("text-body-medium font-medium")
+                            ui.label("Threading-based Processing").classes("text-body-large")
+                            
+                            if hasattr(runner, 'analysis_workers'):
+                                ui.label("Analysis Workers").classes("text-body-medium font-medium mt-4")
+                                ui.label(str(runner.analysis_workers)).classes("text-body-large")
+                            
+                            if hasattr(runner, 'target_panel'):
+                                ui.label("Target Panel").classes("text-body-medium font-medium mt-4")
+                                ui.label(runner.target_panel).classes("text-body-large")
+                            
+                            if hasattr(runner, 'reference'):
+                                ui.label("Reference Genome").classes("text-body-medium font-medium mt-4")
+                                if runner.reference:
+                                    ui.label(str(runner.reference)).classes("text-body-large break-all")
+                                else:
+                                    ui.label("Not configured").classes("text-body-large text-gray-500")
+                    
+                    with ui.column():
+                        ui.label("Additional Information").classes("text-body-medium font-medium")
+                        ui.label("Configuration details are read-only and reflect the settings used when the workflow was launched.").classes("text-body-small text-gray-600")
+            
+            # System Information Card
+            with ui.card().classes("w-full elevation-2 rounded-xl"):
+                ui.label("System Information").classes("text-h6 font-semibold mb-4")
+                
+                with ui.grid(columns=2).classes("w-full gap-4"):
+                    with ui.column():
+                        ui.label("ROBIN Version").classes("text-body-medium font-medium")
+                        ui.label(get_about().__version__).classes("text-body-large")
+                        
+                        ui.label("Sturgeon Version").classes("text-body-medium font-medium mt-4")
+                        ui.label(get_sturgeon_version()).classes("text-body-large")
+                    
+                    with ui.column():
+                        ui.label("CrossNN Version").classes("text-body-medium font-medium")
+                        ui.label(get_crossnn_version()).classes("text-body-large")
+                        
+                        ui.label("CNV from BAM Version").classes("text-body-medium font-medium mt-4")
+                        ui.label(get_cnv_from_bam_version()).classes("text-body-large")
+
+
 def register_theme_pages():
     """Register the theme pages. This function should be called when the module is imported."""
     @ui.page("/")
@@ -871,6 +1036,10 @@ def register_theme_pages():
     @ui.page("/workflow")
     def workflow_page():
         create_workflow_page()
+    
+    @ui.page("/workflow_settings")
+    def workflow_settings_page():
+        create_workflow_settings_page()
 
 
 def get_modkit_version():

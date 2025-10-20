@@ -2790,12 +2790,17 @@ async def run(
             print("GUI not launched: --work-dir not provided.")
         else:
             print("Launching GUI early to ensure immediate availability...")
+            # Use the input paths being watched (not the output work_dir) for display
+            _monitored_display = (
+                ", ".join([str(p) for p in paths]) if paths else (work_dir or "")
+            )
             launcher = _gui_launch(
                 host=gui_host,
                 port=gui_port,
                 workflow_runner=workflow_runner,
                 workflow_steps=plan,
-                monitored_directory=work_dir,
+                monitored_directory=_monitored_display,
+                output_directory=work_dir or "",
                 center=center,
             )
             gui_launcher = launcher

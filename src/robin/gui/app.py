@@ -22,6 +22,7 @@ def launch_gui(
     workflow_runner: Any = None,
     workflow_steps: Optional[list] = None,
     monitored_directory: str = "",
+    output_directory: str = "",
     reload: bool = False,
     center: str = None,
 ) -> GUILauncher:
@@ -42,7 +43,17 @@ def launch_gui(
     abs_mon_dir = (
         str(Path(monitored_directory).resolve()) if monitored_directory else ""
     )
-    success = launcher.launch_gui(workflow_runner, workflow_steps, abs_mon_dir, reload, center)
+    # Normalize output directory as well
+    abs_out_dir = str(Path(output_directory).resolve()) if output_directory else ""
+
+    success = launcher.launch_gui(
+        workflow_runner,
+        workflow_steps,
+        abs_mon_dir,
+        abs_out_dir,
+        reload,
+        center,
+    )
     if not success:
         raise RuntimeError("Failed to launch GUI")
 

@@ -80,6 +80,7 @@ class GUILauncher:
         self.workflow_runner = None
         self.workflow_steps = []
         self.monitored_directory = ""
+        self.output_directory = ""
         self.reload = reload
         self.center = None  # Center ID for the analysis
         # Message queue for non-blocking communication
@@ -132,6 +133,7 @@ class GUILauncher:
         workflow_runner: Any = None,
         workflow_steps: list = None,
         monitored_directory: str = "",
+        output_directory: str = "",
         reload: bool = False,
         center: str = None,
     ) -> bool:
@@ -153,6 +155,14 @@ class GUILauncher:
             )
         except Exception:
             self.monitored_directory = monitored_directory
+
+        # Store absolute output directory if provided
+        try:
+            self.output_directory = (
+                str(Path(output_directory).resolve()) if output_directory else ""
+            )
+        except Exception:
+            self.output_directory = output_directory
 
         try:
             # Start GUI in completely isolated background thread
@@ -738,8 +748,8 @@ class GUILauncher:
                                 "bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors text-center"
                             )
                             ui.button(
-                                "Launch New Workflow",
-                                on_click=lambda: self._launch_workflow_button_clicked(),
+                                "Workflow Settings",
+                                on_click=lambda: self._workflow_settings_button_clicked(),
                             ).classes(
                                 "bg-green-600 hover:bg-green-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors"
                             )
@@ -3108,9 +3118,9 @@ class GUILauncher:
         except Exception:
             pass
 
-    def _launch_workflow_button_clicked(self):
-        """Handle launch workflow button click."""
-        ui.notify("Launch workflow functionality not implemented yet", type="info")
+    def _workflow_settings_button_clicked(self):
+        """Handle workflow settings button click."""
+        ui.navigate.to("/workflow_settings")
 
     def stop_gui(self):
         """Stop the GUI thread."""
@@ -3182,6 +3192,7 @@ def launch_gui(
     workflow_runner: Any = None,
     workflow_steps: list = None,
     monitored_directory: str = "",
+    output_directory: str = "",
     center: str = None,
 ) -> GUILauncher:
     """Legacy launch function (kept for backward compatibility).
@@ -3198,6 +3209,7 @@ def launch_gui(
         workflow_runner=workflow_runner,
         workflow_steps=workflow_steps,
         monitored_directory=monitored_directory,
+        output_directory=output_directory,
         center=center,
     )
 
