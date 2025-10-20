@@ -599,9 +599,11 @@ def _get_analysis_panel(sample_dir: Path) -> str:
                 panel = df.iloc[0]["analysis_panel"]
                 if panel and str(panel).strip() != "":
                     return str(panel).strip()
-        return "rCNS2"  # Default fallback
+        # No fallback to rCNS2 - return empty string if not found
+        return ""
     except Exception:
-        return "rCNS2"  # Default fallback
+        # No fallback to rCNS2 - return empty string if error
+        return ""
 
 
 def _extract_run_information(sample_dir: Path, sample_id: str) -> Dict[str, str]:

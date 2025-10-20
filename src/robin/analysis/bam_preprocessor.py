@@ -719,6 +719,14 @@ def bam_preprocessing_handler(job, center: str = None):
                 csv_manager.update_master_csv(
                     sample_id, bam_stats, metadata.extracted_data
                 )
+                
+                # Update analysis panel in master.csv (preserve from job context)
+                existing_target_panel = job.context.metadata.get("target_panel")
+                if existing_target_panel:
+                    csv_manager.update_analysis_panel(sample_id, existing_target_panel)
+                    logger.info(f"Updated master.csv with analysis panel '{existing_target_panel}' for sample {sample_id}")
+                else:
+                    logger.warning(f"No target_panel found in job context for sample {sample_id} - analysis_panel not set in master.csv")
 
             except Exception as e:
                 logger.warning(f"Could not update master.csv for {sample_id}: {e}")

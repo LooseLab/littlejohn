@@ -153,10 +153,10 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             panel = df.iloc[0]["analysis_panel"]
                             if panel and str(panel).strip() != "":
                                 return str(panel).strip()
-                    return "rCNS2"  # Default fallback
+                    return ""  # No default fallback
                 except Exception as e:
                     _log_notify(f"Exception in _get_target_panel_info: {e}", level="error", notify=False)
-                    return "rCNS2"  # Default fallback
+                    return ""  # No default fallback
             
             target_panel = _get_target_panel_info()
             
@@ -167,9 +167,13 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 "PanCan": ("bg-purple-100", "text-purple-800", "Pan-Cancer Panel")
             }
             
-            panel_color_classes, panel_text_classes, panel_display_name = panel_colors.get(
-                target_panel, ("bg-gray-100", "text-gray-800", f"{target_panel} Panel")
-            )
+            if not target_panel:
+                # No panel found - show warning
+                panel_color_classes, panel_text_classes, panel_display_name = ("bg-red-100", "text-red-800", "Panel Not Found")
+            else:
+                panel_color_classes, panel_text_classes, panel_display_name = panel_colors.get(
+                    target_panel, ("bg-gray-100", "text-gray-800", f"{target_panel} Panel")
+                )
             
             # Store panel information in state for use by other functions
             key = str(sample_dir)

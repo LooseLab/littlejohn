@@ -247,13 +247,8 @@ def _setup_file_paths(target_panel: str = "rCNS2") -> Tuple[str, str]:
             if os.path.exists(custom_panel_path):
                 gene_bed = custom_panel_path
             else:
-                # Fallback to rCNS2 if custom panel not found
-                target_panel = "rCNS2"
-                rCNS2_path = os.path.join(resources_dir, "rCNS2_panel_name_uniq.bed")
-                if os.path.exists(rCNS2_path):
-                    gene_bed = rCNS2_path
-                else:
-                    gene_bed = "rCNS2_panel_name_uniq.bed"
+                # Custom panel not found - use placeholder but don't change target_panel
+                gene_bed = f"{target_panel}_panel_name_uniq.bed"
 
         # Look for all genes BED file
         all_genes_path = os.path.join(resources_dir, "all_genes2.bed")
@@ -271,9 +266,8 @@ def _setup_file_paths(target_panel: str = "rCNS2") -> Tuple[str, str]:
         elif target_panel == "PanCan":
             gene_bed = "2025-03_pan-cancer_merged_20kb.bed"
         else:
-            # Default to rCNS2
-            target_panel = "rCNS2"
-            gene_bed = "rCNS2_panel_name_uniq.bed"
+            # Custom panel - use as is, don't fallback to rCNS2
+            gene_bed = f"{target_panel}_panel_name_uniq.bed"
 
         all_gene_bed = "all_genes2.bed"
 

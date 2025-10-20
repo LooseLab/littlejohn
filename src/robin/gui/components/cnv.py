@@ -430,7 +430,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
         """Load gene BED file based on the analysis panel used for the sample"""
         try:
             # Determine which panel to use
-            panel = "rCNS2"  # Default fallback
+            panel = ""  # No default fallback
             if sample_dir:
                 try:
                     master_csv_path = sample_dir / "master.csv"
@@ -446,7 +446,10 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             
             # Map panel to BED filename
             bed_filename = None
-            if panel == "rCNS2":
+            if not panel:
+                # No panel found - return empty DataFrame
+                return pd.DataFrame(columns=["chrom", "start_pos", "end_pos", "gene"])
+            elif panel == "rCNS2":
                 bed_filename = "rCNS2_panel_name_uniq.bed"
             elif panel == "AML":
                 bed_filename = "AML_panel_name_uniq.bed"
