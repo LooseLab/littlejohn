@@ -29,18 +29,35 @@ class MGMTSection(ReportSection):
         plot_out = None
         specific_sites_file = None
 
-        for file in natsort.natsorted(os.listdir(self.report.output)):
-            if file.endswith("_mgmt.csv"):
-                count = int(file.split("_")[0])
-                if count > last_seen:
-                    mgmt_results = pd.read_csv(os.path.join(self.report.output, file))
-                    plot_out = os.path.join(
-                        self.report.output, file.replace(".csv", ".png")
-                    )
-                    specific_sites_file = os.path.join(
-                        self.report.output, f"{count}_specific_sites.csv"
-                    )
-                    last_seen = count
+        # First, look for "final_mgmt.csv" files (highest priority)
+        final_files = [f for f in os.listdir(self.report.output) if f == "final_mgmt.csv"]
+        if final_files:
+            file = final_files[0]
+            mgmt_results = pd.read_csv(os.path.join(self.report.output, file))
+            plot_out = os.path.join(self.report.output, file.replace(".csv", ".png"))
+            specific_sites_file = os.path.join(self.report.output, "final_specific_sites.csv")
+            last_seen = 999999  # High number to indicate final result
+        else:
+            # Fallback to numeric-prefixed files
+            for file in natsort.natsorted(os.listdir(self.report.output)):
+                if file.endswith("_mgmt.csv"):
+                    try:
+                        # Try to extract numeric prefix from filename
+                        prefix = file.split("_")[0]
+                        count = int(prefix)
+                        if count > last_seen:
+                            mgmt_results = pd.read_csv(os.path.join(self.report.output, file))
+                            plot_out = os.path.join(
+                                self.report.output, file.replace(".csv", ".png")
+                            )
+                            specific_sites_file = os.path.join(
+                                self.report.output, f"{count}_specific_sites.csv"
+                            )
+                            last_seen = count
+                    except ValueError:
+                        # Skip files that don't start with a numeric prefix
+                        logger.debug(f"Skipping file with non-numeric prefix: {file}")
+                        continue
 
         if last_seen == 0 or mgmt_results is None:
             return
@@ -284,19 +301,22 @@ class MGMTSection(ReportSection):
                     self.elements.append(Spacer(1, 6))  # Reduced spacing
 
             # Add file sources information in a more compact format
+            if last_seen == 999999:  # Final file
+                results_file = "final_mgmt.csv"
+                plot_file = "final_mgmt.png"
+            else:
+                results_file = f"{last_seen}_mgmt.csv"
+                plot_file = f"{last_seen}_mgmt.png"
+            
             file_sources = [
                 ["Source", "Location"],  # Shorter headers
                 [
                     "Results",  # Shorter labels
-                    os.path.basename(
-                        os.path.join(self.report.output, f"{last_seen}_mgmt.csv")
-                    ),  # Just filename
+                    results_file,
                 ],
                 [
                     "Plot",
-                    os.path.basename(
-                        os.path.join(self.report.output, f"{last_seen}_mgmt.png")
-                    ),
+                    plot_file,
                 ],
             ]
 
@@ -394,8 +414,8 @@ class MGMTSection(ReportSection):
                 "PredictionScorePercent": (
                     float(prediction_score) if prediction_score is not None else None
                 ),
-                "ResultsFile": f"{last_seen}_mgmt.csv" if last_seen else None,
-                "PlotFile": f"{last_seen}_mgmt.png" if last_seen else None,
+                "ResultsFile": "final_mgmt.csv" if last_seen == 999999 else (f"{last_seen}_mgmt.csv" if last_seen else None),
+                "PlotFile": "final_mgmt.png" if last_seen == 999999 else (f"{last_seen}_mgmt.png" if last_seen else None),
                 "CpGSitesFile": (
                     os.path.basename(specific_sites_file)
                     if specific_sites_file

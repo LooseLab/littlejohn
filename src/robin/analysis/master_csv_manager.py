@@ -11,6 +11,14 @@ import pandas as pd
 from typing import Dict, Any
 from dataclasses import dataclass
 import logging
+import time
+
+# Import file locking (Unix/macOS)
+try:
+    import fcntl
+    HAS_FCNTL = True
+except ImportError:
+    HAS_FCNTL = False
 
 
 @dataclass
@@ -18,6 +26,44 @@ class MasterCSVManager:
     """Manages the creation and updating of master.csv files for each sample"""
 
     work_dir: str
+
+    def _acquire_lock(self, file_handle, exclusive=True, timeout=10.0):
+        """
+        Acquire a file lock with timeout.
+        
+        Args:
+            file_handle: Open file handle to lock
+            exclusive: If True, acquire exclusive lock (for writing). If False, shared lock (for reading)
+            timeout: Maximum time to wait for lock in seconds
+        
+        Returns:
+            True if lock acquired, False otherwise
+        """
+        if not HAS_FCNTL:
+            return True  # No locking available, proceed anyway
+        
+        lock_type = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        start_time = time.time()
+        
+        while True:
+            try:
+                fcntl.flock(file_handle.fileno(), lock_type | fcntl.LOCK_NB)
+                return True
+            except (IOError, OSError):
+                # Lock is held by another process
+                if time.time() - start_time >= timeout:
+                    return False
+                time.sleep(0.01)  # Wait 10ms before retry
+    
+    def _release_lock(self, file_handle):
+        """Release a file lock."""
+        if not HAS_FCNTL:
+            return
+        
+        try:
+            fcntl.flock(file_handle.fileno(), fcntl.LOCK_UN)
+        except (IOError, OSError):
+            pass  # Lock already released or file closed
 
     def update_master_csv(
         self, sample_id: str, bam_data: Dict[str, Any], bam_info: Dict[str, Any]
@@ -59,9 +105,17 @@ class MasterCSVManager:
             logger.error(f"Error updating master.csv for {sample_id}: {e}")
 
     def _load_existing_data(self, csv_path: str) -> Dict[str, Any]:
-        """Load existing data from CSV or create default structure"""
+        """
+        Load existing data from CSV or create default structure.
+        
+        No read locking is used because:
+        1. Writers use atomic write-and-rename, so readers never see partial files
+        2. Worst case is reading slightly stale data (acceptable for monitoring)
+        3. Keeps GUI responsive and non-blocking
+        """
         if os.path.exists(csv_path):
             try:
+                # Read without locking - atomic writes ensure we never see partial data
                 df = pd.read_csv(csv_path)
                 if not df.empty:
                     data = df.iloc[0].to_dict()
@@ -80,6 +134,9 @@ class MasterCSVManager:
                 print(f"Warning: Error reading existing CSV: {e}")
 
         # Return default structure
+        return self._get_default_structure()
+    
+    def _get_default_structure(self) -> Dict[str, Any]:
         return {
             "counter_bam_passed": 0,
             "counter_bam_failed": 0,
@@ -253,9 +310,46 @@ class MasterCSVManager:
             logger.error(f"Error updating analysis panel for {sample_id}: {e}")
 
     def _save_to_csv(self, data: Dict[str, Any], csv_path: str) -> None:
-        """Save data to CSV file"""
+        """
+        Save data to CSV file with exclusive locking to prevent concurrent writes.
+        Uses atomic write-and-rename pattern to prevent partial reads.
+        """
+        import tempfile
+        
+        # Create dataframe
         df = pd.DataFrame([data])
-        df.to_csv(csv_path, index=False)
+        
+        # Write to temporary file in the same directory (for atomic rename)
+        csv_dir = os.path.dirname(csv_path)
+        temp_fd, temp_path = tempfile.mkstemp(dir=csv_dir, prefix='.master_', suffix='.csv.tmp')
+        
+        try:
+            # Write to temp file with exclusive lock
+            with os.fdopen(temp_fd, 'w') as f:
+                # Acquire exclusive lock
+                if not self._acquire_lock(f, exclusive=True, timeout=10.0):
+                    raise IOError(f"Could not acquire exclusive lock for writing {csv_path}")
+                
+                try:
+                    # Write CSV content
+                    df.to_csv(f, index=False)
+                    # Ensure data is written to disk
+                    f.flush()
+                    os.fsync(f.fileno())
+                finally:
+                    self._release_lock(f)
+            
+            # Atomically rename temp file to target (this is atomic on Unix/macOS)
+            os.replace(temp_path, csv_path)
+            
+        except Exception as e:
+            # Clean up temp file if something went wrong
+            try:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+            except Exception:
+                pass
+            raise e
 
     # ---------------------------------------------------------------------
     # Public helpers for GUI/workflow to persist overview stats

@@ -291,9 +291,9 @@
 }
 
 .data-table__th {
-  padding: 16px 24px;
+  padding: 8px 12px;
   text-align: left;
-  font-size: 14px;  /* Match table content font size */
+  font-size: 11px;  /* Compact font size */
   font-weight: 600;  /* Apple's weight */
   color: var(--md-on-surface-variant);
   border-bottom: 1px solid var(--md-outline-variant);
@@ -302,8 +302,8 @@
 }
 
 .data-table__td {
-  padding: 16px 24px;
-  font-size: 14px;  /* Consistent font size for table content */
+  padding: 8px 12px;
+  font-size: 12px;  /* Compact font size for table content */
   color: var(--md-on-surface);
   border-bottom: 1px solid var(--md-outline-variant);
   letter-spacing: -0.25px;

@@ -216,8 +216,10 @@ def modkit_pileup_file_to_bed(
             )
 
         # For minimal data, we expect only the essential columns
-        if isinstance(input_data, pd.DataFrame) and len(modkit_df.columns) == 5:
-            # Minimal data format - columns should already be named correctly
+        # Support various optimized formats: 5, 8, 9, or 10 columns
+        if isinstance(input_data, pd.DataFrame) and len(modkit_df.columns) <= 10:
+            # Minimal/optimized data format (5-10 columns)
+            # Columns should already be named correctly
             expected_columns = [
                 "chrom",
                 "chromStart",
@@ -225,12 +227,20 @@ def modkit_pileup_file_to_bed(
                 "mod_code",
                 "strand",
             ]
-            if list(modkit_df.columns) == expected_columns:
-                # Data is already in minimal format, just filter by mod_code
+            # Check if all expected columns exist in the DataFrame
+            has_expected_cols = all(col in modkit_df.columns for col in expected_columns)
+            
+            if has_expected_cols:
+                # Data has the essential columns, just filter and select them
+                modkit_df = modkit_df[expected_columns].copy()
+                modkit_df = modkit_df[modkit_df["mod_code"] == fivemc_code]
+            elif len(modkit_df.columns) == 5:
+                # Exactly 5 unnamed columns - assign names
+                modkit_df.columns = expected_columns
                 modkit_df = modkit_df[modkit_df["mod_code"] == fivemc_code]
             else:
-                # Assign column names for minimal data
-                modkit_df.columns = expected_columns
+                # Optimized format with more columns - try to extract the essential ones
+                modkit_df = modkit_df[expected_columns].copy()
                 modkit_df = modkit_df[modkit_df["mod_code"] == fivemc_code]
         else:
             # Full data format - use original logic
@@ -303,23 +313,27 @@ def modkit_pileup_file_to_bed(
         ]
 
         # Load probes file
-        probes_df = read_probes_file(probes_file)
+        # The probes file has a header and uses whitespace (spaces) as delimiter
+        probes_df = pd.read_csv(probes_file, sep=r'\s+', header=0)
+        
+        # Rename columns to expected names if needed
+        if 'ID_REF' in probes_df.columns:
+            probes_df = probes_df.rename(columns={'ID_REF': 'probe_name'})
+        
+        # Keep only the columns we need
+        probes_df = probes_df[['chr', 'start', 'end', 'probe_name']].copy()
 
         # Ensure chromosome names match
-        probes_df["chr"] = probes_df["chr"].astype(str)  # Make sure probes are strings
+        probes_df["chr"] = probes_df["chr"].astype(str).str.replace("^chr", "", regex=True)  # Remove "chr" prefix
         modkit_df["chr"] = (
             modkit_df["chr"].astype(str).str.replace("^chr", "", regex=True)
         )  # Remove "chr" prefix
-
-        # Print to verify
-        # print("Normalized Chromosomes in probes:", np.unique(probes_df['chr']))
-        # print("Normalized Chromosomes in modkit:", np.unique(modkit_df['chr']))
+        
+        # Get unique chromosomes
+        chromosomes = np.unique(probes_df["chr"].astype(str))
 
         # Copy probes data for methylation processing
         probes_methyl_df = deepcopy(probes_df)
-
-        # Get unique chromosomes
-        chromosomes = np.unique(probes_df["chr"].astype(str))
 
         # Initialize methylation count columns
         probes_methyl_df["methylation_calls"] = 0
@@ -345,6 +359,10 @@ def modkit_pileup_file_to_bed(
                 neg_threshold=neg_threshold,
                 pos_threshold=pos_threshold,
             )
+
+            # Rename 'probe_name' to 'probe_id' for consistency
+            if 'probe_name' in calls_per_probe_chr.columns:
+                calls_per_probe_chr = calls_per_probe_chr.rename(columns={'probe_name': 'probe_id'})
 
             calls_per_probe.append(calls_per_probe_chr)
 
@@ -390,6 +408,10 @@ def modkit_pileup_file_to_bed(
 
         # Store result for return
         result_df = calls_per_probe.copy()
+        
+        # Rename 'probe_name' to 'probe_id' for Sturgeon compatibility
+        if 'probe_name' in result_df.columns:
+            result_df = result_df.rename(columns={'probe_name': 'probe_id'})
 
     finally:
         # Clean up large DataFrames that are no longer needed

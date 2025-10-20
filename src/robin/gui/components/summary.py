@@ -25,7 +25,7 @@ def _run_info_section(sample_dir: Path, sample_id: str):
         ui.label("Run Details").classes("text-lg font-semibold text-blue-800")
         ui.separator().classes().style("border: 1px solid var(--md-primary)")
         
-        with ui.row().classes("w-full gap-4"):
+        with ui.row().classes("w-full gap-1 flex-wrap"):
             _create_dashboard_card(
                 "Run Time", run_info.get("run_time", "Not available"), "schedule", "Sequencing run timestamp"
             )
@@ -55,7 +55,7 @@ def _classification_section(sample_dir: Path):
         ui.label("Classification Details").classes("text-lg font-semibold text-blue-800")
         ui.separator().classes().style("border: 1px solid var(--md-primary)")
         
-        with ui.row().classes("w-full gap-4"):
+        with ui.row().classes("w-full gap-1 flex-wrap"):
             # Sturgeon
             sturgeon_data = classification_data.get("sturgeon", {})
             _create_classification_dashboard_card_with_data(
@@ -117,7 +117,7 @@ def _analysis_section(sample_dir: Path):
         ui.label("Analysis Details").classes("text-lg font-semibold text-blue-800")
         ui.separator().classes().style("border: 1px solid var(--md-primary)")
         
-        with ui.row().classes("w-full gap-4"):
+        with ui.row().classes("w-full gap-1 flex-wrap"):
             # Coverage Analysis
             _create_coverage_dashboard_card_with_data(
                 coverage_data.get("quality", "Not available"),
@@ -162,8 +162,8 @@ def add_summary_section(sample_dir: Path, sample_id: str) -> None:
     _classification_section(sample_dir)
     _analysis_section(sample_dir)
     
-    # Start periodic refresh timer (every 5 seconds)
-    ui.timer(5.0, lambda: [
+    # Start periodic refresh timer (every 30 seconds)
+    ui.timer(30.0, lambda: [
         _run_info_section.refresh(),
         _classification_section.refresh(),
         _analysis_section.refresh()
@@ -171,21 +171,21 @@ def add_summary_section(sample_dir: Path, sample_id: str) -> None:
 
 
 def _create_dashboard_card(title: str, value: str, icon: str, description: str) -> None:
-    """Create a compact dashboard-style card matching the design pattern."""
-    with ui.card().classes("flex-1 bg-white rounded-lg shadow-sm border border-gray-200 p-4"):
-        with ui.row().classes("flex items-center justify-between mb-2"):
+    """Create a compact dashboard-style card matching the Mosaic design pattern."""
+    with ui.card().classes("mosaic-card flex-1 min-w-0"):
+        with ui.row().classes("mosaic-card__header"):
             # Title
-            ui.label(title).classes("text-sm font-medium text-gray-600")
+            ui.label(title).classes("mosaic-card__title truncate")
             
             # Icon in circular background
-            with ui.row().classes("w-7 h-7 bg-pink-100 rounded-full flex items-center justify-center"):
-                ui.icon(icon).classes("w-3.5 h-3.5 text-pink-600")
+            with ui.row().classes("mosaic-card__icon"):
+                ui.icon(icon).classes("w-4 h-4")
         
-        # Main value
-        ui.label(value).classes("text-xl font-bold text-gray-900 mb-1")
+        # Main value with text wrapping
+        ui.label(value).classes("mosaic-card__content text-sm font-bold mb-1 break-words")
         
         # Description
-        ui.label(description).classes("text-xs text-gray-500")
+        ui.label(description).classes("mosaic-card__subtitle")
 
 
 def _create_classification_dashboard_card_with_data(
@@ -197,35 +197,37 @@ def _create_classification_dashboard_card_with_data(
     icon: str, 
     description: str
 ) -> None:
-    """Create a compact classification dashboard card with data."""
-    with ui.card().classes("flex-1 bg-white rounded-lg shadow-sm border border-gray-200 p-4"):
-        with ui.row().classes("flex items-center justify-between mb-2"):
+    """Create a compact classification dashboard card with Mosaic styling."""
+    with ui.card().classes("mosaic-card flex-1 min-w-0"):
+        with ui.row().classes("mosaic-card__header"):
             # Title
-            ui.label(title).classes("text-sm font-medium text-gray-600")
+            ui.label(title).classes("mosaic-card__title truncate")
             
             # Icon in circular background
-            with ui.row().classes("w-7 h-7 bg-blue-100 rounded-full flex items-center justify-center"):
-                ui.icon(icon).classes("w-3.5 h-3.5 text-blue-600")
+            with ui.row().classes("mosaic-card__icon"):
+                ui.icon(icon).classes("w-4 h-4")
         
         # Main classification result with confidence badge
-        with ui.row().classes("flex items-center justify-between mb-1"):
-            ui.label(classification).classes("text-xl font-bold text-gray-900")
+        with ui.row().classes("flex items-start justify-between mb-1 gap-1"):
+            ui.label(classification).classes("mosaic-card__content text-sm font-bold break-words flex-1")
             # Confidence level badge with color coding
-            confidence_badge = ui.label(confidence_level).classes("px-2 py-1 text-xs font-medium rounded-full")
+            confidence_badge_class = "status-badge"
             if confidence >= 80:
-                confidence_badge.classes("bg-green-100 text-green-800")
+                confidence_badge_class += " status-badge--success"
             elif confidence >= 50:
-                confidence_badge.classes("bg-yellow-100 text-yellow-800")
+                confidence_badge_class += " status-badge--warning"
             else:
-                confidence_badge.classes("bg-red-100 text-red-800")
+                confidence_badge_class += " status-badge--error"
+            
+            ui.label(confidence_level).classes(confidence_badge_class)
         
         # Compact details in a single row
-        with ui.row().classes("flex items-center justify-between mb-1"):
-            ui.label(f"Confidence: {confidence:.1f}%").classes("text-xs font-medium text-gray-700")
-            ui.label(f"Features: {features:,}").classes("text-xs text-gray-500")
+        with ui.row().classes("flex items-center justify-between mb-1 gap-1"):
+            ui.label(f"Confidence: {confidence:.1f}%").classes("mosaic-card__subtitle")
+            ui.label(f"Features: {features:,}").classes("mosaic-card__subtitle")
         
         # Description
-        ui.label(description).classes("text-xs text-gray-500")
+        ui.label(description).classes("mosaic-card__subtitle")
 
 
 def _create_classification_dashboard_card(title: str, classification: str, icon: str, description: str) -> Dict[str, Any]:
@@ -294,38 +296,40 @@ def _create_coverage_dashboard_card_with_data(
     enrichment: str
 ) -> None:
     """Create a compact coverage analysis dashboard card with data."""
-    with ui.card().classes("flex-1 bg-white rounded-lg shadow-sm border border-gray-200 p-4"):
-        with ui.row().classes("flex items-center justify-between mb-2"):
+    with ui.card().classes("mosaic-card flex-1 min-w-0"):
+        with ui.row().classes("mosaic-card__header"):
             # Title
-            ui.label("Coverage Analysis").classes("text-sm font-medium text-gray-600")
+            ui.label("Coverage Analysis").classes("mosaic-card__title truncate")
             
             # Icon in circular background
-            with ui.row().classes("w-7 h-7 bg-blue-100 rounded-full flex items-center justify-center"):
-                ui.icon("analytics").classes("w-3.5 h-3.5 text-blue-600")
+            with ui.row().classes("mosaic-card__icon"):
+                ui.icon("analytics").classes("w-5 h-5")
         
         # Main quality result with badge
-        with ui.row().classes("flex items-center justify-between mb-1"):
-            ui.label(quality).classes("text-xl font-bold text-gray-900")
+        with ui.row().classes("flex items-start justify-between mb-1 gap-1"):
+            ui.label(quality).classes("mosaic-card__content text-sm font-bold break-words flex-1")
             # Coverage badge with color coding
-            coverage_badge = ui.label(target_coverage).classes("px-2 py-1 text-xs font-medium rounded-full")
+            coverage_badge_class = "status-badge"
             try:
                 coverage_num = float(target_coverage.replace("x", ""))
                 if coverage_num >= 30:
-                    coverage_badge.classes("bg-green-100 text-green-800")
+                    coverage_badge_class += " status-badge--success"
                 elif coverage_num >= 20:
-                    coverage_badge.classes("bg-blue-100 text-blue-800")
+                    coverage_badge_class += " status-badge--info"
                 elif coverage_num >= 10:
-                    coverage_badge.classes("bg-yellow-100 text-yellow-800")
+                    coverage_badge_class += " status-badge--warning"
                 else:
-                    coverage_badge.classes("bg-red-100 text-red-800")
+                    coverage_badge_class += " status-badge--error"
             except (ValueError, AttributeError):
-                coverage_badge.classes("bg-gray-100 text-gray-600")
+                coverage_badge_class += " status-badge--info"
+            
+            ui.label(target_coverage).classes(coverage_badge_class)
         
         # Coverage details in compact layout
-        with ui.column().classes("mb-2"):
-            ui.label(f"Global: {global_coverage}").classes("text-xs text-gray-600")
-            ui.label(f"Targets: {target_coverage}").classes("text-xs text-gray-600")
-            ui.label(f"Enrichment: {enrichment}").classes("text-xs text-gray-600")
+        with ui.column().classes("mb-1 gap-0.5"):
+            ui.label(f"Global: {global_coverage}").classes("mosaic-card__subtitle")
+            ui.label(f"Targets: {target_coverage}").classes("mosaic-card__subtitle")
+            ui.label(f"Enrichment: {enrichment}").classes("mosaic-card__subtitle")
         
         # Coverage thresholds as small badges
         with ui.row().classes("gap-1 flex-wrap"):
@@ -382,30 +386,30 @@ def _create_cnv_dashboard_card_with_data(
     lost: int
 ) -> None:
     """Create a compact CNV analysis dashboard card with data."""
-    with ui.card().classes("flex-1 bg-white rounded-lg shadow-sm border border-gray-200 p-4"):
-        with ui.row().classes("flex items-center justify-between mb-2"):
+    with ui.card().classes("mosaic-card flex-1 min-w-0"):
+        with ui.row().classes("mosaic-card__header"):
             # Title
-            ui.label("Copy Number Analysis").classes("text-sm font-medium text-gray-600")
+            ui.label("Copy Number Analysis").classes("mosaic-card__title truncate")
             
             # Icon in circular background
-            with ui.row().classes("w-7 h-7 bg-purple-100 rounded-full flex items-center justify-center"):
-                ui.icon("person").classes("w-3.5 h-3.5 text-purple-600")
+            with ui.row().classes("mosaic-card__icon"):
+                ui.icon("person").classes("w-5 h-5")
         
         # Main genetic sex result
-        ui.label(genetic_sex).classes("text-xl font-bold text-gray-900 mb-1")
+        ui.label(genetic_sex).classes("mosaic-card__content text-sm font-bold mb-1 break-words")
         
         # Analysis details in compact layout
-        with ui.column().classes("mb-2"):
-            ui.label(f"Bin Width: {bin_width}").classes("text-xs text-gray-600")
-            ui.label(f"Variance: {variance}").classes("text-xs text-gray-600")
+        with ui.column().classes("mb-1 gap-0.5"):
+            ui.label(f"Bin Width: {bin_width}").classes("mosaic-card__subtitle")
+            ui.label(f"Variance: {variance}").classes("mosaic-card__subtitle")
         
         # CNV counts as badges
-        with ui.row().classes("gap-2 mb-1"):
-            ui.label(f"Gained: {gained}").classes("px-2 py-1 text-xs font-medium rounded-full bg-green-100 text-green-800")
-            ui.label(f"Lost: {lost}").classes("px-2 py-1 text-xs font-medium rounded-full bg-red-100 text-red-800")
+        with ui.row().classes("gap-1 mb-1"):
+            ui.label(f"Gained: {gained}").classes("px-1 py-0.5 text-xs font-medium rounded-full bg-green-100 text-green-800")
+            ui.label(f"Lost: {lost}").classes("px-1 py-0.5 text-xs font-medium rounded-full bg-red-100 text-red-800")
         
         # Description
-        ui.label("Copy number analysis across genome with breakpoint detection").classes("text-xs text-gray-500")
+        ui.label("Copy number analysis across genome with breakpoint detection").classes("mosaic-card__subtitle")
 
 
 def _create_cnv_dashboard_card() -> Dict[str, Any]:
@@ -452,38 +456,40 @@ def _create_mgmt_dashboard_card_with_data(
     cpg_sites: str
 ) -> None:
     """Create a compact MGMT analysis dashboard card with data."""
-    with ui.card().classes("flex-1 bg-white rounded-lg shadow-sm border border-gray-200 p-4"):
-        with ui.row().classes("flex items-center justify-between mb-2"):
+    with ui.card().classes("mosaic-card flex-1 min-w-0"):
+        with ui.row().classes("mosaic-card__header"):
             # Title
-            ui.label("MGMT Analysis").classes("text-sm font-medium text-gray-600")
+            ui.label("MGMT Analysis").classes("mosaic-card__title truncate")
             
             # Icon in circular background
-            with ui.row().classes("w-7 h-7 bg-orange-100 rounded-full flex items-center justify-center"):
-                ui.icon("science").classes("w-3.5 h-3.5 text-orange-600")
+            with ui.row().classes("mosaic-card__icon"):
+                ui.icon("science").classes("w-5 h-5")
         
         # Main status result with badge
-        with ui.row().classes("flex items-center justify-between mb-1"):
-            ui.label(status).classes("text-xl font-bold text-gray-900")
+        with ui.row().classes("flex items-start justify-between mb-1 gap-1"):
+            ui.label(status).classes("mosaic-card__content text-sm font-bold break-words flex-1")
             # Methylation badge with color coding
-            methylation_badge = ui.label(methylation_percent).classes("px-2 py-1 text-xs font-medium rounded-full")
+            methylation_badge_class = "status-badge"
             try:
                 meth_num = float(methylation_percent.replace("%", ""))
                 if meth_num > 10:
-                    methylation_badge.classes("bg-green-100 text-green-800")
+                    methylation_badge_class += " status-badge--success"
                 elif meth_num > 5:
-                    methylation_badge.classes("bg-yellow-100 text-yellow-800")
+                    methylation_badge_class += " status-badge--warning"
                 else:
-                    methylation_badge.classes("bg-red-100 text-red-800")
+                    methylation_badge_class += " status-badge--error"
             except (ValueError, AttributeError):
-                methylation_badge.classes("bg-gray-100 text-gray-600")
+                methylation_badge_class += " status-badge--info"
+            
+            ui.label(methylation_percent).classes(methylation_badge_class)
         
         # Analysis details in compact layout
-        with ui.column().classes("mb-2"):
-            ui.label(f"Average: {average_methylation}").classes("text-xs text-gray-600")
-            ui.label(f"Score: {prediction_score}").classes("text-xs text-gray-600")
+        with ui.column().classes("mb-1 gap-0.5"):
+            ui.label(f"Average: {average_methylation}").classes("mosaic-card__subtitle")
+            ui.label(f"Score: {prediction_score}").classes("mosaic-card__subtitle")
         
         # Description
-        ui.label(f"MGMT status determined from methylation analysis of {cpg_sites} CpG sites").classes("text-xs text-gray-500")
+        ui.label(f"MGMT status determined from methylation analysis of {cpg_sites} CpG sites").classes("mosaic-card__subtitle")
 
 
 def _create_mgmt_dashboard_card() -> Dict[str, Any]:
@@ -526,26 +532,26 @@ def _create_fusion_dashboard_card_with_data(
     genome_fusions: int
 ) -> None:
     """Create a compact fusion analysis dashboard card with data."""
-    with ui.card().classes("flex-1 bg-white rounded-lg shadow-sm border border-gray-200 p-4"):
-        with ui.row().classes("flex items-center justify-between mb-2"):
+    with ui.card().classes("mosaic-card flex-1 min-w-0"):
+        with ui.row().classes("mosaic-card__header"):
             # Title
-            ui.label("Fusion Analysis").classes("text-sm font-medium text-gray-600")
+            ui.label("Fusion Analysis").classes("mosaic-card__title truncate")
             
             # Icon in circular background
-            with ui.row().classes("w-7 h-7 bg-green-100 rounded-full flex items-center justify-center"):
-                ui.icon("merge").classes("w-3.5 h-3.5 text-green-600")
+            with ui.row().classes("mosaic-card__icon"):
+                ui.icon("merge").classes("w-5 h-5")
         
         # Panel info and main result
-        with ui.row().classes("flex items-center justify-between mb-1"):
-            ui.label(f"Panel: {panel}").classes("text-sm font-medium text-gray-700")
-            ui.label(f"{target_fusions} target fusions").classes("px-2 py-1 text-xs font-medium rounded-full bg-blue-100 text-blue-800")
+        with ui.row().classes("flex items-start justify-between mb-1 gap-1"):
+            ui.label(f"Panel: {panel}").classes("mosaic-card__content text-sm font-medium break-words flex-1")
+            ui.label(f"{target_fusions} target fusions").classes("px-1 py-0.5 text-xs font-medium rounded-full bg-blue-100 text-blue-800")
         
         # Analysis details in compact layout
-        with ui.column().classes("mb-2"):
-            ui.label(f"{genome_fusions} genome wide fusions").classes("text-xs text-gray-600")
+        with ui.column().classes("mb-1"):
+            ui.label(f"{genome_fusions} genome wide fusions").classes("mosaic-card__subtitle")
         
         # Description
-        ui.label("Fusion candidates identified from reads with supplementary alignments").classes("text-xs text-gray-500")
+        ui.label("Fusion candidates identified from reads with supplementary alignments").classes("mosaic-card__subtitle")
 
 
 def _create_fusion_dashboard_card() -> Dict[str, Any]:
@@ -911,19 +917,25 @@ def _extract_mgmt_data(sample_dir: Path) -> Dict[str, Any]:
 
     try:
         # Use the same file discovery logic as the MGMT component
-        csv_files = list(sample_dir.glob("*_mgmt.csv"))
-        if not csv_files:
-            return mgmt_data
+        # First check for final_mgmt.csv files (highest priority)
+        final_files = list(sample_dir.glob("final_mgmt.csv"))
+        if final_files:
+            latest_csv = final_files[0]
+        else:
+            # Fallback to numeric-prefixed files
+            csv_files = list(sample_dir.glob("*_mgmt.csv"))
+            if not csv_files:
+                return mgmt_data
 
-        # Find the latest MGMT CSV file (same logic as MGMT component)
-        def _count_from_name(p: Path) -> int:
-            try:
-                return int(p.name.split("_")[0])
-            except Exception as e:
-                logging.debug(f"   MGMT: <access denied>: {e}")
-                return -1
+            # Find the latest MGMT CSV file (same logic as MGMT component)
+            def _count_from_name(p: Path) -> int:
+                try:
+                    return int(p.name.split("_")[0])
+                except Exception as e:
+                    logging.debug(f"   MGMT: <access denied>: {e}")
+                    return -1
 
-        latest_csv = max(csv_files, key=_count_from_name)
+            latest_csv = max(csv_files, key=_count_from_name)
 
         # Read the latest MGMT CSV file
         try:
@@ -1171,27 +1183,60 @@ def _extract_classification_data(sample_dir: Path) -> Dict[str, Any]:
 def _extract_fusion_data(sample_dir: Path) -> Dict[str, Any]:
     """Extract fusion analysis data from generated summary files."""
     fusion_data = {"target_fusions": 0, "genome_fusions": 0}
+    
+    logging.info(f"[Summary] _extract_fusion_data() called with sample_dir: {sample_dir}")
 
     try:
+        # Debug: List all fusion-related files
+        fusion_files = list(sample_dir.glob("*fusion*"))
+        logging.info(f"[Summary] Found fusion files: {[f.name for f in fusion_files]}")
+        
+        # Debug: Check if genome-wide processed file exists
+        genome_file = sample_dir / "fusion_candidates_all_processed.csv"
+        logging.info(f"[Summary] Genome-wide processed file exists: {genome_file.exists()}")
+        if genome_file.exists():
+            logging.info(f"[Summary] Genome-wide processed file size: {genome_file.stat().st_size} bytes")
         # First try to read from the new fusion_summary.csv file
         summary_file = sample_dir / "fusion_summary.csv"
         if summary_file.exists():
             try:
+                with open(summary_file, "r") as f:
+                    content = f.read()
+                    
                 with open(summary_file, "r") as f:
                     reader = csv.DictReader(f)
                     for row in reader:
                         fusion_data["target_fusions"] = int(row.get("target_fusions", 0))
                         fusion_data["genome_fusions"] = int(row.get("genome_fusions", 0))
                         break
-                logging.debug(f"[Summary] Fusion data extracted from summary file - target: {fusion_data['target_fusions']}, genome: {fusion_data['genome_fusions']}")
-                return fusion_data
+                
+                # Check if the summary file has incorrect genome-wide count (0)
+                if fusion_data["genome_fusions"] == 0:
+                    # Try to regenerate the summary file with correct data
+                    try:
+                        from robin.gui.components.fusion import _generate_summary_files_from_pickle
+                        if _generate_summary_files_from_pickle(sample_dir, force_regenerate=True):
+                            # Re-read the regenerated summary file
+                            with open(summary_file, "r") as f:
+                                reader = csv.DictReader(f)
+                                for row in reader:
+                                    fusion_data["target_fusions"] = int(row.get("target_fusions", 0))
+                                    fusion_data["genome_fusions"] = int(row.get("genome_fusions", 0))
+                                    break
+                            return fusion_data
+                    except Exception as e:
+                        pass  # Don't return early, continue to pickle file loading
+                else:
+                    logging.info(f"[Summary] Fusion data extracted from summary file - target: {fusion_data['target_fusions']}, genome: {fusion_data['genome_fusions']}")
+                    logging.info(f"[Summary] Summary file path: {summary_file}")
+                    return fusion_data
             except Exception as e:
                 logging.debug(f"   Fusion: Failed to read summary file: {e}")
         
         # If summary files don't exist, try to generate them from pickle files
         try:
             from robin.gui.components.fusion import _generate_summary_files_from_pickle
-            if _generate_summary_files_from_pickle(sample_dir):
+            if _generate_summary_files_from_pickle(sample_dir, force_regenerate=False):
                 # Try reading the newly generated summary file
                 if summary_file.exists():
                     with open(summary_file, "r") as f:
@@ -1200,10 +1245,36 @@ def _extract_fusion_data(sample_dir: Path) -> Dict[str, Any]:
                             fusion_data["target_fusions"] = int(row.get("target_fusions", 0))
                             fusion_data["genome_fusions"] = int(row.get("genome_fusions", 0))
                             break
-                    logging.debug(f"[Summary] Fusion data extracted from generated summary file - target: {fusion_data['target_fusions']}, genome: {fusion_data['genome_fusions']}")
+                    logging.info(f"[Summary] Fusion data extracted from generated summary file - target: {fusion_data['target_fusions']}, genome: {fusion_data['genome_fusions']}")
                     return fusion_data
         except Exception as e:
             logging.debug(f"   Fusion: Failed to generate summary files from pickle: {e}")
+        
+        # If still no data, try to load directly from pickle files and count gene_pairs
+        try:
+            from robin.gui.components.fusion import _load_processed_pickle
+            target_file = sample_dir / "fusion_candidates_master_processed.csv"
+            genome_file = sample_dir / "fusion_candidates_all_processed.csv"
+            
+            
+            target_data = _load_processed_pickle(target_file)
+            genome_data = _load_processed_pickle(genome_file)
+            
+            
+            if target_data and isinstance(target_data, dict):
+                fusion_data["target_fusions"] = target_data.get("candidate_count", 0)
+            
+            if genome_data and isinstance(genome_data, dict):
+                # Use gene_pairs count if candidate_count is 0 (same logic as GUI)
+                genome_count = genome_data.get("candidate_count", 0)
+                if genome_count == 0 and genome_data.get("gene_pairs"):
+                    genome_count = len(genome_data.get("gene_pairs", []))
+                fusion_data["genome_fusions"] = genome_count
+            
+            logging.info(f"[Summary] Fusion data loaded directly from pickle files - target: {fusion_data['target_fusions']}, genome: {fusion_data['genome_fusions']}")
+            return fusion_data
+        except Exception as e:
+            logging.debug(f"   Fusion: Failed to load directly from pickle files: {e}")
         
         # Fallback to individual fusion_results.csv file
         fusion_results_file = sample_dir / "fusion_results.csv"

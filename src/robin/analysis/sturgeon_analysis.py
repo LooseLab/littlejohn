@@ -176,6 +176,127 @@ class SturgeonAnalysis:
             raise
 
 
+def process_multiple_files(parquet_paths, metadata_list, work_dir, logger):
+    """
+    Process multiple parquet files for sturgeon analysis.
+    
+    This function processes multiple parquet files for the same sample.
+    Each file is processed individually and results are accumulated in
+    the same sturgeon_scores.csv file.
+
+    Args:
+        parquet_paths: List of paths to parquet files
+        metadata_list: List of metadata dictionaries (one per parquet file)
+        work_dir: Working directory
+        logger: Logger instance
+
+    Returns:
+        Dictionary with aggregated sturgeon analysis results
+    """
+    if not parquet_paths or not metadata_list:
+        raise ValueError("parquet_paths and metadata_list must not be empty")
+    
+    if len(parquet_paths) != len(metadata_list):
+        raise ValueError("parquet_paths and metadata_list must have the same length")
+    
+    # Get sample ID from first metadata (assuming all parquet files are from same sample)
+    sample_id = metadata_list[0].get("sample_id", "unknown")
+    
+    logger.info(f"🐟 Starting multi-file sturgeon analysis for sample: {sample_id}")
+    logger.info(f"Processing {len(parquet_paths)} parquet files for sample {sample_id}")
+    
+    # Log essential metadata only
+    for i, (parquet_path, metadata) in enumerate(zip(parquet_paths, metadata_list)):
+        logger.debug(f"Parquet file {i+1}: {os.path.basename(parquet_path)}")
+
+    analysis_result = {
+        "sample_id": sample_id,
+        "parquet_paths": parquet_paths,
+        "analysis_timestamp": time.time(),
+        "processing_steps": [],
+        "error_message": None,
+        "files_processed": 0,
+        "total_files": len(parquet_paths),
+        "output_dir": None,
+        "sturgeon_scores_path": None,
+    }
+
+    try:
+        # Create sample-specific output directory
+        output_dir = os.path.join(work_dir, sample_id)
+        os.makedirs(output_dir, exist_ok=True)
+        analysis_result["output_dir"] = output_dir
+        analysis_result["sturgeon_scores_path"] = os.path.join(output_dir, "sturgeon_scores.csv")
+        
+        logger.info(f"Created output directory: {output_dir}")
+        analysis_result["processing_steps"].append("directory_created")
+
+        # Initialize sturgeon analysis
+        sturgeon_analyzer = SturgeonAnalysis(work_dir=work_dir)
+        
+        # Get reference genome and probes file (shared across all files)
+        reference_genome = "hg38"
+        probes_file = sturgeon_analyzer._get_probes_file(reference_genome)
+        logger.info(f"Using reference genome: {reference_genome}")
+        logger.info(f"Using probes file: {os.path.basename(probes_file)}")
+
+        # Process each parquet file individually
+        logger.info("Processing parquet files individually")
+        processed_files = 0
+        
+        for i, (parquet_path, metadata) in enumerate(zip(parquet_paths, metadata_list)):
+            logger.info(f"Processing parquet file {i+1}/{len(parquet_paths)}: {os.path.basename(parquet_path)}")
+            
+            try:
+                # Check if parquet file exists
+                if not os.path.exists(parquet_path):
+                    logger.warning(f"Parquet file not found: {parquet_path}")
+                    continue
+                
+                # Get current timestamp in milliseconds
+                current_time = time.time() * 1000
+                
+                # Run sturgeon analysis for this file
+                sturgeon_analyzer._run_sturgeon_analysis(
+                    parquet_path, output_dir, probes_file, current_time
+                )
+                
+                processed_files += 1
+                logger.debug(f"Successfully processed file {i+1}: {os.path.basename(parquet_path)}")
+                
+            except Exception as e:
+                logger.warning(f"Error processing {os.path.basename(parquet_path)}: {e}")
+                continue
+
+        if processed_files == 0:
+            analysis_result["error_message"] = "No files could be processed successfully"
+            analysis_result["processing_steps"].append("no_files_processed")
+            return analysis_result
+
+        analysis_result["files_processed"] = processed_files
+        analysis_result["processing_steps"].append("files_processed")
+
+        # Check if sturgeon_scores.csv was created
+        if os.path.exists(analysis_result["sturgeon_scores_path"]):
+            analysis_result["processing_steps"].append("sturgeon_scores_created")
+            logger.info(f"Sturgeon scores accumulated in: {analysis_result['sturgeon_scores_path']}")
+        else:
+            logger.warning("No sturgeon_scores.csv file was created")
+
+        analysis_result["processing_steps"].append("analysis_complete")
+        logger.info(f"Multi-file sturgeon analysis completed for {sample_id}")
+        logger.info(f"Files successfully processed: {analysis_result['files_processed']}/{analysis_result['total_files']}")
+        logger.info(f"Output directory: {analysis_result['output_dir']}")
+        
+        return analysis_result
+
+    except Exception as e:
+        logger.error(f"Error in multi-file sturgeon analysis for {sample_id}: {e}")
+        analysis_result["error_message"] = str(e)
+        analysis_result["processing_steps"].append("analysis_failed")
+        return analysis_result
+
+
 def sturgeon_handler(job, work_dir=None):
     """
     Handler function for Sturgeon analysis jobs.
@@ -188,67 +309,173 @@ def sturgeon_handler(job, work_dir=None):
     try:
         # Get job-specific logger
         logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
-        logger.info(
-            f"Starting Sturgeon analysis for: {os.path.basename(job.context.filepath)}"
-        )
-
-        # Get metadata from previous steps
-        bed_conversion_result = job.context.results.get("bed_conversion", {})
-        bam_metadata = job.context.metadata.get("bam_metadata", {})
-
-        # Extract parquet path from bed conversion results
-        parquet_path = bed_conversion_result.get("parquet_path")
-        if not parquet_path:
-            raise ValueError("No parquet path found from bed conversion step")
-
-        # Get sample ID
-        sample_id = bam_metadata.get("sample_id", "unknown")
-
-        # Determine work directory
-        if work_dir is None:
-            # Default to parquet file directory
-            work_dir = os.path.dirname(parquet_path)
-        else:
-            # Use specified work directory, create if it doesn't exist
-            os.makedirs(work_dir, exist_ok=True)
-            logger.debug(f"Using specified work directory: {work_dir}")
-
-        # Create Sturgeon analysis instance
-        sturgeon_analyzer = SturgeonAnalysis(work_dir=work_dir)
-
-        # Process the parquet file
-        sturgeon_result = sturgeon_analyzer.process_parquet_file(
-            parquet_path, sample_id, work_dir
-        )
-
-        # Store results in job context
-        job.context.add_metadata("sturgeon_analysis", sturgeon_result.results)
-        job.context.add_metadata(
-            "sturgeon_processing_steps", sturgeon_result.processing_steps
-        )
-
-        if sturgeon_result.error_message:
-            job.context.add_error("sturgeon_analysis", sturgeon_result.error_message)
-            logger.error(f"Sturgeon analysis failed: {sturgeon_result.error_message}")
-        else:
-            job.context.add_result(
-                "sturgeon_analysis",
-                {
-                    "status": "success",
-                    "sample_id": sturgeon_result.sample_id,
-                    "analysis_time": sturgeon_result.analysis_timestamp,
-                    "output_dir": sturgeon_result.output_dir,
-                    "processing_steps": sturgeon_result.processing_steps,
-                },
+        
+        # Check if this is a batched job
+        batched_job = job.context.metadata.get("_batched_job")
+        if batched_job:
+            batch_size = batched_job.get_file_count()
+            sample_id = batched_job.get_sample_id()
+            batch_id = batched_job.batch_id
+            logger.info(f"Processing sturgeon analysis batch: {batch_size} files for sample '{sample_id}' (batch_id: {batch_id})")
+            
+            # Get all filepaths in the batch
+            filepaths = batched_job.get_filepaths()
+            
+            # Log individual files in the batch
+            for i, filepath in enumerate(filepaths):
+                logger.info(f"  Batch file {i+1}/{batch_size}: {os.path.basename(filepath)}")
+            
+            # Prepare metadata list and extract parquet paths from bed conversion results
+            metadata_list = []
+            parquet_paths = []
+            
+            for i, bam_path in enumerate(filepaths):
+                # Get metadata from preprocessing for this specific file
+                file_metadata = batched_job.contexts[i].metadata.get("bam_metadata", {})
+                
+                # Get sample ID from preprocessing results for this specific file
+                file_context = batched_job.contexts[i]
+                file_sample_id = file_context.get_sample_id()
+                
+                # Use the sample ID from the file's context (which should have preprocessing results)
+                if file_sample_id != "unknown":
+                    file_metadata["sample_id"] = file_sample_id
+                else:
+                    file_metadata["sample_id"] = sample_id
+                
+                # Get parquet path from bed conversion results for this file
+                bed_conversion_result = batched_job.contexts[i].results.get("bed_conversion", {})
+                parquet_path = bed_conversion_result.get("parquet_path")
+                
+                if parquet_path:
+                    parquet_paths.append(parquet_path)
+                    metadata_list.append(file_metadata)
+                    logger.debug(f"Found parquet path for file {i+1}: {os.path.basename(parquet_path)}")
+                else:
+                    logger.warning(f"No parquet path found for file {i+1}: {os.path.basename(bam_path)}")
+            
+            if not parquet_paths:
+                error_msg = "No parquet paths found from bed conversion results in batch"
+                logger.error(error_msg)
+                job.context.add_error("sturgeon_analysis", error_msg)
+                return
+            
+            # Determine work directory for the batch
+            if work_dir is None:
+                # Default to first parquet file directory
+                batch_work_dir = os.path.dirname(parquet_paths[0])
+            else:
+                # Use specified work directory, create if it doesn't exist
+                os.makedirs(work_dir, exist_ok=True)
+                batch_work_dir = work_dir
+                logger.debug(f"Using specified work directory: {batch_work_dir}")
+            
+            # Process all parquet files in the batch using the new aggregated function
+            logger.info(f"Processing {len(parquet_paths)} parquet files as aggregated batch for sample '{sample_id}'")
+            batch_result = process_multiple_files(
+                parquet_paths=parquet_paths,
+                metadata_list=metadata_list,
+                work_dir=batch_work_dir,
+                logger=logger
             )
+            
+            # Store batch results in job context (maintain compatibility with existing structure)
+            job.context.add_metadata("sturgeon_analysis", {
+                "batch_result": batch_result,  # Single aggregated result
+                "batch_size": batch_size,
+                "sample_id": sample_id,
+                "batch_id": batch_id,
+                "files_processed": batch_result.get("files_processed", len(parquet_paths)),
+                "total_files": batch_result.get("total_files", len(parquet_paths))
+            })
+            
+            logger.info(f"Completed sturgeon analysis batch processing: {batch_size} files for sample '{sample_id}'")
+            logger.info(f"Files successfully processed: {batch_result.get('files_processed', len(parquet_paths))}/{batch_result.get('total_files', len(parquet_paths))}")
+            
+            if batch_result.get("error_message"):
+                logger.error(f"Batch processing completed with errors: {batch_result['error_message']}")
+                job.context.add_error("sturgeon_analysis", batch_result["error_message"])
+            else:
+                logger.info("Batch processing completed successfully with aggregated sturgeon analysis")
+                job.context.add_result(
+                    "sturgeon_analysis",
+                    {
+                        "status": "success",
+                        "sample_id": sample_id,
+                        "analysis_time": batch_result.get("analysis_timestamp", 0),
+                        "output_dir": batch_result.get("output_dir", ""),
+                        "processing_steps": batch_result.get("processing_steps", []),
+                        "sturgeon_scores_path": batch_result.get("sturgeon_scores_path", ""),
+                        "files_processed": batch_result.get("files_processed", len(parquet_paths)),
+                        "total_files": batch_result.get("total_files", len(parquet_paths)),
+                    },
+                )
+            
+            return
+            
+        else:
+            # Single file processing (backward compatibility)
             logger.info(
-                f"Sturgeon analysis complete for {os.path.basename(job.context.filepath)}"
+                f"Starting Sturgeon analysis for: {os.path.basename(job.context.filepath)}"
             )
-            logger.info(f"Sample ID: {sturgeon_result.sample_id}")
-            logger.info(f"Output directory: {sturgeon_result.output_dir}")
-            logger.debug(
-                f"Processing steps: {', '.join(sturgeon_result.processing_steps)}"
+
+            # Get metadata from previous steps
+            bed_conversion_result = job.context.results.get("bed_conversion", {})
+            bam_metadata = job.context.metadata.get("bam_metadata", {})
+
+            # Extract parquet path from bed conversion results
+            parquet_path = bed_conversion_result.get("parquet_path")
+            if not parquet_path:
+                raise ValueError("No parquet path found from bed conversion step")
+
+            # Get sample ID
+            sample_id = bam_metadata.get("sample_id", "unknown")
+
+            # Determine work directory
+            if work_dir is None:
+                # Default to parquet file directory
+                work_dir = os.path.dirname(parquet_path)
+            else:
+                # Use specified work directory, create if it doesn't exist
+                os.makedirs(work_dir, exist_ok=True)
+                logger.debug(f"Using specified work directory: {work_dir}")
+
+            # Create Sturgeon analysis instance
+            sturgeon_analyzer = SturgeonAnalysis(work_dir=work_dir)
+
+            # Process the parquet file
+            sturgeon_result = sturgeon_analyzer.process_parquet_file(
+                parquet_path, sample_id, work_dir
             )
+
+            # Store results in job context
+            job.context.add_metadata("sturgeon_analysis", sturgeon_result.results)
+            job.context.add_metadata(
+                "sturgeon_processing_steps", sturgeon_result.processing_steps
+            )
+
+            if sturgeon_result.error_message:
+                job.context.add_error("sturgeon_analysis", sturgeon_result.error_message)
+                logger.error(f"Sturgeon analysis failed: {sturgeon_result.error_message}")
+            else:
+                job.context.add_result(
+                    "sturgeon_analysis",
+                    {
+                        "status": "success",
+                        "sample_id": sturgeon_result.sample_id,
+                        "analysis_time": sturgeon_result.analysis_timestamp,
+                        "output_dir": sturgeon_result.output_dir,
+                        "processing_steps": sturgeon_result.processing_steps,
+                    },
+                )
+                logger.info(
+                    f"Sturgeon analysis complete for {os.path.basename(job.context.filepath)}"
+                )
+                logger.info(f"Sample ID: {sturgeon_result.sample_id}")
+                logger.info(f"Output directory: {sturgeon_result.output_dir}")
+                logger.debug(
+                    f"Processing steps: {', '.join(sturgeon_result.processing_steps)}"
+                )
 
     except Exception as e:
         job.context.add_error("sturgeon_analysis", str(e))
@@ -399,55 +626,23 @@ def predict_sample_from_dataframe(
         os.path.dirname(os.path.abspath(models.__file__)), "general.zip"
     )
 
-    
     # Save DataFrame as a temporary BED file
-    with tempfile.NamedTemporaryFile(delete=True, suffix=".bed") as tmp_bed:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".bed") as tmp_bed:
         temp_bed_file = tmp_bed.name
         bed_df.to_csv(temp_bed_file, sep="\t", index=False, header=True)
 
-        # Create a temporary output file for the prediction results
-        with tempfile.NamedTemporaryFile(delete=True, suffix=".json") as tmp_output:
-            output_file = tmp_output.name
-
-            # Run prediction in separate process
-            try:
-                # Get the path to this script
-                current_script = os.path.abspath(__file__)
-
-                # Run the prediction in a separate process
-                result = subprocess.run(
-                    [
-                        sys.executable,  # Use the same Python interpreter
-                        current_script,
-                        "predict",  # Command to run prediction
-                        "--model",
-                        modelfile,
-                        "--input",
-                        temp_bed_file,
-                        "--output",
-                        output_file,
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=300,  # 5 minute timeout
-                )
-
-                if result.returncode != 0:
-                    raise RuntimeError(f"Prediction failed: {result.stderr}")
-
-                # Read the prediction results
-                with open(output_file, "r") as f:
-                    prediction_data = json.load(f)
-
-                # Convert back to DataFrame
-                prediction_df = pd.DataFrame(prediction_data)
-
-            except subprocess.TimeoutExpired:
-                raise RuntimeError("Prediction timed out after 5 minutes")
-            except Exception as e:
-                raise RuntimeError(f"Prediction failed: {str(e)}")
-
+    try:
+        # Run prediction directly (no subprocess needed in Ray workflow)
+        prediction_df = run_sturgeon_mem_free(modelfile, temp_bed_file)
         return prediction_df
+    except Exception as e:
+        raise RuntimeError(f"Prediction failed: {str(e)}")
+    finally:
+        # Clean up temporary file
+        try:
+            os.unlink(temp_bed_file)
+        except Exception:
+            pass
 
 
 def model_forward(
@@ -610,33 +805,5 @@ def run_sturgeon_mem_free(model_file, bed_file):
 
 
 if __name__ in {"__main__", "__mp_main__"}:
-    import argparse
-
-    # Check if this is a prediction subprocess call
-    if len(sys.argv) > 1 and sys.argv[1] == "predict":
-        # This is a subprocess call for prediction
-        parser = argparse.ArgumentParser(description="Sturgeon prediction subprocess")
-        parser.add_argument("command", help="Command to run")
-        parser.add_argument("--model", required=True, help="Path to model file")
-        parser.add_argument("--input", required=True, help="Path to input BED file")
-        parser.add_argument("--output", required=True, help="Path to output JSON file")
-
-        args = parser.parse_args()
-
-        if args.command == "predict":
-            try:
-                # Run the prediction
-                prediction_df = run_sturgeon_mem_free(args.model, args.input)
-
-                # Convert DataFrame to JSON and save
-                prediction_data = prediction_df.to_dict("records")
-                with open(args.output, "w") as f:
-                    json.dump(prediction_data, f)
-
-                sys.exit(0)
-            except Exception as e:
-                print(f"Prediction error: {str(e)}", file=sys.stderr)
-                sys.exit(1)
-    else:
-        # This is the main GUI launch
-        print("GUI launched by auto-reload function.")
+    # This is the main module - no subprocess handling needed
+    print("Sturgeon analysis module loaded.")

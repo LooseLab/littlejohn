@@ -19,6 +19,9 @@ import os
 import random
 import logging
 import json
+import glob
+import fcntl
+import time
 from pathlib import Path
 from collections import defaultdict
 from typing import Dict, Any, Optional, List, Tuple, Set
@@ -42,6 +45,47 @@ from robin.classification_config import (
 
 # Module-level logger
 logger = logging.getLogger("robin.analysis.fusion_work")
+
+
+class FileLock:
+    """
+    Simple file-based lock for coordinating access across processes/threads.
+    Uses fcntl for POSIX systems.
+    """
+    
+    def __init__(self, lock_file: str, timeout: float = 30.0):
+        self.lock_file = lock_file
+        self.timeout = timeout
+        self.fd = None
+    
+    def __enter__(self):
+        self.acquire()
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
+    
+    def acquire(self):
+        """Acquire the lock with timeout"""
+        os.makedirs(os.path.dirname(self.lock_file), exist_ok=True)
+        self.fd = open(self.lock_file, 'w')
+        
+        start_time = time.time()
+        while True:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except IOError:
+                if time.time() - start_time > self.timeout:
+                    raise TimeoutError(f"Could not acquire lock {self.lock_file} within {self.timeout}s")
+                time.sleep(0.1)
+    
+    def release(self):
+        """Release the lock"""
+        if self.fd:
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+            self.fd.close()
+            self.fd = None
 
 
 @dataclass
@@ -241,7 +285,10 @@ def _load_bed_regions(bed_file: str) -> Dict[str, List[GeneRegion]]:
     regions = defaultdict(list)
 
     if not os.path.exists(bed_file):
+        logger.warning(f"DEBUG: BED file does not exist: {bed_file}")
         return dict(regions)
+    
+    logger.info(f"DEBUG: Loading BED file: {bed_file}")
 
     try:
         with open(bed_file, "r") as f:
@@ -267,11 +314,15 @@ def _load_bed_regions(bed_file: str) -> Dict[str, List[GeneRegion]]:
     except FileNotFoundError:
         # If file not found, return empty dict
         pass
-    except Exception:
+    except Exception as e:
         # If any other error, return empty dict
+        logger.error(f"DEBUG: Error loading BED file {bed_file}: {e}")
         pass
 
-    return dict(regions)
+    result = dict(regions)
+    total_regions = sum(len(regions) for regions in result.values())
+    logger.info(f"DEBUG: Loaded {total_regions} total regions from {bed_file}")
+    return result
 
 
 def _ensure_gene_regions_loaded(target_panel: str = "rCNS2") -> None:
@@ -294,8 +345,19 @@ def _ensure_gene_regions_loaded(target_panel: str = "rCNS2") -> None:
 
         # Load genome-wide gene regions (shared across all panels)
         if not _all_gene_regions_cache:
+            logger.info(f"DEBUG: Loading genome-wide gene regions from {all_gene_bed}")
             _all_gene_regions_cache["shared"] = _load_bed_regions(all_gene_bed)
             logger.info(f"Loaded {len(_all_gene_regions_cache['shared'])} chromosomes for genome-wide genes from {all_gene_bed}")
+            
+            # Debug: Log some details about loaded genome-wide regions
+            total_genome_regions = sum(len(regions) for regions in _all_gene_regions_cache["shared"].values())
+            logger.info(f"DEBUG: Total genome-wide gene regions loaded: {total_genome_regions}")
+            
+            # Debug: Log first few regions for verification
+            if _all_gene_regions_cache["shared"]:
+                first_chrom = list(_all_gene_regions_cache["shared"].keys())[0]
+                first_regions = _all_gene_regions_cache["shared"][first_chrom][:3]
+                logger.info(f"DEBUG: First few genome-wide regions on {first_chrom}: {first_regions}")
     else:
         logger.info(f"DEBUG: Gene regions for target_panel='{target_panel}' already loaded in cache")
 
@@ -666,6 +728,18 @@ def process_bam_for_fusions_work(
         logger.info(f"Target panel candidates found: {len(target_candidates) if target_candidates is not None else 0}")
 
         # Process reads for genome-wide fusions
+        logger.info(f"DEBUG: Processing genome-wide fusions using cache key 'shared'")
+        logger.info(f"DEBUG: Available genome-wide cache keys: {list(_all_gene_regions_cache.keys())}")
+        
+        if "shared" not in _all_gene_regions_cache:
+            logger.error("DEBUG: 'shared' key not found in _all_gene_regions_cache!")
+            logger.error(f"DEBUG: Available keys: {list(_all_gene_regions_cache.keys())}")
+        else:
+            shared_regions = _all_gene_regions_cache["shared"]
+            total_shared_regions = sum(len(regions) for regions in shared_regions.values())
+            logger.info(f"DEBUG: Total shared gene regions available: {total_shared_regions}")
+            logger.info(f"DEBUG: Shared regions chromosomes: {list(shared_regions.keys())[:10]}...")  # Show first 10 chromosomes
+        
         genome_wide_candidates = _process_reads_for_fusions(
             bamfile, reads_with_supp, _all_gene_regions_cache["shared"]
         )
@@ -681,6 +755,357 @@ def process_bam_for_fusions_work(
         logger.error(f"Error processing BAM file for fusions: {str(e)}")
         logger.error("Exception details:", exc_info=True)
         raise
+
+
+# =============================================================================
+# STAGING OPTIMIZATION FUNCTIONS
+# =============================================================================
+
+
+def _get_staging_dir(work_dir: str, sample_id: str) -> str:
+    """Get staging directory for temporary per-file fusion results"""
+    staging_dir = os.path.join(work_dir, sample_id, "_fusion_staging")
+    os.makedirs(staging_dir, exist_ok=True)
+    return staging_dir
+
+
+def _get_lock_file(work_dir: str, sample_id: str, lock_type: str = "counter") -> str:
+    """Get lock file path for coordinating concurrent access"""
+    lock_dir = os.path.join(work_dir, sample_id, "_locks")
+    os.makedirs(lock_dir, exist_ok=True)
+    return os.path.join(lock_dir, f"fusion_{lock_type}.lock")
+
+
+def _get_pending_count(work_dir: str, sample_id: str) -> int:
+    """Get count of files pending accumulation (thread-safe)"""
+    staging_dir = _get_staging_dir(work_dir, sample_id)
+    staging_files = glob.glob(os.path.join(staging_dir, "target_*.parquet"))
+    return len(staging_files)
+
+
+def _atomic_counter_increment(work_dir: str, sample_id: str) -> int:
+    """
+    Atomically increment and return the fusion file counter for a sample.
+    Uses file locking to prevent race conditions.
+    
+    Returns:
+        The counter value to use for this file
+    """
+    lock_file = _get_lock_file(work_dir, sample_id, "counter")
+    counter_file = os.path.join(work_dir, sample_id, "fusion_analysis_counter.txt")
+    
+    with FileLock(lock_file, timeout=30.0):
+        # Read current counter
+        if os.path.exists(counter_file):
+            try:
+                with open(counter_file, "r") as f:
+                    counter = int(f.read().strip())
+            except (ValueError, IOError):
+                counter = 0
+        else:
+            counter = 0
+        
+        # Write incremented counter
+        os.makedirs(os.path.dirname(counter_file), exist_ok=True)
+        with open(counter_file, "w") as f:
+            f.write(str(counter + 1))
+        
+        return counter
+
+
+def process_bam_with_staging(
+    file_path: str,
+    temp_dir: str,
+    metadata: Dict[str, Any],
+    fusion_metadata: FusionMetadata,
+    target_panel: str = "rCNS2",
+    has_supplementary: bool = False,
+    supplementary_read_ids: List[str] = [],
+    work_dir: Optional[str] = None,
+    batch_size: int = 10,
+) -> Tuple[Dict[str, Any], bool]:
+    """
+    Fast per-file processing that saves results to staging area.
+    Does NOT merge with accumulated data - much faster for large datasets.
+    
+    Args:
+        file_path: Path to BAM file
+        temp_dir: Temporary directory
+        metadata: File metadata
+        fusion_metadata: Current fusion metadata object
+        target_panel: Target panel name
+        has_supplementary: Whether file has supplementary reads
+        supplementary_read_ids: List of supplementary read IDs
+        work_dir: Working directory for staging
+        batch_size: Number of files before accumulation triggers
+    
+    Returns:
+        Tuple of (results_dict, should_accumulate)
+    """
+    sample_id = fusion_metadata.sample_id
+    
+    if not has_supplementary:
+        return {
+            "has_supplementary": False,
+            "target_candidates_count": 0,
+            "genome_wide_candidates_count": 0,
+            "target_candidates": None,
+            "genome_wide_candidates": None,
+        }, False
+    
+    if not work_dir:
+        # Fallback to non-staging mode
+        logger.warning("No work_dir provided - falling back to non-staging mode")
+        return process_bam_file(
+            file_path, temp_dir, metadata, fusion_metadata,
+            target_panel, has_supplementary, supplementary_read_ids, work_dir
+        ), False
+    
+    try:
+        # Get atomic counter (thread-safe)
+        counter = _atomic_counter_increment(work_dir, sample_id)
+        logger.info(f"Assigned fusion file counter: {counter}")
+        
+        # Detect fusion candidates (no loading of accumulated data)
+        target_candidates, genome_wide_candidates = process_bam_for_fusions_work(
+            file_path, target_panel
+        )
+        
+        # Apply fusion candidate filtering
+        if target_candidates is not None and not target_candidates.empty:
+            target_candidates = _filter_fusion_candidates(target_candidates)
+            
+        if genome_wide_candidates is not None and not genome_wide_candidates.empty:
+            genome_wide_candidates = _filter_fusion_candidates(genome_wide_candidates)
+        
+        # Save to staging (Parquet is ~5-10x faster than JSON)
+        staging_dir = _get_staging_dir(work_dir, sample_id)
+        
+        target_staging = os.path.join(staging_dir, f"target_{counter:06d}.parquet")
+        genome_staging = os.path.join(staging_dir, f"genome_{counter:06d}.parquet")
+        
+        # Save candidates to staging
+        if target_candidates is not None and not target_candidates.empty:
+            target_candidates.to_parquet(target_staging, index=False)
+            logger.info(f"Saved {len(target_candidates)} target candidates to staging")
+        else:
+            # Save empty marker file
+            pd.DataFrame().to_parquet(target_staging, index=False)
+        
+        if genome_wide_candidates is not None and not genome_wide_candidates.empty:
+            genome_wide_candidates.to_parquet(genome_staging, index=False)
+            logger.info(f"Saved {len(genome_wide_candidates)} genome-wide candidates to staging")
+        else:
+            # Save empty marker file
+            pd.DataFrame().to_parquet(genome_staging, index=False)
+        
+        # Check if accumulation should run
+        pending_count = _get_pending_count(work_dir, sample_id)
+        should_accumulate = pending_count >= batch_size
+        
+        logger.info(
+            f"Fusion staging complete. Pending files: {pending_count}/{batch_size}"
+        )
+        
+        if should_accumulate:
+            logger.info(
+                f"Accumulation threshold reached ({pending_count} >= {batch_size})"
+            )
+        
+        results = {
+            "has_supplementary": True,
+            "target_candidates_count": (
+                len(target_candidates) if target_candidates is not None else 0
+            ),
+            "genome_wide_candidates_count": (
+                len(genome_wide_candidates) if genome_wide_candidates is not None else 0
+            ),
+            "target_candidates": target_candidates,
+            "genome_wide_candidates": genome_wide_candidates,
+        }
+        
+        return results, should_accumulate
+        
+    except Exception as e:
+        logger.error(f"Error in fusion staging for {sample_id}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        # Fall back to non-staging mode on error
+        return process_bam_file(
+            file_path, temp_dir, metadata, fusion_metadata,
+            target_panel, has_supplementary, supplementary_read_ids, work_dir
+        ), False
+
+
+def accumulate_fusion_candidates(
+    work_dir: str,
+    sample_id: str,
+    target_panel: str = "rCNS2",
+    force: bool = False,
+    batch_size: int = 10,
+) -> Dict[str, Any]:
+    """
+    Batch accumulation of staged fusion candidates with proper locking.
+    
+    This method:
+    1. Locks the accumulation process to prevent concurrent accumulations
+    2. Loads all staged files
+    3. Efficiently concatenates them (faster than iterative merge)
+    4. Merges batch with existing accumulated data
+    5. Saves updated accumulated data
+    6. Cleans up staging files
+    
+    Args:
+        work_dir: Working directory
+        sample_id: Sample identifier
+        target_panel: Target panel type
+        force: If True, accumulate even if below threshold (for end-of-run)
+        batch_size: Minimum number of files to accumulate
+    
+    Returns:
+        Dictionary with accumulation results
+    """
+    lock_file = _get_lock_file(work_dir, sample_id, "accumulation")
+    
+    try:
+        with FileLock(lock_file, timeout=60.0):
+            logger.info(f"Starting fusion batch accumulation for {sample_id} (force={force})")
+            start_time = time.time()
+            
+            staging_dir = _get_staging_dir(work_dir, sample_id)
+            
+            # Find all staging files
+            target_files = sorted(glob.glob(os.path.join(staging_dir, "target_*.parquet")))
+            genome_files = sorted(glob.glob(os.path.join(staging_dir, "genome_*.parquet")))
+            
+            if not target_files:
+                logger.info(f"No staged fusion files to accumulate for {sample_id}")
+                return {"status": "no_files", "files_processed": 0}
+            
+            # Check if we should accumulate based on count
+            if not force and len(target_files) < batch_size:
+                logger.info(
+                    f"Skipping fusion accumulation - only {len(target_files)} files staged "
+                    f"(threshold: {batch_size}, force={force})"
+                )
+                return {"status": "below_threshold", "files_pending": len(target_files)}
+            
+            logger.info(
+                f"Accumulating {len(target_files)} staged fusion files for {sample_id}"
+            )
+            
+            # Load all staged files
+            target_dfs = []
+            genome_dfs = []
+            
+            for target_file, genome_file in zip(target_files, genome_files):
+                try:
+                    target_df = pd.read_parquet(target_file)
+                    if not target_df.empty:
+                        target_dfs.append(target_df)
+                    
+                    genome_df = pd.read_parquet(genome_file)
+                    if not genome_df.empty:
+                        genome_dfs.append(genome_df)
+                except Exception as e:
+                    logger.warning(f"Error loading staging file {target_file}: {e}")
+                    continue
+            
+            logger.info(
+                f"Loaded {len(target_dfs)} target and {len(genome_dfs)} genome-wide staging files"
+            )
+            
+            # Efficient batch merge using concat
+            batch_target = pd.concat(target_dfs, ignore_index=True) if target_dfs else pd.DataFrame()
+            batch_genome = pd.concat(genome_dfs, ignore_index=True) if genome_dfs else pd.DataFrame()
+            
+            logger.info(
+                f"Batch merged: {len(batch_target)} target, {len(batch_genome)} genome-wide candidates"
+            )
+            
+            # Load existing accumulated metadata
+            existing_metadata = _load_fusion_metadata(work_dir, sample_id)
+            
+            if existing_metadata and existing_metadata.fusion_data:
+                # Merge with existing
+                existing_target = existing_metadata.fusion_data.get("target_candidates", [])
+                existing_genome = existing_metadata.fusion_data.get("genome_wide_candidates", [])
+                
+                logger.info(
+                    f"Existing data: {len(existing_target)} target, {len(existing_genome)} genome-wide"
+                )
+                
+                # Convert existing to DataFrames and concatenate
+                if existing_target:
+                    existing_target_df = pd.DataFrame(existing_target)
+                    batch_target = pd.concat([existing_target_df, batch_target], ignore_index=True)
+                
+                if existing_genome:
+                    existing_genome_df = pd.DataFrame(existing_genome)
+                    batch_genome = pd.concat([existing_genome_df, batch_genome], ignore_index=True)
+            
+            # Convert to list of dicts for storage
+            final_target = batch_target.to_dict("records") if not batch_target.empty else []
+            final_genome = batch_genome.to_dict("records") if not batch_genome.empty else []
+            
+            logger.info(
+                f"Final accumulated: {len(final_target)} target, {len(final_genome)} genome-wide candidates"
+            )
+            
+            # Create updated metadata
+            fusion_metadata = FusionMetadata(
+                sample_id=sample_id,
+                file_path="accumulated",
+                analysis_timestamp=time.time(),
+                target_panel=target_panel,
+                fusion_data={
+                    "target_candidates": final_target,
+                    "genome_wide_candidates": final_genome,
+                },
+                analysis_results={
+                    "target_candidates_count": len(final_target),
+                    "genome_wide_candidates_count": len(final_genome),
+                },
+                processing_steps=["accumulated"],
+            )
+            
+            # Save accumulated metadata
+            _save_fusion_metadata(fusion_metadata, work_dir, sample_id)
+            
+            # Generate output files with accumulated data
+            _generate_output_files(sample_id, fusion_metadata.analysis_results, fusion_metadata, work_dir)
+            
+            # Clean up staging files
+            logger.info("Cleaning up fusion staging files...")
+            for f in target_files + genome_files:
+                try:
+                    os.remove(f)
+                except OSError as e:
+                    logger.warning(f"Could not remove staging file {f}: {e}")
+            
+            elapsed = time.time() - start_time
+            logger.info(
+                f"Fusion batch accumulation complete for {sample_id}: "
+                f"{len(target_files)} files in {elapsed:.2f}s "
+                f"({elapsed/len(target_files):.3f}s per file)"
+            )
+            
+            return {
+                "status": "success",
+                "files_processed": len(target_files),
+                "target_candidates": len(final_target),
+                "genome_wide_candidates": len(final_genome),
+                "elapsed_time": elapsed,
+            }
+    
+    except TimeoutError as e:
+        logger.error(f"Could not acquire fusion accumulation lock for {sample_id}: {e}")
+        return {"status": "lock_timeout", "error": str(e)}
+    except Exception as e:
+        logger.error(f"Error during fusion batch accumulation for {sample_id}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return {"status": "error", "error": str(e)}
 
 
 def process_bam_file(
@@ -1301,17 +1726,19 @@ def _generate_fusion_summary_files(output_file: str, processed_data: dict) -> No
             except Exception:
                 pass  # If we can't read it, we'll start fresh
         
-        # Update the appropriate count
+        # Update the appropriate count - preserve existing counts from other processing
         if is_target_panel:
             target_count = candidate_count
         else:
             genome_count = candidate_count
         
-        # Write the updated summary
+        # Write the updated summary with both counts preserved
         with open(summary_file, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["target_fusions", "genome_fusions"])
             writer.writerow([target_count, genome_count])
+        
+        logger.info(f"[Fusion] Updated summary file: target={target_count}, genome={genome_count}")
         
     except Exception as e:
         print(f"Warning: Failed to generate fusion summary files: {e}")
@@ -1494,3 +1921,49 @@ def preprocess_structural_variants_standalone(output_dir: str) -> None:
     except Exception as e:
         logger.error(f"Error pre-processing structural variants: {str(e)}")
         logger.error("Exception details:", exc_info=True)
+
+
+def finalize_fusion_accumulation_for_sample(
+    sample_id: str, work_dir: str, target_panel: str = "rCNS2"
+) -> Dict[str, Any]:
+    """
+    Force final accumulation of any remaining staged fusion files for a sample.
+    
+    This should be called when:
+    - All files for a sample have been processed
+    - The workflow is completing
+    - There are staged files that haven't been accumulated yet
+    
+    Args:
+        sample_id: Sample identifier
+        work_dir: Working directory containing sample data
+        target_panel: Target panel type
+    
+    Returns:
+        Dictionary with accumulation results
+    """
+    try:
+        logger.info(f"Finalizing fusion accumulation for sample {sample_id}")
+        
+        # Check if there are pending files
+        pending_count = _get_pending_count(work_dir, sample_id)
+        
+        if pending_count == 0:
+            logger.info(f"No pending fusion files for {sample_id} - accumulation not needed")
+            return {"status": "no_pending_files", "sample_id": sample_id}
+        
+        logger.info(f"Found {pending_count} pending fusion files for {sample_id} - forcing accumulation")
+        
+        # Force accumulation of remaining files (batch_size=1 ensures accumulation runs)
+        result = accumulate_fusion_candidates(
+            work_dir, sample_id, target_panel, force=True, batch_size=1
+        )
+        
+        logger.info(f"Final fusion accumulation complete for {sample_id}: {result}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error during final fusion accumulation for {sample_id}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return {"status": "error", "error": str(e), "sample_id": sample_id}

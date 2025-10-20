@@ -456,5 +456,5 @@ def add_classification_section(sample_dir: Path) -> None:
         except Exception:
             pass
 
-    # Start the refresh timer (every 15 seconds)
-    ui.timer(15.0, _refresh_classification, active=True, immediate=True)
+    # Start the refresh timer (every 30 seconds)
+    ui.timer(30.0, _refresh_classification, active=True, immediate=True)

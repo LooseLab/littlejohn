@@ -612,6 +612,7 @@ def bam_preprocessing_handler(job, center: str = None):
             )
         except Exception:
             total_reads = 0
+        
         if total_reads > 50000:
             # Mark in context to prevent downstream triggers; record reason and count
             job.context.add_metadata("skip_downstream", True)
@@ -709,11 +710,13 @@ def bam_preprocessing_handler(job, center: str = None):
                 logger.warning(f"Could not update master.csv for {sample_id}: {e}")
 
         # Step 5: Add result to context
+        sample_id = metadata.extracted_data.get("sample_id", "unknown")
+        
         job.context.add_result(
             "preprocessing",
             {
                 "status": "success",
-                "sample_id": metadata.extracted_data.get("sample_id", "unknown"),
+                "sample_id": sample_id,
                 "state": metadata.extracted_data.get("state", "unknown"),
                 "mapped_reads": metadata.extracted_data.get("mapped_reads", 0),
                 "unmapped_reads": metadata.extracted_data.get("unmapped_reads", 0),

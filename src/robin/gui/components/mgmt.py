@@ -154,17 +154,24 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
     def _refresh_mgmt_sync(sample_dir: Path, launcher: Any) -> None:
         """Synchronous MGMT refresh."""
         try:
-            csv_files = list(sample_dir.glob("*_mgmt.csv"))
-            if not csv_files:
-                return
-
+            # Define the helper function first
             def _count_from_name(p: Path) -> int:
                 try:
                     return int(p.name.split("_")[0])
                 except Exception:
                     return -1
 
-            latest_csv = max(csv_files, key=_count_from_name)
+            # First check for final_mgmt.csv files (highest priority)
+            final_files = list(sample_dir.glob("final_mgmt.csv"))
+            if final_files:
+                latest_csv = final_files[0]
+            else:
+                # Fallback to numeric-prefixed files
+                csv_files = list(sample_dir.glob("*_mgmt.csv"))
+                if not csv_files:
+                    return
+
+                latest_csv = max(csv_files, key=_count_from_name)
             key = str(sample_dir)
             state = launcher._mgmt_state.get(key, {})
             current_count = _count_from_name(latest_csv)
@@ -273,5 +280,5 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
         except Exception as e:
             raise Exception(f"Failed to refresh MGMT section: {e}")
 
-    # Start the refresh timer (every 15 seconds)
-    ui.timer(15.0, _refresh_mgmt, active=True, immediate=True)
+    # Start the refresh timer (every 30 seconds)
+    ui.timer(30.0, _refresh_mgmt, active=True, immediate=True)

@@ -57,7 +57,7 @@ dependencies = [
     "requests",
     "PyPDF2",
     "alive-progress",
-    "nicegui",
+    "nicegui==3.0",
     "gff3_parser",
     "dna_features_viewer", 
     "icecream",

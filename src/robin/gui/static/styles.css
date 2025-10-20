@@ -1,5 +1,5 @@
 :root {
-  /* Apple HIG + Material Design 3 Color Tokens - Green Theme */
+  /* Mosaic-inspired Design System with Green Theme */
   --md-primary: #4F9153;  /* Original green */
   --md-primary-container: #E8F5E8;  /* Light green container */
   --md-on-primary: #FFFFFF;
@@ -20,20 +20,20 @@
   --md-on-error: #FFFFFF;
   --md-on-error-container: #B71C1C;
   
-  /* Apple HIG Surface Colors - Pure white with subtle depth */
+  /* Mosaic Surface Colors - Clean whites and grays */
   --md-surface: #FFFFFF;  /* Pure white for content */
-  --md-surface-container: #F8F9FA;  /* Very light gray - Apple's subtle depth */
-  --md-surface-container-high: #F1F3F4;  /* Light gray - Apple's secondary surface */
-  --md-surface-container-highest: #E8EAED;  /* Medium light gray - Apple's tertiary surface */
-  --md-surface-variant: #F1F3F4;  /* Light gray variant */
-  --md-on-surface: #1D1D1F;  /* Apple's primary text color */
-  --md-on-surface-variant: #6E6E73;  /* Apple's secondary text color */
+  --md-surface-container: #F8FAFC;  /* Very light gray - Mosaic's subtle depth */
+  --md-surface-container-high: #F1F5F9;  /* Light gray - Mosaic's secondary surface */
+  --md-surface-container-highest: #E2E8F0;  /* Medium light gray - Mosaic's tertiary surface */
+  --md-surface-variant: #F1F5F9;  /* Light gray variant */
+  --md-on-surface: #0F172A;  /* Mosaic's primary text color - darker slate */
+  --md-on-surface-variant: #64748B;  /* Mosaic's secondary text color - slate */
   
-  /* Apple HIG Outline Colors - Subtle and refined */
-  --md-outline: #D2D2D7;  /* Apple's separator color */
-  --md-outline-variant: #E5E5EA;  /* Apple's secondary separator */
+  /* Mosaic Outline Colors - Subtle and refined */
+  --md-outline: #E2E8F0;  /* Mosaic's separator color */
+  --md-outline-variant: #F1F5F9;  /* Mosaic's secondary separator */
   
-  --md-inverse-surface: #1D1D1F;  /* Apple's dark surface */
+  --md-inverse-surface: #0F172A;  /* Mosaic's dark surface - slate */
   --md-inverse-on-surface: #FFFFFF;  /* White text on dark */
   --md-inverse-primary: #81C784;  /* Light green for inverse */
   
@@ -45,33 +45,36 @@
   --color-background: var(--md-surface);
   --color-background-dark: var(--md-inverse-surface);
   
-  /* Typography - Inter font family */
-  --font-primary: "Inter", "SF Pro Display", "SF Pro", -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  /* Typography - Mosaic uses Inter font family */
+  --font-primary: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
   --font-mono: "JetBrains Mono", "SF Mono", "Monaco", "Menlo", "Consolas", "Liberation Mono", "Courier New", monospace;
   
-  /* Spacing - Apple HIG 8pt grid system */
-  --spacing-xs: 4px;   /* 4pt */
-  --spacing-sm: 8px;   /* 8pt */
-  --spacing-md: 16px;  /* 16pt */
-  --spacing-lg: 24px;  /* 24pt */
-  --spacing-xl: 32px;  /* 32pt */
-  --spacing-xxl: 48px; /* 48pt */
+  /* Spacing - Mosaic uses Tailwind spacing scale */
+  --spacing-xs: 4px;   /* 1 */
+  --spacing-sm: 8px;   /* 2 */
+  --spacing-md: 16px;  /* 4 */
+  --spacing-lg: 24px;  /* 6 */
+  --spacing-xl: 32px;  /* 8 */
+  --spacing-xxl: 48px; /* 12 */
+  --spacing-xxxl: 64px; /* 16 */
   
-  /* Elevation - Apple HIG subtle shadows */
-  --elevation-1: 0 1px 3px rgba(0, 0, 0, 0.1), 0 1px 2px rgba(0, 0, 0, 0.06);
-  --elevation-2: 0 4px 6px rgba(0, 0, 0, 0.1), 0 2px 4px rgba(0, 0, 0, 0.06);
-  --elevation-3: 0 10px 15px rgba(0, 0, 0, 0.1), 0 4px 6px rgba(0, 0, 0, 0.05);
-  --elevation-4: 0 20px 25px rgba(0, 0, 0, 0.1), 0 10px 10px rgba(0, 0, 0, 0.04);
+  /* Elevation - Mosaic uses more pronounced shadows */
+  --elevation-1: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  --elevation-2: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+  --elevation-3: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  --elevation-4: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+  --elevation-5: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
   
-  /* Transitions - Apple HIG spring animations */
-  --transition-base: 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
-  --transition-emphasized: 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  /* Transitions - Mosaic uses smooth transitions */
+  --transition-base: 150ms ease-in-out;
+  --transition-emphasized: 300ms ease-in-out;
   
-  /* Border radius - Apple HIG rounded corners */
-  --radius-sm: 6px;   /* Apple's small radius */
-  --radius-md: 10px;  /* Apple's medium radius */
-  --radius-lg: 16px;  /* Apple's large radius */
-  --radius-xl: 20px;  /* Apple's extra large radius */
+  /* Border radius - Mosaic uses consistent rounded corners */
+  --radius-sm: 4px;   /* Mosaic's small radius */
+  --radius-md: 8px;   /* Mosaic's medium radius */
+  --radius-lg: 12px;   /* Mosaic's large radius */
+  --radius-xl: 16px;  /* Mosaic's extra large radius */
+  --radius-2xl: 24px; /* Mosaic's 2xl radius */
   
   /* Apple HIG specific colors */
   --apple-blue: #007AFF;
@@ -170,52 +173,52 @@ body {
   color-scheme: light dark;
 }
 
-/* Apple HIG Typography Scale - SF Pro inspired */
+/* Mosaic Typography Scale - Inter font inspired */
 .text-display-large {
-  font-size: 57px;
-  line-height: 64px;
-  font-weight: 700;  /* Apple uses heavier weights */
-  letter-spacing: -0.5px;  /* Apple's tighter letter spacing */
+  font-size: 48px;
+  line-height: 56px;
+  font-weight: 700;  /* Mosaic uses heavier weights */
+  letter-spacing: -0.025em;  /* Mosaic's tighter letter spacing */
 }
 
 .text-display-medium {
-  font-size: 45px;
-  line-height: 52px;
+  font-size: 36px;
+  line-height: 44px;
   font-weight: 700;
-  letter-spacing: -0.25px;
+  letter-spacing: -0.025em;
 }
 
 .text-display-small {
-  font-size: 36px;
-  line-height: 44px;
+  font-size: 30px;
+  line-height: 38px;
   font-weight: 600;
-  letter-spacing: 0px;
+  letter-spacing: -0.025em;
 }
 
 .text-headline-large {
-  font-size: 32px;
-  line-height: 40px;
-  font-weight: 600;
-  letter-spacing: -0.25px;
-}
-
-.text-headline-medium {
-  font-size: 28px;
-  line-height: 36px;
-  font-weight: 600;
-  letter-spacing: -0.25px;
-}
-
-.text-headline-small {
   font-size: 24px;
   line-height: 32px;
   font-weight: 600;
-  letter-spacing: -0.25px;
+  letter-spacing: -0.025em;
+}
+
+.text-headline-medium {
+  font-size: 20px;
+  line-height: 28px;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+}
+
+.text-headline-small {
+  font-size: 18px;
+  line-height: 26px;
+  font-weight: 600;
+  letter-spacing: -0.025em;
 }
 
 .text-title-large {
-  font-size: 22px;
-  line-height: 28px;
+  font-size: 16px;
+  line-height: 24px;
   font-weight: 600;
   letter-spacing: -0.25px;
 }
@@ -294,13 +297,22 @@ body {
 
 .q-button {
   border-radius: var(--radius-md);
-  font-weight: 600;  /* Apple's button weight */
+  font-weight: 600;  /* Mosaic's button weight */
   text-transform: none;
-  letter-spacing: -0.25px;
+  letter-spacing: -0.025em;
   transition: all var(--transition-base);
-  /* Apple HIG: Clear button states */
+  /* Mosaic: Clean button states */
   position: relative;
   overflow: hidden;
+  font-size: 14px;
+  padding: var(--spacing-sm) var(--spacing-lg);
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-xs);
+  cursor: pointer;
+  border: none;
 }
 
 .q-button::before {
@@ -310,24 +322,25 @@ body {
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(255, 255, 255, 0.1);
-  opacity: 0;
-  transition: opacity var(--transition-base);
+  background: linear-gradient(45deg, transparent 30%, rgba(255, 255, 255, 0.1) 50%, transparent 70%);
+  transform: translateX(-100%);
+  transition: transform 0.6s;
 }
 
 .q-button:hover::before {
-  opacity: 1;
+  transform: translateX(100%);
 }
 
 .q-button--standard {
   background-color: var(--md-primary);
   color: var(--md-on-primary);
+  box-shadow: var(--elevation-1);
 }
 
 .q-button--standard:hover {
-  background-color: var(--md-primary-container);
-  color: var(--md-on-primary-container);
+  background-color: var(--md-secondary);
   box-shadow: var(--elevation-2);
+  transform: translateY(-1px);
 }
 
 .q-button--outline {
@@ -339,24 +352,30 @@ body {
 .q-button--outline:hover {
   background-color: var(--md-primary-container);
   border-color: var(--md-primary);
+  transform: translateY(-1px);
 }
 
-/* Apple HIG Header styling - Green theme with subtle depth */
+/* Mosaic Header styling - Clean modern design */
 .q-header {
-  height: 64px;
+  height: 72px;
   background-color: var(--md-primary);
-  border-bottom: 1px solid var(--md-primary-container);
-  box-shadow: var(--elevation-1);
+  border-bottom: 1px solid var(--md-outline);
+  box-shadow: var(--elevation-2);
   transition: all var(--transition-base);
-  /* Apple HIG: Subtle backdrop blur */
+  /* Mosaic: Clean backdrop blur */
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
+  padding: 0 var(--spacing-lg);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
 /* Header text and meter styling for better visibility */
 .q-header .q-label {
   color: var(--md-on-primary) !important;  /* White text on green background */
   font-weight: 600;
+  font-size: 16px;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);  /* Subtle shadow for better contrast */
 }
 
@@ -365,6 +384,7 @@ body {
 .q-header .q-label:contains("RAM") {
   color: var(--md-on-primary) !important;
   font-weight: 600;
+  font-size: 14px;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
 }
 
@@ -372,7 +392,7 @@ body {
   background-color: var(--md-primary);
   backdrop-filter: blur(30px);
   -webkit-backdrop-filter: blur(30px);
-  box-shadow: var(--elevation-2);
+  box-shadow: var(--elevation-3);
 }
 
 .body--dark .q-header {
@@ -435,55 +455,74 @@ body {
   background-color: var(--md-surface);
 }
 
-/* Apple HIG Image and plot containers - Subtle depth */
+/* Mosaic Image and plot containers - Clean modern depth */
 .image-container,
 .plot-container,
 .chart-container,
 .visualization-container {
   background-color: var(--md-surface);
   border-radius: var(--radius-lg);
-  padding: var(--spacing-md);
-  box-shadow: var(--elevation-1);
-  border: 1px solid var(--md-outline-variant);
-  /* Apple HIG: Subtle backdrop blur for depth */
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  padding: var(--spacing-lg);
+  box-shadow: var(--elevation-2);
+  border: 1px solid var(--md-outline);
+  /* Mosaic: Clean modern styling */
+  transition: all var(--transition-base);
 }
 
-/* Apple HIG Compact table styling */
+.image-container:hover,
+.plot-container:hover,
+.chart-container:hover,
+.visualization-container:hover {
+  box-shadow: var(--elevation-3);
+  transform: translateY(-1px);
+}
+
+/* Mosaic Modern table styling */
 .compact-table .q-table__container {
-  font-size: var(--spacing-sm);
+  font-size: 12px;
   border-radius: var(--radius-lg);
   overflow: hidden;
-  box-shadow: var(--elevation-1);
+  box-shadow: var(--elevation-2);
   background-color: var(--md-surface);
-  border: 1px solid var(--md-outline-variant);
+  border: 1px solid var(--md-outline);
+  transition: all var(--transition-base);
+}
+
+.compact-table .q-table__container:hover {
+  box-shadow: var(--elevation-3);
 }
 
 .compact-table .q-table th,
 .compact-table .q-table td {
-  padding: var(--spacing-sm) var(--spacing-md);
+  padding: var(--spacing-xs) var(--spacing-sm);
   line-height: 1.4;
-  border-bottom: 1px solid var(--md-outline-variant);
-  font-size: 14px;  /* Consistent font size for all table content */
+  border-bottom: 1px solid var(--md-outline);
+  font-size: 12px;
+  transition: background-color var(--transition-base);
 }
 
 .compact-table .q-table thead tr > th {
-  font-weight: 600;  /* Apple's table header weight */
+  font-weight: 600;
   background-color: var(--md-surface-container-high);
   color: var(--md-on-surface-variant);
-  font-size: 14px;  /* Match table content font size */
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.compact-table .q-table tbody tr:hover {
+  background-color: var(--md-surface-container-high);
 }
 
 .compact-table .q-table__separator,
 .compact-table .q-table__bottom {
-  min-height: 48px;
-  padding: var(--spacing-sm) var(--spacing-md);
+  min-height: 40px;
+  padding: var(--spacing-xs) var(--spacing-sm);
   background-color: var(--md-surface-container);
 }
 
 .compact-table .q-field--dense {
-  font-size: var(--spacing-sm);
+  font-size: 11px;
 }
 
 /* Apple HIG Form elements */

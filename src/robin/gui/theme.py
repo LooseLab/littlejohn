@@ -108,7 +108,7 @@ def get_version_from_github():
 
 
 def styled_table(*, columns, rows=None, pagination=20, class_size="table-xs", **kwargs):
-    """Create a NiceGUI table with Material Design 3 styling.
+    """Create a NiceGUI table with Material Design 3 styling and compact layout.
 
     Args:
         columns: columns definition passed to ui.table
@@ -132,7 +132,7 @@ def styled_table(*, columns, rows=None, pagination=20, class_size="table-xs", **
             table.classes(replace=f"table w-full {class_size} text-xs")
         except Exception:
             table.classes(f"table w-full {class_size} text-xs")
-        # Use Quasar's dense mode with M3 styling
+        # Use Quasar's dense mode with M3 styling for maximum compactness
         try:
             table.props("dense flat wrap-cells")
         except Exception:
@@ -149,12 +149,12 @@ async def check_version():
     if is_development_mode:
         return
         
-    # Check if version has already been checked in this session
+    # Check if version has already been checked in this app session
     try:
-        if app.storage.tab.get("version_checked", False):
+        if app.storage.general.get("version_checked", False):
             return
     except RuntimeError:
-        # Tab storage not available in this context, continue with version check
+        # Storage not available in this context, continue with version check
         pass
 
     try:
@@ -245,11 +245,11 @@ async def check_version():
             )
         dialog.open()
 
-    # Mark version as checked for this session
+    # Mark version as checked for this app session
     try:
-        app.storage.tab["version_checked"] = True
+        app.storage.general["version_checked"] = True
     except RuntimeError:
-        # Tab storage not available in this context, skip setting the flag
+        # Storage not available in this context, skip setting the flag
         pass
 
 
@@ -260,12 +260,47 @@ quitdialog = None
 
 MENU_BREAKPOINT = 1200
 
+
+class GlobalSystemMetrics:
+    """Global system metrics singleton that provides CPU and RAM usage data."""
+    
+    _instance = None
+    _timer_active = False
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance.cpu = 0
+            cls._instance.ram = 0
+        return cls._instance
+    
+    def start_timer(self):
+        """Start the global metrics timer if not already running."""
+        if not self._timer_active:
+            self._timer_active = True
+            ui.timer(1.0, self.update_metrics)
+    
+    def update_metrics(self):
+        """Update CPU and RAM metrics."""
+        try:
+            self.cpu = round(psutil.getloadavg()[1] / os.cpu_count() * 100, 1)
+            self.ram = round(psutil.virtual_memory()[2], 1)
+        except (OSError, AttributeError):
+            # Handle cases where psutil might fail or os.cpu_count() returns None
+            self.cpu = 0
+            self.ram = 0
+
+
+# Global metrics instance
+global_metrics = GlobalSystemMetrics()
+
 # Read the HTML content for the header
 HEADER_HTML = (Path(__file__).parent / "static" / "header.html").read_text()
 
 # Read the CSS styles for the application
 STYLE_CSS = (Path(__file__).parent / "static" / "styles.css").read_text()
 M3_COMPONENTS_CSS = (Path(__file__).parent / "static" / "m3-components.css").read_text()
+MOSAIC_COMPONENTS_CSS = (Path(__file__).parent / "static" / "mosaic-components.css").read_text()
 
 
 @contextmanager
@@ -295,7 +330,7 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
         '<script src="https://cdn.jsdelivr.net/npm/igv@3.2.0/dist/igv.min.js"></script>'
     )
     ui.add_head_html(
-        HEADER_HTML + f"<style>{STYLE_CSS}</style><style>{M3_COMPONENTS_CSS}</style>"
+        HEADER_HTML + f"<style>{STYLE_CSS}</style><style>{M3_COMPONENTS_CSS}</style><style>{MOSAIC_COMPONENTS_CSS}</style>"
     )
     ui.add_head_html(
         """
@@ -319,9 +354,9 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
             return
             
         try:
-            disclaimer_acknowledged = app.storage.tab.get("disclaimer_acknowledged", False)
+            disclaimer_acknowledged = app.storage.general.get("disclaimer_acknowledged", False)
         except RuntimeError:
-            # Tab storage not available in this context, show disclaimer
+            # Storage not available in this context, show disclaimer
             disclaimer_acknowledged = False
         
         if not disclaimer_acknowledged:
@@ -354,9 +389,9 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
 
                 def acknowledge():
                     try:
-                        app.storage.tab["disclaimer_acknowledged"] = True
+                        app.storage.general["disclaimer_acknowledged"] = True
                     except RuntimeError:
-                        # Tab storage not available in this context, skip setting the flag
+                        # Storage not available in this context, skip setting the flag
                         pass
                     disclaimer_dialog.close()
 
@@ -403,13 +438,13 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
             with ui.row().classes(
                 f"max-[{MENU_BREAKPOINT}px]:hidden items-center align-left px-4"
             ):
-                ui.html(navtitle).classes("text-headline-medium drop-shadow font-bold").style(
+                ui.html(navtitle, sanitize=False).classes("text-headline-medium drop-shadow font-bold").style(
                     "font-weight: 600; font-family: var(--font-primary)"
                 )
             with ui.row().classes(
                 f"min-[{MENU_BREAKPOINT+1}px]:hidden items-center align-left px-4"
             ):
-                ui.html(smalltitle).classes("text-headline-medium drop-shadow font-bold").style(
+                ui.html(smalltitle, sanitize=False).classes("text-headline-medium drop-shadow font-bold").style(
                     "font-weight: 600; font-family: var(--font-primary)"
                 )
             with ui.row().classes("ml-auto align-top"):
@@ -430,26 +465,12 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
                         f"max-[{MENU_BREAKPOINT}px]:hidden"
                     )
 
-                    # Create a data model for system metrics
-                    class SystemMetrics:
-                        def __init__(self):
-                            self.cpu = 0
-                            self.ram = 0
+                    # Start global metrics timer if not already running
+                    global_metrics.start_timer()
 
-                    metrics = SystemMetrics()
-
-                    # Bind the progress indicators to the model
-                    cpu_activity.bind_value_from(metrics, "cpu")
-                    ram_utilisation.bind_value_from(metrics, "ram")
-
-                    # Single timer to update both metrics
-                    def update_metrics():
-                        metrics.cpu = round(
-                            psutil.getloadavg()[1] / os.cpu_count() * 100, 1
-                        )
-                        metrics.ram = round(psutil.virtual_memory()[2], 1)
-
-                    ui.timer(1.0, update_metrics)
+                    # Bind the progress indicators to the global metrics
+                    cpu_activity.bind_value_from(global_metrics, "cpu")
+                    ram_utilisation.bind_value_from(global_metrics, "ram")
 
                     with ui.button(icon="menu").classes("rounded-md"):
                         with ui.menu() as menu:
@@ -718,12 +739,12 @@ def create_standalone_page():
         '<script src="https://cdn.jsdelivr.net/npm/igv@3.2.0/dist/igv.min.js"></script>'
     )
     ui.add_head_html(
-        HEADER_HTML + f"<style>{STYLE_CSS}</style><style>{M3_COMPONENTS_CSS}</style>"
+        HEADER_HTML + f"<style>{STYLE_CSS}</style><style>{M3_COMPONENTS_CSS}</style><style>{MOSAIC_COMPONENTS_CSS}</style>"
     )
     
     # Create a simple header
     with ui.header(elevated=True).classes("items-center duration-200 p-0 px-4 no-wrap elevation-1"):
-        ui.html("<strong>R.O.B.I.N</strong>").classes("text-headline-medium drop-shadow font-bold").style(
+        ui.html("<strong>R.O.B.I.N</strong>", sanitize=False).classes("text-headline-medium drop-shadow font-bold").style(
             "font-weight: 600; font-family: var(--font-primary)"
         )
         ui.image(get_imagefile()).style("width: 50px").classes("ml-auto")

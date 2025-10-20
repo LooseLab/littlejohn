@@ -113,6 +113,7 @@ class GUILauncher:
         self._known_sample_ids: set[str] = set()
         self._preexisting_sample_ids: set[str] = set()
         self._preexisting_scanned: bool = False
+        self._pending_samples_data: Optional[Dict[str, Any]] = None
         
         # Caching for samples data
         self._last_cache_time: float = 0.0
@@ -188,7 +189,7 @@ class GUILauncher:
             # Rate limiting: Skip low-priority updates if queue is getting too large
             queue_size = self.update_queue.qsize()
             if queue_size > 100 and priority < 5:
-                logging.debug(f"[GUI] Skipping low-priority update due to queue size: {queue_size}")
+                logging.error(f"[GUI] Skipping low-priority update due to queue size: {queue_size}")
                 return
             
             # Rate limiting: Skip duplicate updates of the same type within 1 second
@@ -267,8 +268,12 @@ class GUILauncher:
             elif update.update_type == UpdateType.ERROR_UPDATE:
                 self._update_errors(update.data)
             elif update.update_type == UpdateType.SAMPLES_UPDATE:
-                # Use async version to avoid blocking UI
-                ui.timer(0.1, lambda: self._update_samples_table_async(update.data), once=True)
+                # Store the data and update table directly (ui.timer fails with slot error)
+                self._pending_samples_data = update.data
+                try:
+                    self._update_samples_table_sync(self._pending_samples_data)
+                except Exception as e:
+                    logging.error(f"[GUI] Samples table update failed: {e}")
 
         except Exception as e:
             logging.debug(f"Error handling GUI update: {e}")
@@ -526,7 +531,6 @@ class GUILauncher:
             def welcome_page():
                 """Welcome page at root route."""
                 _setup_global_resources()
-                _setup_global_timers()
                 self._create_welcome_page()
 
             # Create the workflow monitoring page
@@ -534,7 +538,6 @@ class GUILauncher:
             def workflow_monitor():
                 """Workflow monitoring page under /robin route."""
                 _setup_global_resources()
-                _setup_global_timers()
                 self._create_workflow_monitor()
 
             # Create the samples overview page
@@ -542,7 +545,6 @@ class GUILauncher:
             def samples_overview():
                 """Samples overview page showing all tracked samples."""
                 _setup_global_resources()
-                _setup_global_timers()
                 self._create_samples_overview()
 
             # Create individual sample detail pages
@@ -550,7 +552,6 @@ class GUILauncher:
             def sample_detail(sample_id: str):
                 """Individual sample detail page."""
                 _setup_global_resources()
-                _setup_global_timers()
 
                 # Add a page visit handler to refresh plots
                 def on_page_visit():
@@ -575,6 +576,47 @@ class GUILauncher:
                 ui.context.client.on_connect(on_page_visit)
 
                 self._create_sample_detail_page(sample_id)
+
+            # Download API endpoint
+            @ui.page("/api/download/{sample_id}/{filename}")
+            def download_file(sample_id: str, filename: str):
+                """Download a file from a sample directory."""
+                try:
+                    # Security: Only allow alphanumeric characters and common file extensions
+                    import re
+                    if not re.match(r'^[a-zA-Z0-9._-]+$', filename):
+                        ui.notify("Invalid filename", type="error")
+                        return
+                    
+                    # Find the sample directory
+                    base_dir = Path(self.monitored_directory) if self.monitored_directory else None
+                    if not base_dir or not base_dir.exists():
+                        ui.notify("Sample directory not found", type="error")
+                        return
+                    
+                    sample_dir = base_dir / sample_id
+                    if not sample_dir.exists():
+                        ui.notify(f"Sample {sample_id} not found", type="error")
+                        return
+                    
+                    file_path = sample_dir / filename
+                    if not file_path.exists() or not file_path.is_file():
+                        ui.notify(f"File {filename} not found", type="error")
+                        return
+                    
+                    # Read file content
+                    with open(file_path, 'rb') as f:
+                        content = f.read()
+                    
+                    # Use NiceGUI's download functionality
+                    ui.download(
+                        content,
+                        filename=filename,
+                        media_type='application/octet-stream'
+                    )
+                    
+                except Exception as e:
+                    ui.notify(f"Download failed: {e}", type="error")
 
             # Setup global CSS and static files - moved to a helper function
             def _setup_global_resources():
@@ -605,17 +647,17 @@ class GUILauncher:
                     self.gui_ready.set()
                     # Rate limit GUI updates to prevent system lockup
                     # Increased from 0.3s to 2.0s to reduce update frequency
-                    ui.timer(2.0, self._drain_updates_on_ui, active=True)
+                    app.timer(2.0, self._drain_updates_on_ui, active=True)
                     # Delay initial sample scanning to prevent startup lockup
                     # Increased from 0.5s to 5.0s to allow GUI to fully initialize
-                    ui.timer(
+                    app.timer(
                         5.0,
                         lambda: self._scan_and_seed_samples_async(preexisting=True),
                         once=True,
                     )
                     # Increase polling interval for new samples to reduce load
-                    # Increased from 3.0s to 10.0s to reduce file system pressure
-                    ui.timer(10.0, self._scan_for_new_samples_async, active=True)
+                    # Increased from 10.0s to 30.0s to reduce file system pressure
+                    app.timer(30.0, self._scan_for_new_samples_async, active=True)
                 except Exception:
                     pass
 
@@ -628,6 +670,10 @@ class GUILauncher:
             except Exception as e:
                 logging.error(f"Error locating favicon: {str(e)}")
                 iconfile = None
+            
+            # Setup global timers once when the app starts
+            _setup_global_timers()
+            
             # Start the GUI
             ui.run(
                 host=self.host,
@@ -637,6 +683,7 @@ class GUILauncher:
                 title="ROBIN",
                 storage_secret="robin",
                 favicon=iconfile,
+                reconnect_timeout=60,
             )
         except Exception as e:
             print(f"GUI worker error: {e}")
@@ -767,14 +814,18 @@ class GUILauncher:
                         self.samples_search = (
                             ui.input(placeholder="Search…")
                             .props("clearable dense")
-                            .on(
-                                "update:model-value",
-                                lambda e: self._set_samples_query(
-                                    str(getattr(e, "value", "") or "")
-                                ),
-                            )
+                            .on("change", lambda e: self._set_samples_query(self._extract_event_value(e)))
+                            .on("update:model-value", lambda e: self._set_samples_query(self._extract_event_value(e)))
                             .classes("ml-auto")
                         )
+                        
+                        # Initialize search input with current filter value
+                        try:
+                            current_query = self._samples_filters.get("query", "")
+                            if current_query:
+                                self.samples_search.value = current_query
+                        except Exception:
+                            pass
 
                         # Origin filter
                         self.origin_filter = (
@@ -784,16 +835,8 @@ class GUILauncher:
                                 label="Origin",
                             )
                             .props("dense clearable")
-                            .on(
-                                "update:model-value",
-                                lambda e: self._set_samples_origin_filter(
-                                    e.args["label"]
-                                    if e.args
-                                    and isinstance(e.args, dict)
-                                    and "label" in e.args
-                                    else "All"
-                                ),
-                            )
+                            .on("change", lambda e: self._set_samples_origin_filter(self._extract_event_value(e)))
+                            .on("update:model-value", lambda e: self._set_samples_origin_filter(self._extract_event_value(e)))
                         )
 
                     # Loading state container
@@ -806,6 +849,7 @@ class GUILauncher:
                     # Create a placeholder table that will be updated later
                     from robin.gui.theme import styled_table
 
+                    # Create samples table
                     _samples_container, self.samples_table = styled_table(
                         columns=[
                             {
@@ -1174,122 +1218,114 @@ class GUILauncher:
                         if hasattr(self, "samples_loading_container"):
                             self.samples_loading_container.set_visibility(True)
 
-    
 
-    async def _update_samples_table_async(self, data: Dict[str, Any]) -> None:
-        """Asynchronous version of samples table update"""
+    def _update_samples_table_sync(self, data: Dict[str, Any]) -> None:
+        """Synchronous version of samples table update"""
         try:
-            
-            try:
-                if not hasattr(self, "samples_table"):
-                    return
-                samples = data.get("samples", [])
+            if not hasattr(self, "samples_table"):
+                return
+            samples = data.get("samples", [])
 
-                # Deduplicate by sample_id taking the newest last_seen
-                by_id: Dict[str, Dict[str, Any]] = {}
-                for s in samples:
-                    sid = s.get("sample_id", "") or "unknown"
-                    last_seen = float(s.get("last_seen", time.time()))
-                    existing = by_id.get(sid)
-                    if not existing or last_seen >= existing.get("_last_seen_raw", 0):
-                        origin_value = (
-                            "Pre-existing"
-                            if sid in self._preexisting_sample_ids and (time.time() - last_seen) >= 3600
-                            else "Live"
-                        )
-                        # Flip Live samples to Complete if inactive for 60 minutes
-                        try:
-                            if origin_value == "Live" and (time.time() - last_seen) >= 3600:
-                                origin_value = "Complete"
-                        except Exception:
-                            pass
-                        by_id[sid] = {
-                            "sample_id": sid,
-                            "origin": origin_value,
-                            # Persisted run info will be patched in below from master.csv
-                            "run_start": "",
-                            "device": "",
-                            "flowcell": "",
-                            "active_jobs": s.get("active_jobs", 0),
-                            "total_jobs": s.get("total_jobs", 0),
-                            "completed_jobs": s.get("completed_jobs", 0),
-                            "failed_jobs": s.get("failed_jobs", 0),
-                            "job_types": (
-                                ",".join(sorted(set(s.get("job_types", []))))
-                                if isinstance(s.get("job_types", []), list)
-                                else str(s.get("job_types", ""))
-                            ),
-                            "last_seen": time.strftime(
-                                "%Y-%m-%d %H:%M:%S", time.localtime(last_seen)
-                            ),
-                            "actions": "View",
-                            "_last_seen_raw": last_seen,
-                        }
-
-                # Patch from master.csv and persist the new overview values for later reload
-                try:
-                    base = (
-                        Path(self.monitored_directory) if self.monitored_directory else None
+            # Deduplicate by sample_id taking the newest last_seen
+            by_id: Dict[str, Dict[str, Any]] = {}
+            for s in samples:
+                sid = s.get("sample_id", "") or "unknown"
+                last_seen = float(s.get("last_seen", time.time()))
+                existing = by_id.get(sid)
+                if not existing or last_seen >= existing.get("_last_seen_raw", 0):
+                    origin_value = (
+                        "Pre-existing"
+                        if sid in self._preexisting_sample_ids and (time.time() - last_seen) >= 3600
+                        else "Live"
                     )
-                    manager = (
-                        MasterCSVManager(str(base)) if base and base.exists() else None
-                    )
-                except Exception:
-                    base, manager = None, None
-
-                for sid, row in by_id.items():
+                    # Flip Live samples to Complete if inactive for 60 minutes
                     try:
-                        # Persist overview numbers to master.csv so we can restore later
-                        if manager is not None:
-                            persist_payload = {
-                                "active_jobs": int(row.get("active_jobs", 0)),
-                                "total_jobs": int(row.get("total_jobs", 0)),
-                                "completed_jobs": int(row.get("completed_jobs", 0)),
-                                "failed_jobs": int(row.get("failed_jobs", 0)),
-                                "job_types": row.get("job_types", ""),
-                                "last_seen": float(row.get("_last_seen_raw", time.time())),
-                            }
-                            manager.update_sample_overview(sid, persist_payload)
-
-                        # Read run info from master.csv to display in table
-                        if base is not None:
-                            csv_path = base / sid / "master.csv"
-                            if csv_path.exists():
-                                with csv_path.open("r", newline="") as fh:
-                                    reader = csv.DictReader(fh)
-                                    first_row = next(reader, None)
-                                if first_row:
-                                    row["run_start"] = self._format_timestamp_for_display(
-                                        first_row.get("run_info_run_time", "")
-                                    )
-                                    row["device"] = first_row.get("run_info_device", "")
-                                    row["flowcell"] = first_row.get(
-                                        "run_info_flow_cell", ""
-                                    )
+                        if origin_value == "Live" and (time.time() - last_seen) >= 3600:
+                            origin_value = "Complete"
                     except Exception:
                         pass
+                    by_id[sid] = {
+                        "sample_id": sid,
+                        "origin": origin_value,
+                        # Persisted run info will be patched in below from master.csv
+                        "run_start": "",
+                        "device": "",
+                        "flowcell": "",
+                        "active_jobs": s.get("active_jobs", 0),
+                        "total_jobs": s.get("total_jobs", 0),
+                        "completed_jobs": s.get("completed_jobs", 0),
+                        "failed_jobs": s.get("failed_jobs", 0),
+                        "job_types": (
+                            ",".join(sorted(set(s.get("job_types", []))))
+                            if isinstance(s.get("job_types", []), list)
+                            else str(s.get("job_types", ""))
+                        ),
+                        "last_seen": time.strftime(
+                            "%Y-%m-%d %H:%M:%S", time.localtime(last_seen)
+                        ),
+                        "actions": "View",
+                        "_last_seen_raw": last_seen,
+                    }
 
-                # Merge with preexisting scans if any
-                existing_rows_by_id = {
-                    r["sample_id"]: r for r in (self._last_samples_rows or [])
-                }
-                for sid, row in by_id.items():
-                    existing_rows_by_id[sid] = row
-                rows = list(existing_rows_by_id.values())
-                # Replace rows to avoid duplicates then apply filters
-                self._last_samples_rows = rows
-                return rows
+            # Patch from master.csv and persist the new overview values for later reload
+            try:
+                base = (
+                    Path(self.monitored_directory) if self.monitored_directory else None
+                )
+                manager = (
+                    MasterCSVManager(str(base)) if base and base.exists() else None
+                )
+            except Exception:
+                base, manager = None, None
 
-            except Exception as e:
-                logging.debug(f"Error updating samples table: {e}")
-                return []
+            for sid, row in by_id.items():
+                try:
+                    # Persist overview numbers to master.csv so we can restore later
+                    if manager is not None:
+                        persist_payload = {
+                            "active_jobs": int(row.get("active_jobs", 0)),
+                            "total_jobs": int(row.get("total_jobs", 0)),
+                            "completed_jobs": int(row.get("completed_jobs", 0)),
+                            "failed_jobs": int(row.get("failed_jobs", 0)),
+                            "job_types": row.get("job_types", ""),
+                            "last_seen": float(row.get("_last_seen_raw", time.time())),
+                        }
+                        manager.update_sample_overview(sid, persist_payload)
+
+                    # Read run info from master.csv to display in table
+                    if base is not None:
+                        csv_path = base / sid / "master.csv"
+                        if csv_path.exists():
+                            with csv_path.open("r", newline="") as fh:
+                                reader = csv.DictReader(fh)
+                                first_row = next(reader, None)
+                            if first_row:
+                                row["run_start"] = self._format_timestamp_for_display(
+                                    first_row.get("run_info_run_time", "")
+                                )
+                                row["device"] = first_row.get("run_info_device", "")
+                                row["flowcell"] = first_row.get(
+                                    "run_info_flow_cell", ""
+                                )
+                except Exception:
+                    pass
+
+            # Merge with preexisting scans if any
+            existing_rows_by_id = {
+                r["sample_id"]: r for r in (self._last_samples_rows or [])
+            }
+            for sid, row in by_id.items():
+                existing_rows_by_id[sid] = row
+            rows = list(existing_rows_by_id.values())
+            # Replace rows to avoid duplicates then apply filters
+            self._last_samples_rows = rows
             
             # Update UI on main thread
             if rows and hasattr(self, "samples_table"):
                 self._apply_samples_table_filters()
-                
+
         except Exception as e:
-            logging.error(f"Error in async samples table update: {e}")
+            logging.error(f"Error in samples table update: {e}")
 
     # -------- Samples table helpers: search, filter, sort --------
     def _format_timestamp_for_display(self, value: Any) -> str:
@@ -1332,24 +1368,68 @@ class GUILauncher:
             normalized.append(r)
         return normalized
 
+    def _extract_event_value(self, event, default=""):
+        """Extract value from NiceGUI event arguments."""
+        try:
+            # Handle different event types
+            if hasattr(event, "value"):
+                return str(event.value or default)
+            elif hasattr(event, "args"):
+                if isinstance(event.args, dict):
+                    return str(event.args.get("value", event.args.get("label", default)))
+                elif isinstance(event.args, list) and len(event.args) > 0:
+                    return str(event.args[0] or default)
+                else:
+                    return str(event.args or default)
+            else:
+                return str(default)
+        except Exception:
+            return str(default)
+
     def _set_samples_query(self, query: str) -> None:
         try:
-            self._samples_filters["query"] = (query or "").strip().lower()
+            # Ensure we have a filters dict
+            if not hasattr(self, "_samples_filters"):
+                self._samples_filters = {"query": "", "origin": "All"}
+            
+            # Normalize the query
+            normalized_query = (query or "").strip().lower()
+            self._samples_filters["query"] = normalized_query
+            
+            # Apply filters immediately
             self._apply_samples_table_filters()
-        except Exception:
+            
+            # Debug logging
+            logging.debug(f"Search query updated: '{normalized_query}'")
+        except Exception as e:
+            logging.error(f"Error setting samples query: {e}")
             pass
 
     def _set_samples_origin_filter(self, origin_value: str) -> None:
         try:
-            self._samples_filters["origin"] = origin_value or "All"
+            # Ensure we have a filters dict
+            if not hasattr(self, "_samples_filters"):
+                self._samples_filters = {"query": "", "origin": "All"}
+            
+            # Normalize the origin value
+            normalized_origin = origin_value or "All"
+            self._samples_filters["origin"] = normalized_origin
+            
+            # Apply filters immediately
             self._apply_samples_table_filters()
-        except Exception:
+            
+            # Debug logging
+            logging.debug(f"Origin filter updated: '{normalized_origin}'")
+        except Exception as e:
+            logging.error(f"Error setting samples origin filter: {e}")
             pass
 
     def _apply_samples_table_filters(self) -> None:
         try:
             base_rows = getattr(self, "_last_samples_rows", []) or []
             rows = self._normalize_rows_for_display(base_rows)
+            
+            logging.debug(f"Applying filters to {len(rows)} base rows")
 
             # Origin filter, compute dynamic 'Complete' for display if needed
             now_ts = time.time()
@@ -1365,11 +1445,13 @@ class GUILauncher:
             origin = (self._samples_filters or {}).get("origin", "All")
             if origin and origin != "All":
                 rows = [r for r in rows if (r.get("origin") == origin)]
+                logging.debug(f"After origin filter ({origin}): {len(rows)} rows")
 
             # Global query filter
             q = (self._samples_filters or {}).get("query", "")
             if q:
                 ql = q.lower()
+                logging.debug(f"Applying search filter: '{ql}'")
 
                 def match_any(r: Dict[str, Any]) -> bool:
                     return any(
@@ -1386,6 +1468,7 @@ class GUILauncher:
                     )
 
                 rows = [r for r in rows if match_any(r)]
+                logging.debug(f"After search filter: {len(rows)} rows")
 
             # annotate export selection state per row for rightmost checkbox column
             try:
@@ -1408,9 +1491,16 @@ class GUILauncher:
                 except Exception:
                     pass
 
-            self.samples_table.rows = rows
-            self.samples_table.update()
-        except Exception:
+            # Update the table
+            if hasattr(self, "samples_table"):
+                self.samples_table.rows = rows
+                self.samples_table.update()
+                logging.debug(f"Updated samples table with {len(rows)} filtered rows")
+            else:
+                logging.warning("samples_table not found, cannot update")
+                
+        except Exception as e:
+            logging.error(f"Error applying samples table filters: {e}")
             pass
 
     def _refresh_sample_plots(self, sample_id: str):
@@ -1576,7 +1666,7 @@ class GUILauncher:
                 from nicegui import run as ng_run  # type: ignore
 
                 
-                if sample_dir and sample_dir.exists():
+                if not sample_dir or not sample_dir.exists():
                     ui.notify(
                         "Output directory not available for this sample",
                         type="warning",
@@ -1840,6 +1930,13 @@ class GUILauncher:
                                         "field": "mtime",
                                         "sortable": True,
                                     },
+                        {
+                            "name": "actions",
+                            "label": "Download",
+                            "field": "actions",
+                            "sortable": False,
+                            "align": "center",
+                        },
                                 ],
                                 rows=[],
                                 pagination=20,
@@ -1850,6 +1947,27 @@ class GUILauncher:
                                     'multi-sort rows-per-page-options="[10,20,50,0]"'
                                 )
                                 files_search.bind_value(files_table, "filter")
+                            except Exception:
+                                pass
+                            
+                            # Add download button slot that emits an event to trigger Python download
+                            try:
+                                files_table.add_slot(
+                                    "body-cell-actions",
+                                    """
+<q-td key="actions" :props="props">
+  <q-btn color="primary" size="sm" icon="download" 
+         @click="() => $parent.$emit('download-file', props.row.name)" 
+         title="Download file" />
+</q-td>
+""",
+                                )
+                            except Exception:
+                                pass
+                            
+                            # Add event handler for download button clicks
+                            try:
+                                files_table.on('download-file', lambda event: _download_file(event.args))
                             except Exception:
                                 pass
 
@@ -1889,6 +2007,31 @@ class GUILauncher:
                             except Exception:
                                 pass
 
+                    # Download method for individual files
+                    def _download_file(filename: str):
+                        """Download a single file from the sample directory."""
+                        try:
+                            if not sample_dir or not sample_dir.exists():
+                                ui.notify("Sample directory not found", type="error")
+                                return
+
+                            file_path = sample_dir / filename
+                            if not file_path.exists() or not file_path.is_file():
+                                ui.notify(f"File {filename} not found", type="error")
+                                return
+
+                            with open(file_path, 'rb') as f:
+                                content = f.read()
+
+                            ui.download(
+                                content,
+                                filename=filename,
+                                media_type='application/octet-stream'
+                            )
+
+                        except Exception as e:
+                            ui.notify(f"Download failed: {e}", type="error")
+
                     # Periodic refresher for files table and master.csv summary
                     _notify_state = {"files_error": False, "csv_error": False}
 
@@ -1908,6 +2051,7 @@ class GUILauncher:
                                                     "%Y-%m-%d %H:%M:%S",
                                                     time.localtime(stat.st_mtime),
                                                 ),
+                                                "actions": f.name,  # Store filename for actions
                                             }
                                         )
                                     except Exception:
@@ -2066,7 +2210,7 @@ class GUILauncher:
 
                     # Start periodic refresh with async version
                     try:
-                        ui.timer(5.0, _refresh_sample_detail_async)
+                        ui.timer(30.0, _refresh_sample_detail_async)
                     except Exception:
                         pass
 
@@ -2380,9 +2524,9 @@ class GUILauncher:
                 self.gui_ready.set()
                 logging.info("[GUI] UI created and ready to receive updates")
                 # Start a periodic UI-thread drain of the update queue
-                ui.timer(0.3, self._drain_updates_on_ui, active=True)
+                app.timer(0.3, self._drain_updates_on_ui, active=True)
                 # Start duration refresher
-                ui.timer(1.0, lambda: self._refresh_duration(), active=True)
+                app.timer(1.0, lambda: self._refresh_duration(), active=True)
 
     def _refresh_duration(self):
         if self._is_running and self._start_time and hasattr(self, "workflow_duration"):
@@ -2537,6 +2681,66 @@ class GUILauncher:
             return self._last_samples_rows
         return None
 
+    def _calculate_job_counts_from_files(self, sample_dir: Path) -> Dict[str, Any]:
+        """Calculate job counts and types from actual analysis result files in the sample directory."""
+        try:
+            total_jobs = 0
+            completed_jobs = 0
+            failed_jobs = 0
+            job_types = set()
+            
+            # Define job type patterns and their corresponding files
+            job_patterns = {
+                "fusion": ["fusion_candidates_master_processed.csv", "fusion_candidates_all_processed.csv", "fusion_summary.csv"],
+                "cnv": ["cnv_results.csv", "cnv_summary.csv", "copy_numbers.pkl"],
+                "mgmt": ["final_mgmt.csv", "*_mgmt.csv"],
+                "coverage": ["coverage_summary.csv", "coverage_results.csv"],
+                "igv_bam": ["*.bam", "*.bai"],
+                "bed_conversion": ["*.bed", "*.bedmethyl"],
+                "nanodx": ["nanodx_results.csv", "nanodx_summary.csv"],
+                "pannanodx": ["pannanodx_results.csv", "pannanodx_summary.csv"],
+                "random_forest": ["random_forest_results.csv", "random_forest_summary.csv"],
+                "sturgeon": ["sturgeon_results.csv", "sturgeon_summary.csv"],
+                "target": ["target_results.csv", "target_summary.csv"]
+            }
+            
+            # Check for each job type
+            for job_type, patterns in job_patterns.items():
+                job_found = False
+                for pattern in patterns:
+                    if "*" in pattern:
+                        # Use glob pattern
+                        matching_files = list(sample_dir.glob(pattern))
+                        if matching_files:
+                            job_found = True
+                            break
+                    else:
+                        # Check for exact file
+                        if (sample_dir / pattern).exists():
+                            job_found = True
+                            break
+                
+                if job_found:
+                    total_jobs += 1
+                    completed_jobs += 1  # Assume completed if files exist
+                    job_types.add(job_type)
+            
+            return {
+                "total_jobs": total_jobs,
+                "completed_jobs": completed_jobs,
+                "failed_jobs": failed_jobs,
+                "job_types": ",".join(sorted(job_types)) if job_types else ""
+            }
+            
+        except Exception as e:
+            logging.warning(f"Error calculating job counts from files for {sample_dir}: {e}")
+            return {
+                "total_jobs": 0,
+                "completed_jobs": 0,
+                "failed_jobs": 0,
+                "job_types": ""
+            }
+
     async def _load_samples_progressively(self, sample_dirs: List[Path], batch_size: int = 10) -> None:
         """Load samples in small batches to avoid blocking the UI"""
         try:
@@ -2586,11 +2790,8 @@ class GUILauncher:
             if hasattr(self, "samples_loading_container"):
                 self.samples_loading_container.set_visibility(False)
                 
-            ui.notify(f"Loaded {len(rows)} samples successfully", type="positive", timeout=2000)
-            
         except Exception as e:
             logging.error(f"Error in progressive loading: {e}")
-            ui.notify(f"Error loading samples: {str(e)}", type="error", timeout=3000)
             if hasattr(self, "samples_loading_container"):
                 self.samples_loading_container.set_visibility(False)
 
@@ -2638,6 +2839,7 @@ class GUILauncher:
                         except Exception:
                             pass
                             
+                        # Try to get overview data from master.csv first
                         ov_active = int(
                             first_row.get("samples_overview_active_jobs", 0) or 0
                         )
@@ -2653,6 +2855,14 @@ class GUILauncher:
                         ov_job_types = str(
                             first_row.get("samples_overview_job_types", "") or ""
                         )
+                        
+                        # If overview data is not available (0 values), calculate from actual analysis files
+                        if ov_total == 0 and ov_completed == 0:
+                            calculated_counts = self._calculate_job_counts_from_files(sample_dir)
+                            ov_total = calculated_counts["total_jobs"]
+                            ov_completed = calculated_counts["completed_jobs"]
+                            ov_failed = calculated_counts["failed_jobs"]
+                            ov_job_types = calculated_counts["job_types"]
                 except Exception:
                     pass
                     
@@ -2716,9 +2926,6 @@ class GUILauncher:
                     await self._load_samples_progressively(sample_dirs)
                     return
             
-            # Show loading notification for smaller directories
-            ui.notify("Loading samples...", type="info", timeout=2000)
-            
             # Show loading indicator
             if hasattr(self, "samples_loading_indicator"):
                 self.samples_loading_indicator.set_visibility(True)
@@ -2737,13 +2944,8 @@ class GUILauncher:
             if hasattr(self, "samples_loading_container"):
                 self.samples_loading_container.set_visibility(False)
             
-            # Show success notification
-            if result is not None:
-                ui.notify("Samples loaded successfully", type="positive", timeout=1500)
-            
         except Exception as e:
             logging.error(f"Error in async sample scanning: {e}")
-            ui.notify(f"Error loading samples: {str(e)}", type="error", timeout=3000)
             
             # Hide loading indicators on error
             if hasattr(self, "samples_loading_indicator"):
@@ -2754,11 +2956,8 @@ class GUILauncher:
     async def _scan_for_new_samples_async(self) -> None:
         """Asynchronous version of new samples scanning"""
         try:
-            # Check cache first
-            cached_data = self._get_cached_samples()
-            if cached_data:
-                return  # Use cached data
-            
+            # Always scan for new samples to ensure we get updates
+            # The cache will be updated by _scan_for_new_samples if there are changes
             self._scan_for_new_samples()
         except Exception as e:
             logging.error(f"Error in async new samples scanning: {e}")
@@ -2904,6 +3103,8 @@ class GUILauncher:
                         pass
                 self._last_samples_rows = merged
                 self._known_sample_ids = {r["sample_id"] for r in merged}
+                # Update cache timestamp when we update the samples data
+                self._last_cache_time = time.time()
         except Exception:
             pass
 

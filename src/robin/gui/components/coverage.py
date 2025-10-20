@@ -1691,12 +1691,26 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                         display_df["INFO"] = display_df["INFO"].apply(truncate_info)
 
-                        # Create table
-                        variant_table = (
-                            ui.table.from_pandas(display_df, pagination=25)
-                            .props("dense")
-                            .style("height: 600px")
-                            .style("font-size: 90%; font-weight: 300")
+                        # Create columns definition from DataFrame
+                        columns = []
+                        for col in display_df.columns:
+                            columns.append({
+                                "name": col,
+                                "label": col,
+                                "field": col,
+                                "sortable": True
+                            })
+                        
+                        # Create rows from DataFrame
+                        rows = display_df.to_dict('records')
+                        
+                        # Create styled table for consistency
+                        from robin.gui.theme import styled_table
+                        table_container, variant_table = styled_table(
+                            columns=columns,
+                            rows=rows,
+                            pagination=25,
+                            class_size="table-xs"
                         )
 
                         # Make all columns sortable
@@ -2710,13 +2724,25 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 reverse=True,
                             )
 
-                            # Create table
-                            gene_table = (
-                                ui.table.from_pandas(
-                                    pd.DataFrame(gene_table_data), pagination=25
-                                )
-                                .props("dense")
-                                .style("height: 400px")
+                            # Create table using styled_table for consistency
+                            from robin.gui.theme import styled_table
+                            
+                            # Create columns definition
+                            columns = []
+                            for col in gene_table_data[0].keys():
+                                columns.append({
+                                    "name": col,
+                                    "label": col.replace("_", " ").title(),
+                                    "field": col,
+                                    "sortable": True
+                                })
+                            
+                            # Create styled table
+                            table_container, gene_table = styled_table(
+                                columns=columns,
+                                rows=gene_table_data,
+                                pagination=25,
+                                class_size="table-xs"
                             )
 
                             # Add search functionality
@@ -2872,10 +2898,28 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                     if variant_data:
                                         # Create table with proper columns using pandas DataFrame
                                         df = pd.DataFrame(variant_data)
-                                        variant_table = (
-                                            ui.table.from_pandas(df, pagination=10)
-                                            .props("dense")
-                                            .style("height: 300px")
+                                        # Create styled table for consistency
+                                        from robin.gui.theme import styled_table
+                                        
+                                        # Create columns definition
+                                        columns = []
+                                        for col in df.columns:
+                                            columns.append({
+                                                "name": col,
+                                                "label": col.replace("_", " ").title(),
+                                                "field": col,
+                                                "sortable": True
+                                            })
+                                        
+                                        # Create rows from DataFrame
+                                        rows = df.to_dict('records')
+                                        
+                                        # Create styled table
+                                        table_container, variant_table = styled_table(
+                                            columns=columns,
+                                            rows=rows,
+                                            pagination=10,
+                                            class_size="table-xs"
                                         )
 
                                         # Make columns sortable
@@ -2945,11 +2989,25 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             key=lambda x: float(x["mean_coverage"].replace("x", ""))
                         )
 
-                        # Create table
-                        low_cov_table = (
-                            ui.table.from_pandas(pd.DataFrame(low_cov_data), pagination=25)
-                            .props("dense")
-                            .style("height: 400px")
+                        # Create table using styled_table for consistency
+                        from robin.gui.theme import styled_table
+                        
+                        # Create columns definition
+                        columns = []
+                        for col in low_cov_data[0].keys():
+                            columns.append({
+                                "name": col,
+                                "label": col.replace("_", " ").title(),
+                                "field": col,
+                                "sortable": True
+                            })
+                        
+                        # Create styled table
+                        table_container, low_cov_table = styled_table(
+                            columns=columns,
+                            rows=low_cov_data,
+                            pagination=25,
+                            class_size="table-xs"
                         )
 
                         # Add search functionality
@@ -3135,10 +3193,28 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                                     # Create table with proper columns using pandas DataFrame
                                     df = pd.DataFrame(variant_data)
-                                    detailed_variant_table = (
-                                        ui.table.from_pandas(df, pagination=20)
-                                        .props("dense")
-                                        .style("height: 500px")
+                                    # Create styled table for consistency
+                                    from robin.gui.theme import styled_table
+                                    
+                                    # Create columns definition
+                                    columns = []
+                                    for col in df.columns:
+                                        columns.append({
+                                            "name": col,
+                                            "label": col.replace("_", " ").title(),
+                                            "field": col,
+                                            "sortable": True
+                                        })
+                                    
+                                    # Create rows from DataFrame
+                                    rows = df.to_dict('records')
+                                    
+                                    # Create styled table
+                                    table_container, detailed_variant_table = styled_table(
+                                        columns=columns,
+                                        rows=rows,
+                                        pagination=20,
+                                        class_size="table-xs"
                                     )
 
                                     # Add search functionality
@@ -4040,4 +4116,4 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             )
 
     # Trigger an immediate refresh on page load, then continue with periodic refreshes
-    ui.timer(15.0, _refresh_coverage_async, active=True, immediate=True)  # Periodic refresh every 30 seconds
+    ui.timer(30.0, _refresh_coverage_async, active=True, immediate=True)  # Periodic refresh every 30 seconds

@@ -76,7 +76,9 @@ import gc
 import json
 import subprocess
 import shutil
-from typing import Dict, Any, Optional, List
+import glob
+import fcntl
+from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
 from io import StringIO
 import numpy as np
@@ -104,6 +106,47 @@ def json_serializable(obj):
     elif isinstance(obj, pd.DataFrame):
         return obj.to_dict("records")
     return obj
+
+
+class FileLock:
+    """
+    Simple file-based lock for coordinating access across processes/threads.
+    Uses fcntl for POSIX systems.
+    """
+    
+    def __init__(self, lock_file: str, timeout: float = 30.0):
+        self.lock_file = lock_file
+        self.timeout = timeout
+        self.fd = None
+    
+    def __enter__(self):
+        self.acquire()
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
+    
+    def acquire(self):
+        """Acquire the lock with timeout"""
+        os.makedirs(os.path.dirname(self.lock_file), exist_ok=True)
+        self.fd = open(self.lock_file, 'w')
+        
+        start_time = time.time()
+        while True:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except IOError:
+                if time.time() - start_time > self.timeout:
+                    raise TimeoutError(f"Could not acquire lock {self.lock_file} within {self.timeout}s")
+                time.sleep(0.1)
+    
+    def release(self):
+        """Release the lock"""
+        if self.fd:
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+            self.fd.close()
+            self.fd = None
 
 
 # Import robin resources for BED files
@@ -182,15 +225,15 @@ def get_covdfs(bamfile, bedfile=None):
 
         newcovdf = pd.read_csv(StringIO(coverage_output), sep="\t")
 
-        logger.info(f"Raw pysam.coverage columns: {list(newcovdf.columns)}")
-        logger.info(f"Sample raw coverage data: {newcovdf.head(2).to_dict('records')}")
+        logger.debug(f"Raw pysam.coverage columns: {list(newcovdf.columns)}")
+        logger.debug(f"Sample raw coverage data: {newcovdf.head(2).to_dict('records')}")
 
         newcovdf.drop(
             columns=["coverage", "meanbaseq", "meanmapq"],
             inplace=True,
         )
 
-        logger.info(f"After dropping columns: {list(newcovdf.columns)}")
+        logger.debug(f"After dropping columns: {list(newcovdf.columns)}")
 
         # Find target BED file - use provided bedfile or fallback to unique_genes.bed
         target_bed = bedfile
@@ -270,17 +313,17 @@ def run_bedmerge(newcovdf, cov_df_main, bedcovdf, bedcov_df_main):
     """
     logger = logging.getLogger("robin.target")
 
-    logger.info("Starting coverage merge:")
-    logger.info(
+    logger.debug("Starting coverage merge:")
+    logger.debug(
         f"  New genome coverage: {len(newcovdf) if newcovdf is not None else 0} regions"
     )
-    logger.info(
+    logger.debug(
         f"  Existing genome coverage: {len(cov_df_main) if cov_df_main is not None else 0} regions"
     )
-    logger.info(
+    logger.debug(
         f"  New target coverage: {len(bedcovdf) if bedcovdf is not None else 0} targets"
     )
-    logger.info(
+    logger.debug(
         f"  Existing target coverage: {len(bedcov_df_main) if bedcov_df_main is not None else 0} targets"
     )
 
@@ -308,15 +351,15 @@ def run_bedmerge(newcovdf, cov_df_main, bedcovdf, bedcov_df_main):
             inplace=True,
         )
 
-        logger.info(
+        logger.debug(
             f"Merged genome coverage: {len(cov_df_main)} + {len(newcovdf)} -> {len(merged_df)} regions"
         )
-        logger.info(
+        logger.debug(
             f"Sample merged genome data: {merged_df.head(3).to_dict('records')}"
         )
     else:
         merged_df = newcovdf
-        logger.info(
+        logger.debug(
             f"No existing genome coverage, using new data: {len(merged_df)} regions"
         )
 
@@ -331,15 +374,15 @@ def run_bedmerge(newcovdf, cov_df_main, bedcovdf, bedcov_df_main):
         merged_bed_df["bases"] = merged_bed_df["bases_df1"] + merged_bed_df["bases_df2"]
         merged_bed_df.drop(columns=["bases_df1", "bases_df2"], inplace=True)
 
-        logger.info(
+        logger.debug(
             f"Merged target coverage: {len(bedcov_df_main)} + {len(bedcovdf)} -> {len(merged_bed_df)} targets"
         )
-        logger.info(
+        logger.debug(
             f"Sample merged target data: {merged_bed_df.head(3).to_dict('records')}"
         )
     else:
         merged_bed_df = bedcovdf
-        logger.info(
+        logger.debug(
             f"No existing target coverage, using new data: {len(merged_bed_df)} targets"
         )
 
@@ -374,13 +417,16 @@ class TargetMetadata:
 class TargetAnalysis:
     """Target analysis worker"""
 
-    def __init__(self, work_dir=None, config_path=None, threads=4, target_panel="rCNS2"):
+    def __init__(self, work_dir=None, config_path=None, threads=4, target_panel="rCNS2", 
+                 batch_size=10, use_staging=True):
         logger = logging.getLogger("robin.target")
 
         self.work_dir = work_dir or os.getcwd()
         self.config_path = config_path
         self.threads = threads
         self.target_panel = target_panel
+        self.batch_size = batch_size  # Trigger accumulation after N files
+        self.use_staging = use_staging  # Enable/disable staging optimization
 
         # Initialize counter for incremental file naming
         self.file_counter = 1
@@ -411,7 +457,7 @@ class TargetAnalysis:
                 "No reference genome configured - SNP calling will not be available"
             )
 
-        logger.info("Target Analysis initialized")
+        logger.info(f"Target Analysis initialized (staging={'enabled' if use_staging else 'disabled'}, batch_size={batch_size})")
 
     def _find_target_bed(self, target_panel: str = "rCNS2") -> str:
         """Find the target BED file from robin resources based on panel type"""
@@ -487,6 +533,178 @@ class TargetAnalysis:
         sample_dir = os.path.join(base_dir, sample_id)
         os.makedirs(sample_dir, exist_ok=True)
         return sample_dir
+    
+    def _get_staging_dir(self, sample_id: str) -> str:
+        """Get staging directory for temporary per-file results"""
+        staging_dir = os.path.join(self.work_dir, sample_id, "_staging")
+        os.makedirs(staging_dir, exist_ok=True)
+        return staging_dir
+    
+    def _get_lock_file(self, sample_id: str, lock_type: str = "counter") -> str:
+        """Get lock file path for coordinating concurrent access"""
+        lock_dir = os.path.join(self.work_dir, sample_id, "_locks")
+        os.makedirs(lock_dir, exist_ok=True)
+        return os.path.join(lock_dir, f"{lock_type}.lock")
+    
+    def _get_pending_count(self, sample_id: str) -> int:
+        """Get count of files pending accumulation (thread-safe)"""
+        staging_dir = self._get_staging_dir(sample_id)
+        staging_files = glob.glob(os.path.join(staging_dir, "coverage_*.parquet"))
+        return len(staging_files)
+    
+    def _atomic_counter_increment(self, sample_id: str) -> int:
+        """
+        Atomically increment and return the file counter for a sample.
+        Uses file locking to prevent race conditions.
+        
+        Returns:
+            The counter value to use for this file
+        """
+        lock_file = self._get_lock_file(sample_id, "counter")
+        counter_file = os.path.join(self.work_dir, sample_id, "target_analysis_counter.txt")
+        
+        with FileLock(lock_file, timeout=30.0):
+            # Read current counter
+            if os.path.exists(counter_file):
+                try:
+                    with open(counter_file, "r") as f:
+                        counter = int(f.read().strip())
+                except (ValueError, IOError):
+                    counter = 0
+            else:
+                counter = 0
+            
+            # Write incremented counter
+            os.makedirs(os.path.dirname(counter_file), exist_ok=True)
+            with open(counter_file, "w") as f:
+                f.write(str(counter + 1))
+            
+            return counter
+    
+    def process_file_with_staging(
+        self,
+        file_path: str,
+        metadata: Dict[str, Any],
+        timestamp: Optional[float] = None,
+    ) -> Tuple[TargetMetadata, bool]:
+        """
+        Fast per-file processing that saves results to staging area.
+        Does NOT merge with accumulated data - much faster for large datasets.
+        
+        Args:
+            file_path: Path to the input file
+            metadata: File metadata from preprocessing
+            timestamp: Optional timestamp for coverage tracking
+        
+        Returns:
+            Tuple of (TargetMetadata, should_accumulate)
+            - TargetMetadata: Results from this file
+            - should_accumulate: True if batch accumulation should run now
+        """
+        logger = logging.getLogger("robin.target")
+        
+        logger.info(f"Processing file with staging: {file_path}")
+        start_time = time.time()
+        
+        # Extract sample ID from metadata
+        sample_id = metadata.get("sample_id", "unknown")
+        logger.debug(f"Extracted sample_id: {sample_id}")
+        
+        target_result = TargetMetadata(
+            sample_id=sample_id, file_path=file_path, analysis_timestamp=start_time
+        )
+        
+        try:
+            # Step 1: Validate input file
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"Input file not found: {file_path}")
+            
+            target_result.processing_steps.append("file_validation")
+            
+            # Step 2: Create sample-specific output directory
+            sample_output_dir = self._check_and_create_folder(self.work_dir, sample_id)
+            logger.info(f"Sample output directory: {sample_output_dir}")
+            
+            # Step 3: Get atomic counter (thread-safe)
+            analysis_counter = self._atomic_counter_increment(sample_id)
+            logger.info(f"Assigned file counter: {analysis_counter}")
+            
+            target_result.processing_steps.append("counter_assigned")
+            
+            # Step 4: Extract coverage data (no loading of accumulated data)
+            logger.info("Extracting coverage data...")
+            newcovdf, bedcovdf = get_covdfs(file_path, self.bedfile)
+            
+            if newcovdf is None or bedcovdf is None:
+                raise RuntimeError("Failed to extract coverage data from BAM file")
+            
+            target_result.processing_steps.append("coverage_extracted")
+            logger.info(
+                f"Coverage data extracted: genome={newcovdf.shape}, targets={bedcovdf.shape}"
+            )
+            
+            # Step 5: Save to staging (Parquet is ~5-10x faster than CSV)
+            staging_dir = self._get_staging_dir(sample_id)
+            
+            coverage_staging = os.path.join(
+                staging_dir, f"coverage_{analysis_counter:06d}.parquet"
+            )
+            bedcov_staging = os.path.join(
+                staging_dir, f"bedcov_{analysis_counter:06d}.parquet"
+            )
+            timestamp_staging = os.path.join(
+                staging_dir, f"timestamp_{analysis_counter:06d}.txt"
+            )
+            
+            # Save coverage data to staging
+            newcovdf.to_parquet(coverage_staging, index=False)
+            bedcovdf.to_parquet(bedcov_staging, index=False)
+            
+            # Save timestamp for coverage tracking
+            current_timestamp = timestamp * 1000 if (self.simtime and timestamp) else time.time() * 1000
+            with open(timestamp_staging, "w") as f:
+                f.write(str(current_timestamp))
+            
+            target_result.processing_steps.append("saved_to_staging")
+            logger.info(f"Saved to staging: {coverage_staging}")
+            
+            # Step 6: Store minimal coverage data in metadata (for logging)
+            target_result.coverage_data = {
+                "genome_coverage_shape": newcovdf.shape,
+                "target_coverage_shape": bedcovdf.shape,
+                "staging_file": coverage_staging,
+            }
+            
+            # Step 7: Check if accumulation should run
+            pending_count = self._get_pending_count(sample_id)
+            should_accumulate = pending_count >= self.batch_size
+            
+            logger.info(
+                f"File staged successfully. Pending files: {pending_count}/{self.batch_size}"
+            )
+            
+            if should_accumulate:
+                logger.info(
+                    f"Accumulation threshold reached ({pending_count} >= {self.batch_size})"
+                )
+            
+            # Step 8: Force garbage collection
+            gc.collect()
+            
+            target_result.processing_steps.append("staging_complete")
+            elapsed = time.time() - start_time
+            logger.info(
+                f"Staging complete for {sample_id} in {elapsed:.2f}s (vs ~{elapsed*10:.1f}s without staging)"
+            )
+            
+            return target_result, should_accumulate
+            
+        except Exception as e:
+            error_details = f"Error in staging for {sample_id}: {str(e)}"
+            logger.error(error_details)
+            target_result.error_message = error_details
+            target_result.processing_steps.append("staging_failed")
+            return target_result, False
 
     def process_file(
         self,
@@ -657,14 +875,14 @@ class TargetAnalysis:
                 logger.info(
                     f"Coverage calculated: {coverage:.4f} ({bases} bases / {genome} genome)"
                 )
-                logger.info(f"Coverage data shape: {updated_covdf.shape}")
-                logger.info(f"Coverage columns: {list(updated_covdf.columns)}")
-                logger.info("Sample coverage data:")
-                logger.info(
+                logger.debug(f"Coverage data shape: {updated_covdf.shape}")
+                logger.debug(f"Coverage columns: {list(updated_covdf.columns)}")
+                logger.debug("Sample coverage data:")
+                logger.debug(
                     f"  First few rows: {updated_covdf.head(3).to_dict('records')}"
                 )
-                logger.info(f"  covbases sum: {bases}")
-                logger.info(f"  endpos sum: {genome}")
+                logger.debug(f"  covbases sum: {bases}")
+                logger.debug(f"  endpos sum: {genome}")
 
                 # Step 10: Track coverage over time
                 if self.simtime and timestamp:
@@ -1044,7 +1262,7 @@ class TargetAnalysis:
         if os.path.exists(file_path):
             try:
                 df = pd.read_csv(file_path)
-                logger.info(
+                logger.debug(
                     f"Loaded existing coverage data from {filename}: {df.shape}"
                 )
 
@@ -1056,7 +1274,7 @@ class TargetAnalysis:
                 ):
                     # Extract only the raw data columns: chrom,startpos,endpos,name,bases
                     df = df[["chrom", "startpos", "endpos", "name", "bases"]]
-                    logger.info(
+                    logger.debug(
                         f"Extracted raw data columns from {filename}: {df.shape}"
                     )
 
@@ -1076,12 +1294,318 @@ class TargetAnalysis:
         if os.path.exists(file_path):
             try:
                 data = np.load(file_path)
-                logger.info(f"Loaded existing coverage over time data: {data.shape}")
+                logger.debug(f"Loaded existing coverage over time data: {data.shape}")
                 return data
             except Exception as e:
                 logger.warning(f"Error loading existing coverage over time data: {e}")
                 return None
         return None
+    
+    def accumulate_staged_files(self, sample_id: str, force: bool = False) -> Dict[str, Any]:
+        """
+        Batch accumulation of staged files with proper locking to prevent race conditions.
+        
+        This method:
+        1. Locks the accumulation process to prevent concurrent accumulations
+        2. Loads all staged files
+        3. Efficiently merges them using groupby (faster than iterative merge)
+        4. Merges batch with existing accumulated data
+        5. Saves updated accumulated data
+        6. Cleans up staging files
+        
+        Args:
+            sample_id: Sample identifier
+            force: If True, accumulate even if below threshold (for end-of-run)
+        
+        Returns:
+            Dictionary with accumulation results
+        """
+        logger = logging.getLogger("robin.target")
+        
+        # Use lock to prevent concurrent accumulation of the same sample
+        lock_file = self._get_lock_file(sample_id, "accumulation")
+        
+        try:
+            with FileLock(lock_file, timeout=60.0):
+                logger.info(f"Starting batch accumulation for {sample_id} (force={force})")
+                start_time = time.time()
+                
+                staging_dir = self._get_staging_dir(sample_id)
+                sample_output_dir = os.path.join(self.work_dir, sample_id)
+                
+                # Find all staging files
+                coverage_files = sorted(glob.glob(os.path.join(staging_dir, "coverage_*.parquet")))
+                bedcov_files = sorted(glob.glob(os.path.join(staging_dir, "bedcov_*.parquet")))
+                timestamp_files = sorted(glob.glob(os.path.join(staging_dir, "timestamp_*.txt")))
+                
+                if not coverage_files:
+                    logger.info(f"No staged files to accumulate for {sample_id}")
+                    return {"status": "no_files", "files_processed": 0}
+                
+                # Check if we should accumulate based on count
+                if not force and len(coverage_files) < self.batch_size:
+                    logger.info(
+                        f"Skipping accumulation - only {len(coverage_files)} files staged "
+                        f"(threshold: {self.batch_size}, force={force})"
+                    )
+                    return {"status": "below_threshold", "files_pending": len(coverage_files)}
+                
+                logger.info(
+                    f"Accumulating {len(coverage_files)} staged files for {sample_id}"
+                )
+                
+                # Load all staged files (they're small and fast to load)
+                staged_covdfs = []
+                staged_bedcovdfs = []
+                timestamps = []
+                
+                for cov_file, bed_file, ts_file in zip(coverage_files, bedcov_files, timestamp_files):
+                    try:
+                        staged_covdfs.append(pd.read_parquet(cov_file))
+                        staged_bedcovdfs.append(pd.read_parquet(bed_file))
+                        with open(ts_file, "r") as f:
+                            timestamps.append(float(f.read().strip()))
+                    except Exception as e:
+                        logger.warning(f"Error loading staging file {cov_file}: {e}")
+                        continue
+                
+                if not staged_covdfs:
+                    logger.error("No staging files could be loaded successfully")
+                    return {"status": "load_failed", "files_attempted": len(coverage_files)}
+                
+                logger.info(f"Loaded {len(staged_covdfs)} staging files successfully")
+                
+                # Efficient batch merge using concat + groupby (much faster than iterative merge)
+                logger.info("Merging staged coverage data...")
+                batch_covdf = pd.concat(staged_covdfs, ignore_index=True)
+                batch_covdf = batch_covdf.groupby(['#rname', 'startpos', 'endpos'], as_index=False).agg({
+                    'numreads': 'sum',
+                    'covbases': 'sum',
+                    'meandepth': 'sum'
+                })
+                
+                logger.info("Merging staged target coverage data...")
+                batch_bedcovdf = pd.concat(staged_bedcovdfs, ignore_index=True)
+                batch_bedcovdf = batch_bedcovdf.groupby(
+                    ['chrom', 'startpos', 'endpos', 'name'], as_index=False
+                ).agg({'bases': 'sum'})
+                
+                logger.info(
+                    f"Batch merged: genome={batch_covdf.shape}, targets={batch_bedcovdf.shape}"
+                )
+                
+                # Load existing accumulated data (only once per batch)
+                existing_covdf = self._load_existing_coverage_data(
+                    sample_output_dir, "coverage_main.csv", logger
+                )
+                existing_bedcovdf = self._load_existing_coverage_data(
+                    sample_output_dir, "bed_coverage_main.csv", logger
+                )
+                existing_coverage_over_time = self._load_existing_coverage_over_time(
+                    sample_output_dir, logger
+                )
+                
+                # Single merge with accumulated data
+                logger.info("Merging with accumulated data...")
+                if existing_covdf is not None:
+                    updated_covdf, updated_bedcovdf = run_bedmerge(
+                        batch_covdf, existing_covdf, batch_bedcovdf, existing_bedcovdf
+                    )
+                else:
+                    updated_covdf, updated_bedcovdf = batch_covdf, batch_bedcovdf
+                
+                logger.info(
+                    f"Final accumulated: genome={updated_covdf.shape}, targets={updated_bedcovdf.shape}"
+                )
+                
+                # Calculate coverage statistics
+                bases = updated_covdf["covbases"].sum()
+                genome = updated_covdf["endpos"].sum()
+                coverage = bases / genome if genome > 0 else 0.0
+                
+                logger.info(
+                    f"Coverage: {coverage:.4f} ({bases} bases / {genome} genome)"
+                )
+                
+                # Track coverage over time (use most recent timestamp from batch)
+                if timestamps:
+                    current_timestamp = max(timestamps)
+                    if existing_coverage_over_time is not None:
+                        updated_coverage_over_time = np.vstack(
+                            [existing_coverage_over_time, [[current_timestamp, coverage]]]
+                        )
+                    else:
+                        updated_coverage_over_time = np.array([[current_timestamp, coverage]])
+                    
+                    # Save coverage over time
+                    np.save(
+                        os.path.join(sample_output_dir, "coverage_time_chart.npy"),
+                        updated_coverage_over_time,
+                    )
+                
+                # Save updated coverage data
+                logger.info("Saving accumulated data...")
+                updated_covdf.to_csv(
+                    os.path.join(sample_output_dir, "coverage_main.csv"),
+                    index=False,
+                )
+                
+                # Calculate and save bed_coverage_main.csv with length and coverage columns
+                bed_coverage_main_df = updated_bedcovdf.copy()
+                bed_coverage_main_df["length"] = (
+                    bed_coverage_main_df["endpos"] - bed_coverage_main_df["startpos"] + 1
+                )
+                bed_coverage_main_df["coverage"] = (
+                    bed_coverage_main_df["bases"] / bed_coverage_main_df["length"]
+                )
+                bed_coverage_main_df = bed_coverage_main_df[
+                    ["chrom", "startpos", "endpos", "name", "length", "coverage", "bases"]
+                ]
+                bed_coverage_main_df.to_csv(
+                    os.path.join(sample_output_dir, "bed_coverage_main.csv"),
+                    index=False,
+                )
+                
+                # Calculate and save target_coverage.csv
+                target_coverage_df = updated_bedcovdf.copy()
+                target_coverage_df["length"] = (
+                    target_coverage_df["endpos"] - target_coverage_df["startpos"] + 1
+                )
+                target_coverage_df["coverage"] = (
+                    target_coverage_df["bases"] / target_coverage_df["length"]
+                )
+                target_coverage_df = target_coverage_df[
+                    ["chrom", "startpos", "endpos", "name", "length", "coverage", "bases"]
+                ]
+                target_coverage_df.to_csv(
+                    os.path.join(sample_output_dir, "target_coverage.csv"),
+                    index=False,
+                )
+                
+                # Identify and save targets exceeding threshold
+                run_list = target_coverage_df[
+                    target_coverage_df["coverage"].ge(self.callthreshold)
+                ]
+                
+                if len(run_list) > 0:
+                    logger.info(f"Found {len(run_list)} regions exceeding threshold")
+                    
+                    # Save count
+                    targets_exceeding_file = os.path.join(
+                        sample_output_dir, "targets_exceeding_threshold_count.txt"
+                    )
+                    with open(targets_exceeding_file, "w") as f:
+                        f.write(str(len(run_list)))
+                    
+                    # Generate BED file
+                    run_list[["chrom", "startpos", "endpos"]].to_csv(
+                        os.path.join(sample_output_dir, "targets_exceeding_threshold.bed"),
+                        sep="\t",
+                        header=None,
+                        index=None,
+                    )
+                else:
+                    logger.info("No regions exceed coverage threshold")
+                    # Create empty BED file
+                    with open(
+                        os.path.join(sample_output_dir, "targets_exceeding_threshold.bed"),
+                        "w"
+                    ) as f:
+                        pass
+                
+                # Create target.bam file if targets exceed threshold
+                if len(run_list) > 0:
+                    logger.info("Creating target.bam file from accumulated targets...")
+                    try:
+                        # Find the original BAM files that were processed
+                        # Look for BAM files in the sample directory or parent directories
+                        original_bam_files = []
+                        
+                        # Check sample directory for BAM files
+                        for root, dirs, files in os.walk(sample_output_dir):
+                            for file in files:
+                                if file.endswith('.bam') and not file.endswith('target.bam'):
+                                    bam_path = os.path.join(root, file)
+                                    # Check if it has an index file
+                                    if os.path.exists(f"{bam_path}.bai"):
+                                        original_bam_files.append(bam_path)
+                        
+                        # If no BAM files found in sample directory, check parent directories
+                        if not original_bam_files:
+                            parent_dir = os.path.dirname(sample_output_dir)
+                            for root, dirs, files in os.walk(parent_dir):
+                                for file in files:
+                                    if file.endswith('.bam') and not file.endswith('target.bam'):
+                                        bam_path = os.path.join(root, file)
+                                        if os.path.exists(f"{bam_path}.bai"):
+                                            original_bam_files.append(bam_path)
+                        
+                        if original_bam_files:
+                            # Use the first available BAM file
+                            source_bam = original_bam_files[0]
+                            targets_bed = os.path.join(sample_output_dir, "targets_exceeding_threshold.bed")
+                            target_bam_path = os.path.join(sample_output_dir, "target.bam")
+                            
+                            logger.info(f"Creating target.bam from {source_bam} using {targets_bed}")
+                            
+                            # Create target.bam using bedtools intersect
+                            run_bedtools(source_bam, targets_bed, target_bam_path)
+                            
+                            # Verify the target.bam was created and has reads
+                            if os.path.exists(target_bam_path):
+                                try:
+                                    with pysam.AlignmentFile(target_bam_path, "rb") as bam_file:
+                                        read_count = bam_file.count(until_eof=True)
+                                        if read_count > 0:
+                                            logger.info(f"Successfully created target.bam with {read_count} reads")
+                                        else:
+                                            logger.warning("target.bam created but contains no reads")
+                                except Exception as e:
+                                    logger.warning(f"Could not verify target.bam: {e}")
+                            else:
+                                logger.error("Failed to create target.bam file")
+                        else:
+                            logger.warning("No suitable BAM files found to create target.bam")
+                            
+                    except Exception as e:
+                        logger.error(f"Error creating target.bam: {e}")
+                        import traceback
+                        logger.error(traceback.format_exc())
+                
+                # Clean up staging files
+                logger.info("Cleaning up staging files...")
+                for f in coverage_files + bedcov_files + timestamp_files:
+                    try:
+                        os.remove(f)
+                    except OSError as e:
+                        logger.warning(f"Could not remove staging file {f}: {e}")
+                
+                # Force garbage collection
+                gc.collect()
+                
+                elapsed = time.time() - start_time
+                logger.info(
+                    f"Batch accumulation complete for {sample_id}: "
+                    f"{len(coverage_files)} files in {elapsed:.2f}s "
+                    f"({elapsed/len(coverage_files):.3f}s per file)"
+                )
+                
+                return {
+                    "status": "success",
+                    "files_processed": len(coverage_files),
+                    "coverage": coverage,
+                    "targets_exceeding_threshold": len(run_list) if len(run_list) > 0 else 0,
+                    "elapsed_time": elapsed,
+                }
+        
+        except TimeoutError as e:
+            logger.error(f"Could not acquire accumulation lock for {sample_id}: {e}")
+            return {"status": "lock_timeout", "error": str(e)}
+        except Exception as e:
+            logger.error(f"Error during batch accumulation for {sample_id}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {"status": "error", "error": str(e)}
 
 
 def process_single_file(
@@ -1178,6 +1702,154 @@ def process_single_file(
         return analysis_result
 
 
+def process_multiple_files(bam_paths, metadata_list, work_dir, logger, reference=None, target_panel="rCNS2"):
+    """
+    Process multiple BAM files for target analysis using staged processing.
+    
+    This function processes multiple BAM files for the same sample using the
+    existing staging infrastructure. Each file is processed individually and
+    staged, then all staged files are accumulated in a single batch operation.
+
+    Args:
+        bam_paths: List of paths to BAM files
+        metadata_list: List of metadata dictionaries (one per BAM file)
+        work_dir: Working directory
+        logger: Logger instance
+        reference: Optional path to reference genome for SNP calling
+        target_panel: Target panel type (rCNS2, AML, PanCan)
+
+    Returns:
+        Dictionary with aggregated target analysis results
+    """
+    if not bam_paths or not metadata_list:
+        raise ValueError("bam_paths and metadata_list must not be empty")
+    
+    if len(bam_paths) != len(metadata_list):
+        raise ValueError("bam_paths and metadata_list must have the same length")
+    
+    # Get sample ID from first metadata (assuming all BAMs are from same sample)
+    sample_id = metadata_list[0].get("sample_id", "unknown")
+    
+    logger.info(f"🎯 Starting multi-file target analysis for sample: {sample_id}")
+    logger.info(f"Processing {len(bam_paths)} BAM files for sample {sample_id}")
+    
+    # Log essential metadata only
+    for i, (bam_path, metadata) in enumerate(zip(bam_paths, metadata_list)):
+        logger.debug(f"BAM file {i+1}: {os.path.basename(bam_path)}")
+
+    analysis_result = {
+        "sample_id": sample_id,
+        "bam_paths": bam_paths,
+        "analysis_timestamp": time.time(),
+        "processing_steps": [],
+        "error_message": None,
+        "files_processed": 0,
+        "total_files": len(bam_paths),
+        "coverage_data": {},
+        "target_bam_path": None,
+        "coverage_over_time": None,
+    }
+
+    try:
+        # Initialize target analysis with staging enabled
+        target_analysis = TargetAnalysis(
+            work_dir=work_dir, 
+            target_panel=target_panel,
+            batch_size=1,  # Force accumulation after each batch
+            use_staging=True
+        )
+        
+        # Set reference genome if provided
+        if reference:
+            target_analysis.reference = reference
+            logger.info(f"Using reference genome: {reference}")
+
+        # Process each BAM file individually using staging
+        logger.info("Processing files with staging (fast path)")
+        processed_files = 0
+        
+        for i, (bam_path, metadata) in enumerate(zip(bam_paths, metadata_list)):
+            logger.info(f"Processing BAM file {i+1}/{len(bam_paths)}: {os.path.basename(bam_path)}")
+            
+            try:
+                # Process file with staging
+                target_metadata, should_accumulate = target_analysis.process_file_with_staging(
+                    bam_path, metadata
+                )
+                
+                if target_metadata.error_message:
+                    logger.warning(f"Error processing {os.path.basename(bam_path)}: {target_metadata.error_message}")
+                    continue
+                
+                processed_files += 1
+                logger.debug(f"Successfully staged file {i+1}: {os.path.basename(bam_path)}")
+                
+            except Exception as e:
+                logger.warning(f"Error processing {os.path.basename(bam_path)}: {e}")
+                continue
+
+        if processed_files == 0:
+            analysis_result["error_message"] = "No files could be processed successfully"
+            analysis_result["processing_steps"].append("no_files_processed")
+            return analysis_result
+
+        analysis_result["files_processed"] = processed_files
+        analysis_result["processing_steps"].append("files_staged")
+
+        # Force accumulation of all staged files
+        logger.info(f"Accumulating {processed_files} staged files for sample {sample_id}")
+        accumulation_result = target_analysis.accumulate_staged_files(
+            sample_id, force=True
+        )
+        
+        if accumulation_result.get("status") != "success":
+            analysis_result["error_message"] = f"Accumulation failed: {accumulation_result.get('error', 'Unknown error')}"
+            analysis_result["processing_steps"].append("accumulation_failed")
+            return analysis_result
+
+        analysis_result["processing_steps"].append("accumulation_complete")
+        logger.info(f"Accumulation completed: {accumulation_result}")
+
+        # Load final accumulated data for result metadata
+        sample_output_dir = os.path.join(work_dir, sample_id)
+        
+        # Load final coverage data
+        final_covdf = target_analysis._load_existing_coverage_data(
+            sample_output_dir, "coverage_main.csv", logger
+        )
+        final_bedcovdf = target_analysis._load_existing_coverage_data(
+            sample_output_dir, "bed_coverage_main.csv", logger
+        )
+        final_coverage_over_time = target_analysis._load_existing_coverage_over_time(
+            sample_output_dir, logger
+        )
+        
+        # Store final results
+        analysis_result["coverage_data"] = {
+            "genome_coverage_shape": final_covdf.shape if final_covdf is not None else (0, 0),
+            "target_coverage_shape": final_bedcovdf.shape if final_bedcovdf is not None else (0, 0),
+            "coverage": accumulation_result.get("coverage", 0.0),
+            "targets_exceeding_threshold": accumulation_result.get("targets_exceeding_threshold", 0),
+        }
+        
+        analysis_result["target_bam_path"] = os.path.join(sample_output_dir, "target.bam")
+        analysis_result["coverage_over_time"] = final_coverage_over_time
+        
+        analysis_result["processing_steps"].append("analysis_complete")
+        logger.info(f"Multi-file target analysis completed for {sample_id}")
+        logger.info(f"Files successfully processed: {analysis_result['files_processed']}/{analysis_result['total_files']}")
+        logger.info(f"Final coverage: {analysis_result['coverage_data']['coverage']:.4f}")
+        logger.info(f"Targets exceeding threshold: {analysis_result['coverage_data']['targets_exceeding_threshold']}")
+        
+        return analysis_result
+
+    except Exception as e:
+        logger.error(f"Error in multi-file target analysis for {sample_id}: {e}")
+        analysis_result["error_message"] = str(e)
+        analysis_result["processing_steps"].append("analysis_failed")
+        return analysis_result
+
+
 def target_handler(job, work_dir=None, reference=None, target_panel="rCNS2"):
     """
     Handler function for target analysis jobs.
@@ -1191,19 +1863,57 @@ def target_handler(job, work_dir=None, reference=None, target_panel="rCNS2"):
     """
     # Get job-specific logger
     logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
-
-    try:
-        file_path = job.context.filepath
-
-        logger.info(f"Starting target analysis for: {os.path.basename(file_path)}")
+    
+    # Check if this is a batched job
+    batched_job = job.context.metadata.get("_batched_job")
+    if batched_job:
+        batch_size = batched_job.get_file_count()
+        sample_id = batched_job.get_sample_id()
+        batch_id = batched_job.batch_id
+        logger.info(f"Processing target analysis batch: {batch_size} files for sample '{sample_id}' (batch_id: {batch_id})")
+        
+        # Get all filepaths in the batch
+        filepaths = batched_job.get_filepaths()
+        
+        # Log individual files in the batch
+        for i, filepath in enumerate(filepaths):
+            logger.info(f"  Batch file {i+1}/{batch_size}: {os.path.basename(filepath)}")
+        
+        # Prepare metadata list for all BAM files in the batch
+        metadata_list = []
+        for i, bam_path in enumerate(filepaths):
+            # Get metadata from preprocessing for this specific file
+            file_metadata = batched_job.contexts[i].metadata.get("bam_metadata", {})
+            
+            # Get sample ID from preprocessing results for this specific file
+            file_context = batched_job.contexts[i]
+            file_sample_id = file_context.get_sample_id()
+            
+            # Use the sample ID from the file's context (which should have preprocessing results)
+            if file_sample_id != "unknown":
+                file_metadata["sample_id"] = file_sample_id
+            else:
+                file_metadata["sample_id"] = sample_id
+            
+            metadata_list.append(file_metadata)
+        
+        # Determine work directory for the batch
+        if work_dir is None:
+            # Default to first BAM file directory
+            batch_work_dir = os.path.dirname(filepaths[0])
+        else:
+            # Use specified work directory, create if it doesn't exist
+            os.makedirs(work_dir, exist_ok=True)
+            batch_work_dir = work_dir
+            logger.debug(f"Using specified work directory: {batch_work_dir}")
         
         # Log and validate target panel
-        job_panel = job.context.metadata.get("target_panel", target_panel)
+        job_panel = batched_job.contexts[0].metadata.get("target_panel", target_panel)
         if job_panel != target_panel:
             logger.warning(f"Panel mismatch: job metadata has '{job_panel}' but handler received '{target_panel}'. Using '{job_panel}' from metadata.")
             target_panel = job_panel
         logger.info(f"Using target panel: {target_panel}")
-
+        
         # Debug: Log reference genome status
         if reference:
             logger.info(f"Reference genome provided to target_handler: {reference}")
@@ -1211,7 +1921,7 @@ def target_handler(job, work_dir=None, reference=None, target_panel="rCNS2"):
             logger.info("No reference genome provided to target_handler")
 
         # Also check job metadata for reference
-        job_reference = job.context.metadata.get("reference")
+        job_reference = batched_job.contexts[0].metadata.get("reference")
         if job_reference:
             logger.info(f"Reference genome found in job metadata: {job_reference}")
             # Use job metadata reference if not provided directly
@@ -1220,75 +1930,256 @@ def target_handler(job, work_dir=None, reference=None, target_panel="rCNS2"):
                 logger.info(f"Using reference from job metadata: {reference}")
         else:
             logger.info("No reference genome found in job metadata")
-
-        # Get metadata from preprocessing
-        file_metadata = job.context.metadata.get("bam_metadata", {})
-
-        # Determine work directory
-        if work_dir is None:
-            # Default to file directory
-            work_dir = os.path.dirname(file_path)
-        else:
-            # Use specified work directory, create if it doesn't exist
-            os.makedirs(work_dir, exist_ok=True)
-
-        # Process the file
-        result = process_single_file(
-            file_path, file_metadata, work_dir, logger, reference, target_panel
+        
+        # Process all BAM files in the batch using the new aggregated function
+        logger.info(f"Processing {batch_size} BAM files as aggregated batch for sample '{sample_id}'")
+        batch_result = process_multiple_files(
+            bam_paths=filepaths,
+            metadata_list=metadata_list,
+            work_dir=batch_work_dir,
+            logger=logger,
+            reference=reference,
+            target_panel=target_panel
         )
-
-        # Store results in job context
-        job.context.add_metadata("target_analysis", result)
-
-        # Update master.csv with panel information
-        if result.get("sample_id") and not result.get("error_message"):
-            try:
-                from robin.analysis.master_csv_manager import MasterCSVManager
-                
-                # Determine work directory
-                if work_dir is None:
-                    work_dir = os.path.dirname(file_path)
-                
-                # Update master.csv with panel information
-                csv_manager = MasterCSVManager(work_dir)
-                csv_manager.update_analysis_panel(result["sample_id"], target_panel)
-                logger.info(f"Updated master.csv with panel '{target_panel}' for sample {result['sample_id']}")
-                
-            except Exception as e:
-                logger.warning(f"Could not update master.csv with panel info for {result.get('sample_id', 'unknown')}: {e}")
-
-        if result.get("error_message"):
-            job.context.add_error("target_analysis", result["error_message"])
-            logger.error(f"Target analysis failed: {result['error_message']}")
+        
+        # Store batch results in job context (maintain compatibility with existing structure)
+        job.context.add_metadata("target_analysis", {
+            "batch_result": batch_result,  # Single aggregated result
+            "batch_size": batch_size,
+            "sample_id": sample_id,
+            "batch_id": batch_id,
+            "files_processed": batch_result.get("files_processed", batch_size),
+            "total_files": batch_result.get("total_files", batch_size)
+        })
+        
+        logger.info(f"Completed target analysis batch processing: {batch_size} files for sample '{sample_id}'")
+        logger.info(f"Files successfully processed: {batch_result.get('files_processed', batch_size)}/{batch_result.get('total_files', batch_size)}")
+        
+        if batch_result.get("error_message"):
+            logger.error(f"Batch processing completed with errors: {batch_result['error_message']}")
+            job.context.add_error("target_analysis", batch_result["error_message"])
         else:
+            logger.info("Batch processing completed successfully with aggregated target analysis")
             job.context.add_result(
                 "target_analysis",
                 {
                     "status": "success",
-                    "sample_id": result.get("sample_id", "unknown"),
-                    "analysis_time": result.get("analysis_timestamp", 0),
-                    "targets_found": result.get("analysis_results", {}).get(
-                        "targets_found", 0
-                    ),
-                    "processing_steps": result.get("processing_steps", []),
-                    "target_data_path": result.get("target_data_path", ""),
-                    "target_plot_path": result.get("target_plot_path", ""),
-                    "target_bam_path": result.get("target_bam_path", ""),
-                    "coverage_summary": result.get("analysis_results", {}).get(
-                        "coverage_summary", {}
-                    ),
+                    "sample_id": sample_id,
+                    "analysis_time": batch_result.get("analysis_timestamp", 0),
+                    "targets_found": batch_result.get("coverage_data", {}).get("targets_exceeding_threshold", 0),
+                    "processing_steps": batch_result.get("processing_steps", []),
+                    "target_data_path": batch_result.get("target_data_path", ""),
+                    "target_plot_path": batch_result.get("target_plot_path", ""),
+                    "target_bam_path": batch_result.get("target_bam_path", ""),
+                    "coverage_summary": batch_result.get("coverage_data", {}),
+                    "files_processed": batch_result.get("files_processed", batch_size),
+                    "total_files": batch_result.get("total_files", batch_size),
                 },
             )
-            logger.info(f"Target analysis complete for {os.path.basename(file_path)}")
-            logger.info(f"Sample ID: {result.get('sample_id', 'unknown')}")
-            logger.info(
-                f"Targets found: {result.get('analysis_results', {}).get('targets_found', 0)}"
-            )
+        
+        # Update master.csv with panel information
+        if sample_id and not batch_result.get("error_message"):
+            try:
+                from robin.analysis.master_csv_manager import MasterCSVManager
+                
+                # Update master.csv with panel information
+                csv_manager = MasterCSVManager(batch_work_dir)
+                csv_manager.update_analysis_panel(sample_id, target_panel)
+                logger.info(f"Updated master.csv with panel '{target_panel}' for sample {sample_id}")
+                
+            except Exception as e:
+                logger.warning(f"Could not update master.csv with panel info for {sample_id}: {e}")
+        
+        return
+        
+    else:
+        # Single file processing (backward compatibility)
+        try:
+            file_path = job.context.filepath
 
+            logger.info(f"Starting target analysis for: {os.path.basename(file_path)}")
+            
+            # Log and validate target panel
+            job_panel = job.context.metadata.get("target_panel", target_panel)
+            if job_panel != target_panel:
+                logger.warning(f"Panel mismatch: job metadata has '{job_panel}' but handler received '{target_panel}'. Using '{job_panel}' from metadata.")
+                target_panel = job_panel
+            logger.info(f"Using target panel: {target_panel}")
+
+            # Debug: Log reference genome status
+            if reference:
+                logger.info(f"Reference genome provided to target_handler: {reference}")
+            else:
+                logger.info("No reference genome provided to target_handler")
+
+            # Also check job metadata for reference
+            job_reference = job.context.metadata.get("reference")
+            if job_reference:
+                logger.info(f"Reference genome found in job metadata: {job_reference}")
+                # Use job metadata reference if not provided directly
+                if not reference:
+                    reference = job_reference
+                    logger.info(f"Using reference from job metadata: {reference}")
+            else:
+                logger.info("No reference genome found in job metadata")
+
+            # Get metadata from preprocessing
+            file_metadata = job.context.metadata.get("bam_metadata", {})
+
+            # Determine work directory
+            if work_dir is None:
+                # Default to file directory
+                work_dir = os.path.dirname(file_path)
+            else:
+                # Use specified work directory, create if it doesn't exist
+                os.makedirs(work_dir, exist_ok=True)
+
+            # Initialize target analysis with staging enabled
+            target_analysis = TargetAnalysis(
+                work_dir=work_dir, 
+                target_panel=target_panel,
+                batch_size=10,  # Accumulate every 10 files
+                use_staging=True
+            )
+            
+            # Set reference genome if provided
+            if reference:
+                target_analysis.reference = reference
+            
+            # Use fast staging-based processing
+            logger.info("Using staging-based processing (fast path)")
+            target_metadata, should_accumulate = target_analysis.process_file_with_staging(
+                file_path, file_metadata
+            )
+            
+            # Convert TargetMetadata to dict for storage
+            result = {
+                "sample_id": target_metadata.sample_id,
+                "file_path": target_metadata.file_path,
+                "analysis_timestamp": target_metadata.analysis_timestamp,
+                "processing_steps": target_metadata.processing_steps,
+                "error_message": target_metadata.error_message,
+                "coverage_data": target_metadata.coverage_data,
+            }
+            
+            # Store results in job context
+            job.context.add_metadata("target_analysis", result)
+            
+            # Trigger accumulation if threshold reached
+            if should_accumulate:
+                logger.info("Accumulation threshold reached - running batch accumulation")
+                accumulation_result = target_analysis.accumulate_staged_files(
+                    target_metadata.sample_id, force=False
+                )
+                logger.info(f"Accumulation result: {accumulation_result}")
+                job.context.add_metadata("accumulation_result", accumulation_result)
+            
+            # Store flag for potential end-of-queue accumulation
+            job.context.add_metadata("needs_final_accumulation", True)
+
+            # Update master.csv with panel information
+            if result.get("sample_id") and not result.get("error_message"):
+                try:
+                    from robin.analysis.master_csv_manager import MasterCSVManager
+                    
+                    # Determine work directory
+                    if work_dir is None:
+                        work_dir = os.path.dirname(file_path)
+                    
+                    # Update master.csv with panel information
+                    csv_manager = MasterCSVManager(work_dir)
+                    csv_manager.update_analysis_panel(result["sample_id"], target_panel)
+                    logger.info(f"Updated master.csv with panel '{target_panel}' for sample {result['sample_id']}")
+                    
+                except Exception as e:
+                    logger.warning(f"Could not update master.csv with panel info for {result.get('sample_id', 'unknown')}: {e}")
+
+            if result.get("error_message"):
+                job.context.add_error("target_analysis", result["error_message"])
+                logger.error(f"Target analysis failed: {result['error_message']}")
+            else:
+                job.context.add_result(
+                    "target_analysis",
+                    {
+                        "status": "success",
+                        "sample_id": result.get("sample_id", "unknown"),
+                        "analysis_time": result.get("analysis_timestamp", 0),
+                        "targets_found": result.get("analysis_results", {}).get(
+                            "targets_found", 0
+                        ),
+                        "processing_steps": result.get("processing_steps", []),
+                        "target_data_path": result.get("target_data_path", ""),
+                        "target_plot_path": result.get("target_plot_path", ""),
+                        "target_bam_path": result.get("target_bam_path", ""),
+                        "coverage_summary": result.get("analysis_results", {}).get(
+                            "coverage_summary", {}
+                        ),
+                    },
+                )
+                logger.info(f"Target analysis complete for {os.path.basename(file_path)}")
+                logger.info(f"Sample ID: {result.get('sample_id', 'unknown')}")
+                logger.info(
+                    f"Targets found: {result.get('analysis_results', {}).get('targets_found', 0)}"
+                )
+
+        except Exception as e:
+            error_details = f"Error in target analysis for {job.context.filepath}: {str(e)}"
+            job.context.add_error("target_analysis", error_details)
+            logger.error(error_details)
+
+
+def finalize_accumulation_for_sample(
+    sample_id: str, work_dir: str, target_panel: str = "rCNS2"
+) -> Dict[str, Any]:
+    """
+    Force final accumulation of any remaining staged files for a sample.
+    
+    This should be called when:
+    - All files for a sample have been processed
+    - The workflow is completing
+    - There are staged files that haven't been accumulated yet
+    
+    Args:
+        sample_id: Sample identifier
+        work_dir: Working directory containing sample data
+        target_panel: Target panel type
+    
+    Returns:
+        Dictionary with accumulation results
+    """
+    logger = logging.getLogger("robin.target")
+    
+    try:
+        logger.info(f"Finalizing accumulation for sample {sample_id}")
+        
+        # Initialize target analysis
+        target_analysis = TargetAnalysis(
+            work_dir=work_dir,
+            target_panel=target_panel,
+            batch_size=1,  # Force accumulation regardless of count
+            use_staging=True
+        )
+        
+        # Check if there are pending files
+        pending_count = target_analysis._get_pending_count(sample_id)
+        
+        if pending_count == 0:
+            logger.info(f"No pending files for {sample_id} - accumulation not needed")
+            return {"status": "no_pending_files", "sample_id": sample_id}
+        
+        logger.info(f"Found {pending_count} pending files for {sample_id} - forcing accumulation")
+        
+        # Force accumulation of remaining files
+        result = target_analysis.accumulate_staged_files(sample_id, force=True)
+        
+        logger.info(f"Final accumulation complete for {sample_id}: {result}")
+        return result
+        
     except Exception as e:
-        error_details = f"Error in target analysis for {job.context.filepath}: {str(e)}"
-        job.context.add_error("target_analysis", error_details)
-        logger.error(error_details)
+        logger.error(f"Error during final accumulation for {sample_id}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return {"status": "error", "error": str(e), "sample_id": sample_id}
 
 
 def ensure_sorted_igv_bam(

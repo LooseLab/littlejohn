@@ -535,6 +535,267 @@ def run_final_combined_analysis(sample_id: str, work_dir: str) -> bool:
         return False
 
 
+def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, reference=None):
+    """
+    Process multiple BAM files for MGMT analysis using aggregated MGMT data.
+    
+    This function processes multiple BAM files for the same sample, accumulating
+    MGMT reads across all files before performing downstream analysis. This is
+    more efficient than processing each BAM file individually and then trying
+    to combine results.
+
+    Args:
+        bam_paths: List of paths to BAM files
+        metadata_list: List of metadata dictionaries (one per BAM file)
+        work_dir: Working directory
+        logger: Logger instance
+        reference: Optional path to reference genome for methylartist
+
+    Returns:
+        Dictionary with aggregated MGMT analysis results
+    """
+    if not bam_paths or not metadata_list:
+        raise ValueError("bam_paths and metadata_list must not be empty")
+    
+    if len(bam_paths) != len(metadata_list):
+        raise ValueError("bam_paths and metadata_list must have the same length")
+    
+    # Get sample ID from first metadata (assuming all BAMs are from same sample)
+    sample_id = metadata_list[0].get("sample_id", "unknown")
+    
+    logger.info(f"🧬 Starting multi-BAM MGMT analysis for sample: {sample_id}")
+    logger.info(f"Processing {len(bam_paths)} BAM files for sample {sample_id}")
+    
+    # Log essential metadata only
+    for i, (bam_path, metadata) in enumerate(zip(bam_paths, metadata_list)):
+        logger.debug(f"BAM file {i+1}: {os.path.basename(bam_path)}")
+
+    # Create sample-specific output directory
+    sample_dir = os.path.join(work_dir, sample_id)
+    os.makedirs(sample_dir, exist_ok=True)
+
+    analysis_result = {
+        "sample_id": sample_id,
+        "bam_paths": bam_paths,
+        "analysis_timestamp": time.time(),
+        "mgmt_bam_file": None,
+        "processing_steps": [],
+        "error_message": None,
+        "files_processed": 0,
+        "total_files": len(bam_paths),
+        "tools_available": {},
+        "mgmt_read_count_from_preprocessing": 0,
+    }
+
+    try:
+        # Find required files and paths
+        mgmt_bed_path = _find_mgmt_bed(work_dir)
+        hv_path = _find_hv_path(work_dir)
+
+        logger.info(f"Starting MGMT analysis for sample: {sample_id}")
+        logger.debug(f"Work directory: {work_dir}")
+        logger.debug(f"MGMT BED file: {mgmt_bed_path}")
+        logger.debug(f"HV path: {hv_path}")
+
+        # Check if any BAM has MGMT reads
+        valid_bam_paths = []
+        valid_metadata_list = []
+        total_mgmt_read_count = 0
+        
+        for bam_path, metadata in zip(bam_paths, metadata_list):
+            # Check MGMT reads from preprocessing metadata
+            has_mgmt_reads = metadata.get("has_mgmt_reads", False)
+            mgmt_read_count = metadata.get("mgmt_read_count", 0)
+            
+            if has_mgmt_reads:
+                valid_bam_paths.append(bam_path)
+                valid_metadata_list.append(metadata)
+                total_mgmt_read_count += mgmt_read_count
+                logger.debug(f"BAM {os.path.basename(bam_path)}: {mgmt_read_count} MGMT reads")
+            else:
+                logger.warning(f"No MGMT reads found in BAM file: {os.path.basename(bam_path)}")
+        
+        if not valid_bam_paths:
+            logger.info(f"No MGMT reads found in any BAM files for sample {sample_id} - this is normal")
+            analysis_result["processing_steps"].append("no_mgmt_reads_found")
+            analysis_result["status"] = "no_mgmt_reads"
+            analysis_result["message"] = "No MGMT reads found in any BAM files"
+            return analysis_result
+
+        logger.info(f"Processing {len(valid_bam_paths)} valid BAM files out of {len(bam_paths)} total")
+        analysis_result["files_processed"] = len(valid_bam_paths)
+        analysis_result["mgmt_read_count_from_preprocessing"] = total_mgmt_read_count
+        analysis_result["processing_steps"].append("mgmt_reads_found")
+
+        # Process each BAM file, accumulating MGMT reads
+        mgmt_bam_output = os.path.join(sample_dir, "mgmt.bam")
+        
+        for i, (bam_path, metadata) in enumerate(zip(valid_bam_paths, valid_metadata_list)):
+            logger.info(f"Processing BAM file {i+1}/{len(valid_bam_paths)}: {os.path.basename(bam_path)}")
+            
+            # Extract MGMT region using bedtools
+            temp_bamfile = tempfile.NamedTemporaryFile(suffix=".bam", delete=False)
+            temp_bamfile.close()
+
+            # Extract MGMT region to temporary file
+            bedtools_cmd = ["bedtools", "intersect", "-a", bam_path, "-b", mgmt_bed_path]
+
+            try:
+                with open(temp_bamfile.name, "wb") as f:
+                    result = subprocess.run(
+                        bedtools_cmd,
+                        stdout=f,
+                        stderr=subprocess.PIPE,
+                        timeout=300,  # 5 minute timeout
+                    )
+
+                if result.returncode != 0:
+                    # Check if the output file was created and has content
+                    if (
+                        not os.path.exists(temp_bamfile.name)
+                        or os.path.getsize(temp_bamfile.name) == 0
+                    ):
+                        logger.warning(f"Bedtools failed to create valid BAM file for {os.path.basename(bam_path)}")
+                        continue
+
+                # Create index for the BAM file
+                try:
+                    pysam.index(temp_bamfile.name, f"{temp_bamfile.name}.bai")
+                except Exception as e:
+                    logger.warning(f"Failed to create BAM index: {e}")
+
+                # Check if the extracted BAM has reads
+                if pysam.AlignmentFile(temp_bamfile.name, "rb").count(until_eof=True) > 0:
+                    if os.path.exists(mgmt_bam_output):
+                        # Concatenate with existing mgmt.bam
+                        temp_holder = tempfile.NamedTemporaryFile(suffix=".bam", delete=False)
+                        temp_holder.close()
+
+                        pysam.cat(
+                            "-o", temp_holder.name, mgmt_bam_output, temp_bamfile.name
+                        )
+                        shutil.copy2(temp_holder.name, mgmt_bam_output)
+                        try:
+                            os.remove(f"{temp_holder.name}.bai")
+                            os.remove(f"{temp_bamfile.name}.bai")
+                        except FileNotFoundError:
+                            pass
+                    else:
+                        # Copy to create new mgmt.bam
+                        shutil.copy2(temp_bamfile.name, mgmt_bam_output)
+                        try:
+                            os.remove(f"{temp_bamfile.name}.bai")
+                        except FileNotFoundError:
+                            pass
+
+                    logger.debug(f"Accumulated MGMT reads from {os.path.basename(bam_path)}")
+                else:
+                    logger.warning(f"No reads found in extracted MGMT region for {os.path.basename(bam_path)}")
+
+            except subprocess.TimeoutExpired:
+                logger.warning(f"Bedtools extraction timed out for {os.path.basename(bam_path)}")
+            except FileNotFoundError:
+                logger.error("bedtools not found in PATH")
+                raise RuntimeError("bedtools not found in PATH")
+            finally:
+                # Clean up temporary file
+                try:
+                    if os.path.exists(temp_bamfile.name):
+                        os.remove(temp_bamfile.name)
+                except FileNotFoundError:
+                    pass
+
+        # Check if we have accumulated any MGMT reads
+        if not os.path.exists(mgmt_bam_output) or os.path.getsize(mgmt_bam_output) == 0:
+            analysis_result["processing_steps"].append("no_mgmt_region_reads")
+            analysis_result["status"] = "no_mgmt_reads"
+            analysis_result["message"] = "No MGMT reads accumulated from any BAM files"
+            return analysis_result
+
+        analysis_result["mgmt_bam_file"] = mgmt_bam_output
+        analysis_result["processing_steps"].append("mgmt_region_extraction")
+
+        # Generate visualization (if methylartist is available)
+        try:
+            # Sort and index the accumulated mgmt.bam file for methylartist
+            sorted_mgmt_bam = os.path.join(sample_dir, "mgmt_sorted.bam")
+
+            try:
+                pysam.sort("-o", sorted_mgmt_bam, mgmt_bam_output)
+                pysam.index(sorted_mgmt_bam, f"{sorted_mgmt_bam}.bai")
+                logger.info(f"Sorted and indexed accumulated MGMT BAM: {sorted_mgmt_bam}")
+                mgmt_bam_for_plot = sorted_mgmt_bam
+            except Exception as e:
+                logger.warning(f"Failed to sort/index accumulated MGMT BAM: {e}")
+                mgmt_bam_for_plot = mgmt_bam_output
+
+            plot_out = os.path.join(sample_dir, "final_mgmt.png")
+            
+            # Build methylartist command with reference genome if available
+            methylartist_cmd = f"methylartist locus -i chr10:129466536-129467536 -b {mgmt_bam_for_plot} -o {plot_out} --motif CG --mods m"
+            if reference and os.path.exists(reference):
+                methylartist_cmd += f" --ref {reference}"
+                logger.info(f"Using reference genome for methylartist: {reference}")
+            else:
+                logger.warning("No reference genome provided or file not found - methylartist may fail")
+
+            result = subprocess.run(
+                methylartist_cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minute timeout
+            )
+
+            if result.returncode == 0:
+                analysis_result["processing_steps"].append("visualization")
+                logger.info("Visualization complete")
+            else:
+                logger.error(f"Methylartist visualization failed: {result.stderr}")
+
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            logger.warning("Methylartist not available, skipping visualization")
+
+        # Run matkit analysis on accumulated data (if available)
+        try:
+            logger.info("Running matkit on accumulated MGMT data")
+            # Use the proper run_matkit function with robin package
+            if run_matkit(work_dir, mgmt_bam_output, hv_path, sample_dir, "final"):
+                analysis_result["processing_steps"].append("matkit_analysis")
+                logger.info("Matkit analysis complete")
+            else:
+                logger.warning("Matkit analysis failed or robin package not available")
+
+        except Exception as e:
+            logger.error(f"Matkit analysis error: {e}")
+
+        # Collect results and metadata
+        analysis_result["tools_available"] = {
+            "bedtools": shutil.which("bedtools") is not None,
+            "robin_package": HVPATH is not None,
+            "matkit": HVPATH is not None,  # matkit comes from robin package
+            "r": shutil.which("Rscript") is not None,
+            "methylartist": shutil.which("methylartist") is not None,
+        }
+        analysis_result["hv_path"] = hv_path
+        analysis_result["hv_path_source"] = (
+            "robin_module" if HVPATH and hv_path == HVPATH else "fallback"
+        )
+
+        analysis_result["processing_steps"].append("analysis_complete")
+        logger.info(f"Multi-BAM MGMT analysis completed for {sample_id}")
+        logger.info(f"Files successfully processed: {analysis_result['files_processed']}/{analysis_result['total_files']}")
+        logger.info(f"Total MGMT reads: {analysis_result['mgmt_read_count_from_preprocessing']}")
+        
+        return analysis_result
+
+    except Exception as e:
+        logger.error(f"Error in multi-BAM MGMT analysis for {sample_id}: {e}")
+        analysis_result["error_message"] = str(e)
+        analysis_result["processing_steps"].append("analysis_failed")
+        return analysis_result
+
+
 def mgmt_handler(job, work_dir=None, reference=None):
     """
     Handler function for MGMT analysis jobs.
@@ -545,78 +806,183 @@ def mgmt_handler(job, work_dir=None, reference=None):
         work_dir: Optional base directory for output (defaults to BAM file directory)
         reference: Optional path to reference genome for methylartist
     """
-    try:
-        bam_path = job.context.filepath
-
-        # Get job-specific logger
-        logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
-        logger.info(f"Starting MGMT analysis for: {os.path.basename(bam_path)}")
-
-        # Get metadata from preprocessing
-        bam_metadata = job.context.metadata.get("bam_metadata", {})
-
-        # Determine work directory
+    # Get job-specific logger
+    logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
+    
+    # Check if this is a batched job
+    batched_job = job.context.metadata.get("_batched_job")
+    if batched_job:
+        batch_size = batched_job.get_file_count()
+        sample_id = batched_job.get_sample_id()
+        batch_id = batched_job.batch_id
+        logger.info(f"Processing MGMT batch: {batch_size} files for sample '{sample_id}' (batch_id: {batch_id})")
+        
+        # Get all filepaths in the batch
+        filepaths = batched_job.get_filepaths()
+        
+        # Log individual files in the batch
+        for i, filepath in enumerate(filepaths):
+            logger.info(f"  Batch file {i+1}/{batch_size}: {os.path.basename(filepath)}")
+        
+        # Prepare metadata list for all BAM files in the batch
+        metadata_list = []
+        for i, bam_path in enumerate(filepaths):
+            # Get metadata from preprocessing for this specific file
+            file_metadata = batched_job.contexts[i].metadata.get("bam_metadata", {})
+            
+            # Get sample ID from preprocessing results for this specific file
+            file_context = batched_job.contexts[i]
+            file_sample_id = file_context.get_sample_id()
+            
+            # Use the sample ID from the file's context (which should have preprocessing results)
+            if file_sample_id != "unknown":
+                file_metadata["sample_id"] = file_sample_id
+            else:
+                file_metadata["sample_id"] = sample_id
+            
+            metadata_list.append(file_metadata)
+        
+        # Determine work directory for the batch
         if work_dir is None:
-            # Default to BAM file directory
-            work_dir = os.path.dirname(bam_path)
+            # Default to first BAM file directory
+            batch_work_dir = os.path.dirname(filepaths[0])
         else:
             # Use specified work directory, create if it doesn't exist
             os.makedirs(work_dir, exist_ok=True)
-            logger.debug(f"Using specified work directory: {work_dir}")
+            batch_work_dir = work_dir
+            logger.debug(f"Using specified work directory: {batch_work_dir}")
+        
+        # Process all BAM files in the batch using the new aggregated function
+        logger.info(f"Processing {batch_size} BAM files as aggregated batch for sample '{sample_id}'")
+        batch_result = process_multiple_bams(
+            bam_paths=filepaths,
+            metadata_list=metadata_list,
+            work_dir=batch_work_dir,
+            logger=logger,
+            reference=reference
+        )
+        
+        # Store batch results in job context (maintain compatibility with existing structure)
+        job.context.add_metadata("mgmt_analysis", {
+            "batch_result": batch_result,  # Single aggregated result
+            "batch_size": batch_size,
+            "sample_id": sample_id,
+            "batch_id": batch_id,
+            "files_processed": batch_result.get("files_processed", batch_size),
+            "total_files": batch_result.get("total_files", batch_size)
+        })
+        
+        logger.info(f"Completed MGMT batch processing: {batch_size} files for sample '{sample_id}'")
+        logger.info(f"Files successfully processed: {batch_result.get('files_processed', batch_size)}/{batch_result.get('total_files', batch_size)}")
+        
+        # Check if this is an expected condition (no MGMT reads) vs actual error
+        if batch_result.get("status") == "no_mgmt_reads":
+            # This is an expected condition, not an error
+            job.context.add_result(
+                "mgmt_analysis",
+                {
+                    "status": "no_mgmt_reads",
+                    "sample_id": sample_id,
+                    "processing_steps": batch_result.get("processing_steps", []),
+                    "message": batch_result.get("message", "No MGMT reads found in any BAM files"),
+                    "mgmt_read_count_from_preprocessing": batch_result.get("mgmt_read_count_from_preprocessing", 0),
+                    "files_processed": batch_result.get("files_processed", batch_size),
+                    "total_files": batch_result.get("total_files", batch_size),
+                },
+            )
+            logger.info(f"MGMT batch analysis completed - {batch_result.get('message', 'No MGMT reads found')}")
+        elif batch_result.get("error_message"):
+            logger.error(f"Batch processing completed with errors: {batch_result['error_message']}")
+            job.context.add_error("mgmt_analysis", batch_result["error_message"])
+        else:
+            logger.info("Batch processing completed successfully with aggregated MGMT analysis")
+            job.context.add_result(
+                "mgmt_analysis",
+                {
+                    "status": "success",
+                    "sample_id": sample_id,
+                    "mgmt_bam_file": batch_result.get("mgmt_bam_file", ""),
+                    "processing_steps": batch_result.get("processing_steps", []),
+                    "tools_available": batch_result.get("tools_available", {}),
+                    "mgmt_read_count_from_preprocessing": batch_result.get("mgmt_read_count_from_preprocessing", 0),
+                    "files_processed": batch_result.get("files_processed", batch_size),
+                    "total_files": batch_result.get("total_files", batch_size),
+                },
+            )
+        
+        return
+        
+    else:
+        # Single file processing (backward compatibility)
+        try:
+            bam_path = job.context.filepath
+            logger.info(f"Starting MGMT analysis for: {os.path.basename(bam_path)}")
 
-        # Process the BAM file
-        mgmt_result = process_bam_file(bam_path, bam_metadata, work_dir, reference=reference)
+            # Get metadata from preprocessing
+            bam_metadata = job.context.metadata.get("bam_metadata", {})
 
-        # Store results in job context
-        job.context.add_metadata("mgmt_analysis", mgmt_result.results)
-        job.context.add_metadata("mgmt_processing_steps", mgmt_result.processing_steps)
+            # Determine work directory
+            if work_dir is None:
+                # Default to BAM file directory
+                work_dir = os.path.dirname(bam_path)
+            else:
+                # Use specified work directory, create if it doesn't exist
+                os.makedirs(work_dir, exist_ok=True)
+                logger.debug(f"Using specified work directory: {work_dir}")
 
-        if mgmt_result.error_message:
-            # Check if this is an expected condition (no MGMT reads) vs actual error
-            if mgmt_result.error_message == "No MGMT spanning reads found":
-                # This is an expected condition, not an error
+            # Process the BAM file
+            mgmt_result = process_bam_file(bam_path, bam_metadata, work_dir, reference=reference)
+
+            # Store results in job context
+            job.context.add_metadata("mgmt_analysis", mgmt_result.results)
+            job.context.add_metadata("mgmt_processing_steps", mgmt_result.processing_steps)
+
+            if mgmt_result.error_message:
+                # Check if this is an expected condition (no MGMT reads) vs actual error
+                if mgmt_result.error_message == "No MGMT spanning reads found":
+                    # This is an expected condition, not an error
+                    job.context.add_result(
+                        "mgmt_analysis",
+                        {
+                            "status": "no_mgmt_reads",
+                            "sample_id": mgmt_result.sample_id,
+                            "processing_steps": mgmt_result.processing_steps,
+                            "message": mgmt_result.error_message,
+                            "mgmt_read_count_from_preprocessing": mgmt_result.results.get(
+                                "mgmt_read_count_from_preprocessing", 0
+                            ),
+                        },
+                    )
+                    logger.info(f"MGMT analysis completed - {mgmt_result.error_message}")
+                else:
+                    # This is an actual error
+                    job.context.add_error("mgmt_analysis", mgmt_result.error_message)
+                    logger.error(f"MGMT analysis failed: {mgmt_result.error_message}")
+            else:
                 job.context.add_result(
                     "mgmt_analysis",
                     {
-                        "status": "no_mgmt_reads",
+                        "status": "success",
                         "sample_id": mgmt_result.sample_id,
+                        "analysis_time": mgmt_result.results.get("analysis_time", 0),
+                        "mgmt_bam_file": mgmt_result.results.get("mgmt_bam_file", ""),
                         "processing_steps": mgmt_result.processing_steps,
-                        "message": mgmt_result.error_message,
+                        "tools_available": mgmt_result.results.get("tools_available", {}),
                         "mgmt_read_count_from_preprocessing": mgmt_result.results.get(
                             "mgmt_read_count_from_preprocessing", 0
                         ),
                     },
                 )
-                logger.info(f"MGMT analysis completed - {mgmt_result.error_message}")
-            else:
-                # This is an actual error
-                job.context.add_error("mgmt_analysis", mgmt_result.error_message)
-                logger.error(f"MGMT analysis failed: {mgmt_result.error_message}")
-        else:
-            job.context.add_result(
-                "mgmt_analysis",
-                {
-                    "status": "success",
-                    "sample_id": mgmt_result.sample_id,
-                    "analysis_time": mgmt_result.results.get("analysis_time", 0),
-                    "mgmt_bam_file": mgmt_result.results.get("mgmt_bam_file", ""),
-                    "processing_steps": mgmt_result.processing_steps,
-                    "tools_available": mgmt_result.results.get("tools_available", {}),
-                    "mgmt_read_count_from_preprocessing": mgmt_result.results.get(
-                        "mgmt_read_count_from_preprocessing", 0
-                    ),
-                },
-            )
-            logger.info(f"MGMT analysis complete for {os.path.basename(bam_path)}")
-            logger.info(f"Sample ID: {mgmt_result.sample_id}")
-            logger.info(
-                f"Analysis time: {mgmt_result.results.get('analysis_time', 0):.2f}s"
-            )
-            logger.debug(f"Processing steps: {', '.join(mgmt_result.processing_steps)}")
-            logger.debug(
-                f"Output directory: {os.path.dirname(mgmt_result.results.get('mgmt_bam_file', ''))}"
-            )
+                logger.info(f"MGMT analysis complete for {os.path.basename(bam_path)}")
+                logger.info(f"Sample ID: {mgmt_result.sample_id}")
+                logger.info(
+                    f"Analysis time: {mgmt_result.results.get('analysis_time', 0):.2f}s"
+                )
+                logger.debug(f"Processing steps: {', '.join(mgmt_result.processing_steps)}")
+                logger.debug(
+                    f"Output directory: {os.path.dirname(mgmt_result.results.get('mgmt_bam_file', ''))}"
+                )
 
-    except Exception as e:
-        job.context.add_error("mgmt_analysis", str(e))
-        logger.error(f"Error in MGMT analysis for {job.context.filepath}: {e}")
+        except Exception as e:
+            job.context.add_error("mgmt_analysis", str(e))
+            logger.error(f"Error in MGMT analysis for {job.context.filepath}: {e}")
