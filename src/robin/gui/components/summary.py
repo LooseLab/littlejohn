@@ -25,7 +25,7 @@ def _run_info_section(sample_dir: Path, sample_id: str):
         ui.label("Run Details").classes("text-lg font-semibold text-blue-800")
         ui.separator().classes().style("border: 1px solid var(--md-primary)")
         
-        with ui.row().classes("w-full gap-1 flex-wrap"):
+        with ui.row().classes("w-full gap-2 sm:gap-1 flex-wrap mobile-run-details"):
             _create_dashboard_card(
                 "Run Time", run_info.get("run_time", "Not available"), "schedule", "Sequencing run timestamp"
             )
@@ -55,7 +55,7 @@ def _classification_section(sample_dir: Path):
         ui.label("Classification Details").classes("text-lg font-semibold text-blue-800")
         ui.separator().classes().style("border: 1px solid var(--md-primary)")
         
-        with ui.row().classes("w-full gap-1 flex-wrap"):
+        with ui.row().classes("w-full gap-2 sm:gap-1 flex-wrap mobile-classification-details"):
             # Sturgeon
             sturgeon_data = classification_data.get("sturgeon", {})
             _create_classification_dashboard_card_with_data(
@@ -117,7 +117,7 @@ def _analysis_section(sample_dir: Path):
         ui.label("Analysis Details").classes("text-lg font-semibold text-blue-800")
         ui.separator().classes().style("border: 1px solid var(--md-primary)")
         
-        with ui.row().classes("w-full gap-1 flex-wrap"):
+        with ui.row().classes("w-full gap-2 sm:gap-1 flex-wrap mobile-analysis-details"):
             # Coverage Analysis
             _create_coverage_dashboard_card_with_data(
                 coverage_data.get("quality", "Not available"),
@@ -172,20 +172,20 @@ def add_summary_section(sample_dir: Path, sample_id: str) -> None:
 
 def _create_dashboard_card(title: str, value: str, icon: str, description: str) -> None:
     """Create a compact dashboard-style card matching the Mosaic design pattern."""
-    with ui.card().classes("mosaic-card flex-1 min-w-0"):
+    with ui.card().classes("mosaic-card flex-1 min-w-0 mobile-dashboard-card"):
         with ui.row().classes("mosaic-card__header"):
             # Title
-            ui.label(title).classes("mosaic-card__title truncate")
+            ui.label(title).classes("mosaic-card__title truncate text-xs sm:text-sm")
             
-            # Icon in circular background
+            # Icon in circular background - larger on mobile
             with ui.row().classes("mosaic-card__icon"):
-                ui.icon(icon).classes("w-4 h-4")
+                ui.icon(icon).classes("w-5 h-5 sm:w-4 sm:h-4")
         
         # Main value with text wrapping
-        ui.label(value).classes("mosaic-card__content text-sm font-bold mb-1 break-words")
+        ui.label(value).classes("mosaic-card__content text-xs sm:text-sm font-bold mb-1 break-words")
         
         # Description
-        ui.label(description).classes("mosaic-card__subtitle")
+        ui.label(description).classes("mosaic-card__subtitle text-xs")
 
 
 def _create_classification_dashboard_card_with_data(
@@ -198,18 +198,18 @@ def _create_classification_dashboard_card_with_data(
     description: str
 ) -> None:
     """Create a compact classification dashboard card with Mosaic styling."""
-    with ui.card().classes("mosaic-card flex-1 min-w-0"):
+    with ui.card().classes("mosaic-card flex-1 min-w-0 mobile-dashboard-card"):
         with ui.row().classes("mosaic-card__header"):
             # Title
-            ui.label(title).classes("mosaic-card__title truncate")
+            ui.label(title).classes("mosaic-card__title truncate text-xs sm:text-sm")
             
-            # Icon in circular background
+            # Icon in circular background - larger on mobile
             with ui.row().classes("mosaic-card__icon"):
-                ui.icon(icon).classes("w-4 h-4")
+                ui.icon(icon).classes("w-5 h-5 sm:w-4 sm:h-4")
         
         # Main classification result with confidence badge
         with ui.row().classes("flex items-start justify-between mb-1 gap-1"):
-            ui.label(classification).classes("mosaic-card__content text-sm font-bold break-words flex-1")
+            ui.label(classification).classes("mosaic-card__content text-xs sm:text-sm font-bold break-words flex-1")
             # Confidence level badge with color coding
             confidence_badge_class = "status-badge"
             if confidence >= 80:
@@ -296,18 +296,18 @@ def _create_coverage_dashboard_card_with_data(
     enrichment: str
 ) -> None:
     """Create a compact coverage analysis dashboard card with data."""
-    with ui.card().classes("mosaic-card flex-1 min-w-0"):
+    with ui.card().classes("mosaic-card flex-1 min-w-0 mobile-dashboard-card"):
         with ui.row().classes("mosaic-card__header"):
             # Title
-            ui.label("Coverage Analysis").classes("mosaic-card__title truncate")
+            ui.label("Coverage Analysis").classes("mosaic-card__title truncate text-xs sm:text-sm")
             
-            # Icon in circular background
+            # Icon in circular background - larger on mobile
             with ui.row().classes("mosaic-card__icon"):
-                ui.icon("analytics").classes("w-5 h-5")
+                ui.icon("analytics").classes("w-5 h-5 sm:w-4 sm:h-4")
         
         # Main quality result with badge
         with ui.row().classes("flex items-start justify-between mb-1 gap-1"):
-            ui.label(quality).classes("mosaic-card__content text-sm font-bold break-words flex-1")
+            ui.label(quality).classes("mosaic-card__content text-xs sm:text-sm font-bold break-words flex-1")
             # Coverage badge with color coding
             coverage_badge_class = "status-badge"
             try:
@@ -386,17 +386,17 @@ def _create_cnv_dashboard_card_with_data(
     lost: int
 ) -> None:
     """Create a compact CNV analysis dashboard card with data."""
-    with ui.card().classes("mosaic-card flex-1 min-w-0"):
+    with ui.card().classes("mosaic-card flex-1 min-w-0 mobile-dashboard-card"):
         with ui.row().classes("mosaic-card__header"):
             # Title
-            ui.label("Copy Number Analysis").classes("mosaic-card__title truncate")
+            ui.label("Copy Number Analysis").classes("mosaic-card__title truncate text-xs sm:text-sm")
             
-            # Icon in circular background
+            # Icon in circular background - larger on mobile
             with ui.row().classes("mosaic-card__icon"):
-                ui.icon("person").classes("w-5 h-5")
+                ui.icon("person").classes("w-5 h-5 sm:w-4 sm:h-4")
         
         # Main genetic sex result
-        ui.label(genetic_sex).classes("mosaic-card__content text-sm font-bold mb-1 break-words")
+        ui.label(genetic_sex).classes("mosaic-card__content text-xs sm:text-sm font-bold mb-1 break-words")
         
         # Analysis details in compact layout
         with ui.column().classes("mb-1 gap-0.5"):
@@ -456,18 +456,18 @@ def _create_mgmt_dashboard_card_with_data(
     cpg_sites: str
 ) -> None:
     """Create a compact MGMT analysis dashboard card with data."""
-    with ui.card().classes("mosaic-card flex-1 min-w-0"):
+    with ui.card().classes("mosaic-card flex-1 min-w-0 mobile-dashboard-card"):
         with ui.row().classes("mosaic-card__header"):
             # Title
-            ui.label("MGMT Analysis").classes("mosaic-card__title truncate")
+            ui.label("MGMT Analysis").classes("mosaic-card__title truncate text-xs sm:text-sm")
             
-            # Icon in circular background
+            # Icon in circular background - larger on mobile
             with ui.row().classes("mosaic-card__icon"):
-                ui.icon("science").classes("w-5 h-5")
+                ui.icon("science").classes("w-5 h-5 sm:w-4 sm:h-4")
         
         # Main status result with badge
         with ui.row().classes("flex items-start justify-between mb-1 gap-1"):
-            ui.label(status).classes("mosaic-card__content text-sm font-bold break-words flex-1")
+            ui.label(status).classes("mosaic-card__content text-xs sm:text-sm font-bold break-words flex-1")
             # Methylation badge with color coding
             methylation_badge_class = "status-badge"
             try:
@@ -532,18 +532,18 @@ def _create_fusion_dashboard_card_with_data(
     genome_fusions: int
 ) -> None:
     """Create a compact fusion analysis dashboard card with data."""
-    with ui.card().classes("mosaic-card flex-1 min-w-0"):
+    with ui.card().classes("mosaic-card flex-1 min-w-0 mobile-dashboard-card"):
         with ui.row().classes("mosaic-card__header"):
             # Title
-            ui.label("Fusion Analysis").classes("mosaic-card__title truncate")
+            ui.label("Fusion Analysis").classes("mosaic-card__title truncate text-xs sm:text-sm")
             
-            # Icon in circular background
+            # Icon in circular background - larger on mobile
             with ui.row().classes("mosaic-card__icon"):
-                ui.icon("merge").classes("w-5 h-5")
+                ui.icon("merge").classes("w-5 h-5 sm:w-4 sm:h-4")
         
         # Panel info and main result
         with ui.row().classes("flex items-start justify-between mb-1 gap-1"):
-            ui.label(f"Panel: {panel}").classes("mosaic-card__content text-sm font-medium break-words flex-1")
+            ui.label(f"Panel: {panel}").classes("mosaic-card__content text-xs sm:text-sm font-medium break-words flex-1")
             ui.label(f"{target_fusions} target fusions").classes("px-1 py-0.5 text-xs font-medium rounded-full bg-blue-100 text-blue-800")
         
         # Analysis details in compact layout

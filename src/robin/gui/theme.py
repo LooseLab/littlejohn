@@ -37,6 +37,7 @@ External Dependencies:
 """
 
 from contextlib import contextmanager
+from signal import siginterrupt
 from packaging import version
 import requests
 import asyncio
@@ -332,6 +333,307 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
     ui.add_head_html(
         HEADER_HTML + f"<style>{STYLE_CSS}</style><style>{M3_COMPONENTS_CSS}</style><style>{MOSAIC_COMPONENTS_CSS}</style>"
     )
+    # Add mobile-specific responsive CSS
+    ui.add_head_html("""
+        <style>
+        /* Mobile-first responsive design for classification cards */
+        @media (max-width: 768px) {
+            .classification-cards {
+                flex-direction: column !important;
+            }
+            .classification-card {
+                flex: none !important;
+                width: 100% !important;
+                margin-bottom: 1rem;
+            }
+        }
+        
+        /* Ensure proper spacing on mobile */
+        @media (max-width: 480px) {
+            .mobile-padding {
+                padding: 0.5rem !important;
+            }
+            .mobile-text {
+                font-size: 0.75rem !important;
+            }
+        }
+        
+        /* Better touch targets for mobile */
+        @media (max-width: 768px) {
+            .mobile-button {
+                min-height: 44px !important;
+                min-width: 44px !important;
+            }
+        }
+        
+        /* Responsive breakpoints for better mobile experience */
+        @media (max-width: 640px) {
+            .text-headline-large {
+                font-size: 1.5rem !important;
+                line-height: 1.2 !important;
+            }
+            .text-headline-medium {
+                font-size: 1.125rem !important;
+            }
+        }
+        
+        /* Ensure cards don't overflow on mobile */
+        @media (max-width: 768px) {
+            .w-full {
+                max-width: 100% !important;
+                overflow-x: hidden !important;
+            }
+        }
+        
+        /* Better spacing for mobile footer */
+        @media (max-width: 640px) {
+            .footer-mobile {
+                flex-direction: column !important;
+                gap: 0.5rem !important;
+                text-align: center !important;
+            }
+        }
+        
+        /* Ultra-compact footer for mobile */
+        @media (max-width: 768px) {
+            .footer-compact {
+                padding: 0.0625rem 0.125rem !important;
+                min-height: auto !important;
+            }
+            .footer-compact .mobile-button {
+                min-height: 24px !important;
+                min-width: 24px !important;
+                padding: 0.0625rem 0.125rem !important;
+                margin: 0 0.0625rem !important;
+                font-size: 0.6875rem !important;
+            }
+        }
+        
+        /* Desktop footer with more space */
+        @media (min-width: 769px) {
+            .footer-compact {
+                padding: 0.5rem 1rem !important;
+            }
+        }
+        
+        /* Ultra-compact footer buttons for landscape phones */
+        @media (max-width: 896px) and (orientation: landscape) {
+            .footer-compact .mobile-button {
+                min-height: 20px !important;
+                min-width: 20px !important;
+                padding: 0.03125rem 0.0625rem !important;
+                margin: 0 0.03125rem !important;
+                font-size: 0.625rem !important;
+            }
+        }
+        
+        @media (max-width: 667px) and (orientation: landscape) {
+            .footer-compact .mobile-button {
+                min-height: 18px !important;
+                min-width: 18px !important;
+                padding: 0.015625rem 0.03125rem !important;
+                margin: 0 0.015625rem !important;
+                font-size: 0.5625rem !important;
+            }
+        }
+        
+        /* Smaller labels for activity monitors on mobile */
+        @media (max-width: 768px) {
+            .text-body-small {
+                font-size: 0.75rem !important;
+            }
+        }
+        
+        /* Mobile dashboard cards - stack vertically on small screens */
+        @media (max-width: 768px) {
+            .mobile-run-details {
+                flex-direction: column !important;
+            }
+            .mobile-classification-details {
+                flex-direction: column !important;
+            }
+            .mobile-analysis-details {
+                flex-direction: column !important;
+            }
+            .mobile-dashboard-card {
+                flex: none !important;
+                width: 100% !important;
+                margin-bottom: 0.5rem;
+            }
+        }
+        
+        /* Better spacing for dashboard cards on mobile */
+        @media (max-width: 480px) {
+            .mobile-dashboard-card {
+                padding: 0.75rem !important;
+            }
+            .mobile-dashboard-card .mosaic-card__content {
+                font-size: 0.875rem !important;
+                line-height: 1.2 !important;
+            }
+        }
+        
+        /* Ultra-compact header and footer on mobile */
+        @media (max-width: 768px) {
+            .q-header {
+                min-height: 32px !important;
+                padding: 0.125rem 0.25rem !important;
+            }
+            .q-footer {
+                min-height: 32px !important;
+                padding: 0.125rem 0.25rem !important;
+            }
+        }
+        
+        /* Even more compact on very small screens */
+        @media (max-width: 480px) {
+            .q-header {
+                min-height: 28px !important;
+                padding: 0.0625rem 0.125rem !important;
+            }
+            .q-footer {
+                min-height: 28px !important;
+                padding: 0.0625rem 0.125rem !important;
+            }
+        }
+        
+        /* Ultra-compact for landscape phones */
+        @media (max-width: 896px) and (orientation: landscape) {
+            .q-header {
+                min-height: 24px !important;
+                padding: 0.03125rem 0.0625rem !important;
+            }
+            .q-footer {
+                min-height: 24px !important;
+                padding: 0.03125rem 0.0625rem !important;
+            }
+        }
+        
+        /* Even more compact for small landscape phones */
+        @media (max-width: 667px) and (orientation: landscape) {
+            .q-header {
+                min-height: 20px !important;
+                padding: 0.015625rem 0.03125rem !important;
+            }
+            .q-footer {
+                min-height: 20px !important;
+                padding: 0.015625rem 0.03125rem !important;
+            }
+        }
+        
+        /* Ensure header and footer stay at page extremities */
+        @media (max-width: 768px) {
+            .q-header {
+                position: fixed !important;
+                top: 0 !important;
+                left: 0 !important;
+                right: 0 !important;
+                z-index: 1000 !important;
+            }
+            .q-footer {
+                position: fixed !important;
+                bottom: 0 !important;
+                left: 0 !important;
+                right: 0 !important;
+                z-index: 1000 !important;
+            }
+            /* Add padding to main content to account for fixed header/footer */
+            .q-page {
+                padding-top: 32px !important;
+                padding-bottom: 32px !important;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .q-page {
+                padding-top: 28px !important;
+                padding-bottom: 28px !important;
+            }
+        }
+        
+        /* Landscape phone content padding */
+        @media (max-width: 896px) and (orientation: landscape) {
+            .q-page {
+                padding-top: 24px !important;
+                padding-bottom: 24px !important;
+            }
+        }
+        
+        @media (max-width: 667px) and (orientation: landscape) {
+            .q-page {
+                padding-top: 20px !important;
+                padding-bottom: 20px !important;
+            }
+        }
+        
+        /* Ultra-compact header text on mobile */
+        @media (max-width: 768px) {
+            .q-header .text-headline-medium {
+                font-size: 1.125rem !important;
+                line-height: 1.2 !important;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .q-header .text-headline-medium {
+                font-size: 1rem !important;
+                line-height: 1.1 !important;
+            }
+        }
+        
+        /* Ultra-compact header text for landscape phones */
+        @media (max-width: 896px) and (orientation: landscape) {
+            .q-header .text-headline-medium {
+                font-size: 0.875rem !important;
+                line-height: 1 !important;
+            }
+        }
+        
+        @media (max-width: 667px) and (orientation: landscape) {
+            .q-header .text-headline-medium {
+                font-size: 0.75rem !important;
+                line-height: 1 !important;
+            }
+        }
+        
+        /* Ultra-compact logos for landscape phones */
+        @media (max-width: 896px) and (orientation: landscape) {
+            .q-header img {
+                width: 24px !important;
+            }
+            .q-footer img {
+                width: 16px !important;
+            }
+        }
+        
+        @media (max-width: 667px) and (orientation: landscape) {
+            .q-header img {
+                width: 20px !important;
+            }
+            .q-footer img {
+                width: 14px !important;
+            }
+        }
+        
+        /* Ensure proper centering of main content */
+        @media (max-width: 768px) {
+            .main-content-card {
+                margin-left: 1rem !important;
+                margin-right: 1rem !important;
+                max-width: calc(100% - 2rem) !important;
+            }
+        }
+        
+        /* Better centering on very small screens */
+        @media (max-width: 480px) {
+            .main-content-card {
+                margin-left: 0.5rem !important;
+                margin-right: 0.5rem !important;
+                max-width: calc(100% - 1rem) !important;
+            }
+        }
+        </style>
+    """)
     ui.add_head_html(
         """
         <script>
@@ -434,88 +736,91 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
         header_classes += " batphone"
 
     with ui.header(elevated=True).classes(header_classes):
-        with ui.grid(columns=2).style("width: 100%"):
-            with ui.row().classes(
-                f"max-[{MENU_BREAKPOINT}px]:hidden items-center align-left px-4"
-            ):
-                ui.html(navtitle, sanitize=False).classes("text-headline-medium drop-shadow font-bold").style(
-                    "font-weight: 600; font-family: var(--font-primary)"
+        # Use flexbox layout instead of grid to prevent overlap
+        with ui.row().classes("w-full items-center justify-between px-1 py-0.5 sm:px-4 sm:py-2"):
+            # Left side: Title (responsive)
+            with ui.row().classes("items-center flex-shrink-0"):
+                ui.html(navtitle, sanitize=False).classes(
+                    f"max-[{MENU_BREAKPOINT}px]:hidden text-headline-medium drop-shadow font-bold"
+                ).style("font-weight: 600; font-family: var(--font-primary)")
+                ui.html(smalltitle, sanitize=False).classes(
+                    f"min-[{MENU_BREAKPOINT+1}px]:hidden text-headline-medium drop-shadow font-bold"
+                ).style("font-weight: 600; font-family: var(--font-primary)")
+            
+            # Right side: Metrics and controls
+            with ui.row().classes("items-center gap-2 flex-shrink-0"):
+                # System metrics (hidden on mobile)
+                ui.label(f"Viewing: {platform.node()}").classes(
+                    f"max-[{MENU_BREAKPOINT}px]:hidden text-body-medium"
                 )
-            with ui.row().classes(
-                f"min-[{MENU_BREAKPOINT+1}px]:hidden items-center align-left px-4"
-            ):
-                ui.html(smalltitle, sanitize=False).classes("text-headline-medium drop-shadow font-bold").style(
-                    "font-weight: 600; font-family: var(--font-primary)"
+                ui.label("CPU").classes(
+                    f"max-[{MENU_BREAKPOINT}px]:hidden text-body-small"
                 )
-            with ui.row().classes("ml-auto align-top"):
-                with ui.row().classes("items-center m-auto gap-3"):
-                    ui.label(f"Viewing: {platform.node()}").classes(
-                        f"max-[{MENU_BREAKPOINT}px]:hidden text-body-medium"
-                    )
-                    ui.label("CPU").classes(
-                        f"max-[{MENU_BREAKPOINT}px]:hidden text-body-medium"
-                    )
-                    cpu_activity = ui.circular_progress(max=100).classes(
-                        f"max-[{MENU_BREAKPOINT}px]:hidden"
-                    )
-                    ui.label("RAM").classes(
-                        f"max-[{MENU_BREAKPOINT}px]:hidden text-body-medium"
-                    )
-                    ram_utilisation = ui.circular_progress(max=100).classes(
-                        f"max-[{MENU_BREAKPOINT}px]:hidden"
-                    )
+                cpu_activity = ui.circular_progress(max=100).classes(
+                    f"max-[{MENU_BREAKPOINT}px]:hidden"
+                )
+                
+                ui.label("RAM").classes(
+                    f"max-[{MENU_BREAKPOINT}px]:hidden text-body-small"
+                )
+                ram_utilisation = ui.circular_progress(max=100).classes(
+                    f"max-[{MENU_BREAKPOINT}px]:hidden"
+                )
 
-                    # Start global metrics timer if not already running
-                    global_metrics.start_timer()
+                # Start global metrics timer if not already running
+                global_metrics.start_timer()
 
-                    # Bind the progress indicators to the global metrics
-                    cpu_activity.bind_value_from(global_metrics, "cpu")
-                    ram_utilisation.bind_value_from(global_metrics, "ram")
+                # Bind the progress indicators to the global metrics
+                cpu_activity.bind_value_from(global_metrics, "cpu")
+                ram_utilisation.bind_value_from(global_metrics, "ram")
 
-                    with ui.button(icon="menu").classes("rounded-md"):
-                        with ui.menu() as menu:
-                            ui.menu_item("Home", lambda: ui.navigate.to("/")).classes(
-                                "text-body-medium"
-                            )
-                            ui.menu_item(
-                                "View Samples", lambda: ui.navigate.to("/live_data")
-                            ).classes("text-body-medium")
-                            ui.menu_item(
-                                "Activity Monitor",
-                                lambda: ui.navigate.to("/robin"),
-                            ).classes("text-body-medium")
-                            ui.menu_item(
-                                "Workflow",
-                                lambda: ui.navigate.to("/workflow"),
-                            ).classes("text-body-medium")
-                            ui.menu_item(
-                                "Documentation",
-                                lambda: ui.navigate.to(
-                                    "https://looselab.github.io/ROBIN/"
-                                ),
-                            ).classes("text-body-medium")
-                            ui.separator()
-                            ui.switch("Allow Remote Access").classes(
-                                "ml-4 bg-transparent"
-                            ).props('color="primary"').bind_value(
-                                app.storage.general, "use_on_air"
-                            )
-                            ui.separator()
-                            ui.switch("Dark Mode").classes("ml-4 bg-transparent").props(
-                                'color="primary"'
-                            ).bind_value(app.storage.browser, "dark_mode")
-                            ui.dark_mode().bind_value(app.storage.browser, "dark_mode")
-                            ui.separator()
-                            ui.menu_item("Close", menu.close).classes(
-                                "text-body-medium"
-                            )
-                            ui.button(
-                                "Quit", icon="logout", on_click=quitdialog.open
-                            ).classes("bg-error text-white rounded-md")
-                    ui.image(get_imagefile()).style("width: 50px")
+                # Menu button
+                with ui.button(icon="menu").classes("rounded-md"):
+                    with ui.menu() as menu:
+                        ui.menu_item("Home", lambda: ui.navigate.to("/")).classes(
+                            "text-body-medium"
+                        )
+                        ui.menu_item(
+                            "View Samples", lambda: ui.navigate.to("/live_data")
+                        ).classes("text-body-medium")
+                        ui.menu_item(
+                            "Activity Monitor",
+                            lambda: ui.navigate.to("/robin"),
+                        ).classes("text-body-medium")
+                        ui.menu_item(
+                            "Workflow",
+                            lambda: ui.navigate.to("/workflow"),
+                        ).classes("text-body-medium")
+                        ui.menu_item(
+                            "Documentation",
+                            lambda: ui.navigate.to(
+                                "https://looselab.github.io/ROBIN/"
+                            ),
+                        ).classes("text-body-medium")
+                        ui.separator()
+                        ui.switch("Allow Remote Access").classes(
+                            "ml-4 bg-transparent"
+                        ).props('color="primary"').bind_value(
+                            app.storage.general, "use_on_air"
+                        )
+                        ui.separator()
+                        ui.switch("Dark Mode").classes("ml-4 bg-transparent").props(
+                            'color="primary"'
+                        ).bind_value(app.storage.browser, "dark_mode")
+                        ui.dark_mode().bind_value(app.storage.browser, "dark_mode")
+                        ui.separator()
+                        ui.menu_item("Close", menu.close).classes(
+                            "text-body-medium"
+                        )
+                        ui.button(
+                            "Quit", icon="logout", on_click=quitdialog.open
+                        ).classes("bg-error text-white rounded-md")
+                
+                # Logo - ultra-small on mobile
+                ui.image(get_imagefile()).style("width: 32px").classes("flex-shrink-0 sm:w-12")
 
     with ui.column().classes(
-        "w-full h-full max-w-full overflow-hidden"
+        "w-full h-full max-w-full overflow-hidden flex flex-col items-center px-2"
     ) as main_content:
         pass
 
@@ -554,32 +859,35 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
             ui.button("Close", on_click=dialog.close).classes(
                 "bg-primary text-white rounded-md"
             )
-        ui.image(get_imagefile()).style("width: 40px")
-        ui.colors(primary="#4F9153")  # Green primary color
-        ui.button("Links", on_click=dialog.open).classes("rounded-md")
+        
+        # Footer content - ultra-compact on mobile
+        with ui.row().classes("w-full items-center justify-between px-0.5 py-0.25 sm:px-2 sm:py-1 gap-0.5 no-wrap footer-compact"):
+            # Left side: Logo (ultra-small on mobile)
+            ui.image(get_imagefile()).style("width: 20px").classes("flex-shrink-0 sm:w-8")
+            
+            # Center: Buttons with proper spacing
+            with ui.row().classes("items-center gap-2 flex-shrink-0"):
+                ui.colors(primary="#4F9153")  # Green primary color
+                ui.button("Links", on_click=dialog.open).classes("rounded-md mobile-button text-xs px-2 py-1")
 
-        with ui.button(icon="info").classes("rounded-md"):
-            with ui.menu() as menu:
-                ui.label().bind_text_from(
-                    app, "urls", backward=lambda n: f"Available urls: {n}"
-                ).classes("text-body-medium")
-                ui.label("Version: " + get_about().__version__).classes(
-                    "text-body-medium"
-                )
-        ui.label(
-            "Some aspects of this application are ©Looselab - all analyses provided for research use only."
-        ).classes(
-            f"max-[{MENU_BREAKPOINT}px]:hidden text-body-small text-weight-italic"
-        )
-        ui.label("©Looselab").classes(
-            f"min-[{MENU_BREAKPOINT+1}px]:hidden text-body-small text-weight-italic"
-        )
-        ui.label("Not for diagnostic use.").classes(
-            f"min-[{MENU_BREAKPOINT+1}px]:hidden text-body-small text-weight-italic"
-        )
-        ui.label(f"Center: {app.storage.general.get('center', 'Not set')}").classes(
-            f"max-[{MENU_BREAKPOINT}px]:hidden text-body-small text-weight-medium"
-        )
+                with ui.button(icon="info").classes("rounded-md mobile-button px-2 py-1"):
+                    with ui.menu() as menu:
+                        ui.label().bind_text_from(
+                            app, "urls", backward=lambda n: f"Available urls: {n}"
+                        ).classes("text-body-medium")
+                        ui.label("Version: " + get_about().__version__).classes(
+                            "text-body-medium"
+                        )
+            
+            # Right side: Compact copyright (mobile only)
+            ui.label("©Looselab").classes(
+                "text-xs text-weight-italic flex-shrink-0"
+            )
+            
+            # Desktop-only additional info
+            ui.label("Not for diagnostic use.").classes(
+                f"min-[{MENU_BREAKPOINT+1}px]:block hidden text-xs text-weight-italic flex-shrink-0"
+            )
 
     with main_content:
         yield
@@ -670,66 +978,78 @@ def create_home_page():
     ):
         
         ui.label("Welcome to the Application").classes(
-            "text-headline-large text-center"
+            "text-headline-large text-center px-4"
         )
-        
-        with ui.card().classes("w-full").style("border: 2px solid var(--md-primary)"):
-            with ui.row().classes("w-full flex justify-between items-center"):
-                ui.label('Sample Name').classes("text-headline-medium ")
-                ui.button("Button").classes("bg-primary text-white rounded-md")
+        with ui.row().classes('items-center m-auto'):
+            ui.circular_progress(value=0.1, show_value=False, size="xs")
+            ui.circular_progress(value=0.1, show_value=False, size="xl") 
+        with ui.row().classes('items-center m-auto'):
+            with ui.circular_progress(value=0.1, show_value=False, size="sm") as progress:
+                ui.button(
+                    icon='star',
+                    on_click=lambda: progress.set_value(progress.value + 0.1)
+                ).props('flat round')
+            ui.label('click to increase progress')
+        with ui.card().classes("w-full max-w-4xl mx-auto mobile-padding main-content-card").style("border: 2px solid var(--md-primary)"):
+            with ui.row().classes("w-full flex justify-between items-center flex-wrap gap-2"):
+                ui.label('Sample Name').classes("text-headline-medium flex-shrink-0")
+                ui.button("Button").classes("bg-primary text-white rounded-md mobile-button")
             ui.separator().classes().style("border: 1px solid var(--md-primary)")
-            with ui.card().classes("w-full bg-gradient-to-r from-blue-50 to-indigo-50"):
+            with ui.card().classes("w-full bg-gradient-to-r from-blue-50 to-indigo-50 mobile-padding"):
                 ui.label("Run Information").classes("text-lg font-semibold mb-3 text-blue-800")
-                with ui.row().classes("w-full gap-8 items-center flex-wrap"):
-                    ui.label("Run").classes("text-body-medium")
-                    ui.label("Model").classes("text-body-medium")
-                    ui.label("Device").classes("text-body-medium")
-                    ui.label("Flow Cell").classes("text-body-medium")
-                    ui.label("Sample").classes("text-body-medium")
+                with ui.row().classes("w-full gap-2 sm:gap-8 items-center flex-wrap"):
+                    ui.label("Run").classes("text-body-medium text-xs sm:text-sm")
+                    ui.label("Model").classes("text-body-medium text-xs sm:text-sm")
+                    ui.label("Device").classes("text-body-medium text-xs sm:text-sm")
+                    ui.label("Flow Cell").classes("text-body-medium text-xs sm:text-sm")
+                    ui.label("Sample").classes("text-body-medium text-xs sm:text-sm")
 
 
-            with ui.card().classes("w-full"):
+            with ui.card().classes("w-full mobile-padding"):
                 ui.label("Classification Results").classes("text-lg font-semibold mb-3 text-blue-800")
-                with ui.row().classes("w-full flex justify-between items-center"):
-                    with ui.card().classes("flex-1 elevation-4 rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50 border-l-4 border-blue-500"):
-                        ui.label("Sturgeon Classification").classes("font-bold text-blue-800 mb-2")
-                        ui.label("Class: --").classes("font-bold text-medium text-blue-600")
-                        ui.label("Confidence: --%").classes("text-sm text-blue-600")
-                        ui.label("Probes: --").classes("text-sm text-blue-600")
-                        ui.label("Model: --").classes("text-sm text-blue-600")
-                        ui.label("Features: --").classes("text-sm text-blue-600")
+                # Use responsive grid: 2 columns on desktop, 1 column on mobile
+                with ui.row().classes("w-full gap-2 sm:gap-4 flex-wrap classification-cards"):
+                    # Sturgeon Classification
+                    with ui.card().classes("flex-1 min-w-0 elevation-4 rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50 border-l-4 border-blue-500 classification-card"):
+                        ui.label("Sturgeon Classification").classes("font-bold text-blue-800 mb-2 text-sm sm:text-base")
+                        ui.label("Class: --").classes("font-bold text-medium text-blue-600 text-xs sm:text-sm")
+                        ui.label("Confidence: --%").classes("text-xs sm:text-sm text-blue-600")
+                        ui.label("Probes: --").classes("text-xs sm:text-sm text-blue-600")
+                        ui.label("Model: --").classes("text-xs sm:text-sm text-blue-600")
+                        ui.label("Features: --").classes("text-xs sm:text-sm text-blue-600")
 
-                    with ui.card().classes("flex-1 elevation-4 rounded-xl bg-gradient-to-br from-green-50 to-green-100 border-l-4 border-green-500"):
-                        ui.label("NanoDX Classification").classes("font-bold text-green-800 mb-2")
-                        ui.label("Class: --").classes("font-bold text-medium text-green-600")
-                        ui.label("Confidence: --%").classes("text-sm text-green-600")
-                        ui.label("Probes: --").classes("text-sm text-green-600")
-                        ui.label("Model: --").classes("text-sm text-blue-600")
-                        ui.label("Features: --").classes("text-sm text-blue-600")
+                    # NanoDX Classification
+                    with ui.card().classes("flex-1 min-w-0 elevation-4 rounded-xl bg-gradient-to-br from-green-50 to-green-100 border-l-4 border-green-500 classification-card"):
+                        ui.label("NanoDX Classification").classes("font-bold text-green-800 mb-2 text-sm sm:text-base")
+                        ui.label("Class: --").classes("font-bold text-medium text-green-600 text-xs sm:text-sm")
+                        ui.label("Confidence: --%").classes("text-xs sm:text-sm text-green-600")
+                        ui.label("Probes: --").classes("text-xs sm:text-sm text-green-600")
+                        ui.label("Model: --").classes("text-xs sm:text-sm text-green-600")
+                        ui.label("Features: --").classes("text-xs sm:text-sm text-green-600")
 
-                    
-                    with ui.card().classes("flex-1 elevation-4 rounded-xl bg-gradient-to-br from-purple-50 to-purple-100 border-l-4 border-purple-500"):
-                        ui.label("PanNanoDX Classification").classes("font-bold text-purple-800 mb-2")
-                        ui.label("Class: --").classes("font-bold text-medium text-purple-600")
-                        ui.label("Confidence: --%").classes("text-sm text-purple-600")
-                        ui.label("Probes: --").classes("text-sm text-purple-600")
-                        ui.label("Model: --").classes("text-sm text-blue-600")
-                        ui.label("Features: --").classes("text-sm text-blue-600")
+                    # PanNanoDX Classification
+                    with ui.card().classes("flex-1 min-w-0 elevation-4 rounded-xl bg-gradient-to-br from-purple-50 to-purple-100 border-l-4 border-purple-500 classification-card"):
+                        ui.label("PanNanoDX Classification").classes("font-bold text-purple-800 mb-2 text-sm sm:text-base")
+                        ui.label("Class: --").classes("font-bold text-medium text-purple-600 text-xs sm:text-sm")
+                        ui.label("Confidence: --%").classes("text-xs sm:text-sm text-purple-600")
+                        ui.label("Probes: --").classes("text-xs sm:text-sm text-purple-600")
+                        ui.label("Model: --").classes("text-xs sm:text-sm text-purple-600")
+                        ui.label("Features: --").classes("text-xs sm:text-sm text-purple-600")
 
-                    
-                    with ui.card().classes("flex-1 elevation-4 rounded-xl bg-gradient-to-br from-orange-50 to-orange-100 border-l-4 border-orange-500"):
-                        ui.label("Random Forest Classification").classes("font-bold text-orange-800 mb-2")
-                        ui.label("Class: --").classes("font-bold text-medium text-orange-600")
-                        ui.label("Confidence: --%").classes("text-sm text-orange-600")
-                        ui.label("Probes: --").classes("text-sm text-orange-600")
-                        ui.label("Model: --").classes("text-sm text-blue-600")
-                        ui.label("Features: --").classes("text-sm text-blue-600")
+                    # Random Forest Classification
+                    with ui.card().classes("flex-1 min-w-0 elevation-4 rounded-xl bg-gradient-to-br from-orange-50 to-orange-100 border-l-4 border-orange-500 classification-card"):
+                        ui.label("Random Forest Classification").classes("font-bold text-orange-800 mb-2 text-sm sm:text-base")
+                        ui.label("Class: --").classes("font-bold text-medium text-orange-600 text-xs sm:text-sm")
+                        ui.label("Confidence: --%").classes("text-xs sm:text-sm text-orange-600")
+                        ui.label("Probes: --").classes("text-xs sm:text-sm text-orange-600")
+                        ui.label("Model: --").classes("text-xs sm:text-sm text-orange-600")
+                        ui.label("Features: --").classes("text-xs sm:text-sm text-orange-600")
 
 
-            ui.label('text below').classes("text-body-medium")
-            with ui.card_section():
-                ui.image('https://picsum.photos/id/684/640/360').classes()
-                ui.label('Lorem ipsum dolor sit amet, consectetur adipiscing elit, ...')
+            ui.label('text below').classes("text-body-medium px-4")
+            with ui.card_section().classes("px-4"):
+                ui.image('https://picsum.photos/id/684/640/360').classes("w-full h-auto rounded-lg")
+                ui.label('Lorem ipsum dolor sit amet, consectetur adipiscing elit, ...').classes("text-body-medium mobile-text")
 
 
 def create_standalone_page():

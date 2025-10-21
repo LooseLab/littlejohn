@@ -310,103 +310,153 @@ def _make_fusion_table(container: Any, df: pd.DataFrame) -> Any:
         return table
 
 
-def _cluster_fusion_reads(filtered_data: pd.DataFrame, max_distance: int = 10000) -> pd.DataFrame:
-    """Cluster fusion reads by similar mapping coordinates."""
-    fusion_summary = []
+def _cluster_fusion_reads(filtered_data: pd.DataFrame, max_distance: int = 10000, 
+                         use_breakpoint_validation: bool = True) -> pd.DataFrame:
+    """
+    Cluster fusion reads by similar mapping coordinates with optional breakpoint validation.
     
-    # Group by read_id to get gene pairs
-    for read_id, group in filtered_data.groupby("read_id", observed=True):
-        genes = group["col4"].unique()
-        if len(genes) >= 2:  # Only consider multi-gene reads
-            # Sort genes for consistent pair representation
-            genes_sorted = sorted(genes)
-            gene_pair = "-".join(genes_sorted)
-            
-            # Get chromosome and position information for each gene
-            gene_info = {}
-            for gene in genes_sorted:
-                gene_data = group[group["col4"] == gene]
-                if not gene_data.empty:
-                    first_row = gene_data.iloc[0]
-                    gene_info[gene] = {
-                        "chromosome": first_row.get("reference_id", "Unknown"),
-                        "start": first_row.get("reference_start", 0),
-                        "end": first_row.get("reference_end", 0)
-                    }
-            
-            # Only add if we have info for at least 2 genes
-            if len(gene_info) >= 2:
-                genes_with_info = [g for g in genes_sorted if g in gene_info]
-                if len(genes_with_info) >= 2:
-                    gene1, gene2 = genes_with_info[0], genes_with_info[1]
-                    
-                    fusion_summary.append({
-                        "fusion_pair": gene_pair,
-                        "chr1": gene_info[gene1]["chromosome"],
-                        "chr2": gene_info[gene2]["chromosome"],
-                        "gene1": gene1,
-                        "gene1_start": gene_info[gene1]["start"],
-                        "gene1_end": gene_info[gene1]["end"],
-                        "gene2": gene2,
-                        "gene2_start": gene_info[gene2]["start"],
-                        "gene2_end": gene_info[gene2]["end"],
-                        "read_id": read_id
-                    })
-    
-    if not fusion_summary:
-        return pd.DataFrame()
-    
-    summary_df = pd.DataFrame(fusion_summary)
-    
-    # Cluster by fusion pair and similar coordinates
-    clustered_results = []
-    
-    for fusion_pair in summary_df["fusion_pair"].unique():
-        pair_data = summary_df[summary_df["fusion_pair"] == fusion_pair]
+    Args:
+        filtered_data: DataFrame with fusion candidate data
+        max_distance: Maximum distance for clustering (used differently for breakpoint vs coordinate clustering)
+        use_breakpoint_validation: If True, use breakpoint validation; if False, use original coordinate clustering
         
-        # Group by chromosome combination
-        for (chr1, chr2), chr_group in pair_data.groupby(["chr1", "chr2"]):
-            # Cluster gene1 positions
-            gene1_positions = chr_group[["gene1_start", "gene1_end"]].values
-            gene1_clusters = _cluster_positions(gene1_positions, max_distance)
-            
-            # Cluster gene2 positions
-            gene2_positions = chr_group[["gene2_start", "gene2_end"]].values
-            gene2_clusters = _cluster_positions(gene2_positions, max_distance)
-            
-            # Create cluster combinations
-            for i, gene1_cluster in enumerate(gene1_clusters):
-                for j, gene2_cluster in enumerate(gene2_clusters):
-                    # Find reads that belong to both clusters
-                    cluster_reads = []
-                    for idx, row in chr_group.iterrows():
-                        gene1_start, gene1_end = row["gene1_start"], row["gene1_end"]
-                        gene2_start, gene2_end = row["gene2_start"], row["gene2_end"]
-                        
-                        # Check if this read belongs to both clusters
-                        if (_position_in_cluster(gene1_start, gene1_end, gene1_cluster, max_distance) and
-                            _position_in_cluster(gene2_start, gene2_end, gene2_cluster, max_distance)):
-                            cluster_reads.append(row["read_id"])
-                    
-                    if cluster_reads:
-                        # Calculate cluster boundaries
-                        gene1_min_start = min(gene1_cluster[:, 0])
-                        gene1_max_end = max(gene1_cluster[:, 1])
-                        gene2_min_start = min(gene2_cluster[:, 0])
-                        gene2_max_end = max(gene2_cluster[:, 1])
-                        
-                        clustered_results.append({
-                            "fusion_pair": fusion_pair,
-                            "chr1": chr1,
-                            "chr2": chr2,
-                            "gene1": chr_group.iloc[0]["gene1"],
-                            "gene1_position": f"{gene1_min_start}-{gene1_max_end}",
-                            "gene2": chr_group.iloc[0]["gene2"],
-                            "gene2_position": f"{gene2_min_start}-{gene2_max_end}",
-                            "reads": len(cluster_reads)
-                        })
+    Returns:
+        DataFrame with clustered fusion results
+    """
+    if use_breakpoint_validation:
+        # Use breakpoint validation for more accurate fusion detection
+        logging.info("[Fusion] Using breakpoint validation for clustering")
+        
+        # Validate fusion breakpoints
+        validated_breakpoints = _validate_fusion_breakpoints(
+            filtered_data, 
+            min_read_support=3, 
+            max_breakpoint_distance=100  # Much tighter clustering for breakpoints
+        )
+        
+        if validated_breakpoints.empty:
+            logging.info("[Fusion] No validated breakpoints found")
+            return pd.DataFrame()
+        
+        # Convert to the expected format for the summary table
+        clustered_results = []
+        for _, row in validated_breakpoints.iterrows():
+            clustered_results.append({
+                "fusion_pair": row["gene_pair"],
+                "chr1": row["gene1_chr"],
+                "chr2": row["gene2_chr"],
+                "gene1": row["gene1"],
+                "gene1_position": row["gene1_breakpoint"],
+                "gene2": row["gene2"],
+                "gene2_position": row["gene2_breakpoint"],
+                "reads": row["supporting_reads"],
+                "avg_mapping_quality": row["avg_mapping_quality"],
+                "avg_mapping_span": row["avg_mapping_span"],
+                "cluster_id": row["cluster_id"]
+            })
+        
+        logging.info(f"[Fusion] Breakpoint validation found {len(clustered_results)} validated fusion clusters")
+        return pd.DataFrame(clustered_results)
     
-    return pd.DataFrame(clustered_results)
+    else:
+        # Original coordinate-based clustering (fallback)
+        logging.info("[Fusion] Using original coordinate clustering")
+        fusion_summary = []
+        
+        # Group by read_id to get gene pairs
+        for read_id, group in filtered_data.groupby("read_id", observed=True):
+            genes = group["col4"].unique()
+            if len(genes) >= 2:  # Only consider multi-gene reads
+                # Sort genes for consistent pair representation
+                genes_sorted = sorted(genes)
+                gene_pair = "-".join(genes_sorted)
+                
+                # Get chromosome and position information for each gene
+                gene_info = {}
+                for gene in genes_sorted:
+                    gene_data = group[group["col4"] == gene]
+                    if not gene_data.empty:
+                        first_row = gene_data.iloc[0]
+                        gene_info[gene] = {
+                            "chromosome": first_row.get("reference_id", "Unknown"),
+                            "start": first_row.get("reference_start", 0),
+                            "end": first_row.get("reference_end", 0)
+                        }
+                
+                # Only add if we have info for at least 2 genes
+                if len(gene_info) >= 2:
+                    genes_with_info = [g for g in genes_sorted if g in gene_info]
+                    if len(genes_with_info) >= 2:
+                        gene1, gene2 = genes_with_info[0], genes_with_info[1]
+                        
+                        fusion_summary.append({
+                            "fusion_pair": gene_pair,
+                            "chr1": gene_info[gene1]["chromosome"],
+                            "chr2": gene_info[gene2]["chromosome"],
+                            "gene1": gene1,
+                            "gene1_start": gene_info[gene1]["start"],
+                            "gene1_end": gene_info[gene1]["end"],
+                            "gene2": gene2,
+                            "gene2_start": gene_info[gene2]["start"],
+                            "gene2_end": gene_info[gene2]["end"],
+                            "read_id": read_id
+                        })
+        
+        if not fusion_summary:
+            return pd.DataFrame()
+        
+        summary_df = pd.DataFrame(fusion_summary)
+        
+        # Cluster by fusion pair and similar coordinates
+        clustered_results = []
+        
+        for fusion_pair in summary_df["fusion_pair"].unique():
+            pair_data = summary_df[summary_df["fusion_pair"] == fusion_pair]
+            
+            # Group by chromosome combination
+            for (chr1, chr2), chr_group in pair_data.groupby(["chr1", "chr2"]):
+                # Cluster gene1 positions
+                gene1_positions = chr_group[["gene1_start", "gene1_end"]].values
+                gene1_clusters = _cluster_positions(gene1_positions, max_distance)
+                
+                # Cluster gene2 positions
+                gene2_positions = chr_group[["gene2_start", "gene2_end"]].values
+                gene2_clusters = _cluster_positions(gene2_positions, max_distance)
+                
+                # Create cluster combinations
+                for i, gene1_cluster in enumerate(gene1_clusters):
+                    for j, gene2_cluster in enumerate(gene2_clusters):
+                        # Find reads that belong to both clusters
+                        cluster_reads = []
+                        for idx, row in chr_group.iterrows():
+                            gene1_start, gene1_end = row["gene1_start"], row["gene1_end"]
+                            gene2_start, gene2_end = row["gene2_start"], row["gene2_end"]
+                            
+                            # Check if this read belongs to both clusters
+                            if (_position_in_cluster(gene1_start, gene1_end, gene1_cluster, max_distance) and
+                                _position_in_cluster(gene2_start, gene2_end, gene2_cluster, max_distance)):
+                                cluster_reads.append(row["read_id"])
+                        
+                        # Only include clusters with minimum read support (3 or more reads)
+                        if len(cluster_reads) >= 3:
+                            # Calculate cluster boundaries
+                            gene1_min_start = min(gene1_cluster[:, 0])
+                            gene1_max_end = max(gene1_cluster[:, 1])
+                            gene2_min_start = min(gene2_cluster[:, 0])
+                            gene2_max_end = max(gene2_cluster[:, 1])
+                            
+                            clustered_results.append({
+                                "fusion_pair": fusion_pair,
+                                "chr1": chr1,
+                                "chr2": chr2,
+                                "gene1": chr_group.iloc[0]["gene1"],
+                                "gene1_position": f"{gene1_min_start}-{gene1_max_end}",
+                                "gene2": chr_group.iloc[0]["gene2"],
+                                "gene2_position": f"{gene2_min_start}-{gene2_max_end}",
+                                "reads": len(cluster_reads)
+                            })
+        
+        return pd.DataFrame(clustered_results)
 
 
 def _cluster_positions(positions: np.ndarray, max_distance: int) -> List[np.ndarray]:
@@ -461,6 +511,224 @@ def _position_in_cluster(start: int, end: int, cluster: np.ndarray, max_distance
     return False
 
 
+# =============================================================================
+# BREAKPOINT VALIDATION FUNCTIONS
+# =============================================================================
+
+def _extract_fusion_breakpoints(annotated_data: pd.DataFrame) -> pd.DataFrame:
+    """
+    Extract fusion breakpoints from annotated fusion data.
+    
+    This function analyzes reads that map to multiple genes and extracts
+    the actual fusion junction points (breakpoints) from their supplementary alignments.
+    
+    Args:
+        annotated_data: DataFrame with fusion candidate data
+        
+    Returns:
+        DataFrame with breakpoint information for each read
+    """
+    breakpoint_data = []
+    
+    # Group by read_id to analyze each read's alignments
+    for read_id, read_group in annotated_data.groupby("read_id", observed=True):
+        genes = read_group["col4"].unique()
+        
+        # Only process reads that map to multiple genes (fusion candidates)
+        if len(genes) < 2:
+            continue
+            
+        # Sort genes for consistent ordering
+        genes_sorted = sorted(genes)
+        
+        # Extract breakpoint information for each gene
+        gene_breakpoints = {}
+        for gene in genes_sorted:
+            gene_data = read_group[read_group["col4"] == gene]
+            if not gene_data.empty:
+                # Take the first (primary) alignment for this gene
+                first_row = gene_data.iloc[0]
+                gene_breakpoints[gene] = {
+                    "chromosome": first_row.get("reference_id", "Unknown"),
+                    "start": first_row.get("reference_start", 0),
+                    "end": first_row.get("reference_end", 0),
+                    "strand": first_row.get("strand", "+"),
+                    "mapping_quality": first_row.get("mapping_quality", 0),
+                    "mapping_span": first_row.get("mapping_span", 0)
+                }
+        
+        # Only proceed if we have breakpoint info for at least 2 genes
+        if len(gene_breakpoints) >= 2:
+            # Create breakpoint pairs for all gene combinations
+            gene_list = list(gene_breakpoints.keys())
+            for i in range(len(gene_list)):
+                for j in range(i + 1, len(gene_list)):
+                    gene1, gene2 = gene_list[i], gene_list[j]
+                    
+                    breakpoint_data.append({
+                        "read_id": read_id,
+                        "gene_pair": f"{gene1}-{gene2}",
+                        "gene1": gene1,
+                        "gene1_chr": gene_breakpoints[gene1]["chromosome"],
+                        "gene1_start": gene_breakpoints[gene1]["start"],
+                        "gene1_end": gene_breakpoints[gene1]["end"],
+                        "gene1_strand": gene_breakpoints[gene1]["strand"],
+                        "gene2": gene2,
+                        "gene2_chr": gene_breakpoints[gene2]["chromosome"],
+                        "gene2_start": gene_breakpoints[gene2]["start"],
+                        "gene2_end": gene_breakpoints[gene2]["end"],
+                        "gene2_strand": gene_breakpoints[gene2]["strand"],
+                        "min_mapping_quality": min(
+                            gene_breakpoints[gene1]["mapping_quality"],
+                            gene_breakpoints[gene2]["mapping_quality"]
+                        ),
+                        "min_mapping_span": min(
+                            gene_breakpoints[gene1]["mapping_span"],
+                            gene_breakpoints[gene2]["mapping_span"]
+                        )
+                    })
+    
+    return pd.DataFrame(breakpoint_data)
+
+
+def _cluster_breakpoints(breakpoint_data: pd.DataFrame, max_distance: int = 100) -> pd.DataFrame:
+    """
+    Cluster breakpoints by similar coordinates within each gene pair.
+    
+    This function groups reads that have similar breakpoint coordinates,
+    which indicates they support the same fusion event.
+    
+    Args:
+        breakpoint_data: DataFrame with breakpoint information
+        max_distance: Maximum distance for clustering breakpoints
+        
+    Returns:
+        DataFrame with clustered breakpoint information
+    """
+    if breakpoint_data.empty:
+        return pd.DataFrame()
+    
+    clustered_results = []
+    
+    # Group by gene pair and chromosome combination
+    for (gene_pair, chr1, chr2), group in breakpoint_data.groupby(["gene_pair", "gene1_chr", "gene2_chr"]):
+        if group.empty:
+            continue
+            
+        # Cluster gene1 breakpoints
+        gene1_positions = group[["gene1_start", "gene1_end"]].values
+        gene1_clusters = _cluster_positions(gene1_positions, max_distance)
+        
+        # Cluster gene2 breakpoints
+        gene2_positions = group[["gene2_start", "gene2_end"]].values
+        gene2_clusters = _cluster_positions(gene2_positions, max_distance)
+        
+        # Create cluster combinations
+        for i, gene1_cluster in enumerate(gene1_clusters):
+            for j, gene2_cluster in enumerate(gene2_clusters):
+                # Find reads that belong to both clusters
+                cluster_reads = []
+                cluster_mapping_qualities = []
+                cluster_mapping_spans = []
+                
+                for idx, row in group.iterrows():
+                    gene1_start, gene1_end = row["gene1_start"], row["gene1_end"]
+                    gene2_start, gene2_end = row["gene2_start"], row["gene2_end"]
+                    
+                    # Check if this read belongs to both clusters
+                    if (_position_in_cluster(gene1_start, gene1_end, gene1_cluster, max_distance) and
+                        _position_in_cluster(gene2_start, gene2_end, gene2_cluster, max_distance)):
+                        cluster_reads.append(row["read_id"])
+                        cluster_mapping_qualities.append(row["min_mapping_quality"])
+                        cluster_mapping_spans.append(row["min_mapping_span"])
+                
+                if cluster_reads:
+                    # Calculate cluster boundaries
+                    gene1_min_start = min(gene1_cluster[:, 0])
+                    gene1_max_end = max(gene1_cluster[:, 1])
+                    gene2_min_start = min(gene2_cluster[:, 0])
+                    gene2_max_end = max(gene2_cluster[:, 1])
+                    
+                    # Calculate average quality metrics
+                    avg_mapping_quality = np.mean(cluster_mapping_qualities) if cluster_mapping_qualities else 0
+                    avg_mapping_span = np.mean(cluster_mapping_spans) if cluster_mapping_spans else 0
+                    
+                    clustered_results.append({
+                        "gene_pair": gene_pair,
+                        "gene1": group.iloc[0]["gene1"],
+                        "gene1_chr": chr1,
+                        "gene1_breakpoint": f"{gene1_min_start}-{gene1_max_end}",
+                        "gene1_start": gene1_min_start,
+                        "gene1_end": gene1_max_end,
+                        "gene2": group.iloc[0]["gene2"],
+                        "gene2_chr": chr2,
+                        "gene2_breakpoint": f"{gene2_min_start}-{gene2_max_end}",
+                        "gene2_start": gene2_min_start,
+                        "gene2_end": gene2_max_end,
+                        "supporting_reads": len(cluster_reads),
+                        "read_ids": cluster_reads,
+                        "avg_mapping_quality": avg_mapping_quality,
+                        "avg_mapping_span": avg_mapping_span,
+                        "cluster_id": f"{gene_pair}_{i}_{j}"
+                    })
+    
+    return pd.DataFrame(clustered_results)
+
+
+def _validate_fusion_breakpoints(annotated_data: pd.DataFrame, min_read_support: int = 3, 
+                                max_breakpoint_distance: int = 100) -> pd.DataFrame:
+    """
+    Validate fusion candidates by requiring consistent breakpoint support.
+    
+    This function implements the breakpoint validation logic you requested:
+    - Extracts fusion breakpoints from supplementary alignments
+    - Clusters reads by similar breakpoint coordinates
+    - Only returns fusions with consistent breakpoint support across gene regions
+    
+    Args:
+        annotated_data: DataFrame with fusion candidate data
+        min_read_support: Minimum number of reads supporting the same breakpoint
+        max_breakpoint_distance: Maximum distance for clustering breakpoints
+        
+    Returns:
+        DataFrame with validated fusion breakpoints
+    """
+    if annotated_data.empty:
+        return pd.DataFrame()
+    
+    logging.info(f"[Fusion] Validating breakpoints for {len(annotated_data)} fusion candidates")
+    
+    # Extract breakpoints from fusion data
+    breakpoint_data = _extract_fusion_breakpoints(annotated_data)
+    
+    if breakpoint_data.empty:
+        logging.info("[Fusion] No breakpoint data extracted")
+        return pd.DataFrame()
+    
+    logging.info(f"[Fusion] Extracted {len(breakpoint_data)} breakpoint records")
+    
+    # Cluster breakpoints by similar coordinates
+    clustered_breakpoints = _cluster_breakpoints(breakpoint_data, max_breakpoint_distance)
+    
+    if clustered_breakpoints.empty:
+        logging.info("[Fusion] No clustered breakpoints found")
+        return pd.DataFrame()
+    
+    logging.info(f"[Fusion] Found {len(clustered_breakpoints)} clustered breakpoint groups")
+    
+    # Filter by minimum read support
+    validated_breakpoints = clustered_breakpoints[
+        clustered_breakpoints["supporting_reads"] >= min_read_support
+    ]
+    
+    logging.info(f"[Fusion] {len(validated_breakpoints)} breakpoint groups meet minimum support threshold ({min_read_support})")
+    
+    # Sort by supporting reads (descending)
+    validated_breakpoints = validated_breakpoints.sort_values("supporting_reads", ascending=False)
+    
+    return validated_breakpoints
+
+
 def _make_fusion_summary_table(container: Any, annotated_data: pd.DataFrame, goodpairs: pd.Series) -> Any:
     """Create a summary table showing fusion pairs with chromosomes, positions, and read counts."""
     if annotated_data is None or annotated_data.empty:
@@ -486,7 +754,7 @@ def _make_fusion_summary_table(container: Any, annotated_data: pd.DataFrame, goo
                 return None
             
             # Cluster fusion reads by similar coordinates
-            clustered_data = _cluster_fusion_reads(filtered_data, max_distance=10000)
+            clustered_data = _cluster_fusion_reads(filtered_data, max_distance=10000, use_breakpoint_validation=True)
             
             if clustered_data.empty:
                 ui.label("No fusion pairs found").classes("text-gray-600")
@@ -495,20 +763,45 @@ def _make_fusion_summary_table(container: Any, annotated_data: pd.DataFrame, goo
             # Sort by read count (descending)
             aggregated = clustered_data.sort_values("reads", ascending=False)
             
-            # Create columns definition
+            # Create columns definition with breakpoint validation info
             columns = [
                 {"name": "fusion_pair", "label": "Fusion Pair", "field": "fusion_pair", "sortable": True},
                 {"name": "chr1", "label": "Chr 1", "field": "chr1", "sortable": True},
                 {"name": "chr2", "label": "Chr 2", "field": "chr2", "sortable": True},
                 {"name": "gene1", "label": "Gene 1", "field": "gene1", "sortable": True},
-                {"name": "gene1_position", "label": "Gene 1 Position", "field": "gene1_position", "sortable": True},
+                {"name": "gene1_position", "label": "Gene 1 Breakpoint", "field": "gene1_position", "sortable": True},
                 {"name": "gene2", "label": "Gene 2", "field": "gene2", "sortable": True},
-                {"name": "gene2_position", "label": "Gene 2 Position", "field": "gene2_position", "sortable": True},
-                {"name": "reads", "label": "Reads", "field": "reads", "sortable": True}
+                {"name": "gene2_position", "label": "Gene 2 Breakpoint", "field": "gene2_position", "sortable": True},
+                {"name": "reads", "label": "Supporting Reads", "field": "reads", "sortable": True}
             ]
             
-            # Create rows from DataFrame
-            rows = aggregated.to_dict('records')
+            # Add quality metrics if available (from breakpoint validation)
+            if "avg_mapping_quality" in aggregated.columns:
+                columns.append({"name": "avg_mapping_quality", "label": "Avg MapQ", "field": "avg_mapping_quality", "sortable": True})
+            if "avg_mapping_span" in aggregated.columns:
+                columns.append({"name": "avg_mapping_span", "label": "Avg Span", "field": "avg_mapping_span", "sortable": True})
+            
+            # Format the data for display
+            rows = []
+            for _, row in aggregated.iterrows():
+                formatted_row = {
+                    "fusion_pair": row["fusion_pair"],
+                    "chr1": row["chr1"],
+                    "chr2": row["chr2"],
+                    "gene1": row.get("gene1", ""),
+                    "gene1_position": row["gene1_position"],
+                    "gene2": row.get("gene2", ""),
+                    "gene2_position": row["gene2_position"],
+                    "reads": int(row["reads"]),
+                }
+                
+                # Add quality metrics if available
+                if "avg_mapping_quality" in row:
+                    formatted_row["avg_mapping_quality"] = f"{row['avg_mapping_quality']:.1f}"
+                if "avg_mapping_span" in row:
+                    formatted_row["avg_mapping_span"] = f"{row['avg_mapping_span']:.0f}"
+                
+                rows.append(formatted_row)
             
             # Add title
             ui.label("Fusion Summary").classes("text-sm font-medium mb-2")
@@ -1492,9 +1785,14 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             logging.exception(f"[Fusion] Refresh failed: {e}")
 
     def _load_fusion_data(sample_dir: Path) -> Dict[str, Any]:
-        """Load fusion data from files."""
+        """Load fusion data from files with optional breakpoint validation."""
         try:
             logging.info(f"[Fusion] _load_fusion_data() called with sample_dir: {sample_dir}")
+            
+            # Configuration for breakpoint validation
+            USE_BREAKPOINT_VALIDATION = True  # Set to False to disable breakpoint validation
+            MIN_BREAKPOINT_SUPPORT = 3  # Minimum reads supporting same breakpoint
+            MAX_BREAKPOINT_DISTANCE = 100  # Maximum distance for breakpoint clustering
             
             # Load target panel processed
             target_file = sample_dir / "fusion_candidates_master_processed.csv"
@@ -1505,6 +1803,44 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
 
             t = _load_processed_pickle(target_file)
             g = _load_processed_pickle(genome_file)
+            
+            # Apply breakpoint validation if enabled
+            if USE_BREAKPOINT_VALIDATION:
+                if t:
+                    logging.info("[Fusion] Applying breakpoint validation to target data")
+                    annotated_data = t.get("annotated_data", pd.DataFrame())
+                    if not annotated_data.empty:
+                        validated_breakpoints = _validate_fusion_breakpoints(
+                            annotated_data, 
+                            min_read_support=MIN_BREAKPOINT_SUPPORT,
+                            max_breakpoint_distance=MAX_BREAKPOINT_DISTANCE
+                        )
+                        if not validated_breakpoints.empty:
+                            t["validated_breakpoints"] = validated_breakpoints
+                            t["original_candidate_count"] = t.get("candidate_count", 0)
+                            t["candidate_count"] = len(validated_breakpoints)
+                            logging.info(f"[Fusion] Target breakpoint validation: {t['original_candidate_count']} -> {t['candidate_count']} candidates")
+                        else:
+                            t["candidate_count"] = 0
+                            logging.info("[Fusion] No target fusions passed breakpoint validation")
+                
+                if g:
+                    logging.info("[Fusion] Applying breakpoint validation to genome-wide data")
+                    annotated_data = g.get("annotated_data", pd.DataFrame())
+                    if not annotated_data.empty:
+                        validated_breakpoints = _validate_fusion_breakpoints(
+                            annotated_data, 
+                            min_read_support=MIN_BREAKPOINT_SUPPORT,
+                            max_breakpoint_distance=MAX_BREAKPOINT_DISTANCE
+                        )
+                        if not validated_breakpoints.empty:
+                            g["validated_breakpoints"] = validated_breakpoints
+                            g["original_candidate_count"] = g.get("candidate_count", 0)
+                            g["candidate_count"] = len(validated_breakpoints)
+                            logging.info(f"[Fusion] Genome-wide breakpoint validation: {g['original_candidate_count']} -> {g['candidate_count']} candidates")
+                        else:
+                            g["candidate_count"] = 0
+                            logging.info("[Fusion] No genome-wide fusions passed breakpoint validation")
             
             # Debug logging
             logging.info(f"[Fusion] Loaded target data: {t is not None}")
