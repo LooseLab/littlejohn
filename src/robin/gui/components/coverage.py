@@ -142,7 +142,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             
             # Add target panel legend
             def _get_target_panel_info():
-                """Get the target panel information from master.csv"""
+                """Get the target panel information from master.csv with fallback mechanisms"""
                 try:
                     # Read from master.csv
                     master_csv_path = sample_dir / "master.csv"
@@ -151,9 +151,32 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         df = pd.read_csv(master_csv_path)
                         if not df.empty and "analysis_panel" in df.columns:
                             panel = df.iloc[0]["analysis_panel"]
-                            if panel and str(panel).strip() != "":
+                            if panel and str(panel).strip() != "" and str(panel).strip().lower() != "nan":
                                 return str(panel).strip()
-                    return ""  # No default fallback
+                    
+                    # Fallback 1: Try to detect panel from BED files in the sample directory
+                    bed_files = list(sample_dir.glob("*.bed"))
+                    if bed_files:
+                        # Look for panel-specific BED files
+                        for bed_file in bed_files:
+                            bed_name = bed_file.stem.lower()
+                            if "rcns2" in bed_name or "rCNS2" in bed_name:
+                                return "rCNS2"
+                            elif "aml" in bed_name:
+                                return "AML"
+                            elif "pancan" in bed_name or "pan_can" in bed_name:
+                                return "PanCan"
+                            elif "sarcoma" in bed_name:
+                                return "Sarcoma"
+                    
+                    # Fallback 2: Try to detect from target analysis output files
+                    target_files = list(sample_dir.glob("*target*.csv")) + list(sample_dir.glob("*coverage*.csv"))
+                    if target_files:
+                        # This is a heuristic - if we have target analysis files, 
+                        # we can assume it's likely a known panel
+                        return "Unknown Panel"
+                    
+                    return ""  # No panel found
                 except Exception as e:
                     _log_notify(f"Exception in _get_target_panel_info: {e}", level="error", notify=False)
                     return ""  # No default fallback
@@ -164,7 +187,9 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             panel_colors = {
                 "rCNS2": ("bg-blue-100", "text-blue-800", "rCNS2 Panel"),
                 "AML": ("bg-green-100", "text-green-800", "AML Panel"), 
-                "PanCan": ("bg-purple-100", "text-purple-800", "Pan-Cancer Panel")
+                "PanCan": ("bg-purple-100", "text-purple-800", "Pan-Cancer Panel"),
+                "Sarcoma": ("bg-orange-100", "text-orange-800", "Sarcoma Panel"),
+                "Unknown Panel": ("bg-yellow-100", "text-yellow-800", "Unknown Panel")
             }
             
             if not target_panel:
@@ -195,7 +220,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 bed_file_mapping = {
                     "rCNS2": "rCNS2_panel_name_uniq.bed",
                     "AML": "AML_panel_name_uniq.bed", 
-                    "PanCan": "PanCan_panel_name_uniq.bed"
+                    "PanCan": "PanCan_panel_name_uniq.bed",
+                    "Sarcoma": "Sarcoma_panel_name_uniq.bed"
                 }
                 
                 bed_filename = bed_file_mapping.get(target_panel, "Unknown")
@@ -214,7 +240,9 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         panel_descriptions = {
                             "rCNS2": "Central Nervous System genes (244 regions)",
                             "AML": "Acute Myeloid Leukemia genes (1,181 regions)", 
-                            "PanCan": "Pan-Cancer comprehensive gene set (1,389 regions)"
+                            "PanCan": "Pan-Cancer comprehensive gene set (1,389 regions)",
+                            "Sarcoma": "Sarcoma-specific gene panel",
+                            "Unknown Panel": "Panel type could not be determined"
                         }
                         ui.label(panel_descriptions.get(target_panel, "Custom gene panel")).classes("text-xs")
             

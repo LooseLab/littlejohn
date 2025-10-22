@@ -113,12 +113,21 @@ class MasterCSVManager:
         2. Worst case is reading slightly stale data (acceptable for monitoring)
         3. Keeps GUI responsive and non-blocking
         """
+        # Start with default structure to ensure all fields are present
+        data = self._get_default_structure()
+        
         if os.path.exists(csv_path):
             try:
                 # Read without locking - atomic writes ensure we never see partial data
                 df = pd.read_csv(csv_path)
                 if not df.empty:
-                    data = df.iloc[0].to_dict()
+                    csv_data = df.iloc[0].to_dict()
+                    
+                    # Merge CSV data with default structure (CSV data takes precedence)
+                    for key, value in csv_data.items():
+                        if value is not None and not (isinstance(value, float) and pd.isna(value)):
+                            data[key] = value
+                    
                     # Ensure string fields are properly converted to strings
                     # to prevent float objects from being passed to split() methods
                     string_fields = [
@@ -129,12 +138,10 @@ class MasterCSVManager:
                     for field in string_fields:
                         if field in data and data[field] is not None:
                             data[field] = str(data[field])
-                    return data
             except Exception as e:
                 print(f"Warning: Error reading existing CSV: {e}")
 
-        # Return default structure
-        return self._get_default_structure()
+        return data
     
     def _get_default_structure(self) -> Dict[str, Any]:
         return {
