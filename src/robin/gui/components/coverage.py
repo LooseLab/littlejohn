@@ -51,7 +51,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     "text-sm text-gray-600"
                 )
         with ui.card().classes("w-full"):
-            with ui.grid(columns=2).classes("w-full gap-4"):
+            with ui.grid(rows=2).classes("w-full gap-4"):
                 # Per Chromosome Coverage (bar)
                 echart_chr_cov = ui.echart(
                     {

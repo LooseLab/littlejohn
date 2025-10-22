@@ -1704,7 +1704,7 @@ class GUILauncher:
                 
         with theme.frame(
             f"R.O.B.I.N - Sample {sample_id}",
-            smalltitle="Samples",
+            smalltitle=sample_id,
             batphone=False,
             center=self.center,
         ):
