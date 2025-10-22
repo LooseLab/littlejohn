@@ -30,7 +30,7 @@ def _run_info_section(sample_dir: Path, sample_id: str):
                 "Run Time", run_info.get("run_time", "Not available"), "schedule", "Sequencing run timestamp"
             )
             _create_dashboard_card(
-                "Basecall Model", run_info.get("model", "Not available"), "settings", "AI model used for basecalling"
+                        "Basecall Model", run_info.get("model", "Not available"), "settings", "Model used for basecalling"
             )
             _create_dashboard_card(
                 "Device", run_info.get("device", "Not available"), "smartphone", "Sequencing device identifier"
