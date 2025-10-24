@@ -21,18 +21,20 @@ logger = logging.getLogger(__name__)
 class RobinReport:
     """Main class for generating ROBIN PDF reports."""
 
-    def __init__(self, filename, output, center: str):
+    def __init__(self, filename, output, center: str, progress_callback=None):
         """Initialize the report generator.
 
         Args:
             filename: Output PDF filename
             output: Directory containing analysis output files
             center: Center ID running the analysis
+            progress_callback: Optional callback function for progress updates
         """
         self.filename = filename
         self.output = output
         self.center = center
         self.sample_id = os.path.basename(os.path.normpath(output))
+        self.progress_callback = progress_callback
 
         # Handle filename with None prefix
         if filename.startswith("None"):
@@ -59,6 +61,18 @@ class RobinReport:
         # Initialize sections
         self.sections = []
         self._initialize_sections()
+    
+    def _emit_progress(self, stage: str, message: str, progress: float = None):
+        """Emit a progress update if callback is available."""
+        if self.progress_callback:
+            try:
+                self.progress_callback({
+                    'stage': stage,
+                    'message': message,
+                    'progress': progress
+                })
+            except Exception as e:
+                logger.error(f"Error emitting progress: {e}")
 
     def _load_master_data(self):
         """Load the master data file if it exists."""
@@ -123,6 +137,7 @@ class RobinReport:
         """
         try:
             logger.info("Starting report generation")
+            self._emit_progress("initializing", "Initializing report generation...", 0.0)
 
             # Add summary section header with enhanced M3 typography
             self.elements_summary.insert(
@@ -146,7 +161,8 @@ class RobinReport:
             self.elements_summary.insert(2, Spacer(1, 16))
 
             # Process each section
-            for section in self.sections:
+            self._emit_progress("processing_sections", "Processing report sections...", 0.2)
+            for i, section in enumerate(self.sections):
                 try:
                     section.add_content()
                     summary_elements, main_elements = section.get_elements()
@@ -201,6 +217,7 @@ class RobinReport:
                 )
 
             # Build the PDF
+            self._emit_progress("building_pdf", "Building PDF document...", 0.8)
             from .header_footer import header_footer_canvas_factory
 
             self.doc.multiBuild(
@@ -211,6 +228,7 @@ class RobinReport:
             )
 
             logger.info(f"PDF created: {self.filename}")
+            self._emit_progress("completed", "Report generation completed!", 1.0)
 
             # Add success message to report
             success_content = f"""
@@ -347,6 +365,7 @@ def create_pdf(
     export_csv_dir=None,
     export_xlsx=False,
     export_zip=False,
+    progress_callback=None,
 ):
     """Create a PDF report from ROBIN analysis results.
 
@@ -354,11 +373,12 @@ def create_pdf(
         filename: Output PDF filename
         output: Directory containing analysis output files
         report_type: Type of report to generate ('summary' or 'detailed')
+        progress_callback: Optional callback function for progress updates
 
     Returns:
         Path to the generated PDF file
     """
-    report = RobinReport(filename, output, center)
+    report = RobinReport(filename, output, center, progress_callback)
     return report.generate_report(
         report_type=report_type,
         export_csv_dir=export_csv_dir,

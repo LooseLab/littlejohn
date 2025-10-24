@@ -122,6 +122,10 @@ class GUILauncher:
         self._mgmt_state: Dict[str, Dict[str, Any]] = {}
         # Coverage per-sample cache (file mtimes, computed metrics)
         self._coverage_state: Dict[str, Dict[str, Any]] = {}
+        
+        # Progress notification event
+        from nicegui import Event
+        self.progress_notification_event = Event[Dict[str, Any]]()
         # CNV per-sample cache
         self._cnv_state: Dict[str, Dict[str, Any]] = {}
         # Cache last seen queue status so we can populate immediately on page creation
@@ -224,6 +228,143 @@ class GUILauncher:
         except Exception as e:
             # Don't let update failures affect the workflow
             logging.debug(f"Failed to send GUI update: {e}")
+
+    def _process_progress_queue(self):
+        """Process queued progress updates for report generation."""
+        try:
+            from robin.gui.report_progress import progress_manager
+            
+            # Process updates in the UI context
+            while not progress_manager.progress_queue.empty():
+                update = progress_manager.progress_queue.get_nowait()
+                self._handle_progress_update(update)
+                
+        except queue.Empty:
+            pass
+        except Exception as e:
+            logging.debug(f"Error processing progress queue: {e}")
+    
+    def _setup_notification_system(self, container):
+        """Set up the notification system with the provided container."""
+        try:
+            # Set up event subscription in the proper UI context
+            self.progress_notification_event.subscribe(
+                lambda data: self._show_notification_in_container(container, data)
+            )
+            logging.info("Notification system set up successfully")
+        except Exception as e:
+            logging.error(f"Error setting up notification system: {e}")
+
+    def _show_notification_in_container(self, container, data: Dict[str, Any]):
+        """Show notification in the dedicated container."""
+        try:
+            message = data.get('message', '')
+            notification_type = data.get('type', 'info')
+            timeout = data.get('timeout', 5000)
+            
+            # Create notification in the container
+            with container:
+                ui.notify(
+                    message,
+                    type=notification_type,
+                    timeout=timeout,
+                    position="top-right"
+                )
+                
+        except Exception as e:
+            logging.error(f"Error showing notification in container: {e}")
+
+    def _handle_progress_notification_event(self, event_data: Dict[str, Any]):
+        """Handle progress notification events."""
+        try:
+            from nicegui import ui
+
+            message = event_data.get('message', '')
+            notification_type = event_data.get('type', 'info')
+            timeout = event_data.get('timeout', 5000)
+
+            # Show notification in the proper UI context
+            ui.notify(
+                message,
+                type=notification_type,
+                timeout=timeout,
+                position="top-right"
+            )
+
+        except Exception as e:
+            logging.error(f"Error handling progress notification event: {e}")
+
+    def _handle_progress_update(self, update: Dict[str, Any]):
+        """Handle a single progress update in the UI context."""
+        try:
+            from nicegui import ui
+            
+            sample_id = update['sample_id']
+            update_type = update['type']
+            
+            if update_type == 'start':
+                # Emit event for initial notification
+                self.progress_notification_event.emit({
+                    'sample_id': sample_id,
+                    'message': f"[{sample_id}] Starting report generation...",
+                    'type': 'info',
+                    'timeout': 3000  # 3 seconds
+                })
+                
+                logging.debug(f"Started report generation for {sample_id}")
+                
+            elif update_type == 'update':
+                stage = update['stage']
+                message = update['message']
+                progress = update.get('progress')
+                
+                # Calculate progress percentage
+                progress_percent = int((progress or 0.0) * 100) if progress is not None else ""
+                progress_text = f" ({progress_percent}%)" if progress_percent else ""
+                
+                # Emit event for progress notification
+                self.progress_notification_event.emit({
+                    'sample_id': sample_id,
+                    'message': f"[{sample_id}] {message}{progress_text}",
+                    'type': 'info',
+                    'timeout': 2000  # 2 seconds for progress updates
+                })
+                
+                logging.debug(f"Updated progress for {sample_id}: {stage} - {message}")
+                
+            elif update_type == 'complete':
+                filename = update.get('filename')
+                
+                # Show completion notification
+                completion_message = f"[{sample_id}] Report generation completed"
+                if filename:
+                    completion_message += f": {filename}"
+                
+                # Emit event for completion notification
+                self.progress_notification_event.emit({
+                    'sample_id': sample_id,
+                    'message': completion_message,
+                    'type': 'positive',
+                    'timeout': 5000
+                })
+                
+                logging.info(f"Completed report generation for {sample_id}")
+                
+            elif update_type == 'error':
+                error_message = update['error_message']
+                
+                # Emit event for error notification
+                self.progress_notification_event.emit({
+                    'sample_id': sample_id,
+                    'message': f"[{sample_id}] Report generation failed: {error_message}",
+                    'type': 'negative',
+                    'timeout': 10000
+                })
+                
+                logging.error(f"Report generation failed for {sample_id}: {error_message}")
+                
+        except Exception as e:
+            logging.error(f"Error handling progress update: {e}")
 
     def _drain_updates_on_ui(self):
         """Drain queued updates and apply them on the UI thread (called by ui.timer)."""
@@ -658,6 +799,10 @@ class GUILauncher:
                     # Increase polling interval for new samples to reduce load
                     # Increased from 10.0s to 30.0s to reduce file system pressure
                     app.timer(30.0, self._scan_for_new_samples_async, active=True)
+                    
+                    # Process progress queue for report generation
+                    app.timer(0.1, self._process_progress_queue, active=True)
+                    
                 except Exception:
                     pass
 
@@ -699,6 +844,7 @@ class GUILauncher:
             smalltitle="<strong>R.O.B.I.N</strong>",
             batphone=False,
             center=self.center,
+            setup_notifications=self._setup_notification_system,
         ):
             # Main content container with full width and proper centering
             with ui.column().classes("w-full min-h-screen p-4 md:p-8"):
@@ -770,6 +916,7 @@ class GUILauncher:
             smalltitle="Samples",
             batphone=False,
             center=self.center,
+            setup_notifications=self._setup_notification_system,
         ):
             # Main content area
             with ui.column().classes("w-full p-4 gap-4"):
@@ -1054,10 +1201,15 @@ class GUILauncher:
                                 if not selected:
                                     ui.notify("No samples selected", type="warning")
                                     return
+                                
+                                # Import progress tracking
+                                from robin.gui.report_progress import create_progress_callback, progress_manager
+                                
                                 try:
                                     from nicegui import run as ng_run  # type: ignore
                                 except Exception:
                                     ng_run = None  # type: ignore
+                                
                                 for sid in selected:
                                     try:
                                         sample_dir = (
@@ -1071,6 +1223,10 @@ class GUILauncher:
                                                 type="warning",
                                             )
                                             continue
+                                        
+                                        # Start tracking report generation
+                                        progress_manager.start_report(sid)
+                                        
                                         filename = f"{sid}_run_report.pdf"
                                         pdf_path = os.path.join(
                                             str(sample_dir), filename
@@ -1081,6 +1237,10 @@ class GUILauncher:
                                             export_csv_dir = os.path.join(
                                                 str(sample_dir), "report_csv"
                                             )
+                                        
+                                        # Create progress callback for this sample
+                                        progress_callback = create_progress_callback(sid)
+                                        
                                         if ng_run is not None:
                                             pdf_file = await ng_run.io_bound(
                                                 create_pdf,
@@ -1092,6 +1252,7 @@ class GUILauncher:
                                                 export_zip=bool(
                                                     state.get("export_csv", False)
                                                 ),
+                                                progress_callback=progress_callback,  # Pass the callback
                                             )
                                         else:
                                             pdf_file = create_pdf(
@@ -1103,6 +1264,7 @@ class GUILauncher:
                                                 export_zip=bool(
                                                     state.get("export_csv", False)
                                                 ),
+                                                progress_callback=progress_callback,  # Pass the callback
                                             )
                                         ui.download(pdf_file)
                                         # Also offer CSV ZIP if requested
@@ -1116,6 +1278,9 @@ class GUILauncher:
                                             if os.path.exists(zip_path):
                                                 ui.download(zip_path)
                                     except Exception as e:
+                                        # Mark report as failed
+                                        from robin.gui.report_progress import progress_manager
+                                        progress_manager.error_report(sid, str(e))
                                         ui.notify(
                                             f"Export failed for {sid}: {e}",
                                             type="error",
@@ -1672,7 +1837,15 @@ class GUILauncher:
                         type="warning",
                     )
                     return
-                ui.notify("Generating report…")
+                
+                # Show initial notification with more explicit styling
+                ui.notify(
+                    f"[{sample_id}] Starting report generation...",
+                    type="info",
+                    timeout=0,  # Persistent notification
+                    position="top-right"
+                )
+                
                 filename = f"{sample_id}_run_report.pdf"
                 pdf_path = os.path.join(str(sample_dir), filename)
                 os.makedirs(str(sample_dir), exist_ok=True)
@@ -1681,6 +1854,11 @@ class GUILauncher:
                     export_csv_dir = os.path.join(
                         str(sample_dir), "report_csv"
                     )
+                
+                # Create progress callback
+                from robin.gui.report_progress import create_progress_callback
+                progress_callback = create_progress_callback(sample_id)
+                
                 pdf_file = await ng_run.io_bound(
                     create_pdf,
                     pdf_path,
@@ -1689,7 +1867,13 @@ class GUILauncher:
                     export_csv_dir=export_csv_dir,
                     export_xlsx=False,
                     export_zip=bool(state.get("export_csv", False)),
+                    progress_callback=progress_callback,
                 )
+                
+                # Mark report as completed
+                from robin.gui.report_progress import progress_manager
+                progress_manager.complete_report(sample_id, filename)
+                
                 ui.download(pdf_file)
                 # Also offer CSV ZIP if requested
                 if bool(state.get("export_csv", False)) and export_csv_dir:
@@ -1698,15 +1882,18 @@ class GUILauncher:
                     )
                     if os.path.exists(zip_path):
                         ui.download(zip_path)
-                ui.notify("Report downloaded")
+                
             except Exception as e:
-                ui.notify(f"Report generation failed: {e}", type="error")
+                # Mark report as failed
+                from robin.gui.report_progress import progress_manager
+                progress_manager.error_report(sample_id, str(e))
                 
         with theme.frame(
             f"R.O.B.I.N - Sample {sample_id}",
             smalltitle=sample_id,
             batphone=False,
             center=self.center,
+            setup_notifications=self._setup_notification_system,
         ):
             # Guard: unknown sample -> show message and back button; also redirect
             if self._known_sample_ids and sample_id not in self._known_sample_ids:
@@ -2221,6 +2408,7 @@ class GUILauncher:
             smalltitle="Samples",
             batphone=False,
             center=self.center,
+            setup_notifications=self._setup_notification_system,
         ):
             # Page title and navigation
             with ui.row().classes("w-full p-4 items-center justify-between"):
