@@ -59,8 +59,104 @@ from robin.logging_config import (
 )
 
 
+def _download_missing_models(missing_files, models_dir):
+    """Download missing model files using the same logic as setup_models.py"""
+    import json
+    import hashlib
+    import urllib.request
+    import urllib.error
+    import os
+    
+    print("\n🔄 Attempting to download missing models...")
+    
+    # Load assets manifest
+    try:
+        assets_file = Path.cwd() / "assets.json"
+        if not assets_file.exists():
+            print("❌ assets.json not found. Cannot download models automatically.")
+            return False
+        
+        with open(assets_file, 'r') as f:
+            manifest = json.load(f)
+    except Exception as e:
+        print(f"❌ Failed to load assets manifest: {e}")
+        return False
+    
+    # Asset name mapping
+    asset_mapping = {
+        "general.zip": "general_model",
+        "Capper_et_al_NN.pkl": "capper_model", 
+        "pancan_devel_v5i_NN.pkl": "pancan_model"
+    }
+    
+    github_token = os.getenv('GITHUB_TOKEN')
+    if not github_token:
+        print("ℹ️  No GITHUB_TOKEN found. Trying public download...")
+    
+    success_count = 0
+    for filename in missing_files:
+        if filename not in asset_mapping:
+            print(f"⚠️  Unknown model file: {filename}")
+            continue
+            
+        asset_name = asset_mapping[filename]
+        if asset_name not in manifest["assets"]:
+            print(f"❌ Asset '{asset_name}' not found in manifest")
+            continue
+            
+        asset_info = manifest["assets"][asset_name]
+        asset_url = asset_info["url"]
+        expected_sha256 = asset_info["sha256"]
+        
+        target_path = models_dir / filename
+        
+        try:
+            print(f"\n📥 Downloading {filename}...")
+            
+            # Download the file
+            headers = {}
+            if github_token:
+                headers["Authorization"] = f"Bearer {github_token}"
+            
+            request = urllib.request.Request(asset_url, headers=headers)
+            
+            with urllib.request.urlopen(request) as response:
+                with open(target_path, 'wb') as f:
+                    f.write(response.read())
+            
+            # Verify checksum
+            print("🔍 Verifying checksum...")
+            sha256_hash = hashlib.sha256()
+            with open(target_path, "rb") as f:
+                for chunk in iter(lambda: f.read(4096), b""):
+                    sha256_hash.update(chunk)
+            calculated_sha256 = sha256_hash.hexdigest()
+            
+            if calculated_sha256 != expected_sha256:
+                print(f"❌ Checksum mismatch for {filename}")
+                print(f"Expected: {expected_sha256}")
+                print(f"Got:      {calculated_sha256}")
+                target_path.unlink()
+                continue
+            
+            print(f"✅ Successfully downloaded {filename}")
+            success_count += 1
+            
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                print(f"❌ Authentication failed for {filename}. Need GitHub token.")
+            elif e.code == 404:
+                print(f"❌ Asset not found: {filename}")
+            else:
+                print(f"❌ HTTP error {e.code} downloading {filename}: {e.reason}")
+        except Exception as e:
+            print(f"❌ Failed to download {filename}: {e}")
+    
+    return success_count == len(missing_files)
+
+
 def _check_models_or_exit():
-    """Check for required model files and exit with helpful message if any are missing."""
+    """Check for required model files and offer to download them if missing."""
     from pathlib import Path
     
     # Define required models
@@ -123,27 +219,65 @@ def _check_models_or_exit():
         print(f"\n📁 Models directory: {models_dir}")
         print(f"📁 Current working directory: {Path.cwd()}")
         
+        # Ask user if they want to download
         print("\n" + "="*60)
-        print("HOW TO DOWNLOAD MISSING MODELS")
+        print("AUTOMATIC DOWNLOAD OPTION")
         print("="*60)
-        print("To download the missing model files, run one of these commands:")
-        print()
-        print("Option 1 - Using setup_models.py (works with public repositories):")
-        print("   python setup_models.py")
-        print()
-        print("Option 2 - Using setup_models_api.py (requires GitHub token for private repos):")
-        print("   export GITHUB_TOKEN=your_github_token")
-        print("   python setup_models_api.py")
-        print()
-        print("Note: Option 1 works if the repository is public.")
-        print("Option 2 is needed for private repositories or if you have a GitHub token.")
-        print("You can create a token at: https://github.com/settings/tokens")
-        print()
-        print("After downloading, you can run ROBIN normally.")
-        print("="*60)
-        print("\n⚠️  ROBIN cannot run without the required model files.")
-        print("Please download them using one of the methods above and try again.")
-        sys.exit(1)
+        print("Would you like to automatically download the missing model files?")
+        print("This will use the same method as 'python setup_models.py'")
+        
+        try:
+            response = input("\nDownload missing models? [Y/n]: ").strip().lower()
+            if response in ['', 'y', 'yes']:
+                if _download_missing_models(missing_files, models_dir):
+                    print("\n🎉 All models downloaded successfully!")
+                    print("ROBIN is now ready to run.")
+                    return  # Success, continue execution
+                else:
+                    print("\n⚠️  Some downloads failed. Trying alternative method...")
+                    print("\n" + "="*60)
+                    print("FALLBACK TO API METHOD")
+                    print("="*60)
+                    print("The automatic download failed. You can try the API method:")
+                    print()
+                    print("1. Set a GitHub token:")
+                    print("   export GITHUB_TOKEN=your_github_token")
+                    print()
+                    print("2. Run the API download script:")
+                    print("   python setup_models_api.py")
+                    print()
+                    print("3. Or run the original setup script:")
+                    print("   python setup_models.py")
+                    print()
+                    print("After downloading, run ROBIN again.")
+                    print("="*60)
+                    sys.exit(1)
+            else:
+                print("\n" + "="*60)
+                print("MANUAL DOWNLOAD INSTRUCTIONS")
+                print("="*60)
+                print("To download the missing model files manually, run one of these commands:")
+                print()
+                print("Option 1 - Using setup_models.py (works with public repositories):")
+                print("   python setup_models.py")
+                print()
+                print("Option 2 - Using setup_models_api.py (requires GitHub token for private repos):")
+                print("   export GITHUB_TOKEN=your_github_token")
+                print("   python setup_models_api.py")
+                print()
+                print("Note: Option 1 works if the repository is public.")
+                print("Option 2 is needed for private repositories or if you have a GitHub token.")
+                print("You can create a token at: https://github.com/settings/tokens")
+                print()
+                print("After downloading, you can run ROBIN normally.")
+                print("="*60)
+                print("\n⚠️  ROBIN cannot run without the required model files.")
+                print("Please download them using one of the methods above and try again.")
+                sys.exit(1)
+        except KeyboardInterrupt:
+            print("\n\n⚠️  Download cancelled by user.")
+            print("ROBIN cannot run without the required model files.")
+            sys.exit(1)
 
 
 # Constants
