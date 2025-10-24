@@ -59,6 +59,93 @@ from robin.logging_config import (
 )
 
 
+def _check_models_or_exit():
+    """Check for required model files and exit with helpful message if any are missing."""
+    from pathlib import Path
+    
+    # Define required models
+    required_models = [
+        "general.zip",
+        "Capper_et_al_NN.pkl", 
+        "pancan_devel_v5i_NN.pkl"
+    ]
+    
+    # Try to find models directory - prioritize current working directory
+    strategies = [
+        # Strategy 1: Current working directory (most reliable for development)
+        Path.cwd() / "src" / "robin" / "models",
+        # Strategy 2: Look for project root from current directory
+        Path.cwd() / "robin" / "models",
+        # Strategy 3: Look relative to this file (for installed packages)
+        Path(__file__).parent.parent / "models",
+        # Strategy 4: Look in common installation locations
+        Path.home() / ".local" / "share" / "robin" / "models",
+        Path("/usr/local/share/robin/models"),
+        Path("/opt/robin/models"),
+    ]
+    
+    models_dir = None
+    for strategy in strategies:
+        if strategy.exists():
+            models_dir = strategy
+            break
+    
+    if models_dir is None:
+        print("❌ Could not locate ROBIN models directory")
+        print("Please ensure you're running ROBIN from the project root directory")
+        print("or that the models are installed in a standard location.")
+        sys.exit(1)
+    
+    # Check for missing files
+    missing_files = []
+    present_files = []
+    
+    for filename in required_models:
+        model_path = models_dir / filename
+        if model_path.exists() and model_path.stat().st_size > 0:
+            present_files.append(filename)
+        else:
+            missing_files.append(filename)
+    
+    if missing_files:
+        print("\n" + "="*60)
+        print("ROBIN MODEL STATUS CHECK")
+        print("="*60)
+        print("❌ Missing required model files:")
+        for filename in missing_files:
+            print(f"   ✗ {filename}")
+        
+        if present_files:
+            print("\n✅ Present model files:")
+            for filename in present_files:
+                print(f"   ✓ {filename}")
+        
+        print(f"\n📁 Models directory: {models_dir}")
+        print(f"📁 Current working directory: {Path.cwd()}")
+        
+        print("\n" + "="*60)
+        print("HOW TO DOWNLOAD MISSING MODELS")
+        print("="*60)
+        print("To download the missing model files, run one of these commands:")
+        print()
+        print("Option 1 - Using setup_models.py (works with public repositories):")
+        print("   python setup_models.py")
+        print()
+        print("Option 2 - Using setup_models_api.py (requires GitHub token for private repos):")
+        print("   export GITHUB_TOKEN=your_github_token")
+        print("   python setup_models_api.py")
+        print()
+        print("Note: Option 1 works if the repository is public.")
+        print("Option 2 is needed for private repositories or if you have a GitHub token.")
+        print("You can create a token at: https://github.com/settings/tokens")
+        print()
+        print("After downloading, you can run ROBIN normally.")
+        print("="*60)
+        print("\n⚠️  ROBIN cannot run without the required model files.")
+        print("Please download them using one of the methods above and try again.")
+        sys.exit(1)
+
+
 # Constants
 VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR"}
 VALID_JOB_TYPES = {
@@ -1640,6 +1727,9 @@ def workflow(
 ) -> None:
     """Run various operations on BAM files in a directory. Preprocessing is automatically included as the first step."""
     try:
+        # Check for required model files first
+        _check_models_or_exit()
+        
         # Require user acknowledgment before proceeding
         if not _get_user_acknowledgment():
             sys.exit(1)
