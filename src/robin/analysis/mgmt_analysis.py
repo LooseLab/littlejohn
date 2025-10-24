@@ -58,6 +58,224 @@ def has_reads(bam_file, chrom, start, end):
     return False  # No reads found
 
 
+def validate_methylation_data(bam_file: str, logger: logging.Logger) -> Dict[str, Any]:
+    """
+    Validate that BAM file has sufficient methylation data for methylartist.
+    
+    Args:
+        bam_file (str): Path to BAM file
+        logger (logging.Logger): Logger instance
+        
+    Returns:
+        Dict containing validation results and metadata
+    """
+    validation_result = {
+        "has_sufficient_data": False,
+        "total_reads": 0,
+        "reads_with_mm_tags": 0,
+        "reads_with_ml_tags": 0,
+        "modification_types": set(),
+        "error_message": None
+    }
+    
+    try:
+        with pysam.AlignmentFile(bam_file, "rb") as bam:
+            read_count = 0
+            mm_count = 0
+            ml_count = 0
+            
+            for read in bam.fetch(until_eof=True):
+                read_count += 1
+                
+                # Check for MM tags (modification calls)
+                if read.has_tag("MM"):
+                    mm_count += 1
+                    mm_tag = read.get_tag("MM")
+                    if mm_tag:
+                        # Parse modification types from MM tag
+                        mods = mm_tag.split(";")
+                        for mod in mods:
+                            if ":" in mod:
+                                mod_type = mod.split(":")[0]
+                                validation_result["modification_types"].add(mod_type)
+                
+                # Check for ML tags (modification likelihoods)
+                if read.has_tag("ML"):
+                    ml_count += 1
+                
+                # Stop counting after reasonable sample size to avoid long processing
+                if read_count >= 10000:
+                    break
+            
+            validation_result["total_reads"] = read_count
+            validation_result["reads_with_mm_tags"] = mm_count
+            validation_result["reads_with_ml_tags"] = ml_count
+            
+            # Determine if we have sufficient data
+            # Need at least some reads with methylation data
+            min_reads_with_mods = 10
+            has_modifications = len(validation_result["modification_types"]) > 0
+            
+            if mm_count >= min_reads_with_mods and has_modifications:
+                validation_result["has_sufficient_data"] = True
+                logger.info(f"Methylation data validation passed: {mm_count} reads with MM tags, mods: {validation_result['modification_types']}")
+            else:
+                validation_result["error_message"] = f"Insufficient methylation data: {mm_count} reads with MM tags (min: {min_reads_with_mods}), modifications: {validation_result['modification_types']}"
+                logger.warning(validation_result["error_message"])
+                
+    except Exception as e:
+        validation_result["error_message"] = f"Error validating methylation data: {str(e)}"
+        logger.error(validation_result["error_message"])
+    
+    return validation_result
+
+
+def run_methylartist_safely(
+    bam_file: str, 
+    output_file: str, 
+    interval: str = "chr10:129466536-129467536",
+    reference: Optional[str] = None,
+    logger: Optional[logging.Logger] = None
+) -> Dict[str, Any]:
+    """
+    Run methylartist with robust error handling and fallback options.
+    
+    Args:
+        bam_file (str): Path to BAM file
+        output_file (str): Output PNG file path
+        interval (str): Genomic interval for analysis
+        reference (Optional[str]): Reference genome path
+        logger (Optional[logging.Logger]): Logger instance
+        
+    Returns:
+        Dict containing execution results and metadata
+    """
+    if logger is None:
+        logger = logging.getLogger("robin.mgmt")
+    
+    result = {
+        "success": False,
+        "error_message": None,
+        "command_used": None,
+        "validation_passed": False,
+        "fallback_used": False
+    }
+    
+    try:
+        # Step 1: Validate methylation data before running methylartist
+        logger.info(f"Validating methylation data in {os.path.basename(bam_file)}")
+        validation = validate_methylation_data(bam_file, logger)
+        
+        if not validation["has_sufficient_data"]:
+            result["error_message"] = f"Methylation data validation failed: {validation['error_message']}"
+            logger.warning(result["error_message"])
+            return result
+        
+        result["validation_passed"] = True
+        logger.info("Methylation data validation passed, proceeding with methylartist")
+        
+        # Step 2: Build methylartist command with robust parameters
+        methylartist_cmd = [
+            "methylartist", "locus",
+            "-i", interval,
+            "-b", bam_file,
+            "-o", output_file,
+            "--motif", "CG",
+            "--mods", "m",
+            "--minreads", "5",  # Minimum reads per position
+            "--minqual", "10",  # Minimum quality score
+            "--smoothwindowsize", "5",  # Smaller smoothing window for sparse data
+            "--modspace", "1"  # Explicit mod space setting
+        ]
+        
+        if reference and os.path.exists(reference):
+            methylartist_cmd.extend(["--ref", reference])
+            logger.info(f"Using reference genome: {reference}")
+        
+        result["command_used"] = " ".join(methylartist_cmd)
+        logger.debug(f"Methylartist command: {result['command_used']}")
+        
+        # Step 3: Execute methylartist with timeout and error handling
+        process_result = subprocess.run(
+            methylartist_cmd,
+            capture_output=True,
+            text=True,
+            timeout=300,  # 5 minute timeout
+            cwd=os.path.dirname(output_file)  # Run in output directory
+        )
+        
+        if process_result.returncode == 0:
+            # Check if output file was actually created
+            if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
+                result["success"] = True
+                logger.info(f"Methylartist visualization completed successfully: {os.path.basename(output_file)}")
+            else:
+                result["error_message"] = "Methylartist completed but no output file was created"
+                logger.error(result["error_message"])
+        else:
+            # Parse error output for specific issues
+            stderr = process_result.stderr.strip()
+            stdout = process_result.stdout.strip()
+            
+            if "ZeroDivisionError" in stderr:
+                result["error_message"] = f"Methylartist failed due to insufficient data points: {stderr}"
+            elif "cannot smooth segment" in stderr:
+                result["error_message"] = f"Methylartist failed due to insufficient data for smoothing: {stderr}"
+            elif "found mods:" in stdout and "mod space positions: 1" in stdout:
+                result["error_message"] = f"Methylartist found insufficient methylation sites: {stdout}"
+            else:
+                result["error_message"] = f"Methylartist failed with return code {process_result.returncode}: {stderr}"
+            
+            logger.error(result["error_message"])
+            
+            # Try fallback with even more conservative parameters
+            logger.info("Attempting fallback methylartist with ultra-conservative parameters")
+            fallback_cmd = [
+                "methylartist", "locus",
+                "-i", interval,
+                "-b", bam_file,
+                "-o", output_file,
+                "--motif", "CG",
+                "--mods", "m",
+                "--minreads", "1",  # Absolute minimum
+                "--minqual", "5",   # Very low quality threshold
+                "--smoothwindowsize", "1",  # Minimal smoothing
+                "--modspace", "1",
+                "--reads", "100"  # Limit to small number of reads
+            ]
+            
+            if reference and os.path.exists(reference):
+                fallback_cmd.extend(["--ref", reference])
+            
+            fallback_result = subprocess.run(
+                fallback_cmd,
+                capture_output=True,
+                text=True,
+                timeout=180,  # Shorter timeout for fallback
+                cwd=os.path.dirname(output_file)
+            )
+            
+            if fallback_result.returncode == 0 and os.path.exists(output_file) and os.path.getsize(output_file) > 0:
+                result["success"] = True
+                result["fallback_used"] = True
+                logger.info("Fallback methylartist visualization completed successfully")
+            else:
+                result["error_message"] += f" | Fallback also failed: {fallback_result.stderr}"
+                logger.error("Both primary and fallback methylartist attempts failed")
+                
+    except subprocess.TimeoutExpired:
+        result["error_message"] = "Methylartist execution timed out"
+        logger.error(result["error_message"])
+    except FileNotFoundError:
+        result["error_message"] = "methylartist command not found in PATH"
+        logger.error(result["error_message"])
+    except Exception as e:
+        result["error_message"] = f"Unexpected error running methylartist: {str(e)}"
+        logger.error(result["error_message"])
+    
+    return result
+
+
 @dataclass
 class MGMTMetadata:
     """Container for MGMT analysis metadata and results"""
@@ -420,30 +638,26 @@ def process_bam_file(
 
             plot_out = os.path.join(sample_dir, f"{file_number}_mgmt.png")
             
-            # Build methylartist command with reference genome if available
-            methylartist_cmd = f"methylartist locus -i chr10:129466536-129467536 -b {mgmt_bam_for_plot} -o {plot_out} --motif CG --mods m"
-            if reference and os.path.exists(reference):
-                methylartist_cmd += f" --ref {reference}"
-                logger.info(f"Using reference genome for methylartist: {reference}")
-            else:
-                logger.warning("No reference genome provided or file not found - methylartist may fail")
-
-            result = subprocess.run(
-                methylartist_cmd,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=300,  # 5 minute timeout
+            # Use the new safe methylartist wrapper
+            methylartist_result = run_methylartist_safely(
+                bam_file=mgmt_bam_for_plot,
+                output_file=plot_out,
+                interval="chr10:129466536-129467536",
+                reference=reference,
+                logger=logger
             )
 
-            if result.returncode == 0:
+            if methylartist_result["success"]:
                 mgmt_result.processing_steps.append("visualization")
                 logger.info("Visualization complete")
+                if methylartist_result["fallback_used"]:
+                    logger.info("Visualization completed using fallback parameters")
             else:
-                logger.error(f"Methylartist visualization failed: {result.stderr}")
+                logger.warning(f"Methylartist visualization failed: {methylartist_result['error_message']}")
+                # Don't treat this as a fatal error - analysis can continue without visualization
 
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            logger.warning("Methylartist not available, skipping visualization")
+        except Exception as e:
+            logger.warning(f"Error during visualization step: {e}")
         finally:
             # Clean up temporary files
             for temp_file in temp_files:
@@ -731,30 +945,26 @@ def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, reference=
 
             plot_out = os.path.join(sample_dir, "final_mgmt.png")
             
-            # Build methylartist command with reference genome if available
-            methylartist_cmd = f"methylartist locus -i chr10:129466536-129467536 -b {mgmt_bam_for_plot} -o {plot_out} --motif CG --mods m"
-            if reference and os.path.exists(reference):
-                methylartist_cmd += f" --ref {reference}"
-                logger.info(f"Using reference genome for methylartist: {reference}")
-            else:
-                logger.warning("No reference genome provided or file not found - methylartist may fail")
-
-            result = subprocess.run(
-                methylartist_cmd,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=300,  # 5 minute timeout
+            # Use the new safe methylartist wrapper
+            methylartist_result = run_methylartist_safely(
+                bam_file=mgmt_bam_for_plot,
+                output_file=plot_out,
+                interval="chr10:129466536-129467536",
+                reference=reference,
+                logger=logger
             )
 
-            if result.returncode == 0:
+            if methylartist_result["success"]:
                 analysis_result["processing_steps"].append("visualization")
                 logger.info("Visualization complete")
+                if methylartist_result["fallback_used"]:
+                    logger.info("Visualization completed using fallback parameters")
             else:
-                logger.error(f"Methylartist visualization failed: {result.stderr}")
+                logger.warning(f"Methylartist visualization failed: {methylartist_result['error_message']}")
+                # Don't treat this as a fatal error - analysis can continue without visualization
 
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            logger.warning("Methylartist not available, skipping visualization")
+        except Exception as e:
+            logger.warning(f"Error during visualization step: {e}")
 
         # Run matkit analysis on accumulated data (if available)
         try:

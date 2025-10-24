@@ -305,7 +305,7 @@ MOSAIC_COMPONENTS_CSS = (Path(__file__).parent / "static" / "mosaic-components.c
 
 
 @contextmanager
-def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
+def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, setup_notifications=None):
     """
     Context manager to create a custom page frame with Material Design 3 styling and consistent behavior across all pages.
 
@@ -314,6 +314,7 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
         batphone (bool): Whether to show the BATMAN mode title.
         smalltitle (str): The title to display on small screens.
         center (str): Center ID running the analysis.
+        setup_notifications (callable): Optional callback to set up notification system with the notification container.
 
     Yields:
         None
@@ -823,6 +824,14 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None):
         "w-full h-full max-w-full overflow-hidden flex flex-col items-center px-2"
     ) as main_content:
         pass
+
+    # Create a global notification container for progress updates
+    with ui.column() as notification_container:
+        pass  # This will hold our notifications
+    
+    # Set up notification system if callback provided
+    if setup_notifications:
+        setup_notifications(notification_container)
 
     # Create a footer with useful information and quit button using M3 styling
     footer_classes = "items-center elevation-1"
