@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Tuple, Any
 
 import click
+import logging
 
 # Check if we're in development mode
 is_development_mode = os.environ.get("ROBIN_DEV_MODE", "").lower() in ("1", "true", "yes", "on")
@@ -1863,6 +1864,31 @@ def workflow(
     try:
         # Check for required model files first
         _check_models_or_exit()
+        
+        # Validate reference genome if provided
+        if reference:
+            try:
+                # Import the validation function from matkit
+                from robin.analysis.utilities.matkit import _ensure_fasta_index
+                
+                # Convert Path to string for the validation function
+                ref_path = str(reference) if isinstance(reference, Path) else reference
+                
+                # Use click.echo for visibility even when log level is ERROR
+                click.echo(f"Validating reference genome: {reference}")
+                
+                # Validate and ensure index exists
+                _ensure_fasta_index(ref_path)
+                
+                click.echo(f"✓ Reference genome validated and indexed: {reference}")
+            except Exception as e:
+                error_msg = (
+                    f"Failed to validate reference genome: {e}\n"
+                    f"Please ensure the file exists and is a valid FASTA file, "
+                    f"or remove the --reference parameter if not needed for this workflow."
+                )
+                click.echo(f"❌ {error_msg}", err=True)
+                sys.exit(1)
         
         # Require user acknowledgment before proceeding
         if not _get_user_acknowledgment():

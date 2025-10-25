@@ -31,6 +31,64 @@ warnings.filterwarnings(
     "ignore", message="The figure layout has changed to tight", category=UserWarning
 )
 
+
+def _ensure_fasta_index(ref_fasta: str) -> None:
+    """
+    Ensure the reference FASTA file has an index (.fai file).
+    
+    This function checks if the FASTA file has a corresponding .fai index file.
+    If the index is missing or older than the FASTA file, it creates/updates it
+    using pysam.faidx.
+    
+    Args:
+        ref_fasta: Path to the reference FASTA file
+        
+    Raises:
+        FileNotFoundError: If the reference FASTA file doesn't exist
+        RuntimeError: If the index creation fails
+    """
+    if not ref_fasta or not os.path.exists(ref_fasta):
+        raise FileNotFoundError(f"Reference FASTA file not found: {ref_fasta}")
+    
+    fai_file = f"{ref_fasta}.fai"
+    
+    # Check if index exists and is up-to-date
+    if os.path.exists(fai_file):
+        # Check if index is newer than the FASTA file
+        fai_mtime = os.path.getmtime(fai_file)
+        fa_mtime = os.path.getmtime(ref_fasta)
+        
+        if fai_mtime >= fa_mtime:
+            # Index exists and is up-to-date, no action needed
+            return
+    
+    # Create or update the index using pysam
+    print(f"Creating FASTA index for {ref_fasta}")
+    try:
+        # pysam.faidx creates the .fai index file
+        pysam.faidx(ref_fasta)
+        
+        # Verify the index was created
+        if not os.path.exists(fai_file):
+            error_msg = (
+                f"FASTA index creation reported success but {fai_file} was not created. "
+                f"Make sure you have write permissions in the FASTA file's directory."
+            )
+            print(f"ERROR: {error_msg}")
+            raise RuntimeError(error_msg)
+        
+        print(f"Successfully created FASTA index: {fai_file}")
+        
+    except Exception as e:
+        error_msg = (
+            f"Failed to create FASTA index for {ref_fasta}. "
+            f"Error: {str(e)}. "
+            f"Make sure the FASTA file is valid and you have write permissions."
+        )
+        print(f"ERROR: {error_msg}")
+        raise RuntimeError(error_msg)
+
+
 def merge_modkit_files(
     new_files: List[str],
     existing_file: str,
@@ -973,7 +1031,17 @@ def process_bam_counts_improved(
     # Load reference genome if provided for validation
     ref_fasta_obj = None
     if ref_fasta:
-        ref_fasta_obj = pysam.FastaFile(ref_fasta)
+        # Ensure the reference FASTA has an index before opening
+        # If index creation fails, log warning but continue without reference
+        try:
+            _ensure_fasta_index(ref_fasta)
+            ref_fasta_obj = pysam.FastaFile(ref_fasta)
+        except (RuntimeError, FileNotFoundError) as e:
+            logging.warning(
+                f"Could not create FASTA index for {ref_fasta}: {e}. "
+                "Continuing without reference genome validation."
+            )
+            ref_fasta_obj = None
 
     # Debug tracking for specific positions
     debug_data = {} if debug_positions else None
