@@ -290,6 +290,16 @@ body {
   backdrop-filter: blur(20px);
 }
 
+/* Allow cards containing tables to overflow horizontally */
+.q-card:has(.compact-table) {
+  overflow: visible;
+}
+
+/* Ensure any column containing a table allows overflow */
+.column:has(.compact-table) {
+  overflow: visible;
+}
+
 .q-card:hover {
   box-shadow: var(--elevation-2);
   transform: translateY(-1px);  /* Apple's subtle hover effect */
@@ -481,15 +491,21 @@ body {
 .compact-table .q-table__container {
   font-size: 12px;
   border-radius: var(--radius-lg);
-  overflow: hidden;
+  overflow: visible !important; /* Allow content to overflow for scrolling */
   box-shadow: var(--elevation-2);
   background-color: var(--md-surface);
   border: 1px solid var(--md-outline);
   transition: all var(--transition-base);
+  /* Ensure table container doesn't restrict width */
+  width: 100%;
 }
 
 .compact-table .q-table__container:hover {
   box-shadow: var(--elevation-3);
+}
+
+.compact-table .q-table {
+  table-layout: auto;
 }
 
 .compact-table .q-table th,
@@ -523,6 +539,12 @@ body {
 
 .compact-table .q-field--dense {
   font-size: 11px;
+}
+
+/* Ensure table wrapper allows horizontal scrolling */
+.compact-table > div {
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 /* Apple HIG Form elements */
@@ -688,6 +710,31 @@ a:active:not(.browser-window *) {
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--md-outline);
+}
+
+/* Mobile touch scrolling for tables */
+.compact-table {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-x;
+  position: relative;
+}
+
+.compact-table::-webkit-scrollbar {
+  height: 6px;
+}
+
+.compact-table::-webkit-scrollbar-thumb {
+  background: var(--md-outline-variant);
+  border-radius: 3px;
+}
+
+@media (max-width: 768px) {
+  .compact-table {
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-x;
+    scroll-behavior: smooth;
+  }
 }
 
 /* Apple HIG Focus states for accessibility */

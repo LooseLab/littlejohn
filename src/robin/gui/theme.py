@@ -121,7 +121,7 @@ def styled_table(*, columns, rows=None, pagination=20, class_size="table-xs", **
     Returns:
         Tuple of (container, table) where container is the overflow wrapper column and table is the ui.table instance.
     """
-    # Outer container with M3 styling
+    # Outer container with M3 styling and mobile touch scrolling support
     container = ui.column().classes(
         "w-full overflow-x-auto compact-table elevation-1 rounded-lg"
     )
@@ -375,14 +375,6 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, se
             }
             .text-headline-medium {
                 font-size: 1.125rem !important;
-            }
-        }
-        
-        /* Ensure cards don't overflow on mobile */
-        @media (max-width: 768px) {
-            .w-full {
-                max-width: 100% !important;
-                overflow-x: hidden !important;
             }
         }
         
