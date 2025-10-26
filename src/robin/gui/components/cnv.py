@@ -56,10 +56,10 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             cnv_scale = ui.toggle(
                 options={"linear": "Linear", "log": "Log"}, value="linear"
             ).classes("mt-1")
-            ui.label("Breakpoints").classes("text-sm ml-4")
+            cnv_bp_label = ui.label("Breakpoints").classes("text-sm ml-4").style("display: none")
             cnv_bp = ui.toggle(
                 options={"hide": "Hide", "show": "Show"}, value="show"
-            ).classes("mt-1")
+            ).classes("mt-1").style("display: none")
         cnv_abs = ui.echart(
             {
                 "backgroundColor": "transparent",
@@ -910,6 +910,13 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             else:
                 color_mode = "chromosome"
             
+            # Show/hide breakpoint density y-axis based on selection
+            should_show_breakpoint_density = selected != "All"
+            for chart in (cnv_abs, cnv_diff):
+                if len(chart.options["yAxis"]) > 1:
+                    # Index 1 is the "Breakpoint density" axis
+                    chart.options["yAxis"][1]["show"] = should_show_breakpoint_density
+            
             cnv_abs.options["yAxis"][0]["type"] = "log" if use_log else "value"
             cnv_abs.options["yAxis"][0]["logBase"] = 10 if use_log else None
             # ensure xAxis sane when switching modes
@@ -1599,6 +1606,25 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
         except Exception as e:
             logging.exception(f"[CNV] Refresh failed: {e}")
 
+    def _update_breakpoints_visibility() -> None:
+        """Show/hide breakpoints controls based on chromosome selection."""
+        try:
+            key = str(sample_dir)
+            state = launcher._cnv_state.get(key, {})
+            selected = state.get("selected_chrom", "All")
+            
+            # Show breakpoints controls only when viewing individual chromosomes
+            should_show = selected != "All"
+            
+            try:
+                display_value = "block" if should_show else "none"
+                cnv_bp_label.style(f"display: {display_value}")
+                cnv_bp.style(f"display: {display_value}")
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def _refresh_cnv_sync(sample_dir: Path, launcher: Any) -> None:
         """Synchronous CNV refresh."""
         try:
@@ -1784,6 +1810,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 except Exception as e:
                     pass
             launcher._cnv_state[key] = state
+            # Update breakpoints visibility after state is updated
+            _update_breakpoints_visibility()
         except Exception:
             pass
 
@@ -1814,6 +1842,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             st["selected_chrom"] = _val(ev, "All") or "All"
             st["_force_chrom_refresh"] = True  # Force refresh for chromosome selection
             logging.debug(f"CNV select changed -> {st['selected_chrom']}")
+            # Update breakpoints visibility
+            _update_breakpoints_visibility()
             # reset x zoom when switching scope
             try:
                 for chart in (cnv_abs, cnv_diff):
