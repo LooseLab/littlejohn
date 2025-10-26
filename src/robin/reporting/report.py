@@ -161,10 +161,17 @@ class RobinReport:
             self.elements_summary.insert(2, Spacer(1, 16))
 
             # Process each section
-            self._emit_progress("processing_sections", "Processing report sections...", 0.2)
+            total_sections = len(self.sections)
+            self._emit_progress("processing_sections", f"Processing {total_sections} report sections...", 0.2)
+            
             for i, section in enumerate(self.sections):
+                section_name = section.__class__.__name__.replace("Section", "")
+                progress = 0.2 + (i / total_sections) * 0.5  # 20% to 70%
+                
                 try:
+                    self._emit_progress("processing_sections", f"Loading {section_name} data...", progress)
                     section.add_content()
+                    
                     summary_elements, main_elements = section.get_elements()
 
                     # Always include summary elements
@@ -176,6 +183,9 @@ class RobinReport:
                         or section.__class__.__name__ == "DisclaimerSection"
                     ):
                         self.elements.extend(main_elements)
+                    
+                    self._emit_progress("processing_sections", f"Completed {section_name} section", progress + 0.02)
+                    
                 except Exception as e:
                     logger.error(
                         f"Error processing section {section.__class__.__name__}: {e}",
@@ -191,6 +201,7 @@ class RobinReport:
                     self.elements_summary.append(
                         Paragraph(error_content, self.styles.styles["Error"])
                     )
+                    self._emit_progress("processing_sections", f"Skipped {section_name} due to error", progress)
 
             # Add detailed analysis header and elements only for detailed reports
             if report_type == "detailed":
@@ -207,6 +218,8 @@ class RobinReport:
 
             # Combine all elements
             logger.info("Combining elements for final PDF")
+            self._emit_progress("building_pdf", "Combining report sections...", 0.75)
+            
             if report_type == "detailed":
                 final_elements = (
                     self.elements_summary + self.elements + self.end_of_report_elements
@@ -217,7 +230,7 @@ class RobinReport:
                 )
 
             # Build the PDF
-            self._emit_progress("building_pdf", "Building PDF document...", 0.8)
+            self._emit_progress("building_pdf", "Rendering PDF document...", 0.82)
             from .header_footer import header_footer_canvas_factory
 
             self.doc.multiBuild(
@@ -245,6 +258,7 @@ class RobinReport:
             # Optionally export CSV/XLSX/ZIP
             if export_csv_dir:
                 try:
+                    self._emit_progress("building_pdf", "Preparing CSV export...", 0.85)
                     os.makedirs(export_csv_dir, exist_ok=True)
                     manifest = {
                         "sample_id": self.sample_id,
@@ -254,9 +268,19 @@ class RobinReport:
                     }
 
                     # Collect frames from sections
+                    total_frames = 0
+                    for section in self.sections:
+                        frames = getattr(section, "get_export_frames", lambda: {})()
+                        total_frames += len(frames)
+                    
+                    frame_count = 0
                     for section in self.sections:
                         frames = getattr(section, "get_export_frames", lambda: {})()
                         for name, df in frames.items():
+                            frame_count += 1
+                            progress = 0.85 + (frame_count / max(total_frames, 1)) * 0.08
+                            self._emit_progress("building_pdf", f"Exporting {name} data...", progress)
+                            
                             safe_name = name.replace(" ", "_")
                             csv_path = os.path.join(
                                 export_csv_dir,
@@ -279,6 +303,7 @@ class RobinReport:
                                 )
 
                     # Write manifest
+                    self._emit_progress("building_pdf", "Writing manifest...", 0.93)
                     manifest_path = os.path.join(
                         export_csv_dir, f"{self.sample_id}_manifest.json"
                     )

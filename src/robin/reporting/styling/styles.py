@@ -243,12 +243,12 @@ class ReportStyles:
                 "allowOrphans": 0,
             },
             "DisplayMedium": {
-                "fontSize": 22,  # Enhanced from 20
-                "leading": 28,  # M3 leading ratio
+                "fontSize": 16,  # Reduced for Summary heading
+                "leading": 20,  # Adjusted to match fontSize
                 "textColor": self.COLORS["on_surface"],
                 "fontName": bold_font,
-                "spaceAfter": 16,  # Enhanced from 12
-                "spaceBefore": 8,  # Enhanced from 6
+                "spaceAfter": 12,  # Adjusted spacing
+                "spaceBefore": 6,  # Adjusted spacing
                 "allowWidows": 0,
                 "allowOrphans": 0,
             },

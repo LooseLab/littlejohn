@@ -1193,7 +1193,7 @@ class GUILauncher:
                     # Batch export selected reports
                     try:
 
-                        async def _export_selected_reports(state: Dict[str, Any]):
+                        async def _export_selected_reports(state: Dict[str, Any], progress_dialog, files_to_download, download_complete, progress_callback, progress_updates):
                             try:
                                 selected = list(
                                     getattr(self, "_selected_sample_ids", set()) or []
@@ -1202,30 +1202,37 @@ class GUILauncher:
                                     ui.notify("No samples selected", type="warning")
                                     return
                                 
-                                # Import progress tracking
-                                from robin.gui.report_progress import create_progress_callback, progress_manager
+                                total_samples = len(selected)
                                 
                                 try:
                                     from nicegui import run as ng_run  # type: ignore
                                 except Exception:
                                     ng_run = None  # type: ignore
                                 
-                                for sid in selected:
+                                for idx, sid in enumerate(selected):
                                     try:
+                                        # Update overall progress
+                                        overall_progress = (idx / total_samples) * 0.9
+                                        
+                                        # Emit progress update showing current sample and mark as starting
+                                        current_sample_msg = f"Generating {idx + 1}/{total_samples} - {sid}"
+                                        progress_updates.put({
+                                            'stage': 'processing_sections',
+                                            'message': 'Starting...',
+                                            'progress': 0.0,
+                                            'sample_id': sid
+                                        })
+                                        
                                         sample_dir = (
                                             Path(self.monitored_directory) / sid
                                             if self.monitored_directory
                                             else None
                                         )
                                         if not sample_dir or not sample_dir.exists():
-                                            ui.notify(
-                                                f"Missing output for {sid}",
-                                                type="warning",
-                                            )
+                                            logging.warning(f"Missing output for {sid}")
                                             continue
                                         
-                                        # Start tracking report generation
-                                        progress_manager.start_report(sid)
+                                        # Don't use notification system - only update dialog
                                         
                                         filename = f"{sid}_run_report.pdf"
                                         pdf_path = os.path.join(
@@ -1238,10 +1245,13 @@ class GUILauncher:
                                                 str(sample_dir), "report_csv"
                                             )
                                         
-                                        # Create progress callback for this sample
-                                        progress_callback = create_progress_callback(sid)
-                                        
+                                        # Don't use the notification system - use only our dialog callback
                                         if ng_run is not None:
+                                            # Use custom callback that updates dialog only
+                                            def sample_progress_callback(data: Dict[str, Any]):
+                                                data['sample_id'] = sid  # Add sample ID to track which bar to update
+                                                progress_callback(data)  # This updates the dialog via progress_updates queue
+                                            
                                             pdf_file = await ng_run.io_bound(
                                                 create_pdf,
                                                 pdf_path,
@@ -1252,9 +1262,14 @@ class GUILauncher:
                                                 export_zip=bool(
                                                     state.get("export_csv", False)
                                                 ),
-                                                progress_callback=progress_callback,  # Pass the callback
+                                                progress_callback=sample_progress_callback,  # Pass the dialog-only callback
                                             )
                                         else:
+                                            # Use custom callback that updates dialog only
+                                            def sample_progress_callback(data: Dict[str, Any]):
+                                                data['sample_id'] = sid  # Add sample ID to track which bar to update
+                                                progress_callback(data)  # This updates the dialog via progress_updates queue
+                                            
                                             pdf_file = create_pdf(
                                                 pdf_path,
                                                 str(sample_dir),
@@ -1264,9 +1279,12 @@ class GUILauncher:
                                                 export_zip=bool(
                                                     state.get("export_csv", False)
                                                 ),
-                                                progress_callback=progress_callback,  # Pass the callback
+                                                progress_callback=sample_progress_callback,  # Pass the dialog-only callback
                                             )
-                                        ui.download(pdf_file)
+                                        
+                                        # Queue file for download instead of downloading immediately
+                                        files_to_download.append(pdf_file)
+                                        
                                         # Also offer CSV ZIP if requested
                                         if (
                                             bool(state.get("export_csv", False))
@@ -1276,24 +1294,42 @@ class GUILauncher:
                                                 export_csv_dir, f"{sid}_report_data.zip"
                                             )
                                             if os.path.exists(zip_path):
-                                                ui.download(zip_path)
+                                                files_to_download.append(zip_path)
+                                        
+                                        # Mark sample as complete
+                                        progress_updates.put({
+                                            'stage': 'completed',
+                                            'message': 'Completed',
+                                            'progress': 1.0,
+                                            'sample_id': sid
+                                        })
+                                        
                                     except Exception as e:
-                                        # Mark report as failed
-                                        from robin.gui.report_progress import progress_manager
-                                        progress_manager.error_report(sid, str(e))
-                                        ui.notify(
-                                            f"Export failed for {sid}: {e}",
-                                            type="error",
-                                        )
-                                ui.notify("Export complete")
-                            except Exception:
-                                pass
+                                        # Report generation failed
+                                        logging.error(f"Export failed for {sid}: {e}")
+                                        # Mark sample as failed
+                                        progress_updates.put({
+                                            'stage': 'error',
+                                            'message': f'Failed: {str(e)[:50]}',
+                                            'progress': 1.0,
+                                            'sample_id': sid
+                                        })
+                                
+                                # Mark as complete
+                                download_complete["done"] = True
+                                logging.info(f"Bulk export complete. {len(files_to_download)} file(s) ready for download.")
+                            except Exception as e:
+                                logging.error(f"Error in bulk export: {e}")
+                                download_complete["done"] = True
 
                         async def _confirm_bulk_export():
                             # Ensure there is at least one selection before opening
                             if not getattr(self, "_selected_sample_ids", None):
                                 ui.notify("No samples selected", type="warning")
                                 return
+
+                            selected_ids = list(getattr(self, "_selected_sample_ids", set()) or [])
+                            num_selected = len(selected_ids)
 
                             report_types = {
                                 "summary": "Summary Only",
@@ -1304,64 +1340,198 @@ class GUILauncher:
                                 "export_csv": False,
                             }
 
-                            with ui.dialog() as dialog, ui.card().classes("w-96 p-4"):
-                                ui.label("Generate Report").classes(
-                                    "text-h6 font-bold mb-4"
-                                )
-
-                                # Report type selector
-                                with ui.column().classes("mb-4"):
-                                    ui.label("Report Type").classes("font-bold mb-2")
-                                    ui.toggle(
-                                        report_types,
-                                        value="detailed",
-                                        on_change=lambda e: state.update(
-                                            {"type": e.value}
-                                        ),
+                            with ui.dialog().props("persistent") as dialog:
+                                with ui.card().classes("w-96 p-4"):
+                                    ui.label("Export Reports").classes(
+                                        "text-h6 font-bold mb-4"
                                     )
 
-                                # Data export options
-                                with ui.column().classes("mb-4"):
-                                    ui.label("Include Data").classes("font-bold mb-2")
-                                    ui.checkbox(
-                                        "CSV data (ZIP)",
-                                        value=False,
-                                        on_change=lambda e: state.update(
-                                            {"export_csv": bool(e.value)}
-                                        ),
-                                    )
+                                    with ui.column():
+                                        # Report type selector
+                                        with ui.column().classes("mb-4"):
+                                            ui.label("Report Type").classes("font-bold mb-2")
+                                            ui.toggle(
+                                                report_types,
+                                                value="detailed",
+                                                on_change=lambda e: state.update(
+                                                    {"type": e.value}
+                                                ),
+                                            )
 
-                                # Disclaimer section (match single-report dialog)
-                                with ui.column().classes("mb-4"):
-                                    ui.label("Disclaimer").classes("font-bold mb-2")
-                                    formatted_text = EXTENDED_DISCLAIMER_TEXT.replace(
-                                        "\n\n", "<br><br>"
-                                    ).replace("\n", " ")
-                                    ui.label(formatted_text).classes(
-                                        "text-sm text-gray-600 mb-4"
-                                    )
+                                        # Data export options
+                                        with ui.column().classes("mb-4"):
+                                            ui.label("Include Data").classes("font-bold mb-2")
+                                            ui.checkbox(
+                                                "CSV data (ZIP)",
+                                                value=False,
+                                                on_change=lambda e: state.update(
+                                                    {"export_csv": bool(e.value)}
+                                                ),
+                                            )
 
-                                ui.label(
-                                    "Are you sure you want to generate a report?"
-                                ).classes("mb-4")
+                                        # Disclaimer section
+                                        with ui.column().classes("mb-4"):
+                                            ui.label("Disclaimer").classes("font-bold mb-2")
+                                            formatted_text = EXTENDED_DISCLAIMER_TEXT.replace(
+                                                "\n\n", "<br><br>"
+                                            ).replace("\n", " ")
+                                            ui.label(formatted_text).classes(
+                                                "text-sm text-gray-600 mb-4"
+                                            )
 
-                                # Buttons
-                                with ui.row().classes("justify-end gap-2"):
-                                    ui.button(
-                                        "Cancel",
-                                        on_click=lambda: dialog.submit(("No", None)),
-                                    ).props("flat")
-                                    ui.button(
-                                        "Export",
-                                        on_click=lambda: dialog.submit(("Yes", state)),
-                                    ).props("color=primary")
+                                        ui.label(
+                                            f"Are you sure you want to export reports for {num_selected} sample(s)?"
+                                        ).classes("mb-4")
+
+                                        # Buttons
+                                        with ui.row().classes("justify-end gap-2"):
+                                            ui.button(
+                                                "Cancel",
+                                                on_click=lambda: dialog.submit("Cancel"),
+                                            ).props("flat")
+                                            ui.button(
+                                                "Export",
+                                                on_click=lambda: dialog.submit("Export"),
+                                            ).props("color=primary")
+
+                                    # Display selected samples below buttons
+                                    ui.label(
+                                        f"Exporting reports for {num_selected} sample(s): {', '.join(selected_ids[:3])}"
+                                        + (f" and {num_selected - 3} more" if num_selected > 3 else "")
+                                    ).classes("text-sm font-medium text-gray-700 mt-4")
 
                             dialog_result = await dialog
-                            if dialog_result is None:
+                            if dialog_result != "Export":
                                 return
-                            result, state_val = dialog_result
-                            if result == "Yes" and isinstance(state_val, dict):
-                                await _export_selected_reports(state_val)
+
+                            # Now show the progress dialog
+                            with ui.dialog().props("persistent") as progress_dialog:
+                                with ui.card().classes("w-96 p-4"):
+                                    # Title
+                                    ui.label("Exporting Reports").classes(
+                                        "text-h6 font-bold mb-4"
+                                    )
+
+                                    # Sample count
+                                    ui.label(f"Exporting {num_selected} report(s)").classes(
+                                        "text-sm font-medium text-gray-700 mb-4"
+                                    )
+
+                                    # Report type and output displays
+                                    ui.label(
+                                        f"Report Type: {state.get('type', 'detailed').title()}"
+                                    ).classes("text-sm mb-2")
+                                    
+                                    ui.label(
+                                        f"Output: PDF{' + CSV (ZIP)' if state.get('export_csv', False) else ''}"
+                                    ).classes("text-sm mb-4")
+                                    
+                                    # Create individual progress bars for each sample
+                                    sample_progress_bars = {}
+                                    sample_progress_labels = {}
+                                    
+                                    with ui.column().classes("w-full"):
+                                        for sid in selected_ids:
+                                            with ui.column().classes("mb-3 w-full"):
+                                                ui.label(sid).classes("text-xs font-medium text-gray-700 mb-1")
+                                                progress_bar = ui.linear_progress(0.0).classes("mb-1")
+                                                progress_label = ui.label("Waiting...").classes("text-xs text-gray-500")
+                                                sample_progress_bars[sid] = progress_bar
+                                                sample_progress_labels[sid] = progress_label
+                                    
+                                    # Messages container - use label with newlines for multiple messages
+                                    messages_label = ui.label("").classes("text-xs text-gray-500")
+
+                                    # Track messages
+                                    progress_updates = queue.Queue()
+                                    messages_list = []
+                                    
+                                    # Track current sample being processed
+                                    current_sample = {"id": None}
+                                    
+                                    # Timer to process progress updates on UI thread
+                                    def process_progress_updates():
+                                        """Process queued progress updates."""
+                                        try:
+                                            while not progress_updates.empty():
+                                                update = progress_updates.get_nowait()
+                                                stage = update.get("stage", "unknown")
+                                                message = update.get("message", "")
+                                                progress = update.get("progress", 0.0)
+                                                sample_id = update.get("sample_id")
+                                                
+                                                # Update the current sample's progress bar
+                                                if sample_id and sample_id in sample_progress_bars:
+                                                    if progress is not None:
+                                                        sample_progress_bars[sample_id].value = progress
+                                                        sample_progress_labels[sample_id].text = f"{int(progress * 100)}% - {message}"
+                                                    else:
+                                                        sample_progress_labels[sample_id].text = message
+                                                    current_sample["id"] = sample_id
+                                                
+                                                # Add message to messages list
+                                                messages_list.append(message)
+                                                # Keep only last 10 messages
+                                                if len(messages_list) > 10:
+                                                    messages_list.pop(0)
+                                                
+                                                # Update messages label
+                                                messages_label.text = "\n".join(messages_list[-5:])
+                                                
+                                        except queue.Empty:
+                                            pass
+                                        except Exception as e:
+                                            logging.debug(f"Error processing progress updates: {e}")
+                                    
+                                    # Set up timer to process updates
+                                    update_timer = ui.timer(0.1, process_progress_updates)
+                                    
+                                    def progress_callback(progress_data: Dict[str, Any]):
+                                        """Custom progress callback to update dialog (called from background thread)."""
+                                        try:
+                                            # Queue the update instead of directly updating UI
+                                            progress_updates.put(progress_data)
+                                        except Exception as e:
+                                            logging.debug(f"Error in progress callback: {e}")
+                                    
+                                    # Track if still generating
+                                    is_generating = {"active": True}
+
+                                    # Storage for the files to download
+                                    files_to_download = []
+                                    download_complete = {"done": False}
+                                    
+                                    # Timer to handle downloads once background task is done
+                                    def handle_downloads():
+                                        """Handle downloads in UI context once generation is complete."""
+                                        if download_complete["done"] and files_to_download:
+                                            # Log that export is complete
+                                            file_count = len([f for f in files_to_download if f is not None])
+                                            logging.info(f"Bulk export complete. {file_count} file(s) ready for download.")
+                                            
+                                            for file_path in files_to_download:
+                                                if file_path is not None:
+                                                    logging.debug(f"Initiating download: {file_path}")
+                                                    ui.download(file_path)
+                                            # Close dialog after 3 seconds
+                                            ui.timer(3.0, lambda: progress_dialog.submit(None), once=True)
+                                            download_timer.deactivate()
+                                    
+                                    download_timer = ui.timer(0.1, handle_downloads)
+                                    
+                                    # Start report generation
+                                    async def complete_export():
+                                        """Complete the export and close dialog."""
+                                        try:
+                                            await _export_selected_reports(state, progress_dialog, files_to_download, download_complete, progress_callback, progress_updates)
+                                        finally:
+                                            # Clean up timer
+                                            update_timer.deactivate()
+                                            is_generating["active"] = False
+                                    
+                                    asyncio.create_task(complete_export())
+
+                            await progress_dialog
 
                         # Wire the button now that handlers exist
                         self.export_reports_button.on_click(_confirm_bulk_export)
@@ -1768,61 +1938,251 @@ class GUILauncher:
                 "export_csv": False,
             }
 
-            with ui.dialog() as dialog, ui.card().classes("w-96 p-4"):
-                ui.label("Generate Report").classes(
-                    "text-h6 font-bold mb-4"
-                )
-
-                # Report type selector
-                with ui.column().classes("mb-4"):
-                    ui.label("Report Type").classes("font-bold mb-2")
-                    ui.toggle(
-                        report_types,
-                        value="detailed",
-                        on_change=lambda e: state.update({"type": e.value}),
+            with ui.dialog().props("persistent") as dialog:
+                with ui.card().classes("w-96 p-4"):
+                    # Title
+                    title_label = ui.label("Generate Report").classes(
+                        "text-h6 font-bold mb-4"
                     )
 
-                # Disclaimer section
-                with ui.column().classes("mb-4"):
-                    ui.label("Disclaimer").classes("font-bold mb-2")
-                    formatted_text = EXTENDED_DISCLAIMER_TEXT.replace(
-                        "\n\n", "<br><br>"
-                    ).replace("\n", " ")
-                    ui.label(formatted_text).classes(
-                        "text-sm text-gray-600 mb-4"
+                    # Container for initial form content
+                    with ui.column():
+                        # Report type selector
+                        with ui.column().classes("mb-4"):
+                            ui.label("Report Type").classes("font-bold mb-2")
+                            type_toggle = ui.toggle(
+                                report_types,
+                                value="detailed",
+                                on_change=lambda e: state.update({"type": e.value}),
+                            )
+
+                        # Disclaimer section
+                        with ui.column().classes("mb-4"):
+                            ui.label("Disclaimer").classes("font-bold mb-2")
+                            formatted_text = EXTENDED_DISCLAIMER_TEXT.replace(
+                                "\n\n", "<br><br>"
+                            ).replace("\n", " ")
+                            ui.label(formatted_text).classes(
+                                "text-sm text-gray-600 mb-4"
+                            )
+
+                        # Data export options
+                        with ui.column().classes("mb-4"):
+                            ui.label("Include Data").classes("font-bold mb-2")
+                            csv_checkbox = ui.checkbox(
+                                "CSV data (ZIP)",
+                                value=False,
+                                on_change=lambda e: state.update(
+                                    {"export_csv": bool(e.value)}
+                                ),
+                            )
+
+                        ui.label(
+                            "Are you sure you want to generate a report?"
+                        ).classes("mb-4")
+
+                        # Buttons
+                        with ui.row().classes("justify-end gap-2"):
+                            ui.button(
+                                "No", on_click=lambda: dialog.submit("No")
+                            ).props("flat")
+                            ui.button(
+                                "Yes",
+                                on_click=lambda: dialog.submit("Yes"),
+                            ).props("color=primary")
+                    
+                    # Run name below buttons
+                    ui.label(f"Exporting data for run: {sample_id}").classes(
+                        "text-sm font-medium text-gray-700 mt-4"
                     )
-
-                # Data export options
-                with ui.column().classes("mb-4"):
-                    ui.label("Include Data").classes("font-bold mb-2")
-                    ui.checkbox(
-                        "CSV data (ZIP)",
-                        value=False,
-                        on_change=lambda e: state.update(
-                            {"export_csv": bool(e.value)}
-                        ),
-                    )
-
-                ui.label(
-                    "Are you sure you want to generate a report?"
-                ).classes("mb-4")
-
-                # Buttons
-                with ui.row().classes("justify-end gap-2"):
-                    ui.button(
-                        "No", on_click=lambda: dialog.submit(("No", None))
-                    ).props("flat")
-                    ui.button(
-                        "Yes",
-                        on_click=lambda: dialog.submit(("Yes", state)),
-                    ).props("color=primary")
 
             dialog_result = await dialog
-            if dialog_result is None:
+            if dialog_result != "Yes":
                 return
-            result, state_val = dialog_result
-            if result == "Yes" and isinstance(state_val, dict):
-                await download_report(state_val)
+
+            # Now show the progress dialog
+            with ui.dialog().props("persistent") as progress_dialog:
+                with ui.card().classes("w-96 p-4"):
+                    # Title
+                    ui.label("Generating Report").classes(
+                        "text-h6 font-bold mb-4"
+                    )
+
+                    # Run name
+                    ui.label(f"Exporting data for run: {sample_id}").classes(
+                        "text-sm font-medium text-gray-700 mb-4"
+                    )
+
+                    # Report type and output displays
+                    report_type_display = ui.label(
+                        f"Report Type: {state.get('type', 'detailed').title()}"
+                    ).classes("text-sm mb-2")
+                    
+                    output_display = ui.label(
+                        f"Output: PDF{' + CSV (ZIP)' if state.get('export_csv', False) else ''}"
+                    ).classes("text-sm mb-4")
+                    
+                    # Progress indicator
+                    progress_bar = ui.linear_progress(0.0).classes("mb-2")
+                    
+                    # Progress text
+                    progress_text = ui.label("Preparing...").classes(
+                        "text-xs text-gray-600 text-center mb-2"
+                    )
+                    
+                    # Messages container - use label with newlines for multiple messages
+                    messages_label = ui.label("").classes("text-xs text-gray-500")
+
+                    # Track messages
+                    progress_updates = queue.Queue()
+                    messages_list = []
+                    
+                    # Timer to process progress updates on UI thread
+                    def process_progress_updates():
+                        """Process queued progress updates."""
+                        try:
+                            while not progress_updates.empty():
+                                update = progress_updates.get_nowait()
+                                stage = update.get("stage", "unknown")
+                                message = update.get("message", "")
+                                progress = update.get("progress", 0.0)
+                                
+                                if progress is not None:
+                                    progress_bar.value = progress
+                                    progress_text.text = f"{int(progress * 100)}% - {message}"
+                                else:
+                                    progress_text.text = message
+                                
+                                # Add message to messages list
+                                messages_list.append(message)
+                                # Keep only last 10 messages
+                                if len(messages_list) > 10:
+                                    messages_list.pop(0)
+                                
+                                # Update messages label
+                                messages_label.text = "\n".join(messages_list[-5:])
+                                
+                        except queue.Empty:
+                            pass
+                        except Exception as e:
+                            logging.debug(f"Error processing progress updates: {e}")
+                    
+                    # Set up timer to process updates
+                    update_timer = ui.timer(0.1, process_progress_updates)
+                    
+                    def progress_callback(progress_data: Dict[str, Any]):
+                        """Custom progress callback to update dialog (called from background thread)."""
+                        try:
+                            # Queue the update instead of directly updating UI
+                            progress_updates.put(progress_data)
+                        except Exception as e:
+                            logging.debug(f"Error in progress callback: {e}")
+                    
+                    # Track if still generating
+                    is_generating = {"active": True}
+
+                    # Storage for the files to download (will be populated by background task)
+                    files_to_download = []
+                    download_complete = {"done": False}
+                    
+                    # Timer to handle downloads once background task is done
+                    def handle_downloads():
+                        """Handle downloads in UI context once generation is complete."""
+                        if download_complete["done"] and files_to_download:
+                            # Log that report generation is complete and downloads are available
+                            file_count = len([f for f in files_to_download if f is not None])
+                            logging.info(f"Report generation complete for {sample_id}. {file_count} file(s) ready for download.")
+                            
+                            for file_path in files_to_download:
+                                if file_path is not None:
+                                    logging.debug(f"Initiating download: {file_path}")
+                                    ui.download(file_path)
+                            # Close dialog after 3 seconds
+                            ui.timer(3.0, lambda: progress_dialog.submit(None), once=True)
+                            download_timer.deactivate()
+                    
+                    download_timer = ui.timer(0.1, handle_downloads)
+                    
+                    # Start report generation
+                    async def complete_generation():
+                        """Complete the report generation and close dialog."""
+                        try:
+                            await generate_and_download_report(state, progress_callback, progress_dialog, is_generating, files_to_download)
+                        finally:
+                            # Clean up timer
+                            update_timer.deactivate()
+                            is_generating["active"] = False
+                            download_complete["done"] = True
+                    
+                    asyncio.create_task(complete_generation())
+
+            await progress_dialog
+
+        async def generate_and_download_report(state: Dict[str, Any], progress_callback, progress_dialog, is_generating, files_to_download):
+            """Generate report and update progress in dialog."""
+            try:
+                from nicegui import run as ng_run  # type: ignore
+                
+                if not sample_dir or not sample_dir.exists():
+                    # Queue error notification
+                    files_to_download.append(None)  # Signal error
+                    ui.timer(0.1, lambda: ui.notify(
+                        "Output directory not available for this sample",
+                        type="warning",
+                    ), once=True)
+                    return
+                
+                filename = f"{sample_id}_run_report.pdf"
+                pdf_path = os.path.join(str(sample_dir), filename)
+                os.makedirs(str(sample_dir), exist_ok=True)
+                export_csv_dir = None
+                if bool(state.get("export_csv", False)):
+                    export_csv_dir = os.path.join(
+                        str(sample_dir), "report_csv"
+                    )
+                
+                # Use only our custom callback, not the notification system
+                def combined_callback(progress_data: Dict[str, Any]):
+                    """Custom callback for dialog updates only (no notifications)."""
+                    progress_callback(progress_data)
+                
+                pdf_file = await ng_run.io_bound(
+                    create_pdf,
+                    pdf_path,
+                    str(sample_dir),
+                    state.get("type", "detailed"),
+                    export_csv_dir=export_csv_dir,
+                    export_xlsx=False,
+                    export_zip=bool(state.get("export_csv", False)),
+                    progress_callback=combined_callback,
+                )
+                
+                # Mark report as completed
+                from robin.gui.report_progress import progress_manager
+                progress_manager.complete_report(sample_id, filename)
+                
+                # Queue files for download in UI context
+                files_to_download.append(pdf_file)
+                
+                # Also offer CSV ZIP if requested
+                if bool(state.get("export_csv", False)) and export_csv_dir:
+                    zip_path = os.path.join(
+                        export_csv_dir, f"{sample_id}_report_data.zip"
+                    )
+                    if os.path.exists(zip_path):
+                        files_to_download.append(zip_path)
+                
+            except Exception as e:
+                # Mark report as failed
+                from robin.gui.report_progress import progress_manager
+                progress_manager.error_report(sample_id, str(e))
+                
+                # Queue error notification in UI context
+                ui.timer(0.1, lambda: ui.notify(
+                    f"Error generating report: {str(e)}",
+                    type="negative",
+                ), once=True)
+                files_to_download.append(None)  # Signal error
 
         async def download_report(state: Dict[str, Any]):
             """Generate and download the report for this sample."""
