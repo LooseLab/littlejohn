@@ -89,12 +89,18 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             "top": 10,
                             "textStyle": {"fontSize": 16, "color": "#000"},
                         },
-                        "legend": {"data": ["Off Target", "On Target"], "top": 45},
+                        "legend": {
+                            "data": ["Off Target", "On Target"],
+                            "left": 10,
+                            "top": "center",
+                            "orient": "vertical",
+                            "itemGap": 10,
+                        },
                         "tooltip": {"trigger": "axis"},
                         "grid": {
-                            "left": "5%",
+                            "left": "15%",
                             "right": "5%",
-                            "top": "25%",
+                            "top": "20%",
                             "containLabel": True,
                         },
                         "xAxis": {
@@ -382,7 +388,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         "textStyle": {"fontSize": 16, "color": "#000"},
                     },
                     "grid": {
-                        "left": "5%",
+                        "left": "15%",
                         "right": "5%",
                         "bottom": "10%",
                         "top": "20%",
@@ -426,7 +432,10 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     },
                     "yAxis": {"type": "value", "name": "Coverage (x)"},
                     "legend": {
-                        "top": 50,
+                        "left": 10,
+                        "top": "center",
+                        "orient": "vertical",
+                        "itemGap": 10,
                         "selected": {
                             "box plot": True,
                             "outliers": True,
