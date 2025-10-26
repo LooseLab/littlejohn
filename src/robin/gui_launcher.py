@@ -2005,9 +2005,12 @@ class GUILauncher:
                 with ui.card().classes("w-96 p-4"):
                     # Title
                     ui.label("Generating Report").classes(
-                        "text-h6 font-bold mb-4"
+                        "text-h6 font-bold mb-2"
                     )
-
+                    
+                    # Divider
+                    ui.separator().classes("mb-4")
+                    
                     # Run name
                     ui.label(f"Exporting data for run: {sample_id}").classes(
                         "text-sm font-medium text-gray-700 mb-4"
