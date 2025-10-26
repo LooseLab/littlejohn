@@ -356,16 +356,68 @@ class MGMTSection(ReportSection):
             self.elements.append(sources_table)
             self.elements.append(Spacer(1, 6))  # Reduced spacing
 
-            # Add the methylation plot if it exists
+            # Try to add the methylation plot
+            plot_added = False
+            
+            # First, try to load from existing PNG file
             if plot_out and os.path.exists(plot_out):
-                self.elements.append(Image(plot_out, width=6 * inch, height=4 * inch))
-                self.elements.append(
-                    Paragraph(
-                        "MGMT promoter methylation plot showing methylation levels across CpG sites",
-                        self.styles.styles["Caption"],
+                try:
+                    self.elements.append(Image(plot_out, width=6 * inch, height=4 * inch))
+                    self.elements.append(
+                        Paragraph(
+                            "MGMT promoter methylation plot showing methylation levels across CpG sites",
+                            self.styles.styles["Caption"],
+                        )
                     )
-                )
-            else:
+                    plot_added = True
+                except Exception as e:
+                    logger.warning(f"Failed to load MGMT plot from file: {e}")
+            
+            # If not found, try to generate from BAM file using locus_figure
+            if not plot_added:
+                # Try sorted BAM first, then fall back to unsorted
+                bam_candidates = [
+                    os.path.join(self.report.output, "mgmt_sorted.bam"),
+                    os.path.join(self.report.output, "mgmt.bam"),
+                ]
+                
+                bam_path = None
+                for candidate in bam_candidates:
+                    if os.path.exists(candidate):
+                        bam_path = candidate
+                        break
+                
+                if bam_path:
+                    try:
+                        from robin.analysis.methylation_wrapper import locus_figure
+                        
+                        logger.info(f"Generating MGMT plot from BAM file for report: {os.path.basename(bam_path)}")
+                        fig = locus_figure(
+                            interval="chr10:129466536-129467536",
+                            bam_path=bam_path,
+                            motif="CG",
+                            mods="m",
+                        )
+                        
+                        # Save to a file in the report output directory
+                        plot_path = os.path.join(self.report.output, "mgmt_report_plot.png")
+                        fig.savefig(plot_path, dpi=150, bbox_inches='tight')
+                        
+                        # Add to report
+                        self.elements.append(Image(plot_path, width=6 * inch, height=4 * inch))
+                        self.elements.append(
+                            Paragraph(
+                                "MGMT promoter methylation plot showing methylation levels across CpG sites",
+                                self.styles.styles["Caption"],
+                            )
+                        )
+                        plot_added = True
+                            
+                    except Exception as e:
+                        logger.warning(f"Failed to generate MGMT plot from BAM: {e}")
+            
+            # If still not added, show error message
+            if not plot_added:
                 self.elements.append(
                     Paragraph(
                         "MGMT promoter methylation plot is not available due to insufficient coverage.",
