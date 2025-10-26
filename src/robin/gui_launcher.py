@@ -933,8 +933,8 @@ class GUILauncher:
                         "Sample statistics will be available once the workflow is running."
                     ).classes("text-sm text-gray-600")
 
-                # Samples table
-                with ui.card().classes("w-full"):
+                # Samples table section - removed card wrapper to enable touch scrolling on mobile
+                with ui.column().classes("w-full gap-2"):
                     with ui.row().classes("w-full items-center justify-between mb-4"):
                         ui.label("All Tracked Samples").classes(
                             "text-lg font-semibold"
