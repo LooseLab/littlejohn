@@ -953,6 +953,47 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 igv_status.set_text(f"Error clearing tracks: {e}")
                 print(f"Error in _clear_igv_tracks: {e}")
 
+        # Function to wait for BAM file to stabilize (not being written to)
+        def _wait_for_bam_ready(bam_path: Path, max_wait_time: int = 30) -> bool:
+            """
+            Wait for BAM file to be ready (not actively being written to).
+            Returns True if file is ready, False if timeout.
+            """
+            import time
+            
+            start_time = time.time()
+            last_size = -1
+            stable_count = 0
+            required_stable_checks = 2  # Need 2 consecutive checks with same size
+            
+            while time.time() - start_time < max_wait_time:
+                try:
+                    if not bam_path.exists():
+                        time.sleep(0.5)
+                        continue
+                    
+                    current_size = bam_path.stat().st_size
+                    
+                    # Check if file size has changed
+                    if current_size == last_size:
+                        stable_count += 1
+                        if stable_count >= required_stable_checks:
+                            # File size is stable for consecutive checks
+                            return True
+                    else:
+                        stable_count = 0  # Reset counter if size changed
+                    
+                    last_size = current_size
+                    time.sleep(0.5)
+                    
+                except (OSError, IOError):
+                    # File might be temporarily unavailable
+                    time.sleep(0.5)
+                    continue
+            
+            # Timeout reached
+            return False
+        
         # Function to reload BAM data into existing IGV browser
         def _reload_bam_track():
             # Initialize state variable
@@ -973,14 +1014,80 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                 # Extract BAM name for display
                 bam_name = current_bam_url.split("/")[-1]
+                
+                # Determine the actual BAM file path
+                bam_path = None
+                if current_bam_url.startswith("/samples/"):
+                    # Extract sample directory and BAM name
+                    parts = current_bam_url.split("/")
+                    if len(parts) >= 4:
+                        sample_dir_name = parts[2]
+                        bam_file_name = parts[3]
+                        bam_path = sample_dir / bam_file_name
+                
+                # Wait for BAM file to be ready if it exists
+                if bam_path and bam_path.exists():
+                    igv_status.set_text("Checking if BAM file is ready...")
+                    if not _wait_for_bam_ready(bam_path):
+                        igv_status.set_text("BAM file is still being updated. Please wait and try again.")
+                        ui.notify("BAM file is still being updated. Please wait and try again.", type="warning")
+                        return
+                    
+                    # Also check if BAI file is ready
+                    bai_path = bam_path.with_suffix(bam_path.suffix + ".bai")
+                    if bai_path.exists():
+                        if not _wait_for_bam_ready(bai_path):
+                            igv_status.set_text("BAM index is still being updated. Please wait and try again.")
+                            ui.notify("BAM index is still being updated. Please wait and try again.", type="warning")
+                            return
 
                 # JavaScript to reload the BAM track
                 js_reload = f"""
                     try {{
-                        console.log('Attempting to reload BAM track...');
-                        console.log('BAM URL:', '{current_bam_url}');
-                        
-                        if (window.lj_igv) {{
+                                                    if (window.lj_igv) {{
+                            // Try to get tracks list
+                            let tracks = [];
+                            try {{
+                                // Try multiple methods to get the tracks list
+                                if (typeof window.lj_igv.getTracks === 'function') {{
+                                    tracks = window.lj_igv.getTracks();
+                                }} else if (window.lj_igv.trackList && Array.isArray(window.lj_igv.trackList)) {{
+                                    tracks = window.lj_igv.trackList;
+                                }} else if (window.lj_igv.tracks && Array.isArray(window.lj_igv.tracks)) {{
+                                    tracks = window.lj_igv.tracks;
+                                }} else if (window.lj_igv.roster && Array.isArray(window.lj_igv.roster.trackViews)) {{
+                                    tracks = window.lj_igv.roster.trackViews;
+                                }} else {{
+                                    // Try to remove by name directly
+                                    if (typeof window.lj_igv.removeTrackByName === 'function') {{
+                                        try {{
+                                            window.lj_igv.removeTrackByName('{bam_name}');
+                                        }} catch (e) {{
+                                            // Ignore errors
+                                        }}
+                                    }}
+                                }}
+                                
+                                // Remove alignment tracks
+                                for (let track of tracks) {{
+                                    try {{
+                                        // Only remove BAM/alignment tracks, not reference tracks
+                                        if (track && (track.format === 'bam' || track.format === 'cram' || track.type === 'alignment')) {{
+                                            // Try multiple removal methods
+                                            if (typeof window.lj_igv.removeTrack === 'function') {{
+                                                window.lj_igv.removeTrack(track);
+                                            }} else if (typeof window.lj_igv.removeTrackByName === 'function') {{
+                                                window.lj_igv.removeTrackByName(track.name);
+                                            }}
+                                        }}
+                                    }} catch (e) {{
+                                        // Ignore errors
+                                    }}
+                                }}
+                            }} catch (e) {{
+                                // Ignore errors
+                            }}
+                            
                             // Create the track configuration
                             const trackConfig = {{
                                 name: '{bam_name}',
@@ -991,51 +1098,169 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 type: 'alignment'
                             }};
                             
-                            console.log('Track config:', trackConfig);
-                            
                             // Add the track to the browser
                             if (typeof window.lj_igv.loadTrack === 'function') {{
                                 window.lj_igv.loadTrack(trackConfig);
-                                console.log('BAM track reloaded successfully');
                             }} else {{
-                                console.log('loadTrack method not available');
                                 // Try alternative method
                                 if (typeof window.lj_igv.addTrack === 'function') {{
                                     window.lj_igv.addTrack(trackConfig);
-                                    console.log('BAM track added using addTrack method');
-                                }} else {{
-                                    throw new Error('No track loading method available');
                                 }}
                             }}
                             
                             // Force a redraw
                             if (typeof window.lj_igv.redraw === 'function') {{
                                 window.lj_igv.redraw();
-                                console.log('Forced IGV redraw after reload');
                             }} else if (typeof window.lj_igv.update === 'function') {{
                                 window.lj_igv.update();
-                                console.log('Forced IGV update after reload');
                             }}
-                        }} else {{
-                            console.log('No IGV browser found');
                         }}
                     }} catch (e) {{
-                        console.error('Error reloading BAM track:', e);
+                        // Ignore errors
                     }}
                 """
 
                 ui.run_javascript(js_reload, timeout=20.0)
 
                 # Update status
-                igv_status.set_text(f"Reloading BAM track: {bam_name}")
+                igv_status.set_text(f"Loading BAM track: {bam_name}")
+                
+                # Change button text to "Reload BAM" after first load
+                reload_bam_button.set_text("Reload BAM")
 
                 # Mark that data tracks are no longer cleared
                 if state:
                     state["data_tracks_cleared"] = False
+                    
+                # Auto-load the BED file after BAM is loaded
+                _load_target_bed()
 
             except Exception as e:
                 igv_status.set_text(f"Error reloading BAM: {e}")
                 print(f"Error in _reload_bam_track: {e}")
+
+        # Function to load target BED file into IGV
+        def _load_target_bed():
+            """Load the target BED file as a track in IGV"""
+            try:
+                # First check if IGV is actually ready
+                if not _is_igv_ready():
+                    igv_status.set_text("IGV is not ready - cannot load BED file.")
+                    return
+
+                # Get the target panel information
+                state = _get_igv_state()
+                
+                # Check if BED file has already been loaded
+                if state.get("bed_file_loaded", False):
+                    return  # BED file already loaded, don't load again
+                
+                # Try to read the panel from master.csv
+                target_panel = None
+                bed_file_path = None
+                try:
+                    master_csv_path = sample_dir / "master.csv"
+                    if master_csv_path.exists():
+                        import pandas as pd
+                        df = pd.read_csv(master_csv_path)
+                        if not df.empty and "analysis_panel" in df.columns:
+                            target_panel = str(df.iloc[0]["analysis_panel"]).strip()
+                            
+                            # Map panel to BED filename
+                            bed_file_mapping = {
+                                "rCNS2": "rCNS2_panel_name_uniq.bed",
+                                "AML": "AML_panel_name_uniq.bed",
+                                "PanCan": "PanCan_panel_name_uniq.bed",
+                                "Sarcoma": "Sarcoma_panel_name_uniq.bed"
+                            }
+                            
+                            bed_filename = bed_file_mapping.get(target_panel, f"{target_panel}_panel_name_uniq.bed")
+                            
+                            # Try to find the BED file in robin resources
+                            try:
+                                from robin import resources
+                                bed_file_path = os.path.join(
+                                    os.path.dirname(os.path.abspath(resources.__file__)),
+                                    bed_filename
+                                )
+                                if not os.path.exists(bed_file_path):
+                                    bed_file_path = None
+                            except Exception:
+                                pass
+                            
+                            # Fallback paths
+                            if not bed_file_path:
+                                possible_paths = [
+                                    bed_filename,
+                                    f"data/{bed_filename}",
+                                    f"/usr/local/share/{bed_filename}",
+                                ]
+                                for path in possible_paths:
+                                    if os.path.exists(path):
+                                        bed_file_path = path
+                                        break
+                except Exception as e:
+                    print(f"Error reading panel information: {e}")
+
+                if not bed_file_path or not os.path.exists(bed_file_path):
+                    igv_status.set_text(f"Could not find BED file for panel: {target_panel}")
+                    ui.notify(f"Target BED file not found for panel: {target_panel}", type="warning")
+                    return
+
+                # Mount the BED file's directory
+                bed_dir = os.path.dirname(bed_file_path)
+                bed_name = os.path.basename(bed_file_path)
+                bed_url = f"/robin_resources/{bed_name}"
+                
+                try:
+                    if app is not None:
+                        app.add_static_files("/robin_resources", bed_dir)
+                except Exception:
+                    # Already mounted or in tests without app
+                    pass
+
+                # JavaScript to load the BED file as a track
+                js_load_bed = f"""
+                    try {{
+                        if (window.lj_igv) {{
+                            // Create the track configuration for the BED file
+                            const trackConfig = {{
+                                name: '{bed_name}',
+                                url: '{bed_url}',
+                                format: 'bed',
+                                indexed: false,
+                                displayMode: 'COLLAPSED',
+                                height: 40,
+                                color: '#0072B2'
+                            }};
+                            
+                            // Load the track into IGV
+                            if (typeof window.lj_igv.loadTrack === 'function') {{
+                                window.lj_igv.loadTrack(trackConfig);
+                            }} else {{
+                                // Try alternative method
+                                if (typeof window.lj_igv.addTrack === 'function') {{
+                                    window.lj_igv.addTrack(trackConfig);
+                                }}
+                            }}
+                        }}
+                    }} catch (e) {{
+                        // Ignore errors
+                    }}
+                """
+
+                ui.run_javascript(js_load_bed, timeout=20.0)
+                
+                # Mark that BED file has been loaded
+                state["bed_file_loaded"] = True
+                
+                # Update status
+                igv_status.set_text(f"Loaded BED file: {bed_name}")
+                ui.notify(f"Target BED file loaded: {bed_name}", type="positive")
+
+            except Exception as e:
+                igv_status.set_text(f"Error loading BED: {e}")
+                print(f"Error in _load_target_bed: {e}")
 
         # Function to check console for errors
         def _check_console_errors():
@@ -1196,10 +1421,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 print(f"Error in debug: {e}")
 
         # IGV control buttons
-        with ui.row().classes("items-center gap-2 mt-2"):
-            ui.button("Refresh IGV Check", on_click=_refresh_igv_check)
-            ui.button("Clear Data Tracks", on_click=_clear_igv_tracks)
-            ui.button("Reload BAM", on_click=_reload_bam_track)
+        reload_bam_button = ui.button("Load BAM", on_click=_reload_bam_track)
 
         # Add IGV library status check timer once after a delay
         ui.timer(3.0, _check_igv_library, once=True)
@@ -1306,14 +1528,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     # Client may have disconnected, ignore UI errors
                     pass
 
-        with ui.row().classes("items-center gap-2 mt-2"):
-            ui.button(
-                "Generate IGV BAM (if missing)", on_click=_trigger_build_sorted_bam
-            )
-            ui.button(
-                "Force Regenerate IGV BAM",
-                on_click=lambda: _trigger_build_sorted_bam(force_regenerate=True),
-            )
+
 
     # SNP Analysis section (only shown in development mode)
     if is_development_mode:
