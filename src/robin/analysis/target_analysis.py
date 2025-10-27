@@ -665,6 +665,13 @@ class TargetAnalysis:
             with open(timestamp_staging, "w") as f:
                 f.write(str(current_timestamp))
             
+            # Save source BAM file path for target.bam creation during accumulation
+            source_bam_staging = os.path.join(
+                staging_dir, f"source_bam_{analysis_counter:06d}.txt"
+            )
+            with open(source_bam_staging, "w") as f:
+                f.write(file_path)
+            
             target_result.processing_steps.append("saved_to_staging")
             logger.info(f"Saved to staging: {coverage_staging}")
             
@@ -1337,6 +1344,7 @@ class TargetAnalysis:
                 coverage_files = sorted(glob.glob(os.path.join(staging_dir, "coverage_*.parquet")))
                 bedcov_files = sorted(glob.glob(os.path.join(staging_dir, "bedcov_*.parquet")))
                 timestamp_files = sorted(glob.glob(os.path.join(staging_dir, "timestamp_*.txt")))
+                source_bam_files = sorted(glob.glob(os.path.join(staging_dir, "source_bam_*.txt")))
                 
                 if not coverage_files:
                     logger.info(f"No staged files to accumulate for {sample_id}")
@@ -1358,13 +1366,16 @@ class TargetAnalysis:
                 staged_covdfs = []
                 staged_bedcovdfs = []
                 timestamps = []
+                source_bam_paths = []
                 
-                for cov_file, bed_file, ts_file in zip(coverage_files, bedcov_files, timestamp_files):
+                for cov_file, bed_file, ts_file, source_bam_file in zip(coverage_files, bedcov_files, timestamp_files, source_bam_files):
                     try:
                         staged_covdfs.append(pd.read_parquet(cov_file))
                         staged_bedcovdfs.append(pd.read_parquet(bed_file))
                         with open(ts_file, "r") as f:
                             timestamps.append(float(f.read().strip()))
+                        with open(source_bam_file, "r") as f:
+                            source_bam_paths.append(f.read().strip())
                     except Exception as e:
                         logger.warning(f"Error loading staging file {cov_file}: {e}")
                         continue
@@ -1513,57 +1524,111 @@ class TargetAnalysis:
                     ) as f:
                         pass
                 
-                # Create target.bam file if targets exceed threshold
+                # Create target.bam file using filtered BAM accumulation approach
                 if len(run_list) > 0:
-                    logger.info("Creating target.bam file from accumulated targets...")
+                    logger.info("Processing filtered BAM files...")
                     try:
-                        # Find the original BAM files that were processed
-                        # Look for BAM files in the sample directory or parent directories
-                        original_bam_files = []
-                        
-                        # Check sample directory for BAM files
-                        for root, dirs, files in os.walk(sample_output_dir):
-                            for file in files:
-                                if file.endswith('.bam') and not file.endswith('target.bam'):
-                                    bam_path = os.path.join(root, file)
-                                    # Check if it has an index file
-                                    if os.path.exists(f"{bam_path}.bai"):
-                                        original_bam_files.append(bam_path)
-                        
-                        # If no BAM files found in sample directory, check parent directories
-                        if not original_bam_files:
-                            parent_dir = os.path.dirname(sample_output_dir)
-                            for root, dirs, files in os.walk(parent_dir):
-                                for file in files:
-                                    if file.endswith('.bam') and not file.endswith('target.bam'):
-                                        bam_path = os.path.join(root, file)
-                                        if os.path.exists(f"{bam_path}.bai"):
-                                            original_bam_files.append(bam_path)
+                        # Use source BAM files from staging
+                        original_bam_files = list(set(source_bam_paths))  # Remove duplicates
                         
                         if original_bam_files:
-                            # Use the first available BAM file
-                            source_bam = original_bam_files[0]
-                            targets_bed = os.path.join(sample_output_dir, "targets_exceeding_threshold.bed")
-                            target_bam_path = os.path.join(sample_output_dir, "target.bam")
+                            # Use the original target panel BED file
+                            targets_bed = self.bedfile
                             
-                            logger.info(f"Creating target.bam from {source_bam} using {targets_bed}")
+                            # Create filtered BAM directory
+                            filtered_bams_dir = os.path.join(sample_output_dir, "_filtered_bams")
+                            os.makedirs(filtered_bams_dir, exist_ok=True)
                             
-                            # Create target.bam using bedtools intersect
-                            run_bedtools(source_bam, targets_bed, target_bam_path)
+                            # Process each source BAM file and save filtered version
+                            new_filtered_bams = []
+                            for i, source_bam in enumerate(original_bam_files):
+                                filtered_bam_name = f"filtered_{i:06d}_{os.path.basename(source_bam)}"
+                                filtered_bam_path = os.path.join(filtered_bams_dir, filtered_bam_name)
+                                
+                                logger.info(f"Filtering BAM {i+1}/{len(original_bam_files)}: {os.path.basename(source_bam)}")
+                                run_bedtools(source_bam, targets_bed, filtered_bam_path)
+                                
+                                if os.path.exists(filtered_bam_path):
+                                    new_filtered_bams.append(filtered_bam_path)
                             
-                            # Verify the target.bam was created and has reads
-                            if os.path.exists(target_bam_path):
-                                try:
-                                    with pysam.AlignmentFile(target_bam_path, "rb") as bam_file:
-                                        read_count = bam_file.count(until_eof=True)
-                                        if read_count > 0:
-                                            logger.info(f"Successfully created target.bam with {read_count} reads")
-                                        else:
-                                            logger.warning("target.bam created but contains no reads")
-                                except Exception as e:
-                                    logger.warning(f"Could not verify target.bam: {e}")
+                            # Check if there's an existing target.bam that should be included in the merge
+                            existing_target_bam = os.path.join(sample_output_dir, "target.bam")
+                            target_bam_to_merge = []
+                            
+                            if os.path.exists(existing_target_bam) and os.path.exists(f"{existing_target_bam}.bai"):
+                                target_bam_to_merge = [existing_target_bam]
+                                logger.info("Including existing target.bam in merge")
                             else:
-                                logger.error("Failed to create target.bam file")
+                                logger.info("No existing target.bam found (will create new one)")
+                            
+                            # Merge existing target.bam (if any) with only the new filtered BAMs
+                            # Note: We don't include old filtered BAMs because they should have already been merged into target.bam
+                            all_filtered_bams = target_bam_to_merge + new_filtered_bams
+                            
+                            if all_filtered_bams:
+                                logger.info(f"Merging {len(all_filtered_bams)} filtered BAM files into target.bam...")
+                                
+                                # Create temporary merge output
+                                temp_merge_bam = os.path.join(sample_output_dir, ".target.bam.tmp")
+                                
+                                # Merge using pysam (pysam.merge expects sorted inputs and produces sorted output)
+                                pysam.merge("-o", temp_merge_bam, *all_filtered_bams)
+                                
+                                # Index the merged BAM
+                                logger.info("Indexing merged BAM...")
+                                pysam.index(temp_merge_bam)
+                                
+                                # Atomically replace target.bam
+                                target_bam_path = os.path.join(sample_output_dir, "target.bam")
+                                if os.path.exists(target_bam_path):
+                                    # Remove old target.bam and index
+                                    os.remove(target_bam_path)
+                                    if os.path.exists(f"{target_bam_path}.bai"):
+                                        os.remove(f"{target_bam_path}.bai")
+                                
+                                shutil.move(temp_merge_bam, target_bam_path)
+                                if os.path.exists(f"{temp_merge_bam}.bai"):
+                                    shutil.move(f"{temp_merge_bam}.bai", f"{target_bam_path}.bai")
+                                else:
+                                    logger.warning("Index file not found after merging - recreating...")
+                                    pysam.index(target_bam_path)
+                                
+                                # Verify the target.bam was created and has reads, and has an index
+                                if os.path.exists(target_bam_path) and os.path.exists(f"{target_bam_path}.bai"):
+                                    try:
+                                        with pysam.AlignmentFile(target_bam_path, "rb") as bam_file:
+                                            read_count = bam_file.count(until_eof=True)
+                                            if read_count > 0:
+                                                logger.info(f"Successfully created target.bam with {read_count} reads from {len(all_filtered_bams)} filtered BAM files")
+                                            else:
+                                                logger.warning("target.bam created but contains no reads")
+                                    except Exception as e:
+                                        logger.warning(f"Could not verify target.bam: {e}")
+                                else:
+                                    logger.error("Failed to create target.bam file")
+                            
+                            # Clean up old filtered BAM files after successful merge
+                            # Since we've merged everything into target.bam, we can remove the filtered BAMs
+                            # But DON'T remove the old target.bam if it was included - it's already been replaced
+                            for filtered_bam in all_filtered_bams:
+                                # Skip cleanup of files that are the same as the newly created target.bam
+                                if os.path.abspath(filtered_bam) == os.path.abspath(target_bam_path):
+                                    continue
+                                
+                                try:
+                                    if os.path.exists(filtered_bam):
+                                        os.remove(filtered_bam)
+                                    if os.path.exists(f"{filtered_bam}.bai"):
+                                        os.remove(f"{filtered_bam}.bai")
+                                except OSError as e:
+                                    logger.warning(f"Could not remove filtered BAM {filtered_bam}: {e}")
+                            
+                            # Remove the filtered BAMs directory if empty
+                            try:
+                                if not os.listdir(filtered_bams_dir):
+                                    os.rmdir(filtered_bams_dir)
+                            except OSError:
+                                pass  # Directory not empty, that's fine
                         else:
                             logger.warning("No suitable BAM files found to create target.bam")
                             
@@ -1574,7 +1639,7 @@ class TargetAnalysis:
                 
                 # Clean up staging files
                 logger.info("Cleaning up staging files...")
-                for f in coverage_files + bedcov_files + timestamp_files:
+                for f in coverage_files + bedcov_files + timestamp_files + source_bam_files:
                     try:
                         os.remove(f)
                     except OSError as e:
