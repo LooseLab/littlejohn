@@ -15,6 +15,13 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # Import pyplot for plotting functionality
 
+# Configure matplotlib to allow more open figures and suppress warnings
+# During preprocessing, many figures may be created
+plt.rcParams['figure.max_open_warning'] = 100  # Increase threshold
+
+# Module-level variable to track last fusion plot figure for cleanup
+_last_fusion_figure = None
+
 # Import DNA Features Viewer components at module level
 try:
     from dna_features_viewer import GraphicFeature, GraphicRecord
@@ -1025,6 +1032,9 @@ def _plot_gene_group(
                     )
 
                     # Update the matplotlib element
+                    # Close previous figure if it exists before assigning new one
+                    if hasattr(mpl_element, 'figure') and mpl_element.figure is not None:
+                        plt.close(mpl_element.figure)
                     mpl_element.figure = fig
                     mpl_element.update()
                 
@@ -1085,7 +1095,15 @@ def _create_advanced_fusion_plot(
     logging.info(f"[Fusion] Creating {num_genes} gene layout with 2 rows (gene structure + read mapping)")
     # Increase figure size and add more padding to prevent tight layout warnings
     # Ensure minimum figure size to prevent zero-size axes warnings
+    # Close previous figure if it exists to prevent accumulation
+    global _last_fusion_figure
+    if _last_fusion_figure is not None:
+        try:
+            plt.close(_last_fusion_figure)
+        except Exception:
+            pass  # Figure might already be closed
     fig, axes = plt.subplots(2, num_genes, figsize=(max(20, 5 * num_genes), 10))
+    _last_fusion_figure = fig
 
     # Handle single gene case
     if num_genes == 1:
@@ -1680,7 +1698,15 @@ def _create_simple_fallback_plot(
     gene_group: List[str], subset: pd.DataFrame
 ) -> plt.Figure:
     """Create a simple fallback plot if advanced visualization fails."""
+    # Close previous figure if it exists to prevent accumulation
+    global _last_fusion_figure
+    if _last_fusion_figure is not None:
+        try:
+            plt.close(_last_fusion_figure)
+        except Exception:
+            pass  # Figure might already be closed
     fig, ax = plt.subplots(1, 1, figsize=(10, 4))
+    _last_fusion_figure = fig
 
     # Simple scatter plot
     genes = list(sorted(subset["col4"].unique()))
