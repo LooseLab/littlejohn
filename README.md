@@ -39,7 +39,6 @@ robin is a specialized bioinformatics workflow engine designed for processing BA
 ### Prerequisites
 
 1. **Conda**: Install Miniconda or Anaconda if you haven't already.
-2. **jq** (optional): For advanced asset management. Install with `brew install jq` (macOS) or `apt-get install jq` (Ubuntu).
 
 ### Installation Steps
 
@@ -59,11 +58,11 @@ robin is a specialized bioinformatics workflow engine designed for processing BA
    ```bash
    # For Linux/Windows
    conda env create -f robin.yml
-   conda activate robin_0_3
+   conda activate robin_0_5
    
    # For macOS
    conda env create -f robin_osx.yml
-   conda activate robin_0_3
+   conda activate robin_0_5
    ```
 
 4. **Install robin in development mode**:
@@ -82,74 +81,7 @@ robin is a specialized bioinformatics workflow engine designed for processing BA
    python scripts/fetch_asset.py pancan_model src/robin/models/pancan_devel_v5i_NN.pkl
    ```
 
-### Alternative Installation (without conda)
 
-If you prefer not to use conda, you can install from source, but you'll need to manually install the system dependencies:
-
-1. **Install system dependencies**:
-   ```bash
-   # Ubuntu/Debian
-   sudo apt-get install samtools bedtools r-base jq
-   
-   # macOS
-   brew install samtools bedtools r jq
-   ```
-
-2. **Clone with submodules**:
-   ```bash
-   git clone --recursive https://github.com/LooseLab/littlejohn.git
-   cd littlejohn
-   ```
-
-3. **Update and initialize submodules**:
-   ```bash
-   git submodule update --init --recursive
-   ```
-   *This ensures all submodules (nanoDX, hv_rapidCNS2) are properly initialized*
-
-4. **Install Python dependencies**:
-   ```bash
-   pip install -e .
-   ```
-
-5. **Download required model assets**:
-   ```bash
-   python setup_models.py
-   ```
-
-## Asset Management
-
-Robin uses a release asset system for managing large model files. This provides better performance and reliability compared to traditional approaches.
-
-### Available Assets
-
-The following model assets are available:
-
-- **general_model**: `general.zip` (1.7GB) - General machine learning model archive
-- **capper_model**: `Capper_et_al_NN.pkl` (132MB) - Capper et al neural network model  
-- **pancan_model**: `pancan_devel_v5i_NN.pkl` (194MB) - Pan-cancer development v5i neural network model
-
-### Downloading Assets
-
-**Automatic setup** (recommended):
-```bash
-python setup_models.py
-```
-
-**Manual download**:
-```bash
-# Download individual models
-python scripts/fetch_asset.py general_model src/robin/models/general.zip
-python scripts/fetch_asset.py capper_model src/robin/models/Capper_et_al_NN.pkl
-python scripts/fetch_asset.py pancan_model src/robin/models/pancan_devel_v5i_NN.pkl
-```
-
-**Using shell script**:
-```bash
-./scripts/fetch_asset.sh general_model src/robin/models/general.zip
-./scripts/fetch_asset.sh capper_model src/robin/models/Capper_et_al_NN.pkl
-./scripts/fetch_asset.sh pancan_model src/robin/models/pancan_devel_v5i_NN.pkl
-```
 
 ### Authentication
 
@@ -179,6 +111,7 @@ robin workflow <data_folder> --work-dir <output_folder> -w target,cnv,fusion,mgm
 - `-w`: Workflow specification (comma-separated list of analysis types)
 - `--reference`: Path to reference genome (required for some analyses)
 - `--center <center_id>`: Center ID running the analysis (e.g., 'Sherwood', 'Auckland', 'New York')
+- `--target-panel`: The specific panel that is being applied. 
 
 ### Example Usage
 
@@ -188,14 +121,16 @@ robin workflow ~/data/bam_files \
   --work-dir ~/results \
   -w target,cnv,fusion,mgmt,sturgeon,nanodx,pannanodx,random_forest \
   --reference ~/references/hg38_simple.fa \
-  --center Sherwood
+  --center Sherwood \
+  --target-panel rCNS2
 
 # Simplified workflow with just a few analyses
 robin workflow ~/data/bam_files \
   --work-dir ~/results \
   -w mgmt,sturgeon \
   --reference ~/references/hg38_simple.fa \
-  --center Auckland
+  --center Auckland \
+  --target-panel PanCan
 
 # With verbose output and custom logging
 robin workflow ~/data/bam_files \
@@ -203,6 +138,7 @@ robin workflow ~/data/bam_files \
   -w mgmt,cnv,sturgeon \
   --reference ~/references/hg38_simple.fa \
   --center New_York \
+  --target-panel rCNS2 \
   --verbose \
   --log-level INFO
 ```
@@ -246,6 +182,52 @@ robin workflow /path/to/directory --workflow "workflow_plan" [OPTIONS]
 - `--use-ray/--no-use-ray`: Enable Ray distributed computing (default: on)
 - `--with-gui/--no-gui`: Launch NiceGUI workflow monitor (default: on)
 
+
+
+### Panel management
+
+Manage built-in and custom target panels used by analyses like `target`, `cnv`, and `fusion`.
+
+- Built-in panels include: `rCNS2`, `AML`, `PanCan`.
+- Custom panels are stored internally after you add them from a BED file.
+
+#### List available panels
+```bash
+robin list-panels
+```
+
+#### Add a custom panel from a BED file
+```bash
+# Add and register a panel (BED must have ≥4 columns: chr, start, end, gene_name[s])
+robin add-panel /path/to/your_panel.bed MyCustomPanel
+
+# Optional: validate format only, without adding
+robin add-panel /path/to/your_panel.bed MyCustomPanel --validate-only
+```
+
+Notes:
+- Panel names cannot be empty and cannot reuse reserved names: `rCNS2`, `AML`, `PanCan`.
+- BED may be 4- or 6-column; if multiple genes are in one region, use comma-separated names.
+
+#### Remove a custom panel
+```bash
+# Will prompt for confirmation
+robin remove-panel MyCustomPanel
+
+# Skip confirmation
+robin remove-panel MyCustomPanel --force
+```
+
+Built-in panels cannot be removed.
+
+#### Use a panel in a workflow
+```bash
+robin workflow /path/to/bam_files \
+  --work-dir ~/results \
+  -w target,cnv,fusion \
+  --target-panel MyCustomPanel \
+  --center Sherwood
+```
 
 
 <!-- 
@@ -512,23 +494,6 @@ robin workflow /path/to/bam/files \
 - **Multi-threading**: Configurable multi-threaded BAM processing via `LJ_BAM_THREADS` environment variable
 - **Async Updates**: Non-blocking GUI updates during analysis execution
 - **Smart Progress Tracking**: Streamlined progress indicators with real-time status updates
-
-### Advanced Configuration
-- **Environment Variables**: 
-  - `ROBIN_DEV_MODE`: Enable development features and debugging
-  - `LJ_CNV_SUBPROCESS_DEBUG`: Debug CNV subprocess operations
-  - `LJ_BAM_THREADS`: Configure BAM processing threads (default: 0 for single-threaded)
-  - `robin_REFERENCE`: Set reference genome path
-
-### Recent Improvements (better_loading branch)
-- **Enhanced Sample Table**: Fixed real-time updates and improved search functionality
-- **Improved Fusion Detection**: Better visualization and interaction for fusion analysis results
-- **Optimized Memory Usage**: Reduced memory footprint for large-scale analysis
-- **Better Error Handling**: Enhanced error recovery and user notification
-- **Streamlined Progress Tracking**: More efficient progress indicators and status updates
-- **Multi-file BED Conversion**: Support for processing multiple BED files simultaneously
-- **Enhanced Report Generation**: Improved PDF report creation with better formatting
-- **GUI Responsiveness**: Smoother loading states and more responsive interface
 
 ## Dependencies
 
