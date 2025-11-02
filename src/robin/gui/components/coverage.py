@@ -4092,13 +4092,21 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
         try:
             key = str(sample_dir)
             state = launcher._coverage_state.get(key, {})
+            
+            # Check if this is a fresh page visit (no last_visit_time means new page)
+            # Force updates on fresh page visits regardless of mtime
+            is_fresh_visit = "last_visit_time" not in state
+            if is_fresh_visit:
+                state["last_visit_time"] = time.time()
+            
             cov_main = sample_dir / "coverage_main.csv"
             bed_cov = sample_dir / "bed_coverage_main.csv"
             target_cov = sample_dir / "target_coverage.csv"
             cov_time = sample_dir / "coverage_time_chart.npy"
             if cov_main.exists():
                 m = cov_main.stat().st_mtime
-                if state.get("cov_main_mtime") != m or "cov_df" not in state:
+                # Force update on fresh page visit or if mtime changed or data not in state
+                if is_fresh_visit or state.get("cov_main_mtime") != m or "cov_df" not in state:
                     try:
                         cov_df = pd.read_csv(cov_main)
                         # Backfill meandepth if missing
@@ -4125,7 +4133,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 _log_notify("coverage_main.csv not found", level="debug", notify=False)
             if bed_cov.exists():
                 m = bed_cov.stat().st_mtime
-                if state.get("bed_cov_mtime") != m or "bed_df" not in state:
+                # Force update on fresh page visit or if mtime changed or data not in state
+                if is_fresh_visit or state.get("bed_cov_mtime") != m or "bed_df" not in state:
                     try:
                         bed_df = pd.read_csv(bed_cov)
                         state["bed_df"] = bed_df
@@ -4146,7 +4155,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 )
             if target_cov.exists():
                 m = target_cov.stat().st_mtime
-                if state.get("target_cov_mtime") != m:
+                # Force update on fresh page visit or if mtime changed
+                if is_fresh_visit or state.get("target_cov_mtime") != m:
                     try:
                         tdf = pd.read_csv(target_cov)
                         _update_target_table(tdf)
@@ -4163,7 +4173,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 )
             if cov_time.exists():
                 m = cov_time.stat().st_mtime
-                if state.get("cov_time_mtime") != m:
+                # Force update on fresh page visit or if mtime changed
+                if is_fresh_visit or state.get("cov_time_mtime") != m:
                     try:
                         _update_time(cov_time)
                         state["cov_time_mtime"] = m

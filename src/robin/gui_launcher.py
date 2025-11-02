@@ -82,6 +82,11 @@ class GUILauncher:
         self.monitored_directory = ""
         self.reload = reload
         self.center = None  # Center ID for the analysis
+        
+        # Sample status transition timeout (in seconds)
+        # Change to 60 for testing (1 minute), 3600 for production (60 minutes)
+        self.completion_timeout_seconds = 60  # Set to 3600 for production
+        
         # Message queue for non-blocking communication
         self.update_queue = queue.PriorityQueue()
         self.gui_ready = threading.Event()
@@ -102,6 +107,9 @@ class GUILauncher:
         # Runtime state
         self._start_time: Optional[float] = None
         self._is_running: bool = False
+        
+        # Track which samples have had target.bam finalization triggered
+        self._finalized_samples: set = set()
 
         # Log ring buffer (last 1000 entries)
         self._log_buffer = deque(maxlen=1000)
@@ -694,7 +702,11 @@ class GUILauncher:
                 """Individual sample detail page."""
                 _setup_global_resources()
 
-                # Add a page visit handler to refresh plots
+                # Clear cached state BEFORE creating the page so plots refresh on load
+                # This ensures all graphs load properly on each page visit
+                self._refresh_sample_plots(sample_id)
+                
+                # Add a page visit handler to refresh plots on reconnect
                 def on_page_visit():
                     """Handle page visit - refresh plots if needed."""
                     try:
@@ -709,9 +721,6 @@ class GUILauncher:
                         )
                     except Exception as e:
                         logging.debug(f"Page visit handler failed for {sample_id}: {e}")
-
-                # Also try to refresh immediately when the page is created
-                ui.timer(2.0, lambda: self._refresh_sample_plots(sample_id), once=True)
 
                 # Register the page visit handler
                 ui.context.client.on_connect(on_page_visit)
@@ -1100,20 +1109,25 @@ class GUILauncher:
                     except Exception:
                         pass
 
-                    # Per-row action button to view sample
+                    # Per-row action buttons (Finalize only shows for Complete/Pre-existing samples)
                     try:
                         self.samples_table.add_slot(
                             "body-cell-actions",
                             """
 <q-td key=\"actions\" :props=\"props\">
-  <q-btn color=\"primary\" size=\"sm\" label=\"View\"
-         @click=\"$parent.$emit('action', props.row.sample_id)\" />
+  <q-btn-group>
+    <q-btn color=\"primary\" size=\"sm\" label=\"View\"
+           @click=\"$parent.$emit('action', props.row.sample_id)\" />
+    <q-btn v-if=\"props.row.origin === 'Complete' || props.row.origin === 'Pre-existing'\"
+           color=\"secondary\" size=\"sm\" label=\"Finalize\" icon=\"merge_type\"
+           @click=\"$parent.$emit('finalize-target', props.row.sample_id)\" />
+  </q-btn-group>
 </q-td>
 """,
                         )
                     except Exception:
                         pass
-
+                    
                     # Add export checkbox as rightmost column
                     try:
                         self.samples_table.add_slot(
@@ -1128,7 +1142,7 @@ class GUILauncher:
                         )
                     except Exception:
                         pass
-
+                    
                     # Handle action emitted from table slot
                     try:
                         self.samples_table.on(
@@ -1139,6 +1153,23 @@ class GUILauncher:
                                 else ui.notify("Invalid button payload", type="warning")
                             ),
                         )
+                    except Exception:
+                        pass
+                    
+                    # Handle finalize-target action
+                    def _on_finalize_target(event):
+                        try:
+                            sample_id = getattr(event, "args", None) if hasattr(event, "args") else None
+                            if isinstance(sample_id, str):
+                                self._trigger_target_bam_finalization(sample_id)
+                                ui.notify(f"Triggered target.bam finalization for {sample_id}", type="positive")
+                            else:
+                                ui.notify("Invalid sample ID", type="warning")
+                        except Exception as e:
+                            ui.notify(f"Error triggering finalization: {e}", type="negative")
+                    
+                    try:
+                        self.samples_table.on("finalize-target", _on_finalize_target)
                     except Exception:
                         pass
 
@@ -1570,13 +1601,26 @@ class GUILauncher:
                 if not existing or last_seen >= existing.get("_last_seen_raw", 0):
                     origin_value = (
                         "Pre-existing"
-                        if sid in self._preexisting_sample_ids and (time.time() - last_seen) >= 3600
+                        if sid in self._preexisting_sample_ids and (time.time() - last_seen) >= self.completion_timeout_seconds
                         else "Live"
                     )
-                    # Flip Live samples to Complete if inactive for 60 minutes
+                    # Flip Live samples to Complete if inactive for configured timeout
+                    prev_origin = None
+                    if existing:
+                        prev_origin = existing.get("origin")
+                    else:
+                        # Check previous rows for this sample
+                        existing_rows = self._last_samples_rows or []
+                        for prev_row in existing_rows:
+                            if prev_row.get("sample_id") == sid:
+                                prev_origin = prev_row.get("origin")
+                                break
                     try:
-                        if origin_value == "Live" and (time.time() - last_seen) >= 3600:
+                        if origin_value == "Live" and (time.time() - last_seen) >= self.completion_timeout_seconds:
                             origin_value = "Complete"
+                            # Trigger finalization if transitioning from Live to Complete
+                            if prev_origin == "Live" or prev_origin is None:
+                                self._trigger_target_bam_finalization(sid)
                     except Exception:
                         pass
                     by_id[sid] = {
@@ -1769,13 +1813,13 @@ class GUILauncher:
             # Origin filter, compute dynamic 'Complete' for display if needed
             now_ts = time.time()
             for r in rows:
-                try:
-                    if r.get("origin") == "Live":
-                        last_raw = float(r.get("_last_seen_raw", 0))
-                        if last_raw and (now_ts - last_raw) >= 3600:
-                            r["origin"] = "Complete"
-                except Exception:
-                    pass
+                    try:
+                        if r.get("origin") == "Live":
+                            last_raw = float(r.get("_last_seen_raw", 0))
+                            if last_raw and (now_ts - last_raw) >= self.completion_timeout_seconds:
+                                r["origin"] = "Complete"
+                    except Exception:
+                        pass
 
             origin = (self._samples_filters or {}).get("origin", "All")
             if origin and origin != "All":
@@ -3109,6 +3153,59 @@ class GUILauncher:
         except Exception:
             pass
 
+    def _trigger_target_bam_finalization(self, sample_id: str) -> None:
+        """Trigger target.bam finalization for a sample that has transitioned to Complete."""
+        if sample_id in self._finalized_samples:
+            return  # Already finalized
+        
+        if not self.monitored_directory:
+            return
+        
+        try:
+            from robin.analysis.target_analysis import finalize_accumulation_for_sample
+            import csv
+            
+            # Read target_panel from master.csv
+            sample_dir = Path(self.monitored_directory) / sample_id
+            master_csv = sample_dir / "master.csv"
+            target_panel = "rCNS2"  # Default
+            
+            if master_csv.exists():
+                try:
+                    with master_csv.open("r", newline="") as fh:
+                        reader = csv.DictReader(fh)
+                        first_row = next(reader, None)
+                        if first_row:
+                            panel = first_row.get("analysis_panel", "").strip()
+                            if panel:
+                                target_panel = panel
+                except Exception:
+                    pass  # Use default
+            
+            # Trigger finalization in background thread to avoid blocking GUI
+            import threading
+            def finalize_in_background():
+                try:
+                    logging.info(f"Triggering target.bam finalization for sample {sample_id} (status: Complete)")
+                    result = finalize_accumulation_for_sample(
+                        sample_id=sample_id,
+                        work_dir=str(self.monitored_directory),
+                        target_panel=target_panel
+                    )
+                    if result.get("status") != "error":
+                        self._finalized_samples.add(sample_id)
+                        logging.info(f"Successfully finalized target.bam for sample {sample_id}")
+                    else:
+                        logging.warning(f"Target.bam finalization returned error for {sample_id}: {result.get('error', 'Unknown')}")
+                except Exception as e:
+                    logging.error(f"Error finalizing target.bam for {sample_id}: {e}")
+            
+            thread = threading.Thread(target=finalize_in_background, daemon=True)
+            thread.start()
+            
+        except Exception as e:
+            logging.error(f"Failed to trigger target.bam finalization for {sample_id}: {e}")
+    
     def _scan_and_seed_samples(self, preexisting: bool = False) -> None:
         """Synchronous version - kept for backward compatibility and io_bound calls"""
         try:
@@ -3171,12 +3268,22 @@ class GUILauncher:
                         pass
                     origin_value = (
                         "Pre-existing"
-                        if sid in self._preexisting_sample_ids and (time.time() - last_seen) >= 3600
+                        if sid in self._preexisting_sample_ids and (time.time() - last_seen) >= self.completion_timeout_seconds
                         else "Live"
                     )
                     try:
-                        if origin_value == "Live" and (time.time() - last_seen) >= 3600:
+                        if origin_value == "Live" and (time.time() - last_seen) >= self.completion_timeout_seconds:
                             origin_value = "Complete"
+                            # Check if this is a transition from Live to Complete
+                            existing = self._last_samples_rows or []
+                            prev_origin = None
+                            for prev_row in existing:
+                                if prev_row.get("sample_id") == sid:
+                                    prev_origin = prev_row.get("origin")
+                                    break
+                            # Trigger finalization if transitioning from Live to Complete
+                            if prev_origin == "Live" or prev_origin is None:
+                                self._trigger_target_bam_finalization(sid)
                     except Exception:
                         pass
                     rows.append(
@@ -3419,11 +3526,11 @@ class GUILauncher:
                     
                 origin_value = (
                     "Pre-existing"
-                    if sid in self._preexisting_sample_ids and (time.time() - last_seen) >= 3600
+                    if sid in self._preexisting_sample_ids and (time.time() - last_seen) >= self.completion_timeout_seconds
                     else "Live"
                 )
                 try:
-                    if origin_value == "Live" and (time.time() - last_seen) >= 3600:
+                    if origin_value == "Live" and (time.time() - last_seen) >= self.completion_timeout_seconds:
                         origin_value = "Complete"
                 except Exception:
                     pass
@@ -3628,9 +3735,13 @@ class GUILauncher:
                             )
                             updated["_last_seen_raw"] = last_seen
                             # Determine origin based on inactivity threshold
+                            prev_origin = existing_row.get("origin")
                             try:
-                                if (time.time() - last_seen) >= 3600:
+                                if (time.time() - last_seen) >= self.completion_timeout_seconds:
                                     updated["origin"] = "Complete"
+                                    # Trigger finalization if transitioning from Live to Complete
+                                    if prev_origin == "Live":
+                                        self._trigger_target_bam_finalization(sid)
                                 else:
                                     updated["origin"] = "Live"
                             except Exception:

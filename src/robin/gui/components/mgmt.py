@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List
 import logging
+import time
 
 import pandas as pd
 
@@ -174,9 +175,16 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                 latest_csv = max(csv_files, key=_count_from_name)
             key = str(sample_dir)
             state = launcher._mgmt_state.get(key, {})
+            
+            # Check if this is a fresh page visit - force updates on fresh visits
+            is_fresh_visit = "last_visit_time" not in state
+            if is_fresh_visit:
+                state["last_visit_time"] = time.time()
+            
             current_count = _count_from_name(latest_csv)
             csv_mtime = latest_csv.stat().st_mtime
-            if (
+            # Force update on fresh page visit or if file changed
+            if not is_fresh_visit and (
                 state.get("csv_path") == str(latest_csv)
                 and state.get("csv_mtime") == csv_mtime
             ):
@@ -218,8 +226,10 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                 bed_path = alt_bed if alt_bed.exists() else bed_path
             if bed_path.exists():
                 bed_mtime = bed_path.stat().st_mtime
+                # Force update on fresh page visit or if file changed
                 if (
-                    state.get("bed_path") != str(bed_path)
+                    is_fresh_visit
+                    or state.get("bed_path") != str(bed_path)
                     or state.get("bed_mtime") != bed_mtime
                 ):
                     site_rows = _extract_mgmt_specific_sites(bed_path)

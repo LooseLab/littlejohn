@@ -187,7 +187,7 @@ BATCH_CONFIG: Dict[str, Dict[str, Any]] = {
     "bed_conversion": {"max_batch_size": 20, "timeout_seconds": 2},
     "mgmt": {"max_batch_size": 20, "timeout_seconds": 2},
     "cnv": {"max_batch_size": 50, "timeout_seconds": 2},
-    "target": {"max_batch_size": 20, "timeout_seconds": 2},
+    "target": {"max_batch_size": 100, "timeout_seconds": 10},
     "fusion": {"max_batch_size": 20, "timeout_seconds": 2},
     "sturgeon": {"max_batch_size": 20, "timeout_seconds": 2},
     "nanodx": {"max_batch_size": 20, "timeout_seconds": 2},
@@ -1394,6 +1394,37 @@ class Coordinator:
         for sid in samples_to_remove:
             self.samples_by_id.pop(sid, None)
     
+    async def _finalize_target_bams(self) -> None:
+        """
+        Finalize target BAM accumulation for all samples that have batch BAMs pending merge.
+        This should be called during shutdown to ensure all target.bam files are created.
+        """
+        if not hasattr(self, 'work_dir') or not self.work_dir:
+            return
+        
+        try:
+            from robin.analysis.target_analysis import finalize_accumulation_for_sample
+            
+            # Get all samples that have been processed
+            samples_to_finalize = set()
+            for sid in self.samples_by_id.keys():
+                if sid and sid != "unknown":
+                    samples_to_finalize.add(sid)
+            
+            # Finalize target accumulation for each sample
+            for sample_id in samples_to_finalize:
+                try:
+                    finalize_accumulation_for_sample(
+                        sample_id=sample_id,
+                        work_dir=self.work_dir,
+                        target_panel=self.target_panel
+                    )
+                except Exception as e:
+                    # Log but continue with other samples
+                    logging.warning(f"Failed to finalize target.bam for {sample_id}: {e}")
+        except Exception as e:
+            logging.warning(f"Error during target BAM finalization: {e}")
+    
     async def _flush_csv_buffer(self) -> None:
         """Flush buffered CSV entries to disk."""
         if not self._csv_buffer:
@@ -2171,6 +2202,12 @@ class Coordinator:
         try:
             # Stop accepting new jobs
             self._shutdown_requested = True
+            
+            # Finalize target accumulation for all samples with batch BAMs pending merge
+            try:
+                await self._finalize_target_bams()
+            except Exception:
+                pass
             
             # Flush any remaining CSV buffer entries
             try:
@@ -3066,7 +3103,7 @@ async def run(
                     await task
                 except asyncio.CancelledError:
                     pass
-        # Signal coordinator to stop accepting new jobs
+        # Signal coordinator to stop accepting new jobs and finalize
         try:
             await coord.shutdown.remote()
         except Exception:
@@ -3078,6 +3115,11 @@ async def run(
             pass
         print("Workflow stopped gracefully")
     finally:
+        # Always finalize target BAMs on exit (including normal completion)
+        try:
+            await coord.shutdown.remote()
+        except Exception:
+            pass
         if watcher is not None:
             try:
                 watcher.flush_remaining()
