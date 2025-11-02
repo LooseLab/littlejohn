@@ -1398,12 +1398,22 @@ class Coordinator:
         """
         Finalize target BAM accumulation for all samples that have batch BAMs pending merge.
         This should be called during shutdown to ensure all target.bam files are created.
+        Uses Ray tasks to offload the blocking I/O work to separate workers.
         """
         if not hasattr(self, 'work_dir') or not self.work_dir:
             return
         
         try:
-            from robin.analysis.target_analysis import finalize_accumulation_for_sample
+            # Create a Ray remote function for the blocking work
+            @ray.remote
+            def finalize_sample_task(sample_id: str, work_dir: str, target_panel: str):
+                """Ray task wrapper for finalize_accumulation_for_sample."""
+                from robin.analysis.target_analysis import finalize_accumulation_for_sample
+                return finalize_accumulation_for_sample(
+                    sample_id=sample_id,
+                    work_dir=work_dir,
+                    target_panel=target_panel
+                )
             
             # Get all samples that have been processed
             samples_to_finalize = set()
@@ -1411,16 +1421,23 @@ class Coordinator:
                 if sid and sid != "unknown":
                     samples_to_finalize.add(sid)
             
-            # Finalize target accumulation for each sample
+            # Submit all finalization tasks to Ray workers in parallel
+            tasks = []
             for sample_id in samples_to_finalize:
+                task_ref = finalize_sample_task.remote(
+                    sample_id=sample_id,
+                    work_dir=self.work_dir,
+                    target_panel=self.target_panel
+                )
+                tasks.append((sample_id, task_ref))
+            
+            # Wait for all tasks to complete
+            for sample_id, task_ref in tasks:
                 try:
-                    finalize_accumulation_for_sample(
-                        sample_id=sample_id,
-                        work_dir=self.work_dir,
-                        target_panel=self.target_panel
-                    )
+                    result = ray.get(task_ref)
+                    if result.get("status") == "error":
+                        logging.warning(f"Finalization error for {sample_id}: {result.get('error', 'Unknown')}")
                 except Exception as e:
-                    # Log but continue with other samples
                     logging.warning(f"Failed to finalize target.bam for {sample_id}: {e}")
         except Exception as e:
             logging.warning(f"Error during target BAM finalization: {e}")
