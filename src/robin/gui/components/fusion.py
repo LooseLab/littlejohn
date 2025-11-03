@@ -736,6 +736,55 @@ def _validate_fusion_breakpoints(annotated_data: pd.DataFrame, min_read_support:
     return validated_breakpoints
 
 
+def _get_validated_fusion_pairs(annotated_data: pd.DataFrame, goodpairs: pd.Series) -> List[List[str]]:
+    """Extract validated fusion pairs from annotated_data for dropdown options.
+    
+    Returns a list of gene pairs as lists (e.g., [["GENE1", "GENE2"], ...])
+    representing validated fusion pairs from breakpoint validation.
+    """
+    try:
+        # Filter to good pairs if available
+        if not goodpairs.empty and goodpairs.sum() > 0:
+            # Align indices to avoid reindexing warning
+            aligned_goodpairs = goodpairs.reindex(annotated_data.index, fill_value=False)
+            filtered_data = annotated_data[aligned_goodpairs]
+        else:
+            filtered_data = annotated_data
+        
+        if filtered_data.empty:
+            return []
+        
+        # Get validated fusion pairs using breakpoint validation
+        clustered_data = _cluster_fusion_reads(filtered_data, max_distance=10000, use_breakpoint_validation=True)
+        
+        if clustered_data.empty:
+            return []
+        
+        # Extract unique gene pairs and convert to list format
+        validated_pairs = []
+        seen_pairs = set()
+        
+        for _, row in clustered_data.iterrows():
+            fusion_pair_str = row["fusion_pair"]  # e.g., "GENE1-GENE2"
+            if fusion_pair_str and fusion_pair_str not in seen_pairs:
+                # Split the fusion pair string into individual genes
+                genes = [g.strip() for g in fusion_pair_str.split("-") if g.strip()]
+                if len(genes) >= 2:
+                    # Sort genes for consistency
+                    genes_sorted = sorted(genes)
+                    pair_key = tuple(genes_sorted)
+                    if pair_key not in seen_pairs:
+                        validated_pairs.append(genes_sorted)
+                        seen_pairs.add(pair_key)
+        
+        logging.info(f"[Fusion] Extracted {len(validated_pairs)} validated fusion pairs for dropdown")
+        return validated_pairs
+        
+    except Exception as e:
+        logging.exception(f"[Fusion] Failed to extract validated fusion pairs: {e}")
+        return []
+
+
 def _make_fusion_summary_table(container: Any, annotated_data: pd.DataFrame, goodpairs: pd.Series) -> Any:
     """Create a summary table showing fusion pairs with chromosomes, positions, and read counts."""
     if annotated_data is None or annotated_data.empty:
@@ -1066,13 +1115,11 @@ def _create_advanced_fusion_plot(
 
     # Check if DNA Features Viewer is available
     if not DNA_FEATURES_AVAILABLE:
-        logging.warning("DNA Features Viewer not available, using fallback plot")
         return _create_simple_fallback_plot(gene_group, subset)
 
     # Load gene annotation data
     gene_table = _load_gene_annotations()
     if gene_table is None:
-        logging.warning("Could not load gene annotations, using fallback plot")
         return _create_simple_fallback_plot(gene_group, subset)
 
     # Create figure with tight layout - disable constrained layout to avoid conflicts
@@ -1173,17 +1220,40 @@ def _format_ticks_to_megabases(ax: plt.Axes) -> None:
 def _load_gene_annotations() -> Optional[pd.DataFrame]:
     """Load gene annotation data from the rCNS2_data.csv.gz file."""
     try:
-        # Try to load the gene annotation data
-        gene_data_path = "src/robin/resources/rCNS2_data.csv.gz"
-        if os.path.exists(gene_data_path):
+        # Try to find the gene annotation file using robin resources
+        gene_data_path = None
+        
+        # First try to use robin resources to find the correct path
+        try:
+            from robin import resources
+            resources_dir = os.path.dirname(resources.__file__)
+            gene_data_path = os.path.join(resources_dir, "rCNS2_data.csv.gz")
+            if not os.path.exists(gene_data_path):
+                gene_data_path = None
+        except ImportError:
+            pass
+        
+        # Fallback to relative path if resources import failed
+        if not gene_data_path or not os.path.exists(gene_data_path):
+            # Try relative path from current working directory
+            possible_paths = [
+                "src/robin/resources/rCNS2_data.csv.gz",
+                "robin/resources/rCNS2_data.csv.gz",
+                os.path.join(os.path.dirname(__file__), "..", "..", "resources", "rCNS2_data.csv.gz"),
+            ]
+            
+            for path in possible_paths:
+                abs_path = os.path.abspath(path)
+                if os.path.exists(abs_path):
+                    gene_data_path = abs_path
+                    break
+        
+        if gene_data_path and os.path.exists(gene_data_path):
             gene_table = pd.read_csv(gene_data_path)
-            logging.info(f"Loaded gene annotations: {len(gene_table)} entries")
             return gene_table
         else:
-            logging.warning(f"Gene annotation file not found: {gene_data_path}")
             return None
     except Exception as e:
-        logging.error(f"Error loading gene annotations: {e}")
         return None
 
 
@@ -1197,9 +1267,16 @@ def _plot_gene_structure_with_dna_features(
 ):
     """Plot gene structure using DNA Features Viewer exactly as in the original code."""
     try:
+        # Strip whitespace from gene name to handle leading/trailing spaces in the data
+        gene_name_clean = gene_name.strip() if isinstance(gene_name, str) else gene_name
+        
         # Filter gene table for this specific gene and chromosome
-        gene_info = gene_table[
-            (gene_table["gene_name"] == gene_name) & (gene_table["Seqid"] == chrom)
+        # Also strip whitespace from gene_table gene_name column for matching
+        gene_table_clean = gene_table.copy()
+        gene_table_clean["gene_name"] = gene_table_clean["gene_name"].astype(str).str.strip()
+        
+        gene_info = gene_table_clean[
+            (gene_table_clean["gene_name"] == gene_name_clean) & (gene_table_clean["Seqid"] == chrom)
         ]
 
         if gene_info.empty:
@@ -1224,43 +1301,56 @@ def _plot_gene_structure_with_dna_features(
             # Convert tick labels to megabases
             _format_ticks_to_megabases(ax)
             return
-
+        
         # Create DNA Features Viewer visualization
         features = []
+        
+        # Determine the overall gene region from annotations
+        gene_start = int(gene_info["Start"].min())
+        gene_end = int(gene_info["End"].max())
+        
+        # Use the wider of the annotation range or the read mapping range
+        plot_start = min(start, gene_start)
+        plot_end = max(end, gene_end)
+        plot_length = plot_end - plot_start
 
         # Add gene features
         for _, row in gene_info.iterrows():
-            if row["Type"] == "gene":
-                # Main gene feature
-                strand = 1 if row["Strand"] == "+" else -1
-                features.append(
-                    GraphicFeature(
-                        start=int(row["Start"]),
-                        end=int(row["End"]),
-                        strand=strand,
-                        thickness=8,
-                        color="#ffd700",  # Gold color for genes
-                        label=row["gene_name"],
-                        fontdict={"color": "black", "fontsize": 8},
+            try:
+                if row["Type"] == "gene":
+                    # Main gene feature
+                    strand = 1 if row["Strand"] == "+" else -1
+                    features.append(
+                        GraphicFeature(
+                            start=int(row["Start"]),
+                            end=int(row["End"]),
+                            strand=strand,
+                            thickness=8,
+                            color="#ffd700",  # Gold color for genes
+                            label=row["gene_name"],
+                            fontdict={"color": "black", "fontsize": 8},
+                        )
                     )
-                )
-            elif row["Type"] == "exon":
-                # Exon features
-                strand = 1 if row["Strand"] == "+" else -1
-                features.append(
-                    GraphicFeature(
-                        start=int(row["Start"]),
-                        end=int(row["End"]),
-                        strand=strand,
-                        thickness=4,
-                        color="#C0C0C0",  # Silver color for exons
+                elif row["Type"] == "exon":
+                    # Exon features
+                    strand = 1 if row["Strand"] == "+" else -1
+                    features.append(
+                        GraphicFeature(
+                            start=int(row["Start"]),
+                            end=int(row["End"]),
+                            strand=strand,
+                            thickness=4,
+                            color="#C0C0C0",  # Silver color for exons
+                        )
                     )
-                )
+            except Exception as e:
+                continue
 
         if features:
-            # Create GraphicRecord and plot it
+            # Create GraphicRecord with the full plot range
+            # DNA Features Viewer uses absolute coordinates, first_index sets the starting point
             record = GraphicRecord(
-                sequence_length=end - start, first_index=start, features=features
+                sequence_length=plot_length, first_index=plot_start, features=features
             )
 
             # Plot on the axis
@@ -1980,11 +2070,16 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     state["target"]["plot_container"].clear()
                 except Exception:
                     pass
-                if t.get("candidate_count", 0) > 0 and t.get("gene_groups"):
+                # Get validated fusion pairs from summary table data
+                validated_pairs = _get_validated_fusion_pairs(
+                    t.get("annotated_data", pd.DataFrame()),
+                    t.get("goodpairs", pd.Series())
+                )
+                if validated_pairs:
                     with state["target"]["plot_container"].classes("w-full"):
                         with ui.row().classes("w-full"):
                             state["target"]["dropdown"] = ui.select(
-                                options=t.get("gene_groups", []),
+                                options=validated_pairs,
                                 with_input=False,
                                 on_change=lambda e, t=t: _handle_gene_pair_selection("target", e.value, t),
                                 value=state["target"]["selected_gene_pair"]
@@ -2012,11 +2107,16 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     state["target"]["plot_container"].clear()
                 except Exception:
                     pass
-                if t.get("candidate_count", 0) > 0 and t.get("gene_groups"):
+                # Get validated fusion pairs from summary table data
+                validated_pairs = _get_validated_fusion_pairs(
+                    t.get("annotated_data", pd.DataFrame()),
+                    t.get("goodpairs", pd.Series())
+                )
+                if validated_pairs:
                     with state["target"]["plot_container"].classes("w-full"):
                         with ui.row().classes("w-full"):
                             state["target"]["dropdown"] = ui.select(
-                                options=t.get("gene_groups", []),
+                                options=validated_pairs,
                                 with_input=False,
                                 on_change=lambda e, t=t: _handle_gene_pair_selection("target", e.value, t),
                                 value=state["target"]["selected_gene_pair"]
@@ -2040,10 +2140,6 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             genome_mtime = genome_data.get("mtime")
             genome_data_hash = genome_data.get("data_hash")
             logging.info(f"[Fusion] Genome-wide update check: g={g is not None}, mtime_changed={genome_mtime != state['genome'].get('mtime')}")
-            if g is not None:
-                logging.info(f"[Fusion] Genome-wide UI update: candidate_count={g.get('candidate_count', 0)}, gene_groups_count={len(g.get('gene_groups', []))}")
-                logging.info(f"[Fusion] Genome-wide UI update: has_gene_groups={bool(g.get('gene_groups'))}")
-                logging.info(f"[Fusion] Genome-wide UI update: will_show_dropdown={g.get('candidate_count', 0) > 0 and bool(g.get('gene_groups'))}")
             
             # Always update summary and table when file changes
             if g is not None and genome_mtime != state["genome"].get("mtime"):
@@ -2086,13 +2182,17 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     state["genome"]["status_container"].clear()
                 except Exception:
                     pass
-                logging.info(f"[Fusion] Genome-wide plotting check: candidate_count={g.get('candidate_count', 0)}, gene_groups={len(g.get('gene_groups', []))}")
-                # More permissive condition - show dropdown if we have any gene groups, even if candidate_count is 0
-                if g.get("gene_groups") and len(g.get("gene_groups", [])) > 0:
+                # Get validated fusion pairs from summary table data
+                validated_pairs = _get_validated_fusion_pairs(
+                    g.get("annotated_data", pd.DataFrame()),
+                    g.get("goodpairs", pd.Series())
+                )
+                logging.info(f"[Fusion] Genome-wide plotting check: candidate_count={g.get('candidate_count', 0)}, validated_pairs={len(validated_pairs)}")
+                if validated_pairs:
                     with state["genome"]["plot_container"].classes("w-full"):
                         with ui.row().classes("w-full"):
                             state["genome"]["dropdown"] = ui.select(
-                                options=g.get("gene_groups", []),
+                                options=validated_pairs,
                                 with_input=False,
                                 on_change=lambda e, g=g: _handle_gene_pair_selection("genome", e.value, g),
                                 value=state["genome"]["selected_gene_pair"]
@@ -2126,13 +2226,17 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     state["genome"]["status_container"].clear()
                 except Exception:
                     pass
-                logging.info(f"[Fusion] Genome-wide plotting check: candidate_count={g.get('candidate_count', 0)}, gene_groups={len(g.get('gene_groups', []))}")
-                # More permissive condition - show dropdown if we have any gene groups, even if candidate_count is 0
-                if g.get("gene_groups") and len(g.get("gene_groups", [])) > 0:
+                # Get validated fusion pairs from summary table data
+                validated_pairs = _get_validated_fusion_pairs(
+                    g.get("annotated_data", pd.DataFrame()),
+                    g.get("goodpairs", pd.Series())
+                )
+                logging.info(f"[Fusion] Genome-wide plotting check: candidate_count={g.get('candidate_count', 0)}, validated_pairs={len(validated_pairs)}")
+                if validated_pairs:
                     with state["genome"]["plot_container"].classes("w-full"):
                         with ui.row().classes("w-full"):
                             state["genome"]["dropdown"] = ui.select(
-                                options=g.get("gene_groups", []),
+                                options=validated_pairs,
                                 with_input=False,
                                 on_change=lambda e, g=g: _handle_gene_pair_selection("genome", e.value, g),
                                 value=state["genome"]["selected_gene_pair"]
