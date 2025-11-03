@@ -3057,11 +3057,11 @@ async def run(
                             priority=1,
                         )
 
-                        await asyncio.sleep(30.0)  # Increased from 15.0s to 30.0s to reduce GUI update frequency
+                        await asyncio.sleep(10.0)  # Poll every 10 seconds for faster updates
                     except asyncio.CancelledError:
                         break
                     except Exception:
-                        await asyncio.sleep(30.0)  # Increased from 15.0s to 30.0s to reduce GUI update frequency
+                        await asyncio.sleep(10.0)  # Poll every 10 seconds for faster updates
 
             gui_publish_task = asyncio.create_task(_publish_gui())
             print("GUI monitoring started - workflow status will be updated in real-time")

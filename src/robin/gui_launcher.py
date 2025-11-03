@@ -28,9 +28,11 @@ from robin.analysis.master_csv_manager import MasterCSVManager
 
 from typing import Optional, Dict, Any, List
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field, asdict
 from enum import Enum
 import os
+import json
+import pickle
 
 from robin.gui import theme, images
 
@@ -67,6 +69,44 @@ class GUIUpdate:
     timestamp: float
     data: Dict[str, Any]
     priority: int = 0  # Higher priority updates are processed first
+
+
+@dataclass
+class SampleRecord:
+    """Master record for a single sample with all tracked information."""
+    
+    sample_id: str
+    origin: str = "Live"  # Live, Pre-existing, or Complete
+    run_start: str = ""
+    device: str = ""
+    flowcell: str = ""
+    active_jobs: int = 0
+    total_jobs: int = 0
+    completed_jobs: int = 0
+    failed_jobs: int = 0
+    job_types: str = ""
+    last_seen: str = ""  # Formatted timestamp string
+    _last_seen_raw: float = 0.0  # Raw timestamp for sorting
+    _dirty: bool = False  # Flag to indicate record needs UI update
+    _file_mtime: float = 0.0  # master.csv modification time
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for table rows."""
+        return {
+            "sample_id": self.sample_id,
+            "origin": self.origin,
+            "run_start": self.run_start,
+            "device": self.device,
+            "flowcell": self.flowcell,
+            "active_jobs": self.active_jobs,
+            "total_jobs": self.total_jobs,
+            "completed_jobs": self.completed_jobs,
+            "failed_jobs": self.failed_jobs,
+            "job_types": self.job_types,
+            "last_seen": self.last_seen,
+            "actions": "View",
+            "_last_seen_raw": self._last_seen_raw,
+        }
 
 
 class GUILauncher:
@@ -126,6 +166,12 @@ class GUILauncher:
         # Caching for samples data
         self._last_cache_time: float = 0.0
         self._cache_duration: float = 30.0  # Cache for 30 seconds
+        
+        # Master record system - centralized source of truth for samples
+        self._samples_master_record: Dict[str, SampleRecord] = {}
+        self._samples_record_lock = threading.Lock()
+        self._master_record_cache_file: Optional[Path] = None  # Set when monitored_directory is known
+        self._background_scan_interval: float = 10.0  # Scan every 10 seconds
         # MGMT per-sample cache (latest count seen)
         self._mgmt_state: Dict[str, Dict[str, Any]] = {}
         # Coverage per-sample cache (file mtimes, computed metrics)
@@ -138,6 +184,328 @@ class GUILauncher:
         self._cnv_state: Dict[str, Dict[str, Any]] = {}
         # Cache last seen queue status so we can populate immediately on page creation
         self._last_queue_status: Dict[str, Any] = {}
+
+    # ========== Master Record System Methods ==========
+    
+    def _setup_master_record_cache(self) -> None:
+        """Initialize cache file path when monitored_directory is known."""
+        try:
+            if self.monitored_directory:
+                base = Path(self.monitored_directory)
+                if base.exists():
+                    # Store cache in the monitored directory
+                    self._master_record_cache_file = base / ".samples_master_record.pkl"
+                    logging.info(f"Master record cache file: {self._master_record_cache_file}")
+        except Exception as e:
+            logging.debug(f"Error setting up cache file: {e}")
+
+    def _load_master_record_cache(self) -> bool:
+        """Load master record from cache file. Returns True if successful."""
+        try:
+            if not self._master_record_cache_file or not self._master_record_cache_file.exists():
+                return False
+            
+            with open(self._master_record_cache_file, 'rb') as f:
+                cached_data = pickle.load(f)
+            
+            if isinstance(cached_data, dict):
+                # Convert dicts back to SampleRecord objects
+                with self._samples_record_lock:
+                    self._samples_master_record = {
+                        sid: SampleRecord(**data) if isinstance(data, dict) else data
+                        for sid, data in cached_data.items()
+                    }
+                logging.info(f"Loaded {len(self._samples_master_record)} samples from cache")
+                # Mark all as dirty to trigger UI refresh
+                for record in self._samples_master_record.values():
+                    record._dirty = True
+                return True
+        except Exception as e:
+            logging.debug(f"Error loading master record cache: {e}")
+        return False
+
+    def _save_master_record_cache(self) -> None:
+        """Save master record to cache file."""
+        try:
+            if not self._master_record_cache_file:
+                return
+            
+            with self._samples_record_lock:
+                # Convert SampleRecord objects to dicts for pickle
+                cache_data = {
+                    sid: asdict(record)
+                    for sid, record in self._samples_master_record.items()
+                }
+            
+            # Save to temporary file first, then rename (atomic operation)
+            temp_file = self._master_record_cache_file.with_suffix('.pkl.tmp')
+            with open(temp_file, 'wb') as f:
+                pickle.dump(cache_data, f)
+            temp_file.replace(self._master_record_cache_file)
+            logging.debug(f"Saved master record cache ({len(cache_data)} samples)")
+        except Exception as e:
+            logging.debug(f"Error saving master record cache: {e}")
+
+    def _background_scan_samples(self) -> None:
+        """Background process that scans folder and updates master record.
+        This runs in a separate timer and does NOT block the UI thread."""
+        try:
+            if not self.monitored_directory:
+                return
+            
+            base = Path(self.monitored_directory)
+            if not base.exists():
+                return
+            
+            # Scan all sample directories
+            now_ts = time.time()
+            updated_any = False
+            
+            with self._samples_record_lock:
+                # Track which samples we've seen in this scan
+                seen_sample_ids = set()
+                
+                for sample_dir in base.iterdir():
+                    if not sample_dir.is_dir():
+                        continue
+                    
+                    sid = sample_dir.name
+                    seen_sample_ids.add(sid)
+                    master_csv = sample_dir / "master.csv"
+                    
+                    if not master_csv.exists():
+                        continue
+                    
+                    try:
+                        # Get file modification time
+                        file_mtime = master_csv.stat().st_mtime
+                        
+                        # Get or create record
+                        record = self._samples_master_record.get(sid)
+                        if record is None:
+                            # New sample - create record
+                            record = SampleRecord(sample_id=sid)
+                            record._dirty = True
+                            updated_any = True
+                            # Check if it's pre-existing
+                            if sid in self._preexisting_sample_ids:
+                                record.origin = "Pre-existing"
+                            else:
+                                record.origin = "Live"
+                        elif file_mtime > record._file_mtime:
+                            # File has changed - update record
+                            record._dirty = True
+                            updated_any = True
+                        
+                        # Update file mtime
+                        record._file_mtime = file_mtime
+                        
+                        # Read master.csv for metadata
+                        try:
+                            with master_csv.open("r", newline="") as fh:
+                                reader = csv.DictReader(fh)
+                                first_row = next(reader, None)
+                            if first_row:
+                                # Update run info
+                                record.run_start = self._format_timestamp_for_display(
+                                    first_row.get("run_info_run_time", "")
+                                )
+                                record.device = first_row.get("run_info_device", "") or ""
+                                record.flowcell = first_row.get("run_info_flow_cell", "") or ""
+                                
+                                # Update last_seen from saved value or use file mtime
+                                try:
+                                    saved_last = float(
+                                        first_row.get("samples_overview_last_seen", 0.0) or 0.0
+                                    )
+                                    if saved_last > 0:
+                                        record._last_seen_raw = saved_last
+                                    else:
+                                        record._last_seen_raw = file_mtime
+                                except Exception:
+                                    record._last_seen_raw = file_mtime
+                                
+                                # Update job counts from persisted overview
+                                record.active_jobs = int(
+                                    first_row.get("samples_overview_active_jobs", 0) or 0
+                                )
+                                record.total_jobs = int(
+                                    first_row.get("samples_overview_total_jobs", 0) or 0
+                                )
+                                record.completed_jobs = int(
+                                    first_row.get("samples_overview_completed_jobs", 0) or 0
+                                )
+                                record.failed_jobs = int(
+                                    first_row.get("samples_overview_failed_jobs", 0) or 0
+                                )
+                                record.job_types = str(
+                                    first_row.get("samples_overview_job_types", "") or ""
+                                )
+                        except Exception as e:
+                            logging.debug(f"Error reading master.csv for {sid}: {e}")
+                        
+                        # Update last_seen formatted string
+                        record.last_seen = time.strftime(
+                            "%Y-%m-%d %H:%M:%S", time.localtime(record._last_seen_raw)
+                        )
+                        
+                        # Update origin based on inactivity timeout
+                        prev_origin = record.origin
+                        if record.origin == "Live" and (now_ts - record._last_seen_raw) >= self.completion_timeout_seconds:
+                            record.origin = "Complete"
+                            record._dirty = True
+                            # Trigger finalization if transitioning from Live to Complete
+                            if prev_origin == "Live" and sid not in self._finalized_samples:
+                                self._trigger_target_bam_finalization(sid)
+                                self._finalized_samples.add(sid)
+                        elif record.origin == "Pre-existing" and (now_ts - record._last_seen_raw) >= self.completion_timeout_seconds:
+                            # Keep as Pre-existing if it was pre-existing and still inactive
+                            pass
+                        elif record.origin == "Complete" and (now_ts - record._last_seen_raw) < self.completion_timeout_seconds:
+                            # Reactivate if file was modified recently
+                            record.origin = "Live"
+                            record._dirty = True
+                        
+                        # Save to master record
+                        self._samples_master_record[sid] = record
+                        
+                        # Persist overview to master.csv via MasterCSVManager
+                        try:
+                            manager = MasterCSVManager(str(base))
+                            persist_payload = {
+                                "active_jobs": int(record.active_jobs),
+                                "total_jobs": int(record.total_jobs),
+                                "completed_jobs": int(record.completed_jobs),
+                                "failed_jobs": int(record.failed_jobs),
+                                "job_types": record.job_types,
+                                "last_seen": float(record._last_seen_raw),
+                            }
+                            manager.update_sample_overview(sid, persist_payload)
+                        except Exception as e:
+                            logging.debug(f"Error persisting overview for {sid}: {e}")
+                    
+                    except Exception as e:
+                        logging.debug(f"Error processing sample {sid}: {e}")
+                
+                # Remove samples that no longer exist
+                to_remove = set(self._samples_master_record.keys()) - seen_sample_ids
+                if to_remove:
+                    for sid in to_remove:
+                        del self._samples_master_record[sid]
+                    updated_any = True
+                    logging.debug(f"Removed {len(to_remove)} deleted samples from master record")
+            
+            # Save cache if anything changed
+            if updated_any:
+                self._save_master_record_cache()
+                # Trigger UI refresh if table exists
+                if hasattr(self, "samples_table"):
+                    self._refresh_table_from_master()
+        
+        except Exception as e:
+            logging.error(f"Error in background sample scan: {e}")
+
+    def _refresh_table_from_master(self) -> None:
+        """Fast UI refresh - reads from master record and applies filters.
+        This is called from the background scanner and does NOT do file I/O."""
+        try:
+            if not hasattr(self, "samples_table"):
+                return
+            
+            # Get all records from master
+            with self._samples_record_lock:
+                records = list(self._samples_master_record.values())
+            
+            # Convert to row dicts
+            rows = [record.to_dict() for record in records]
+            
+            # Update cached rows
+            self._last_samples_rows = rows
+            self._last_cache_time = time.time()
+            
+            # Apply filters and update table
+            self._apply_samples_table_filters()
+            
+        except Exception as e:
+            logging.error(f"Error refreshing table from master: {e}")
+
+    def _update_master_record_from_workflow(self, samples_data: List[Dict[str, Any]]) -> None:
+        """Update master record from workflow polling data.
+        This merges workflow stats into the master record without doing file I/O."""
+        try:
+            with self._samples_record_lock:
+                for s in samples_data:
+                    sid = s.get("sample_id", "") or "unknown"
+                    if sid == "unknown":
+                        continue
+                    
+                    last_seen = float(s.get("last_seen", time.time()))
+                    
+                    # Get or create record
+                    record = self._samples_master_record.get(sid)
+                    if record is None:
+                        # Create new record (will be populated by background scan)
+                        record = SampleRecord(
+                            sample_id=sid,
+                            _last_seen_raw=last_seen,
+                            last_seen=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_seen)),
+                        )
+                        if sid in self._preexisting_sample_ids:
+                            record.origin = "Pre-existing"
+                        else:
+                            record.origin = "Live"
+                    
+                    # Update job counts from workflow data (these are more current than file scans)
+                    record.active_jobs = s.get("active_jobs", 0)
+                    record.total_jobs = s.get("total_jobs", 0)
+                    record.completed_jobs = s.get("completed_jobs", 0)
+                    record.failed_jobs = s.get("failed_jobs", 0)
+                    
+                    # Update job types
+                    job_types = s.get("job_types", [])
+                    if isinstance(job_types, list):
+                        record.job_types = ",".join(sorted(set(job_types)))
+                    else:
+                        record.job_types = str(job_types or "")
+                    
+                    # Update last_seen if this is newer
+                    if last_seen > record._last_seen_raw:
+                        record._last_seen_raw = last_seen
+                        record.last_seen = time.strftime(
+                            "%Y-%m-%d %H:%M:%S", time.localtime(last_seen)
+                        )
+                        record._dirty = True
+                    
+                    # Mark as dirty to trigger UI update
+                    record._dirty = True
+                    self._samples_master_record[sid] = record
+                
+                # Persist updates to master.csv
+                try:
+                    base = Path(self.monitored_directory) if self.monitored_directory else None
+                    if base and base.exists():
+                        manager = MasterCSVManager(str(base))
+                        for record in self._samples_master_record.values():
+                            if record._dirty:
+                                persist_payload = {
+                                    "active_jobs": int(record.active_jobs),
+                                    "total_jobs": int(record.total_jobs),
+                                    "completed_jobs": int(record.completed_jobs),
+                                    "failed_jobs": int(record.failed_jobs),
+                                    "job_types": record.job_types,
+                                    "last_seen": float(record._last_seen_raw),
+                                }
+                                manager.update_sample_overview(record.sample_id, persist_payload)
+                                record._dirty = False
+                except Exception as e:
+                    logging.debug(f"Error persisting workflow updates: {e}")
+            
+            # Trigger UI refresh
+            if hasattr(self, "samples_table"):
+                self._refresh_table_from_master()
+        
+        except Exception as e:
+            logging.error(f"Error updating master record from workflow: {e}")
 
     def launch_gui(
         self,
@@ -157,14 +525,19 @@ class GUILauncher:
         self.center = center
 
         # Store absolute monitored directory to avoid relative path issues
-
-        # Store absolute monitored directory to avoid relative path issues
         try:
             self.monitored_directory = (
                 str(Path(monitored_directory).resolve()) if monitored_directory else ""
             )
         except Exception:
             self.monitored_directory = monitored_directory
+        
+        # Setup master record cache when directory is known
+        if self.monitored_directory:
+            self._setup_master_record_cache()
+            # Try to load cache immediately for fast startup
+            if self._load_master_record_cache():
+                logging.info("Loaded samples from cache - table will populate immediately")
 
         try:
             # Start GUI in completely isolated background thread
@@ -417,12 +790,15 @@ class GUILauncher:
             elif update.update_type == UpdateType.ERROR_UPDATE:
                 self._update_errors(update.data)
             elif update.update_type == UpdateType.SAMPLES_UPDATE:
-                # Store the data and update table directly (ui.timer fails with slot error)
+                # Update master record from workflow polling data
+                # This merges workflow stats into master record without file I/O
                 self._pending_samples_data = update.data
                 try:
-                    self._update_samples_table_sync(self._pending_samples_data)
+                    samples_list = update.data.get("samples", [])
+                    if samples_list:
+                        self._update_master_record_from_workflow(samples_list)
                 except Exception as e:
-                    logging.error(f"[GUI] Samples table update failed: {e}")
+                    logging.error(f"[GUI] Samples master record update failed: {e}")
 
         except Exception as e:
             logging.debug(f"Error handling GUI update: {e}")
@@ -798,16 +1174,26 @@ class GUILauncher:
                     # Rate limit GUI updates to prevent system lockup
                     # Increased from 0.3s to 2.0s to reduce update frequency
                     app.timer(2.0, self._drain_updates_on_ui, active=True)
-                    # Delay initial sample scanning to prevent startup lockup
-                    # Increased from 0.5s to 5.0s to allow GUI to fully initialize
+                    
+                    # Background master record scanner - scans folder periodically
+                    # Runs every 10 seconds to keep master record up to date
+                    # First scan happens immediately if cache was loaded, otherwise after 1 second
+                    initial_delay = 1.0 if not self._samples_master_record else 0.1
                     app.timer(
-                        5.0,
-                        lambda: self._scan_and_seed_samples_async(preexisting=True),
+                        initial_delay,
+                        lambda: self._background_scan_samples(),
                         once=True,
                     )
-                    # Increase polling interval for new samples to reduce load
-                    # Increased from 10.0s to 30.0s to reduce file system pressure
-                    app.timer(30.0, self._scan_for_new_samples_async, active=True)
+                    # Subsequent scans every 10 seconds
+                    app.timer(self._background_scan_interval, self._background_scan_samples, active=True)
+                    
+                    # If cache was not loaded, do initial preexisting scan after GUI is ready
+                    if not self._samples_master_record:
+                        app.timer(
+                            2.0,
+                            lambda: self._background_scan_samples(),  # Initial scan
+                            once=True,
+                        )
                     
                     # Process progress queue for report generation
                     app.timer(0.1, self._process_progress_queue, active=True)
@@ -1108,6 +1494,14 @@ class GUILauncher:
                                 break
                     except Exception:
                         pass
+                    
+                    # Populate table from master record if available (fast initial load)
+                    try:
+                        if self._samples_master_record:
+                            logging.info("Populating table from master record cache")
+                            self._refresh_table_from_master()
+                    except Exception as e:
+                        logging.debug(f"Error populating table from master record: {e}")
 
                     # Per-row action buttons (Finalize only shows for Complete/Pre-existing samples)
                     try:
