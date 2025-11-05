@@ -51,36 +51,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     "text-sm text-gray-600"
                 )
         with ui.card().classes("w-full"):
-            with ui.grid(rows=2).classes("w-full gap-4"):
-                # Per Chromosome Coverage (bar)
-                echart_chr_cov = ui.echart(
-                    {
-                        "backgroundColor": "transparent",
-                        "title": {
-                            "text": "Per Chromosome Coverage",
-                            "left": "center",
-                            "top": 10,
-                            "textStyle": {"fontSize": 16, "color": "#000"},
-                        },
-                        "tooltip": {"trigger": "axis"},
-                        "grid": {
-                            "left": "5%",
-                            "right": "5%",
-                            "bottom": "10%",
-                            "top": "20%",
-                            "containLabel": True,
-                        },
-                        "xAxis": {
-                            "type": "category",
-                            "data": [],
-                            "axisLabel": {"rotate": 45},
-                        },
-                        "yAxis": {"type": "value", "name": "Coverage (x)"},
-                        "series": [],
-                    }
-                ).classes("w-full h-64")
-                # Per Chromosome Target Coverage (scatter)
-                echart_target_cov = ui.echart(
+            # Per Chromosome Target Coverage (bar chart)
+            echart_target_cov = ui.echart(
                     {
                         "backgroundColor": "transparent",
                         "title": {
@@ -100,6 +72,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         "grid": {
                             "left": "15%",
                             "right": "5%",
+                            "bottom": "10%",
                             "top": "20%",
                             "containLabel": True,
                         },
@@ -3838,40 +3811,6 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             # Never let logging itself break the UI
             pass
 
-    def _update_chr_cov(cov_df: pd.DataFrame) -> None:
-        try:
-
-            def chr_key(label: str) -> int:
-                s = str(label)
-                if s.startswith("chr"):
-                    s = s[3:]
-                mapping = {"X": 23, "Y": 24}
-                try:
-                    return int(s)
-                except Exception:
-                    return mapping.get(s, 1000)
-
-            pattern = r"^chr([0-9]+|X|Y)$"
-            name_col = "#rname" if "#rname" in cov_df.columns else "rname"
-            temp_df = cov_df[cov_df[name_col].astype(str).str.match(pattern)]
-            temp_df = temp_df[temp_df[name_col] != "chrM"]
-            names = sorted(temp_df[name_col].astype(str).unique(), key=chr_key)
-            temp_df = temp_df.set_index(name_col).loc[names].reset_index()
-            echart_chr_cov.options["xAxis"]["data"] = names
-            echart_chr_cov.options["series"] = [
-                {
-                    "type": "bar",
-                    "name": "Chromosome",
-                    "barWidth": "60%",
-                    "data": [float(v) for v in temp_df["meandepth"].tolist()],
-                }
-            ]
-            echart_chr_cov.update()
-        except Exception as e:
-            _log_notify(
-                f"Chromosome coverage update failed: {e}", level="warning", notify=False
-            )
-
     def _update_target_cov(cov_df: pd.DataFrame, bed_df: pd.DataFrame) -> None:
         try:
 
@@ -3898,25 +3837,45 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             temp_df = cov_df[cov_df[name_col].astype(str).str.match(pattern)]
             temp_df = temp_df[temp_df[name_col] != "chrM"]
             names = sorted(temp_df[name_col].astype(str).unique(), key=chr_key)
+            
+            if not names:
+                _log_notify(
+                    "No valid chromosome data found for target coverage chart",
+                    level="warning",
+                    notify=False,
+                )
+                return
+            
             echart_target_cov.options["xAxis"]["data"] = names
             grouped = grouped.set_index("chrom").reindex(names).reset_index()
+            
+            # Get off-target data - group by chromosome and take mean if multiple entries
+            temp_df_grouped = temp_df.groupby(name_col)["meandepth"].mean()
+            off_target_data = [
+                float(temp_df_grouped.get(chrom, 0.0)) if pd.notna(temp_df_grouped.get(chrom, 0.0)) else 0.0
+                for chrom in names
+            ]
+            
+            # Get on-target data
+            on_target_data = [
+                float(v) if pd.notna(v) else 0.0 
+                for v in grouped["meandepth"].fillna(0).tolist()
+            ]
+            
             echart_target_cov.options["series"] = [
                 {
-                    "type": "scatter",
+                    "type": "bar",
                     "name": "Off Target",
-                    "symbolSize": 8,
-                    "data": [
-                        float(v)
-                        for v in temp_df.set_index(name_col)
-                        .loc[names]["meandepth"]
-                        .tolist()
-                    ],
+                    "barWidth": "35%",
+                    "data": off_target_data,
+                    "itemStyle": {"color": "#9ca3af"},
                 },
                 {
-                    "type": "scatter",
+                    "type": "bar",
                     "name": "On Target",
-                    "symbolSize": 8,
-                    "data": [float(v) for v in grouped["meandepth"].fillna(0).tolist()],
+                    "barWidth": "35%",
+                    "data": on_target_data,
+                    "itemStyle": {"color": "#3b82f6"},
                 },
             ]
             echart_target_cov.update()
@@ -4120,7 +4079,6 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                     cov_df["covbases"]
                                     / cov_df["endpos"].replace(0, np.nan)
                                 ).fillna(0)
-                        _update_chr_cov(cov_df)
                         state["cov_df"] = cov_df
                         state["cov_main_mtime"] = m  # only set on success
                     except Exception as e:
