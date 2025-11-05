@@ -2791,25 +2791,46 @@ class GUILauncher:
                 else None
             )
 
+            # Check directory existence early and redirect if not found
+            if not sample_dir or not sample_dir.exists():
+                logging.warning(f"Sample directory not found: {sample_dir}")
+                with ui.column().classes("w-full items-center justify-center p-8"):
+                    ui.label(f"Sample directory not found: {sample_dir}").classes(
+                        "text-xl font-semibold text-red-600"
+                    )
+                    ui.label(
+                        "The sample directory does not exist or has been removed."
+                    ).classes("text-sm text-gray-600")
+                    ui.label(
+                        "Redirecting to sample list..."
+                    ).classes("text-sm text-gray-500 mt-2")
+                    ui.button(
+                        "Back to Samples", on_click=lambda: ui.navigate.to("/live_data")
+                    ).props("color=primary")
+                
+                # Soft redirect after short delay
+                def redirect_to_samples():
+                    """Redirect to the sample list page."""
+                    try:
+                        ui.navigate.to("/live_data")
+                    except Exception as e:
+                        logging.warning(f"Failed to redirect to /live_data: {e}")
+                        # Fallback: try using JavaScript redirect
+                        try:
+                            ui.run_javascript('window.location.href = "/live_data"')
+                        except Exception as e2:
+                            logging.error(f"Failed JavaScript redirect: {e2}")
+                
+                # Create and activate the timer
+                redirect_timer = ui.timer(2.0, redirect_to_samples, once=True)
+                redirect_timer.activate()
+                return
+
             # Debug visibility: entering sample page and directory availability
             try:
                 ui.notify(f"Opening sample {sample_id}", type="info")
             except Exception:
                 pass
-            
-            # Check directory existence asynchronously to avoid blocking
-            async def check_directory_and_notify():
-                try:
-                    if not sample_dir or not sample_dir.exists():
-                        ui.notify(
-                            f"Sample output directory not found for {sample_id}",
-                            type="warning",
-                        )
-                except Exception:
-                    pass
-            
-            # Start directory check in background
-            ui.timer(0.1, check_directory_and_notify, once=True)
 
             with ui.card().classes("w-full").style("border: 2px solid var(--md-primary)"):
                 with ui.row().classes("w-full flex justify-between items-center"):

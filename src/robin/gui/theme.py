@@ -409,18 +409,18 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, se
             }
         }
         
-        /* Ultra-compact footer for mobile */
+        /* Compact footer for mobile */
         @media (max-width: 768px) {
             .footer-compact {
-                padding: 0.0625rem 0.125rem !important;
+                padding: 0.375rem 0.75rem !important;
                 min-height: auto !important;
             }
             .footer-compact .mobile-button {
-                min-height: 24px !important;
-                min-width: 24px !important;
-                padding: 0.0625rem 0.125rem !important;
-                margin: 0 0.0625rem !important;
-                font-size: 0.6875rem !important;
+                min-height: 32px !important;
+                min-width: 32px !important;
+                padding: 0.25rem 0.5rem !important;
+                margin: 0 0.25rem !important;
+                font-size: 0.75rem !important;
             }
         }
         
@@ -488,51 +488,27 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, se
             }
         }
         
-        /* Ultra-compact header and footer on mobile */
+        /* Compact header and footer on mobile */
         @media (max-width: 768px) {
             .q-header {
-                min-height: 32px !important;
-                padding: 0.125rem 0.25rem !important;
+                min-height: 48px !important;
+                padding: 0.5rem 0.75rem !important;
             }
             .q-footer {
-                min-height: 32px !important;
-                padding: 0.125rem 0.25rem !important;
+                min-height: 48px !important;
+                padding: 0.375rem 0.75rem !important;
             }
         }
         
-        /* Even more compact on very small screens */
+        /* Compact on very small screens */
         @media (max-width: 480px) {
             .q-header {
-                min-height: 28px !important;
-                padding: 0.0625rem 0.125rem !important;
+                min-height: 44px !important;
+                padding: 0.375rem 0.5rem !important;
             }
             .q-footer {
-                min-height: 28px !important;
-                padding: 0.0625rem 0.125rem !important;
-            }
-        }
-        
-        /* Ultra-compact for landscape phones */
-        @media (max-width: 896px) and (orientation: landscape) {
-            .q-header {
-                min-height: 24px !important;
-                padding: 0.03125rem 0.0625rem !important;
-            }
-            .q-footer {
-                min-height: 24px !important;
-                padding: 0.03125rem 0.0625rem !important;
-            }
-        }
-        
-        /* Even more compact for small landscape phones */
-        @media (max-width: 667px) and (orientation: landscape) {
-            .q-header {
-                min-height: 20px !important;
-                padding: 0.015625rem 0.03125rem !important;
-            }
-            .q-footer {
-                min-height: 20px !important;
-                padding: 0.015625rem 0.03125rem !important;
+                min-height: 44px !important;
+                padding: 0.375rem 0.5rem !important;
             }
         }
         
@@ -554,30 +530,15 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, se
             }
             /* Add padding to main content to account for fixed header/footer */
             .q-page {
-                padding-top: 32px !important;
-                padding-bottom: 32px !important;
+                padding-top: 48px !important;
+                padding-bottom: 48px !important;
             }
         }
         
         @media (max-width: 480px) {
             .q-page {
-                padding-top: 28px !important;
-                padding-bottom: 28px !important;
-            }
-        }
-        
-        /* Landscape phone content padding */
-        @media (max-width: 896px) and (orientation: landscape) {
-            .q-page {
-                padding-top: 24px !important;
-                padding-bottom: 24px !important;
-            }
-        }
-        
-        @media (max-width: 667px) and (orientation: landscape) {
-            .q-page {
-                padding-top: 20px !important;
-                padding-bottom: 20px !important;
+                padding-top: 44px !important;
+                padding-bottom: 44px !important;
             }
         }
         
@@ -645,6 +606,65 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, se
                 margin-left: 0.5rem !important;
                 margin-right: 0.5rem !important;
                 max-width: calc(100% - 1rem) !important;
+            }
+        }
+        
+        /* Research Use Only watermark - left aligned after logo */
+        .footer-watermark {
+            position: absolute;
+            top: 50%;
+            left: 4.5rem;
+            transform: translateY(-50%);
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: rgba(0, 0, 0, 0.3);
+            pointer-events: none;
+            white-space: nowrap;
+            z-index: 1;
+            letter-spacing: 0.08em;
+        }
+        
+        /* Desktop watermark positioning */
+        @media (min-width: 769px) {
+            .footer-watermark {
+                left: 5.5rem;
+                font-size: 1rem;
+            }
+        }
+        
+        /* Dark mode watermark */
+        .dark .footer-watermark {
+            color: rgba(255, 255, 255, 0.3);
+        }
+        
+        /* Smaller watermark on mobile */
+        @media (max-width: 768px) {
+            .footer-watermark {
+                font-size: 0.75rem;
+                left: 3rem;
+                letter-spacing: 0.05em;
+            }
+        }
+        
+        /* Ensure footer content is above watermark */
+        .footer-compact {
+            position: relative;
+            z-index: 2;
+        }
+        
+        /* Reduce footer height - desktop */
+        @media (min-width: 769px) {
+            .q-footer {
+                min-height: 56px !important;
+                padding: 0.5rem 1rem !important;
+            }
+        }
+        
+        /* More compact footer on mobile */
+        @media (max-width: 768px) {
+            .q-footer {
+                min-height: 48px !important;
+                padding: 0.375rem 0.75rem !important;
             }
         }
         </style>
@@ -851,7 +871,9 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, se
     footer_classes = "items-center elevation-1"
     if batphone:
         footer_classes += " batphone"
-    with ui.footer().classes(footer_classes):
+    with ui.footer().classes(footer_classes).style("position: relative"):
+        # Research Use Only watermark
+        ui.label("RESEARCH USE ONLY").classes("footer-watermark")
         with ui.dialog() as dialog, ui.card().classes("elevation-3 rounded-xl"):
             ui.label("Links").classes("text-headline-small text-weight-bold q-mb-md")
             ui.separator()
@@ -883,10 +905,10 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, se
                 "bg-primary text-white rounded-md"
             )
         
-        # Footer content - ultra-compact on mobile
-        with ui.row().classes("w-full items-center justify-between px-0.5 py-0.25 sm:px-2 sm:py-1 gap-0.5 no-wrap footer-compact"):
-            # Left side: Logo (ultra-small on mobile)
-            ui.image(get_imagefile()).style("width: 20px").classes("flex-shrink-0 sm:w-8")
+        # Footer content - compact on mobile
+        with ui.row().classes("w-full items-center justify-between px-0.5 py-0.25 sm:px-2 sm:py-1 gap-2 no-wrap footer-compact"):
+            # Left side: Logo (larger size)
+            ui.image(get_imagefile()).style("width: 40px").classes("flex-shrink-0 sm:w-16")
             
             # Center: Buttons with proper spacing
             with ui.row().classes("items-center gap-2 flex-shrink-0"):
