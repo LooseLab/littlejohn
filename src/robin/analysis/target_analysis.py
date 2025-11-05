@@ -2198,6 +2198,7 @@ def finalize_accumulation_for_sample(
     logger = logging.getLogger("robin.target")
     
     try:
+        print(f"[FINAL_MERGE] Starting finalization for sample: {sample_id}")
         logger.info(f"Finalizing accumulation for sample {sample_id}")
         
         sample_output_dir = os.path.join(work_dir, sample_id)
@@ -2225,14 +2226,31 @@ def finalize_accumulation_for_sample(
         # Now merge all batch BAMs into target.bam
         logger.info(f"Merging all batch BAMs into final target.bam for {sample_id}")
         
+        target_bam_path = os.path.join(sample_output_dir, "target.bam")
+        
+        # Check if target.bam already exists but batch files weren't cleaned up from a previous run
+        if os.path.exists(target_bam_path) and os.path.exists(f"{target_bam_path}.bai"):
+            existing_batch_bams = sorted(glob.glob(os.path.join(sample_output_dir, "batch_*.bam")))
+            if existing_batch_bams:
+                logger.info(f"Found {len(existing_batch_bams)} leftover batch BAM files - cleaning up since target.bam already exists")
+                cleaned_count = 0
+                for batch_bam in existing_batch_bams:
+                    try:
+                        if os.path.exists(batch_bam):
+                            os.remove(batch_bam)
+                            cleaned_count += 1
+                        if os.path.exists(f"{batch_bam}.bai"):
+                            os.remove(f"{batch_bam}.bai")
+                    except OSError as e:
+                        logger.warning(f"Could not remove leftover batch BAM {os.path.basename(batch_bam)}: {e}")
+                logger.info(f"Cleaned up {cleaned_count} leftover batch files")
+        
         # Find all batch BAM files
         batch_bams = sorted(glob.glob(os.path.join(sample_output_dir, "batch_*.bam")))
         
         if batch_bams:
             logger.info(f"Found {len(batch_bams)} batch BAM files to merge")
             print(f"[FINAL_MERGE] Found {len(batch_bams)} batch BAM files to merge")
-            
-            target_bam_path = os.path.join(sample_output_dir, "target.bam")
             
             # Create temp merged output
             temp_merged_bam = os.path.join(sample_output_dir, ".final_merged.bam.tmp")
@@ -2257,8 +2275,10 @@ def finalize_accumulation_for_sample(
             if os.path.exists(f"{temp_merged_bam}.bai"):
                 shutil.move(f"{temp_merged_bam}.bai", f"{target_bam_path}.bai")
             
-            # Verify target.bam
-            if os.path.exists(target_bam_path) and os.path.exists(f"{target_bam_path}.bai"):
+            # Verify target.bam was created successfully
+            target_bam_exists = os.path.exists(target_bam_path) and os.path.exists(f"{target_bam_path}.bai")
+            
+            if target_bam_exists:
                 try:
                     with pysam.AlignmentFile(target_bam_path, "rb") as bam_file:
                         read_count = bam_file.count(until_eof=True)
@@ -2273,27 +2293,54 @@ def finalize_accumulation_for_sample(
             else:
                 logger.error("Failed to create target.bam file")
             
-            # Clean up batch BAM files
-            logger.info("Cleaning up batch BAM files after final merge")
-            for batch_bam in batch_bams:
-                try:
-                    if os.path.exists(batch_bam):
-                        os.remove(batch_bam)
-                    if os.path.exists(f"{batch_bam}.bai"):
-                        os.remove(f"{batch_bam}.bai")
-                except OSError as e:
-                    logger.warning(f"Could not remove batch BAM {batch_bam}: {e}")
+            # Clean up batch BAM files and their associated BAI files
+            # Only clean up if target.bam was successfully created
+            if target_bam_exists:
+                print(f"[FINAL_MERGE] Cleaning up {len(batch_bams)} batch BAM files and their index files...")
+                logger.info(f"Cleaning up {len(batch_bams)} batch BAM files and their index files after final merge")
+                cleaned_count = 0
+                failed_count = 0
+                
+                for batch_bam in batch_bams:
+                    try:
+                        # Remove the batch BAM file
+                        if os.path.exists(batch_bam):
+                            os.remove(batch_bam)
+                            cleaned_count += 1
+                            logger.debug(f"Removed batch BAM: {os.path.basename(batch_bam)}")
+                        
+                        # Remove the associated BAI file
+                        batch_bai = f"{batch_bam}.bai"
+                        if os.path.exists(batch_bai):
+                            os.remove(batch_bai)
+                            logger.debug(f"Removed batch BAI: {os.path.basename(batch_bai)}")
+                    except OSError as e:
+                        failed_count += 1
+                        logger.warning(f"Could not remove batch BAM {os.path.basename(batch_bam)}: {e}")
+                
+                logger.info(f"Batch cleanup complete: {cleaned_count} batch files removed, {failed_count} failures")
+                print(f"[FINAL_MERGE] Cleaned up {cleaned_count} batch BAM files")
+                
+                if failed_count > 0:
+                    print(f"[FINAL_MERGE] Warning: Failed to remove {failed_count} batch file(s) - they may need manual cleanup")
+                    logger.warning(f"Failed to remove {failed_count} batch file(s) - they may need manual cleanup")
+            else:
+                print("[FINAL_MERGE] Warning: Skipping batch cleanup - target.bam was not successfully created")
+                logger.warning("Skipping batch cleanup - target.bam was not successfully created")
             
             logger.info(f"Final merge complete for {sample_id}")
-            result["final_merge"] = "success"
+            print(f"[FINAL_MERGE] Finalization complete for {sample_id}")
+            result["final_merge"] = "success" if target_bam_exists else "failed"
             result["batch_files_merged"] = len(batch_bams)
         else:
             logger.info(f"No batch BAM files found for {sample_id}")
+            print(f"[FINAL_MERGE] No batch BAM files found for {sample_id}")
             result["final_merge"] = "no_batch_files"
         
         return result
         
     except Exception as e:
+        print(f"[FINAL_MERGE] Error during final accumulation for {sample_id}: {e}")
         logger.error(f"Error during final accumulation for {sample_id}: {e}")
         import traceback
         logger.error(traceback.format_exc())

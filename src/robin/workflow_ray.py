@@ -879,6 +879,10 @@ class Coordinator:
     def get_target_panel(self) -> str:
         """Get the target panel for fusion analysis."""
         return self.target_panel
+    
+    def set_work_dir(self, work_dir: Optional[str]) -> None:
+        """Set the work directory for the coordinator."""
+        self.work_dir = work_dir
 
     # ----- handler registration API -----
     async def register_handler(self, job_type: str, remote_func) -> None:
@@ -1400,7 +1404,32 @@ class Coordinator:
         This should be called during shutdown to ensure all target.bam files are created.
         Uses Ray tasks to offload the blocking I/O work to separate workers.
         """
-        if not hasattr(self, 'work_dir') or not self.work_dir:
+        # Try to get work_dir from Coordinator attribute first
+        work_dir = getattr(self, 'work_dir', None)
+        
+        # If not set, try to extract from active jobs' metadata
+        if not work_dir:
+            for job in self._inflight.values():
+                try:
+                    work_dir = job.context.metadata.get("work_dir")
+                    if work_dir:
+                        break
+                except Exception:
+                    continue
+        
+        # If still not found, try to extract from samples_by_id if they have work_dir stored
+        if not work_dir:
+            for sample_data in self.samples_by_id.values():
+                try:
+                    work_dir = sample_data.get("work_dir")
+                    if work_dir:
+                        break
+                except Exception:
+                    continue
+        
+        if not work_dir:
+            print("[SHUTDOWN] No work directory found - skipping target BAM finalization")
+            print("[SHUTDOWN] Work directory may not be set on Coordinator or available in job metadata")
             return
         
         try:
@@ -1421,25 +1450,57 @@ class Coordinator:
                 if sid and sid != "unknown":
                     samples_to_finalize.add(sid)
             
+            if not samples_to_finalize:
+                print("[SHUTDOWN] No samples to finalize")
+                return
+            
+            print(f"[SHUTDOWN] Finalizing target.bam for {len(samples_to_finalize)} sample(s) using work_dir: {work_dir}")
+            
             # Submit all finalization tasks to Ray workers in parallel
             tasks = []
             for sample_id in samples_to_finalize:
                 task_ref = finalize_sample_task.remote(
                     sample_id=sample_id,
-                    work_dir=self.work_dir,
+                    work_dir=work_dir,
                     target_panel=self.target_panel
                 )
                 tasks.append((sample_id, task_ref))
             
-            # Wait for all tasks to complete
-            for sample_id, task_ref in tasks:
+            # Wait for all tasks to complete using asyncio.gather to yield to event loop
+            completed = 0
+            # Collect all task refs for concurrent awaiting
+            task_refs = [task_ref for _, task_ref in tasks]
+            sample_ids = [sample_id for sample_id, _ in tasks]
+            
+            # Await all tasks concurrently
+            results = await asyncio.gather(*task_refs, return_exceptions=True)
+            
+            # Process results
+            for sample_id, result in zip(sample_ids, results):
                 try:
-                    result = ray.get(task_ref)
+                    print(f"[SHUTDOWN] Finalizing target.bam for sample: {sample_id}...")
+                    if isinstance(result, Exception):
+                        print(f"[SHUTDOWN] Warning: Failed to finalize target.bam for {sample_id}: {result}")
+                        logging.warning(f"Failed to finalize target.bam for {sample_id}: {result}")
+                        continue
+                    
+                    completed += 1
                     if result.get("status") == "error":
+                        print(f"[SHUTDOWN] Warning: Finalization error for {sample_id}: {result.get('error', 'Unknown')}")
                         logging.warning(f"Finalization error for {sample_id}: {result.get('error', 'Unknown')}")
+                    else:
+                        batch_count = result.get("batch_files_merged", 0)
+                        if batch_count > 0:
+                            print(f"[SHUTDOWN] Completed: {sample_id} (merged {batch_count} batch files)")
+                        else:
+                            print(f"[SHUTDOWN] Completed: {sample_id}")
                 except Exception as e:
+                    print(f"[SHUTDOWN] Warning: Failed to finalize target.bam for {sample_id}: {e}")
                     logging.warning(f"Failed to finalize target.bam for {sample_id}: {e}")
+            
+            print(f"[SHUTDOWN] Target BAM finalization: {completed}/{len(tasks)} samples completed")
         except Exception as e:
+            print(f"[SHUTDOWN] Error during target BAM finalization: {e}")
             logging.warning(f"Error during target BAM finalization: {e}")
     
     async def _flush_csv_buffer(self) -> None:
@@ -2217,52 +2278,72 @@ class Coordinator:
             True if shutdown was successful
         """
         try:
+            print("[SHUTDOWN] Stopping workflow coordinator...")
             # Stop accepting new jobs
             self._shutdown_requested = True
+            print("[SHUTDOWN] Stopped accepting new jobs")
             
             # Finalize target accumulation for all samples with batch BAMs pending merge
             try:
+                print("[SHUTDOWN] Finalizing target.bam files for all samples...")
                 await self._finalize_target_bams()
-            except Exception:
-                pass
+                print("[SHUTDOWN] Target BAM finalization complete")
+            except Exception as e:
+                print(f"[SHUTDOWN] Warning: Error during target BAM finalization: {e}")
             
             # Flush any remaining CSV buffer entries
             try:
+                print("[SHUTDOWN] Flushing CSV buffer entries...")
                 await self._flush_csv_buffer()
-            except Exception:
-                pass
+                print("[SHUTDOWN] CSV buffer flushed")
+            except Exception as e:
+                print(f"[SHUTDOWN] Warning: Error flushing CSV buffer: {e}")
             
             # Cancel all inflight tasks
             if hasattr(self, '_inflight') and self._inflight:
-                for ref in list(self._inflight.keys()):
-                    try:
-                        ray.cancel(ref)
-                    except Exception:
-                        pass
+                inflight_count = len(self._inflight)
+                if inflight_count > 0:
+                    print(f"[SHUTDOWN] Cancelling {inflight_count} inflight tasks...")
+                    for ref in list(self._inflight.keys()):
+                        try:
+                            ray.cancel(ref)
+                        except Exception:
+                            pass
+                    print("[SHUTDOWN] Inflight tasks cancelled")
             
             # Shutdown all pool actors gracefully first
             if hasattr(self, 'queues') and self.queues:
-                for queue_name, actors in self.queues.items():
-                    for actor in actors:
-                        try:
-                            await actor.shutdown.remote()
-                        except Exception:
-                            pass
-                        try:
-                            ray.kill(actor)
-                        except Exception:
-                            pass
+                total_actors = sum(len(actors) for actors in self.queues.values())
+                if total_actors > 0:
+                    print(f"[SHUTDOWN] Shutting down {total_actors} pool actors...")
+                    for queue_name, actors in self.queues.items():
+                        for actor in actors:
+                            try:
+                                await actor.shutdown.remote()
+                            except Exception:
+                                pass
+                            try:
+                                ray.kill(actor)
+                            except Exception:
+                                pass
+                    print("[SHUTDOWN] Pool actors shut down")
             
             # Kill all processor actors
             if hasattr(self, 'processors') and self.processors:
-                for processor in self.processors.values():
-                    try:
-                        ray.kill(processor)
-                    except Exception:
-                        pass
+                processor_count = len(self.processors)
+                if processor_count > 0:
+                    print(f"[SHUTDOWN] Shutting down {processor_count} processor actors...")
+                    for processor in self.processors.values():
+                        try:
+                            ray.kill(processor)
+                        except Exception:
+                            pass
+                    print("[SHUTDOWN] Processor actors shut down")
             
+            print("[SHUTDOWN] Coordinator shutdown complete")
             return True
-        except Exception:
+        except Exception as e:
+            print(f"[SHUTDOWN] Error during shutdown: {e}")
             return False
 
 
@@ -2479,11 +2560,11 @@ async def submit_existing_paths(
     coord_reference = None
     coord_target_panel = None
     try:
-        coord_reference = ray.get(coord.get_reference.remote())
+        coord_reference = await coord.get_reference.remote()
     except Exception:
         pass
     try:
-        coord_target_panel = ray.get(coord.get_target_panel.remote())
+        coord_target_panel = await coord.get_target_panel.remote()
     except Exception:
         pass
     
@@ -2836,6 +2917,13 @@ async def run(
         await coord.setup.remote()
     except Exception:
         pass
+    
+    # Set work_dir on coordinator so it's available during shutdown
+    if work_dir:
+        try:
+            coord.set_work_dir.remote(work_dir)
+        except Exception:
+            pass
 
     # Launch GUI early - immediately after coordinator setup but before job submission
     # This ensures the GUI is available as soon as possible, before any jobs start
@@ -3111,26 +3199,32 @@ async def run(
         if tasks:
             await asyncio.gather(*tasks)
     except KeyboardInterrupt:
-        print("Stopping workflow...")
+        print("\n[SHUTDOWN] Interrupted by user (Ctrl-C)")
+        print("[SHUTDOWN] Initiating graceful shutdown...")
         # Cancel all running tasks gracefully
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+        if tasks:
+            running_tasks = [t for t in tasks if not t.done()]
+            if running_tasks:
+                print(f"[SHUTDOWN] Cancelling {len(running_tasks)} running task(s)...")
+                for task in running_tasks:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                print("[SHUTDOWN] Tasks cancelled")
         # Signal coordinator to stop accepting new jobs and finalize
         try:
+            print("[SHUTDOWN] Shutting down coordinator...")
             await coord.shutdown.remote()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[SHUTDOWN] Warning: Error shutting down coordinator: {e}")
         # Kill all Ray actors gracefully
         try:
             ray.kill(coord)
         except Exception:
             pass
-        print("Workflow stopped gracefully")
+        print("[SHUTDOWN] Workflow stopped gracefully")
     finally:
         # Always finalize target BAMs on exit (including normal completion)
         try:
@@ -3139,20 +3233,27 @@ async def run(
             pass
         if watcher is not None:
             try:
+                print("[SHUTDOWN] Flushing file watcher...")
                 watcher.flush_remaining()
-            except Exception:
-                pass
+                print("[SHUTDOWN] File watcher flushed")
+            except Exception as e:
+                print(f"[SHUTDOWN] Warning: Error flushing file watcher: {e}")
         if observer is not None:
+            print("[SHUTDOWN] Stopping file observer...")
             observer.stop()
             observer.join()
+            print("[SHUTDOWN] File observer stopped")
         
         # Final cleanup: ensure Ray is properly shut down
         try:
             import ray
             if ray.is_initialized():
+                print("[SHUTDOWN] Shutting down Ray...")
                 ray.shutdown()
-        except Exception:
-            pass
+                print("[SHUTDOWN] Ray shutdown complete")
+        except Exception as e:
+            print(f"[SHUTDOWN] Warning: Error shutting down Ray: {e}")
+        print("[SHUTDOWN] All cleanup operations completed")
 
 
 def parse_args():

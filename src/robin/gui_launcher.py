@@ -349,22 +349,26 @@ class GUILauncher:
                             "%Y-%m-%d %H:%M:%S", time.localtime(record._last_seen_raw)
                         )
                         
-                        # Update origin based on inactivity timeout
+                        # Update origin based on inactivity timeout AND active jobs status
                         prev_origin = record.origin
+                        # Only mark as Complete if timeout passed AND no active jobs
                         if record.origin == "Live" and (now_ts - record._last_seen_raw) >= self.completion_timeout_seconds:
-                            record.origin = "Complete"
-                            record._dirty = True
-                            # Trigger finalization if transitioning from Live to Complete
-                            if prev_origin == "Live" and sid not in self._finalized_samples:
-                                self._trigger_target_bam_finalization(sid)
-                                self._finalized_samples.add(sid)
+                            if record.active_jobs == 0:
+                                record.origin = "Complete"
+                                record._dirty = True
+                                # Trigger finalization if transitioning from Live to Complete
+                                if prev_origin == "Live" and sid not in self._finalized_samples:
+                                    self._trigger_target_bam_finalization(sid)
+                                    self._finalized_samples.add(sid)
+                            # If there are active jobs, keep as Live even if timeout passed
                         elif record.origin == "Pre-existing" and (now_ts - record._last_seen_raw) >= self.completion_timeout_seconds:
                             # Keep as Pre-existing if it was pre-existing and still inactive
                             pass
-                        elif record.origin == "Complete" and (now_ts - record._last_seen_raw) < self.completion_timeout_seconds:
-                            # Reactivate if file was modified recently
-                            record.origin = "Live"
-                            record._dirty = True
+                        elif record.origin == "Complete":
+                            # Reactivate if file was modified recently OR if there are active jobs
+                            if (now_ts - record._last_seen_raw) < self.completion_timeout_seconds or record.active_jobs > 0:
+                                record.origin = "Live"
+                                record._dirty = True
                         
                         # Save to master record
                         self._samples_master_record[sid] = record
@@ -2010,11 +2014,15 @@ class GUILauncher:
                                 prev_origin = prev_row.get("origin")
                                 break
                     try:
+                        active_jobs_count = s.get("active_jobs", 0)
+                        # Only mark as Complete if timeout passed AND no active jobs
                         if origin_value == "Live" and (time.time() - last_seen) >= self.completion_timeout_seconds:
-                            origin_value = "Complete"
-                            # Trigger finalization if transitioning from Live to Complete
-                            if prev_origin == "Live" or prev_origin is None:
-                                self._trigger_target_bam_finalization(sid)
+                            if active_jobs_count == 0:
+                                origin_value = "Complete"
+                                # Trigger finalization if transitioning from Live to Complete
+                                if prev_origin == "Live" or prev_origin is None:
+                                    self._trigger_target_bam_finalization(sid)
+                            # If there are active jobs, keep as Live even if timeout passed
                     except Exception:
                         pass
                     by_id[sid] = {
@@ -2210,8 +2218,12 @@ class GUILauncher:
                     try:
                         if r.get("origin") == "Live":
                             last_raw = float(r.get("_last_seen_raw", 0))
+                            active_jobs_count = r.get("active_jobs", 0)
+                            # Only mark as Complete if timeout passed AND no active jobs
                             if last_raw and (now_ts - last_raw) >= self.completion_timeout_seconds:
-                                r["origin"] = "Complete"
+                                if active_jobs_count == 0:
+                                    r["origin"] = "Complete"
+                                # If there are active jobs, keep as Live even if timeout passed
                     except Exception:
                         pass
 
@@ -3666,18 +3678,21 @@ class GUILauncher:
                         else "Live"
                     )
                     try:
+                        # Only mark as Complete if timeout passed AND no active jobs
                         if origin_value == "Live" and (time.time() - last_seen) >= self.completion_timeout_seconds:
-                            origin_value = "Complete"
-                            # Check if this is a transition from Live to Complete
-                            existing = self._last_samples_rows or []
-                            prev_origin = None
-                            for prev_row in existing:
-                                if prev_row.get("sample_id") == sid:
-                                    prev_origin = prev_row.get("origin")
-                                    break
-                            # Trigger finalization if transitioning from Live to Complete
-                            if prev_origin == "Live" or prev_origin is None:
-                                self._trigger_target_bam_finalization(sid)
+                            if ov_active == 0:
+                                origin_value = "Complete"
+                                # Check if this is a transition from Live to Complete
+                                existing = self._last_samples_rows or []
+                                prev_origin = None
+                                for prev_row in existing:
+                                    if prev_row.get("sample_id") == sid:
+                                        prev_origin = prev_row.get("origin")
+                                        break
+                                # Trigger finalization if transitioning from Live to Complete
+                                if prev_origin == "Live" or prev_origin is None:
+                                    self._trigger_target_bam_finalization(sid)
+                            # If there are active jobs, keep as Live even if timeout passed
                     except Exception:
                         pass
                     rows.append(
@@ -3924,8 +3939,11 @@ class GUILauncher:
                     else "Live"
                 )
                 try:
+                    # Only mark as Complete if timeout passed AND no active jobs
                     if origin_value == "Live" and (time.time() - last_seen) >= self.completion_timeout_seconds:
-                        origin_value = "Complete"
+                        if ov_active == 0:
+                            origin_value = "Complete"
+                        # If there are active jobs, keep as Live even if timeout passed
                 except Exception:
                     pass
                     
@@ -4128,14 +4146,19 @@ class GUILauncher:
                                 "%H:%M:%S", time.localtime(last_seen)
                             )
                             updated["_last_seen_raw"] = last_seen
-                            # Determine origin based on inactivity threshold
+                            # Determine origin based on inactivity threshold AND active jobs status
                             prev_origin = existing_row.get("origin")
                             try:
+                                # Only mark as Complete if timeout passed AND no active jobs
                                 if (time.time() - last_seen) >= self.completion_timeout_seconds:
-                                    updated["origin"] = "Complete"
-                                    # Trigger finalization if transitioning from Live to Complete
-                                    if prev_origin == "Live":
-                                        self._trigger_target_bam_finalization(sid)
+                                    if ov_active == 0:
+                                        updated["origin"] = "Complete"
+                                        # Trigger finalization if transitioning from Live to Complete
+                                        if prev_origin == "Live":
+                                            self._trigger_target_bam_finalization(sid)
+                                    else:
+                                        # If there are active jobs, keep as Live even if timeout passed
+                                        updated["origin"] = "Live"
                                 else:
                                     updated["origin"] = "Live"
                             except Exception:

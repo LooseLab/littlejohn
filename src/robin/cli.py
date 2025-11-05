@@ -2027,35 +2027,43 @@ def workflow(
                     )
                 )
             except KeyboardInterrupt:
-                print("Stopping workflow...")
+                print("\n[SHUTDOWN] Interrupted by user (Ctrl-C)")
+                print("[SHUTDOWN] Initiating graceful shutdown...")
                 # Attempt to shutdown Ray gracefully
                 try:
                     import ray
                     if ray.is_initialized():
+                        print("[SHUTDOWN] Shutting down Ray coordinator...")
                         # Get the coordinator and shutdown gracefully
                         try:
                             coord = ray.get_actor("robin_coordinator")
                             ray.kill(coord)
+                            print("[SHUTDOWN] Ray coordinator stopped")
                         except Exception:
                             pass
                         # Shutdown Ray
+                        print("[SHUTDOWN] Shutting down Ray...")
                         ray.shutdown()
-                except Exception:
-                    pass
+                        print("[SHUTDOWN] Ray shutdown complete")
+                except Exception as e:
+                    print(f"[SHUTDOWN] Warning: Error shutting down Ray: {e}")
                 # Attempt to shutdown GUI server if running
                 try:
                     from robin.gui.app import get_gui_launcher as _get  # type: ignore
 
                     gl = _get()
                     if gl is not None:
+                        print("[SHUTDOWN] Shutting down GUI server...")
                         try:
                             from nicegui import app as ng_app  # type: ignore
 
                             ng_app.shutdown()
+                            print("[SHUTDOWN] GUI server shutdown complete")
                         except Exception:
                             pass
                 except Exception:
                     pass
+                print("[SHUTDOWN] Workflow stopped gracefully")
             return
 
         # Create workflow runner
@@ -2215,11 +2223,15 @@ def workflow(
         )
 
     except KeyboardInterrupt:
-        print("Stopping workflow...")
+        print("\n[SHUTDOWN] Interrupted by user (Ctrl-C)")
+        print("[SHUTDOWN] Initiating graceful shutdown...")
         if "runner" in locals() and hasattr(runner, "manager"):
+            print("[SHUTDOWN] Stopping workflow manager...")
             try:
                 runner.manager.stop(timeout=DEFAULT_TIMEOUT)
+                print("[SHUTDOWN] Workflow manager stopped")
             except Exception as e:
+                print(f"[SHUTDOWN] Warning: Error during shutdown: {e}")
                 click.echo(f"Warning: Error during shutdown: {e}", err=True)
         # Attempt to shutdown GUI server if running
         try:
@@ -2227,14 +2239,17 @@ def workflow(
 
             gl = _get()
             if gl is not None:
+                print("[SHUTDOWN] Shutting down GUI server...")
                 try:
                     from nicegui import app as ng_app  # type: ignore
 
                     ng_app.shutdown()
+                    print("[SHUTDOWN] GUI server shutdown complete")
                 except Exception:
                     pass
         except Exception:
             pass
+        print("[SHUTDOWN] Workflow stopped gracefully")
         click.echo("\nWorkflow stopped by user")
     except click.BadParameter as e:
         click.echo(f"Parameter error: {e}", err=True)
