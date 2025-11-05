@@ -22,6 +22,8 @@
 
 ROBIN (Rapid nanopOre Brain intraoperatIve classificatioN) is a comprehensive bioinformatics workflow system designed for processing and analyzing BAM files in the context of human oncology analysis. 
 
+ROBIN was published in NeuroOncology - see [ROBIN Paper](https://academic.oup.com/neuro-oncology/article/27/8/2035/8139084)
+
 It provides automated preprocessing, multiple analysis pipelines, and real-time monitoring capabilities. 
 
 It now incorporates LITTLE JOHN (Lightweight Infrastructure for Task Tracking and Logging with Extensible Job Orchestration for High-throughput aNalysis), which handles the heavy lifting behind the scenes.
@@ -286,9 +288,30 @@ robin workflow /path/to/bam_files \
 
 ## License
 
-MIT License
+***This software is provided "as is", and is for research use only.***
+
+
+robin is distributed under a CC BY-NC 4.0 license. See LICENSE for more information. This license does not override any licenses that may be present in the third party tools used by robin.
 
 ## Acknowledgments
+
+This tool uses a range of third party tools and applications including:
+
+[Sturgeon] https://github.com/marcpaga/sturgeon
+[Radid-CNS2] https://link.springer.com/article/10.1007/s00401-022-02415-6
+[Readfish] https://github.com/LooseLab/readfish
+[cnv_from_bam] https://github.com/adoni5/cnv_from_bam
+[methylartist] https://github.com/adamewing/methylartist
+
+We are grateful to the authors of these tools for their work.
+
+We also thank a lot of people who have contributed to these tools including: Graeme Fox, Simon Deacon, Rory Munro, Satrio Wibowo, Thomas Murray, Inswasti Cahyani, Nadine Holmes, Simon Paine, Stuart Smith and many others from outside Nottingham.
+
+We are particularly grateful to Areeba Patel, Felix Sahm and colleagues for their work on Rapid-CNS2.
+
+This list is non-exhaustive and the software is under active development.
+
+In addition we use:
 
 - [Click](https://click.palletsprojects.com/) - Python package for creating command line interfaces
 - [Watchdog](https://python-watchdog.readthedocs.io/) - Python library for monitoring file system events
