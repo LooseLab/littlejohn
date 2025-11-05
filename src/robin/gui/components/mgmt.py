@@ -30,8 +30,10 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                 mgmt_pred = ui.label("Prediction: --%").classes("text-sm text-gray-700")
         ui.label("MGMT methylation plot").classes("text-sm text-gray-700")
         # mgmt_img = ui.image('')
-        # Persistent Matplotlib element (NiceGUI integration)
-        mgmt_mpl = ui.matplotlib(figsize=(4, 3)).classes("mx-auto flex justify-center")
+        # Matplotlib element for displaying the methylation plot
+        # Using ui.matplotlib() as it works with pre-existing figure objects
+        # Width is 2x relative to height (24:12 = 2:1 aspect ratio)
+        mgmt_mpl = ui.matplotlib(figsize=(24, 12)).classes("w-full")
         ui.separator()
         ui.label("MGMT results (latest)").classes("text-sm text-gray-700 mt-2")
         _, mgmt_results_table = styled_table(
@@ -310,40 +312,43 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
             current_count = _count_from_name(latest_csv)
             csv_mtime = latest_csv.stat().st_mtime
             # Force update on fresh page visit or if file changed
-            if not is_fresh_visit and (
-                state.get("csv_path") == str(latest_csv)
-                and state.get("csv_mtime") == csv_mtime
-            ):
-                return
-            df = pd.read_csv(latest_csv)
-            status = str(df.get("status", pd.Series(["Unknown"])).iloc[0])
-            average = float(df.get("average", pd.Series([0.0])).iloc[0])
-            pred = float(df.get("pred", pd.Series([0.0])).iloc[0])
-            mgmt_status.set_text(f"MGMT status: {status}")
-            mgmt_avg.set_text(f"Average: {average:.2f}%")
-            mgmt_pred.set_text(f"Prediction: {pred:.2f}%")
-            try:
-                mgmt_results_table.rows = [
-                    {
-                        "average": f"{average:.2f}",
-                        "pred": f"{pred:.2f}",
-                        "status": status,
-                    }
-                ]
-                mgmt_results_table.update()
-            except Exception:
-                pass
+            csv_needs_update = (
+                is_fresh_visit
+                or state.get("csv_path") != str(latest_csv)
+                or state.get("csv_mtime") != csv_mtime
+            )
             
-            """
-            img_path = sample_dir / f"{current_count}_mgmt.png"
-            if img_path.exists():
-                img_mtime = img_path.stat().st_mtime
-                if state.get('png_path') != str(img_path) or state.get('png_mtime') != img_mtime:
+            # Always read CSV data (needed for plot even if CSV hasn't changed)
+            try:
+                df = pd.read_csv(latest_csv)
+            except Exception as e:
+                logging.error(f"[MGMT] Failed to read CSV file {latest_csv}: {e}")
+                return  # Cannot proceed without CSV data
+            
+            # Only update CSV-related UI elements if CSV has changed
+            if csv_needs_update:
+                try:
+                    status = str(df.get("status", pd.Series(["Unknown"])).iloc[0])
+                    average = float(df.get("average", pd.Series([0.0])).iloc[0])
+                    pred = float(df.get("pred", pd.Series([0.0])).iloc[0])
+                    mgmt_status.set_text(f"MGMT status: {status}")
+                    mgmt_avg.set_text(f"Average: {average:.2f}%")
+                    mgmt_pred.set_text(f"Prediction: {pred:.2f}%")
                     try:
-                        mgmt_img.set_source(str(img_path))
+                        mgmt_results_table.rows = [
+                            {
+                                "average": f"{average:.2f}",
+                                "pred": f"{pred:.2f}",
+                                "status": status,
+                            }
+                        ]
+                        mgmt_results_table.update()
                     except Exception:
-                        mgmt_img.source = str(img_path)
-            """
+                        pass
+                except Exception as e:
+                    logging.error(f"[MGMT] Failed to update CSV UI elements: {e}")
+                    pass
+            
             # Gather site_rows for table and plot annotations
             site_rows: List[Dict[str, Any]] = []
             # Handle bed file lookup based on CSV file type
@@ -359,23 +364,27 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                 if not bed_path.exists():
                     alt_bed = sample_dir / f"{current_count}_mgmt_mgmt.bed"
                     bed_path = alt_bed if alt_bed.exists() else bed_path
+            
             if bed_path.exists():
                 bed_mtime = bed_path.stat().st_mtime
-                # Force update on fresh page visit or if file changed
-                if (
+                bed_needs_update = (
                     is_fresh_visit
                     or state.get("bed_path") != str(bed_path)
                     or state.get("bed_mtime") != bed_mtime
-                ):
-                    site_rows = _extract_mgmt_specific_sites(bed_path)
+                )
+                
+                # Always extract site_rows for plotting (needed even if bed hasn't changed)
+                site_rows = _extract_mgmt_specific_sites(bed_path)
+                
+                # Only update table if bed file has changed
+                if bed_needs_update:
                     try:
                         mgmt_sites_table.rows = site_rows
                         mgmt_sites_table.update()
                     except Exception:
                         pass
                 else:
-                    # still populate for plotting if unchanged
-                    site_rows = _extract_mgmt_specific_sites(bed_path)
+                    # Still update table even if unchanged (for consistency)
                     try:
                         mgmt_sites_table.rows = site_rows
                         mgmt_sites_table.update()
@@ -389,29 +398,52 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                         locus_figure,
                     )
 
+                    logging.debug(f"[MGMT] Creating locus figure for {bam_path}")
                     fig = locus_figure(
                         interval="chr10:129466536-129467536",
                         bam_path=str(bam_path),
                         motif="CG",
                         mods="m",
                         extra_cli=[
-                            # "--minqual","20", "--reads","2000", "--height","6", "--width","10"
+                            # Set figure size to match our UI element (width 2x height)
+                            "--width", "18",
+                            "--height", "8",
+                            # "--minqual","20", "--reads","2000"
                         ],
                         site_rows=site_rows,
                     )
-                    # Update NiceGUI Matplotlib element
-                    # Suppress GridSpec warnings when saving figure
+                    logging.debug(f"[MGMT] Locus figure created successfully, figure number: {fig.number}")
+                    
+                    # Update matplotlib element with the figure
+                    # Suppress GridSpec warnings when updating figure
                     import warnings
+                    import matplotlib.pyplot as plt
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore", UserWarning)
+                        # Close previous figure if it exists before assigning new one
+                        if hasattr(mgmt_mpl, 'figure') and mgmt_mpl.figure is not None:
+                            try:
+                                plt.close(mgmt_mpl.figure)
+                            except Exception:
+                                pass
+                        logging.debug(f"[MGMT] Assigning figure to matplotlib element")
                         mgmt_mpl.figure = fig
                         mgmt_mpl.update()
+                        logging.debug(f"[MGMT] Plot updated successfully")
                 except Exception as e:
                     # If methylartist fails, create a simple placeholder plot
+                    logging.exception(f"[MGMT] Failed to create methylation plot: {e}")
                     import matplotlib.pyplot as plt
                     import matplotlib.patches as patches
                     
-                    fig, ax = plt.subplots(figsize=(4, 3))
+                    # Close previous figure if it exists
+                    if hasattr(mgmt_mpl, 'figure') and mgmt_mpl.figure is not None:
+                        try:
+                            plt.close(mgmt_mpl.figure)
+                        except Exception:
+                            pass
+                    
+                    fig, ax = plt.subplots(figsize=(24, 12))
                     ax.text(0.5, 0.5, f"Methylation plot unavailable\n({str(e)})", 
                            ha='center', va='center', transform=ax.transAxes,
                            fontsize=10, color='red')
@@ -422,6 +454,25 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                     
                     mgmt_mpl.figure = fig
                     mgmt_mpl.update()
+            else:
+                logging.warning(f"[MGMT] BAM file not found: {bam_path}")
+                # Create a placeholder plot indicating BAM file is missing
+                import matplotlib.pyplot as plt
+                if hasattr(mgmt_mpl, 'figure') and mgmt_mpl.figure is not None:
+                    try:
+                        plt.close(mgmt_mpl.figure)
+                    except Exception:
+                        pass
+                fig, ax = plt.subplots(figsize=(24, 12))
+                ax.text(0.5, 0.5, "MGMT BAM file not found\n(mgmt_sorted.bam)", 
+                       ha='center', va='center', transform=ax.transAxes,
+                       fontsize=10, color='orange')
+                ax.set_xlim(0, 1)
+                ax.set_ylim(0, 1)
+                ax.axis('off')
+                ax.set_title("MGMT Methylation Plot")
+                mgmt_mpl.figure = fig
+                mgmt_mpl.update()
 
             launcher._mgmt_state[key] = {
                 "last_count": current_count,

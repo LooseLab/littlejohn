@@ -212,8 +212,71 @@ def locus_figure(
             # Find the main axis for text annotations (only calculate once)
             main_ax = _choose_main_axis(fig)
             
+            # Pre-calculate all label positions with proper staggering
+            # First, collect all sites that need annotations
+            label_positions_dict = {}
+            if main_ax:
+                ylim = main_ax.get_ylim()
+                y_range = ylim[1] - ylim[0]
+                xlim = main_ax.get_xlim()
+                x_range = xlim[1] - xlim[0]
+                
+                # Estimate label width in data coordinates (approximate)
+                # Font size 9 with padding means roughly 0.02-0.03 of x_range per character
+                max_label_len = max([len(l) for _, _, l in mgmt_sites]) if mgmt_sites else 1
+                label_width_data = (max_label_len + 2) * 0.015 * x_range
+                
+                # Calculate center positions for all sites
+                site_centers = []
+                for p1, p2, label in mgmt_sites:
+                    center_x = (p1 + p2) / 2.0
+                    if xlim[0] <= center_x <= xlim[1]:
+                        site_centers.append((center_x, label))
+                
+                # Sort by x position to process left to right
+                site_centers.sort(key=lambda x: x[0])
+                
+                # Calculate staggered y positions to avoid overlap
+                base_y_offset = 0.02
+                vertical_spacing = 0.025  # Fraction of y_range for spacing
+                
+                for idx, (center_x, label) in enumerate(site_centers):
+                    # Start with base position
+                    annotation_y = ylim[1] - (base_y_offset * y_range)
+                    
+                    # Check for horizontal overlap with previously placed labels
+                    overlap_threshold = label_width_data * 0.8  # 80% of label width
+                    stagger_level = 0
+                    
+                    # Find all overlapping labels and determine best stagger position
+                    overlapping_labels = []
+                    for existing_label, (existing_x, existing_y, existing_stagger) in label_positions_dict.items():
+                        if abs(center_x - existing_x) < overlap_threshold:
+                            overlapping_labels.append((existing_x, existing_y, existing_stagger))
+                    
+                    if overlapping_labels:
+                        # Find the maximum stagger level among overlapping labels
+                        max_stagger = max([s for _, _, s in overlapping_labels])
+                        stagger_level = max_stagger + 1
+                        
+                        # Alternate direction: even stagger levels go up, odd levels go down
+                        # This creates a zigzag pattern
+                        if stagger_level % 2 == 0:
+                            # Go up from the highest overlapping label
+                            max_y = max([y for _, y, _ in overlapping_labels])
+                            annotation_y = max_y + (vertical_spacing * y_range)
+                        else:
+                            # Go down from the lowest overlapping label
+                            min_y = min([y for _, y, _ in overlapping_labels])
+                            annotation_y = min_y - (vertical_spacing * y_range)
+                        
+                        # Ensure we don't go outside the plot area
+                        annotation_y = max(ylim[0] + 0.05 * y_range, min(ylim[1] - 0.02 * y_range, annotation_y))
+                    
+                    # Store the position with stagger level
+                    label_positions_dict[label] = (center_x, annotation_y, stagger_level)
+            
             # Add vertical lines to ALL axes (all subplots)
-            label_positions = []
             for ax_idx, ax in enumerate(axes):
                 try:
                     xlim = ax.get_xlim()
@@ -241,32 +304,8 @@ def locus_figure(
                             )
                             
                             # Add text annotation on the main axis only
-                            if ax == main_ax:
-                                ylim = ax.get_ylim()
-                                y_range = ylim[1] - ylim[0]
-                                center_x = (p1 + p2) / 2.0
-                                
-                                # Calculate vertical position with spacing to prevent overlap
-                                # Stagger labels vertically: each site gets a different y position
-                                site_index = next((i for i, (_, _, l) in enumerate(mgmt_sites) if l == label), 0)
-                                base_y_offset = 0.03
-                                spacing = 0.03
-                                annotation_y_offset = base_y_offset + (site_index * spacing)
-                                annotation_y = ylim[1] - (annotation_y_offset * y_range)
-                                
-                                # Check for horizontal overlap with existing labels
-                                overlap_threshold = 50
-                                has_overlap = False
-                                for existing_x, existing_y in label_positions:
-                                    if abs(center_x - existing_x) < overlap_threshold:
-                                        has_overlap = True
-                                        # If horizontal overlap, move vertically further down
-                                        if abs(annotation_y - existing_y) < spacing * y_range:
-                                            annotation_y -= spacing * y_range
-                                        break
-                                
-                                if not has_overlap:
-                                    label_positions.append((center_x, annotation_y))
+                            if ax == main_ax and label in label_positions_dict:
+                                center_x, annotation_y, _ = label_positions_dict[label]
                                 
                                 ax.text(
                                     center_x,

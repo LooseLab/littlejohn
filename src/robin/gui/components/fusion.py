@@ -303,19 +303,18 @@ def _generate_summary_files_from_pickle(sample_dir: Path, force_regenerate: bool
         else:
             logging.warning(f"[Fusion] Failed to load genome-wide data from: {genome_file}")
         
-        # Extract counts
+        # Extract counts using the same filtering logic as the display code
+        # This ensures consistency between summary panel and fusion section
         target_count = 0
         genome_count = 0
         
         if target_data is not None and isinstance(target_data, dict):
-            target_count = target_data.get("candidate_count", 0)
+            target_count = _count_unique_fusion_pairs(target_data)
+            logging.info(f"[Fusion] Summary: Target count (filtered): {target_count}")
         
         if genome_data is not None and isinstance(genome_data, dict):
-            # Use gene_pairs count if candidate_count is 0 (like reporting code does)
-            genome_count = genome_data.get("candidate_count", 0)
-            if genome_count == 0 and genome_data.get("gene_pairs"):
-                genome_count = len(genome_data.get("gene_pairs", []))
-                logging.info(f"[Fusion] Summary: Using gene_pairs count for genome-wide: {genome_count}")
+            genome_count = _count_unique_fusion_pairs(genome_data)
+            logging.info(f"[Fusion] Summary: Genome-wide count (filtered): {genome_count}")
         
         # Generate fusion_summary.csv
         with open(summary_file, "w", newline="") as f:

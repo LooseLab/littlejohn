@@ -1318,16 +1318,14 @@ def _extract_fusion_data(sample_dir: Path) -> Dict[str, Any]:
             
             
             if target_data and isinstance(target_data, dict):
-                fusion_data["target_fusions"] = target_data.get("candidate_count", 0)
+                # Use filtered counts to match what's displayed in fusion section
+                fusion_data["target_fusions"] = _count_unique_fusion_pairs(target_data)
                 fusion_data["target_pairs"] = _count_unique_fusion_pairs(target_data)
                 fusion_data["target_groups"] = _count_unique_fusion_groups(target_data)
             
             if genome_data and isinstance(genome_data, dict):
-                # Use gene_pairs count if candidate_count is 0 (same logic as GUI)
-                genome_count = genome_data.get("candidate_count", 0)
-                if genome_count == 0 and genome_data.get("gene_pairs"):
-                    genome_count = len(genome_data.get("gene_pairs", []))
-                fusion_data["genome_fusions"] = genome_count
+                # Use filtered counts to match what's displayed in fusion section
+                fusion_data["genome_fusions"] = _count_unique_fusion_pairs(genome_data)
                 fusion_data["genome_pairs"] = _count_unique_fusion_pairs(genome_data)
                 fusion_data["genome_groups"] = _count_unique_fusion_groups(genome_data)
             
