@@ -1563,16 +1563,13 @@ class TargetAnalysis:
                                 # Merge all filtered BAMs for this batch
                                 if len(new_filtered_bams) > 1:
                                     pysam.merge("-o", batch_merged_bam, *new_filtered_bams)
-                                    print(f"[ACCUM] Merged {len(new_filtered_bams)} filtered BAMs -> {os.path.basename(batch_merged_bam)}")
                                 else:
                                     # Single BAM - just copy it
                                     shutil.copy2(new_filtered_bams[0], batch_merged_bam)
-                                    print(f"[ACCUM] Single filtered BAM -> {os.path.basename(batch_merged_bam)}")
                                 
                                 # Index the batch merged BAM
                                 logger.info("Indexing batch merged BAM...")
                                 pysam.index(batch_merged_bam)
-                                print(f"[ACCUM] Indexed {os.path.basename(batch_merged_bam)}")
                                 
                                 # Verify the batch BAM was created
                                 if os.path.exists(batch_merged_bam) and os.path.exists(f"{batch_merged_bam}.bai"):
@@ -1581,10 +1578,8 @@ class TargetAnalysis:
                                             read_count = bam_file.count(until_eof=True)
                                             if read_count > 0:
                                                 logger.info(f"Successfully created batch BAM with {read_count} reads from {len(new_filtered_bams)} filtered BAM files")
-                                                print(f"[ACCUM] Batch BAM verification: {read_count} reads")
                                             else:
                                                 logger.warning("Batch BAM created but contains no reads")
-                                                print("[ACCUM] Batch BAM verification: 0 reads")
                                     except Exception as e:
                                         logger.warning(f"Could not verify batch BAM: {e}")
                                 else:
@@ -2198,7 +2193,6 @@ def finalize_accumulation_for_sample(
     logger = logging.getLogger("robin.target")
     
     try:
-        print(f"[FINAL_MERGE] Starting finalization for sample: {sample_id}")
         logger.info(f"Finalizing accumulation for sample {sample_id}")
         
         sample_output_dir = os.path.join(work_dir, sample_id)
@@ -2250,7 +2244,6 @@ def finalize_accumulation_for_sample(
         
         if batch_bams:
             logger.info(f"Found {len(batch_bams)} batch BAM files to merge")
-            print(f"[FINAL_MERGE] Found {len(batch_bams)} batch BAM files to merge")
             
             # Create temp merged output
             temp_merged_bam = os.path.join(sample_output_dir, ".final_merged.bam.tmp")
@@ -2258,12 +2251,10 @@ def finalize_accumulation_for_sample(
             # Merge all batch BAMs
             pysam.merge("-o", temp_merged_bam, *batch_bams)
             logger.info("Merged all batch BAMs into temporary file")
-            print(f"[FINAL_MERGE] Merged {len(batch_bams)} batch BAMs -> target.bam")
             
             # Index the merged BAM
             pysam.index(temp_merged_bam)
             logger.info("Indexed merged target.bam")
-            print("[FINAL_MERGE] Indexed target.bam")
             
             # Atomically replace target.bam
             if os.path.exists(target_bam_path):
@@ -2284,10 +2275,8 @@ def finalize_accumulation_for_sample(
                         read_count = bam_file.count(until_eof=True)
                         if read_count > 0:
                             logger.info(f"Successfully created target.bam with {read_count} reads from {len(batch_bams)} batch files")
-                            print(f"[FINAL_MERGE] target.bam verification: {read_count} reads")
                         else:
                             logger.warning("target.bam created but contains no reads")
-                            print("[FINAL_MERGE] target.bam verification: 0 reads")
                 except Exception as e:
                     logger.warning(f"Could not verify target.bam: {e}")
             else:
@@ -2296,7 +2285,6 @@ def finalize_accumulation_for_sample(
             # Clean up batch BAM files and their associated BAI files
             # Only clean up if target.bam was successfully created
             if target_bam_exists:
-                print(f"[FINAL_MERGE] Cleaning up {len(batch_bams)} batch BAM files and their index files...")
                 logger.info(f"Cleaning up {len(batch_bams)} batch BAM files and their index files after final merge")
                 cleaned_count = 0
                 failed_count = 0
@@ -2319,28 +2307,22 @@ def finalize_accumulation_for_sample(
                         logger.warning(f"Could not remove batch BAM {os.path.basename(batch_bam)}: {e}")
                 
                 logger.info(f"Batch cleanup complete: {cleaned_count} batch files removed, {failed_count} failures")
-                print(f"[FINAL_MERGE] Cleaned up {cleaned_count} batch BAM files")
                 
                 if failed_count > 0:
-                    print(f"[FINAL_MERGE] Warning: Failed to remove {failed_count} batch file(s) - they may need manual cleanup")
                     logger.warning(f"Failed to remove {failed_count} batch file(s) - they may need manual cleanup")
             else:
-                print("[FINAL_MERGE] Warning: Skipping batch cleanup - target.bam was not successfully created")
                 logger.warning("Skipping batch cleanup - target.bam was not successfully created")
             
             logger.info(f"Final merge complete for {sample_id}")
-            print(f"[FINAL_MERGE] Finalization complete for {sample_id}")
             result["final_merge"] = "success" if target_bam_exists else "failed"
             result["batch_files_merged"] = len(batch_bams)
         else:
             logger.info(f"No batch BAM files found for {sample_id}")
-            print(f"[FINAL_MERGE] No batch BAM files found for {sample_id}")
             result["final_merge"] = "no_batch_files"
         
         return result
         
     except Exception as e:
-        print(f"[FINAL_MERGE] Error during final accumulation for {sample_id}: {e}")
         logger.error(f"Error during final accumulation for {sample_id}: {e}")
         import traceback
         logger.error(traceback.format_exc())
