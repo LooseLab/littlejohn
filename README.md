@@ -1,36 +1,58 @@
-# robin
+# ![ROBIN_logo_small.png](src/robin/gui/images/ROBIN_logo_small.png) R.O.B.I.N
 
-A high-performance Python CLI tool for automated BAM file processing and bioinformatics analysis workflows with advanced GUI monitoring capabilities.
+<!-- [![PyPI - Version](https://img.shields.io/pypi/v/methnicegui.svg)](https://pypi.org/project/methnicegui)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/methnicegui.svg)](https://pypi.org/project/methnicegui)
+-->
+
+# ***This software is provided as is for research use only.***
+
+**Table of Contents**
+
+- [About](#about)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Available Commands](#available-commands)
+- [Performance Features](#performance-features)
+- [License](#license)
+
+
+-----
+
+## About
+
+ROBIN (Rapid nanopOre Brain intraoperatIve classificatioN) is a comprehensive bioinformatics workflow system designed for processing and analyzing BAM files in the context of human oncology analysis. 
+
+It provides automated preprocessing, multiple analysis pipelines, and real-time monitoring capabilities. 
+
+It now incorporates LITTLE JOHN (Lightweight Infrastructure for Task Tracking and Logging with Extensible Job Orchestration for High-throughput aNalysis), which handles the heavy lifting behind the scenes.
 
 ## Overview
 
-robin is a specialized bioinformatics workflow engine designed for processing BAM files through automated pipelines. It provides a robust, multi-threaded system for running complex analysis workflows with built-in support for methylation analysis, copy number variation detection, fusion detection, and various classification algorithms. The platform features an advanced web-based GUI for real-time workflow monitoring, progress tracking, and interactive data visualization.
+ROBIN processes BAM files through automated pipelines. It provides a robust, multi-threaded system for running complex analysis workflows with built-in support for methylation analysis, copy number variation detection, fusion detection, and various classification algorithms. The platform features an advanced web-based GUI for real-time workflow monitoring, progress tracking, and interactive data visualization.
 
-## Key Features
+## Memory usage
 
-- **High-Performance Processing**: Optimized for large-scale BAM file analysis with batched processing and memory management
-- **Advanced Multi-Queue Workflow System**: Separate queues for preprocessing, analysis, classification, and slow jobs with intelligent job scheduling
-- **Built-in Analysis Modules**: 
-  - MGMT methylation analysis with enhanced accuracy
-  - Copy number variation (CNV) analysis with breakpoint detection
-  - Fusion detection analysis with structural variant calling
-  - Target analysis with comprehensive coverage metrics
-  - Sturgeon classification with improved model integration
-  - NanoDX and PanNanoDX analysis with enhanced visualization
-  - Random Forest classification with optimized performance
-- **Intelligent Preprocessing**: Automated metadata extraction and multi-file BED conversion
-- **Advanced Job Management**: Job deduplication, priority queuing, and automatic retry mechanisms
-- **Comprehensive Logging**: Multi-level logging with per-job log level control and real-time monitoring
-- **Real-Time Progress Tracking**: Live progress bars, worker monitoring, and detailed status updates
-- **Smart File Watching**: Monitor directories for new BAM files with configurable filters
-- **Master CSV Tracking**: Automatic sample-level statistics aggregation with enhanced reporting
-- **Ray Distributed Computing**: High-performance distributed processing with automatic resource management
-- **Advanced GUI Workflow Monitor**: Built-in NiceGUI 3.0+ web-based interface with:
-  - Real-time sample table updates
-  - Interactive progress monitoring
-  - Live workflow status tracking
-  - Comprehensive error reporting
-  - Downloadable results and reports
+We have faced challenges with the amount of memory used by ROBIN on certain systems. The incorporation of LITTLE JOHN addresses this and we can now run ROBIN on two promethION flowcells simultaneously on a Nanopore P2i sequencer. These positions can be running ligation (LSK114) or our modified ultra long protocol.
+
+## System requirements
+
+RAM >= 64 Gb
+
+GPU - as per ONT guidelines for running adaptive sampling
+
+CPU - as per ONT guidelines (more is always better)
+
+## Known Issues
+
+1. This first release is for testing purposes only and feedback to us.
+2. Variant calling in real time is currently unavailable. We will be reintroducing this in the near future.
+3. All anaylses must be interpreted by an expert.
+
+## The Future
+
+This version will replace the code available at https://github.com/LooseLab/ROBIN/ in the near future.
+
+---
 
 ## Installation
 
@@ -95,7 +117,7 @@ python setup_models.py
 
 All assets are automatically verified using SHA256 checksums. If verification fails, the download will be retried or the corrupted file will be removed.
 
-## Main Usage
+## Usage
 
 The primary command for running robin workflows is:
 
@@ -229,263 +251,6 @@ robin workflow /path/to/bam_files \
   --center Sherwood
 ```
 
-
-<!-- 
-### `list-files`
-List BAM files in a directory recursively:
-
-```bash
-robin list-files /path/to/directory
-```
-
-### `info`
-Display information about a file or directory:
-
-```bash
-robin info /path/to/file_or_directory
-```
-
-## Workflow System
-
-robin uses a sophisticated multi-queue workflow system with four specialized queues:
-
-### Queue Types
-
-1. **Preprocessing Queue**: Fast jobs for metadata extraction
-   - `preprocessing`: Extract metadata from BAM files
-
-2. **Bed Conversion Queue**: File format conversion jobs
-   - `bed_conversion`: Convert BAM files to BED format
-
-3. **Analysis Queue**: Bioinformatics analysis jobs
-   - `mgmt`: MGMT methylation analysis
-   - `cnv`: Copy number variation analysis
-   - `target`: Target analysis
-   - `fusion`: Fusion detection analysis
-
-4. **Classification Queue**: Machine learning classification jobs
-   - `sturgeon`: Sturgeon classification analysis
-   - `nanodx`: NanoDX analysis
-   - `pannanodx`: PanNanoDX analysis
-
-5. **Slow Queue**: Resource-intensive jobs
-   - `random_forest`: Random Forest analysis
-
-### Workflow Syntax
-
-Workflows can be specified in two formats:
-
-#### Simplified Format (Recommended)
-```bash
-# Simple workflow: MGMT analysis + Sturgeon classification
-robin workflow /path/to/bam/files -w "mgmt,sturgeon" --center Birmingham
-
-# Full pipeline: all analysis types
-robin workflow /path/to/bam/files -w "target,cnv,fusion,mgmt,sturgeon,nanodx,pannanodx,random_forest" --center Coventry
-```
-
-#### Legacy Format (with queue prefixes)
-```bash
-# Simple workflow: preprocessing + MGMT analysis
-robin workflow /path/to/bam/files -w "preprocessing:bed_conversion,analysis:mgmt" --center Derby
-
-# Full pipeline: preprocessing + multiple analyses + classification
-robin workflow /path/to/bam/files -w "preprocessing:bed_conversion,analysis:mgmt,analysis:cnv,classification:sturgeon" --center Plymouth
-```
-
-**Note**: The `preprocessing` step is automatically added as the first step if not specified, ensuring metadata extraction for all workflows. The `bed_conversion` step is automatically added when needed for classification jobs.
-
-## Analysis Modules
-
-### MGMT Analysis
-MGMT (O6-methylguanine-DNA methyltransferase) promoter methylation analysis:
-
-```bash
-robin workflow /path/to/bam/files -w "mgmt" --center Sherwood --verbose
-```
-
-**Features:**
-- Extracts reads from MGMT promoter region (chr10:129466536-129467536)
-- Runs methylation calling using matkit from the robin package
-- Executes R scripts for methylation status prediction
-- Generates methylation plots and CSV results
-- Creates sample-specific output directories
-
-### CNV Analysis
-Copy number variation analysis with breakpoint detection:
-
-```bash
-robin workflow /path/to/bam/files -w "cnv" --center Auckland --verbose
-```
-
-**Features:**
-- Two-pass analysis: sample vs reference CNV comparison
-- Dynamic bin width calculation
-- Breakpoint detection using Kernel Change Point Detection
-- Genetic sex estimation from CNV patterns
-- State persistence for incremental processing
-- Comprehensive output in multiple formats
-
-### Fusion Analysis
-Fusion detection analysis:
-
-```bash
-robin workflow /path/to/bam/files -w "fusion" --center New_York --verbose
-```
-
-**Features:**
-- Structural variant detection
-- Fusion candidate identification
-- Comprehensive fusion analysis pipeline
-
-### Target Analysis
-Target-specific analysis:
-
-```bash
-robin workflow /path/to/bam/files -w "target" --center Oxford --verbose
-```
-
-### Classification Modules
-
-#### Sturgeon Classification
-```bash
-robin workflow /path/to/bam/files -w "sturgeon" --center Cambridge --verbose
-```
-
-#### NanoDX Analysis
-```bash
-robin workflow /path/to/bam/files -w "nanodx" --center London --verbose
-```
-
-#### PanNanoDX Analysis
-```bash
-robin workflow /path/to/bam/files -w "pannanodx" --center Edinburgh --verbose
-```
-
-#### Random Forest Analysis
-```bash
-robin workflow /path/to/bam/files -w "random_forest" --center Glasgow --verbose
-```
-
-## Advanced Features
-
-### Job Deduplication
-Prevent redundant processing when multiple upstream jobs complete simultaneously:
-
-```bash
-robin workflow /path/to/bam/files \
-  -w "mgmt,sturgeon" \
-  --center Manchester \
-  --deduplicate-jobs sturgeon \
-  --verbose
-```
-
-### Configurable Logging
-Fine-grained control over output verbosity:
-
-```bash
-robin workflow /path/to/bam/files \
-  -w "mgmt,cnv" \
-  --center Bristol \
-  --log-level WARNING \
-  --job-log-level preprocessing:DEBUG \
-  --job-log-level mgmt:INFO \
-  --verbose
-```
-
-### Ray Distributed Computing
-Enable distributed processing for improved performance:
-
-```bash
-robin workflow /path/to/bam/files \
-  -w "mgmt,cnv,sturgeon" \
-  --center Cardiff \
-  --use-ray \
-  --ray-num-cpus 8 \
-  --verbose
-```
-
-### GUI Workflow Monitor
-Launch the built-in NiceGUI workflow monitor:
-
-```bash
-robin workflow /path/to/bam/files \
-  -w "mgmt,sturgeon" \
-  --center Belfast \
-  --with-gui \
-  --gui-port 8081 \
-  --verbose
-```
-
-### Progress Tracking
-Real-time progress monitoring with multiple progress bars:
-
-```bash
-robin workflow /path/to/bam/files \
-  -w "mgmt,cnv,sturgeon" \
-  --center Dublin \
-  --verbose
-```
-
-Progress bars show:
-- Queue status (Q: queue size, A: active jobs)
-- Active job details with duration
-- Overall progress across all jobs
-- Real-time updates as jobs complete
-
-### Master CSV Tracking
-Automatic creation and updating of `master.csv` files for each sample:
-- Sample directories with cumulative statistics
-- Total read counts, base counts, and yield tracking
-- Pass/Fail BAM file breakdowns
-- Run information aggregation
-- File tracking for all processed BAM files
-
-## Usage Examples
-
-### Basic MGMT Analysis
-```bash
-# Run MGMT analysis on all BAM files in a directory
-robin workflow /path/to/bam/files -w "mgmt" --center Nottingham --verbose
-```
-
-### Full Bioinformatics Pipeline
-```bash
-# Run comprehensive analysis pipeline
-robin workflow /path/to/bam/files \
-  -w "mgmt,cnv,sturgeon" \
-  --work-dir /path/to/results \
-  --center Liverpool \
-  --deduplicate-jobs sturgeon \
-  --log-level INFO \
-  --verbose
-
-# Complete workflow with all analysis modules
-robin workflow ~/datasets/Demo_Run \
-  --work-dir test_out2 \
-  -w "target,cnv,fusion,mgmt,sturgeon,nanodx,pannanodx,random_forest" \
-  --center Sheffield \
-  --verbose \
-  --log-level WARNING
-```
-
-### Watch for New Files
-```bash
-# Process existing files first, then watch for new ones
-robin workflow /path/to/bam/files \
-  -w "mgmt" \
-  --center York \
-  --verbose
-
-# Only watch for new files (skip existing)
-robin workflow /path/to/bam/files \
-  -w "mgmt" \
-  --center Leeds \
-  --no-process-existing \
-  --verbose
-```
--->
-
 ## Performance Features
 
 ### Enhanced Processing Capabilities
@@ -517,41 +282,6 @@ robin workflow /path/to/bam/files \
 ### Git Submodules
 - `nanoDX`: NanoDX analysis tools
 - `hv_rapidCNS2`: Rapid CNS analysis tools
-
-
-<!--
-## Development
-
-### Running Tests
-```bash
-pytest
-```
-
-### Code Formatting
-```bash
-black src/ tests/
-isort src/ tests/
-```
-
-### Type Checking
-```bash
-mypy src/
-```
-
-### Linting
-```bash
-flake8 src/ tests/
-```
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests for new functionality
-5. Run the test suite
-6. Submit a pull request
--->
 
 
 ## License
