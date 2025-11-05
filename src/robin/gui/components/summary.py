@@ -78,8 +78,8 @@ def _classification_section(sample_dir: Path, launcher: Any = None):
                     sturgeon_data.get("confidence", 0.0),
                     sturgeon_data.get("confidence_level", "Not available"),
                     sturgeon_data.get("features", 0),
-                    "psychology", 
-                    "AI brain tumor classification"
+                    "psychology", # icon parameter
+                    "CNS tumor classification"
                 )
             
             # NanoDX
@@ -92,7 +92,7 @@ def _classification_section(sample_dir: Path, launcher: Any = None):
                     nanodx_data.get("confidence_level", "Not available"),
                     nanodx_data.get("features", 0),
                     "biotech", 
-                    "Molecular cancer diagnostics"
+                    "CNS tumor classification"
                 )
             
             # PanNanoDX
@@ -105,7 +105,7 @@ def _classification_section(sample_dir: Path, launcher: Any = None):
                     pannanodx_data.get("confidence_level", "Not available"),
                     pannanodx_data.get("features", 0),
                     "science", 
-                    "Pan-cancer analysis"
+                    "Pan-cancer tumor classification"
                 )
             
             # Random Forest
@@ -118,7 +118,7 @@ def _classification_section(sample_dir: Path, launcher: Any = None):
                     rf_data.get("confidence_level", "Not available"),
                     rf_data.get("features", 0),
                     "forest", 
-                    "Machine learning classification"
+                    "CNS Machine learning classification"
                 )
 
 
