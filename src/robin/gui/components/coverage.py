@@ -214,7 +214,6 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 if bed_filename and bed_filename != "Unknown":
                     try:
                         from robin import resources
-                        import os
                         resources_dir = os.path.dirname(os.path.abspath(resources.__file__))
                         bed_path = os.path.join(resources_dir, bed_filename)
                         if not os.path.exists(bed_path):
@@ -566,17 +565,17 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     def _get_igv_state():
                         try:
                             key = str(sample_dir)
-                        if hasattr(launcher, "_coverage_state"):
-                            if key not in launcher._coverage_state:
+                            if hasattr(launcher, "_coverage_state"):
+                                if key not in launcher._coverage_state:
+                                    launcher._coverage_state[key] = {}
+                                return launcher._coverage_state[key]
+                            else:
+                                launcher._coverage_state = {}
                                 launcher._coverage_state[key] = {}
-                            return launcher._coverage_state[key]
-                        else:
-                            launcher._coverage_state = {}
-                            launcher._coverage_state[key] = {}
-                            return launcher._coverage_state[key]
-                    except Exception:
-                        # Return empty state as fallback
-                        return {}
+                                return launcher._coverage_state[key]
+                        except Exception:
+                            # Return empty state as fallback
+                            return {}
 
                 def _is_igv_ready():
                     """Check if IGV browser is properly initialized and ready."""
@@ -683,54 +682,54 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             print(f"Error checking IGV library: {e}")
                             return False
                     except Exception:
-                            return False
+                        return False
 
                 # Function to retry IGV creation
                 def _retry_igv_creation(bam_path: Path):
                     """Retry IGV browser creation after a failure."""
                     try:
-                            igv_status.set_text("Retrying IGV browser creation...")
+                        igv_status.set_text("Retrying IGV browser creation...")
                         _load_igv_bam(bam_path)
                     except Exception as e:
-                            igv_status.set_text(f"Retry failed: {e}")
+                        igv_status.set_text(f"Retry failed: {e}")
                         print(f"IGV retry error: {e}")
 
-                        # Function to wait for element to be ready
+                # Function to wait for element to be ready
                 def _wait_for_element_ready():
-                        """Wait for the IGV div element to be properly rendered."""
-                        js_wait = """
-                        return new Promise((resolve, reject) => {
-                            const el = document.getElementById('igv-container');
-                            if (!el) {
-                                reject(new Error('Element not found'));
-                                return;
-                            }
-                    
+                    """Wait for the IGV div element to be properly rendered."""
+                    js_wait = """
+                    return new Promise((resolve, reject) => {
+                        const el = document.getElementById('igv-container');
+                        if (!el) {
+                            reject(new Error('Element not found'));
+                            return;
+                        }
+                
+                        if (el.offsetWidth > 0 && el.offsetHeight > 0) {
+                            resolve(true);
+                            return;
+                        }
+                
+                        // Wait for element to be ready
+                        const checkReady = () => {
                             if (el.offsetWidth > 0 && el.offsetHeight > 0) {
                                 resolve(true);
-                                return;
+                            } else {
+                                setTimeout(checkReady, 100);
                             }
-                    
-                            // Wait for element to be ready
-                            const checkReady = () => {
-                                if (el.offsetWidth > 0 && el.offsetHeight > 0) {
-                                    resolve(true);
-                                } else {
-                                    setTimeout(checkReady, 100);
-                                }
-                            };
-                            checkReady();
-                        });
-                        """
-                        try:
-                            return ui.run_javascript(js_wait, timeout=10.0)
-                        except Exception:
-                            return False
+                        };
+                        checkReady();
+                    });
+                    """
+                    try:
+                        return ui.run_javascript(js_wait, timeout=10.0)
+                    except Exception:
+                        return False
 
                 # Function to load BAM into IGV
                 def _load_igv_bam(bam_path: Path):
                     try:
-                            # Get state first
+                        # Get state first
                         state = _get_igv_state()
 
                         # Prevent multiple simultaneous IGV loading attempts
@@ -852,20 +851,20 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 # Clear loading flag on failure
                                 state["igv_loading"] = False
 
-                        except Exception as e:
-                            igv_status.set_text(f"Error loading IGV: {e}")
+                    except Exception as e:
+                        igv_status.set_text(f"Error loading IGV: {e}")
                         _clear_igv_state()
                         # Clear loading flag on error
                         if "state" in locals():
                             state["igv_loading"] = False
 
-                        # Check for existing files once after a delay to ensure IGV library is loaded
-                        ui.timer(2.0, _check_existing_igv_bam, once=True)
+                    # Check for existing files once after a delay to ensure IGV library is loaded
+                    ui.timer(2.0, _check_existing_igv_bam, once=True)
 
-                        # Function to refresh IGV BAM check (useful after regeneration)
+                # Function to refresh IGV BAM check (useful after regeneration)
                 def _refresh_igv_check():
-                        try:
-                            # Only refresh if IGV isn't ready or if we need to check for new files
+                    try:
+                        # Only refresh if IGV isn't ready or if we need to check for new files
                         if _is_igv_ready():
                             # Check if the current BAM still exists
                             current_bam = _get_igv_state().get("igv_loaded_bam")
@@ -889,15 +888,15 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         # If we get here, we need to refresh
                         _clear_igv_state()
                         _check_existing_igv_bam()
-                        except Exception as e:
-                            print(f"Error refreshing IGV check: {e}")
+                    except Exception as e:
+                        print(f"Error refreshing IGV check: {e}")
 
-                        # Function to clear data tracks from IGV (keeps reference tracks)
+                # Function to clear data tracks from IGV (keeps reference tracks)
                 def _clear_igv_tracks():
-                # Initialize state variable
-                        state = None
-                        try:
-                            # First check if IGV is actually ready
+                    # Initialize state variable
+                    state = None
+                    try:
+                        # First check if IGV is actually ready
                         if not _is_igv_ready():
                             igv_status.set_text("IGV is not ready - cannot clear tracks.")
                             return
@@ -944,24 +943,24 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         if state:
                             state["data_tracks_cleared"] = True
 
-                        except Exception as e:
-                            igv_status.set_text(f"Error clearing tracks: {e}")
+                    except Exception as e:
+                        igv_status.set_text(f"Error clearing tracks: {e}")
                         print(f"Error in _clear_igv_tracks: {e}")
 
-                        # Function to wait for BAM file to stabilize (not being written to)
+                # Function to wait for BAM file to stabilize (not being written to)
                 def _wait_for_bam_ready(bam_path: Path, max_wait_time: int = 30) -> bool:
-                        """
-                        Wait for BAM file to be ready (not actively being written to).
-                        Returns True if file is ready, False if timeout.
-                        """
-                        import time
+                    """
+                    Wait for BAM file to be ready (not actively being written to).
+                    Returns True if file is ready, False if timeout.
+                    """
+                    import time
             
-                        start_time = time.time()
-                        last_size = -1
-                        stable_count = 0
-                        required_stable_checks = 2  # Need 2 consecutive checks with same size
+                    start_time = time.time()
+                    last_size = -1
+                    stable_count = 0
+                    required_stable_checks = 2  # Need 2 consecutive checks with same size
             
-                        while time.time() - start_time < max_wait_time:
+                    while time.time() - start_time < max_wait_time:
                         try:
                             if not bam_path.exists():
                                 time.sleep(0.5)
@@ -987,14 +986,14 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             continue
             
                     # Timeout reached
-                        return False
+                    return False
         
-                        # Function to reload BAM data into existing IGV browser
+                # Function to reload BAM data into existing IGV browser
                 def _reload_bam_track():
-                # Initialize state variable
-                        state = None
-                        try:
-                            # First check if IGV is actually ready
+                    # Initialize state variable
+                    state = None
+                    try:
+                        # First check if IGV is actually ready
                         if not _is_igv_ready():
                             igv_status.set_text("IGV is not ready - cannot reload BAM.")
                             return
@@ -1130,15 +1129,15 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         # Auto-load the BED file after BAM is loaded
                         _load_target_bed()
 
-                        except Exception as e:
-                            igv_status.set_text(f"Error reloading BAM: {e}")
+                    except Exception as e:
+                        igv_status.set_text(f"Error reloading BAM: {e}")
                         print(f"Error in _reload_bam_track: {e}")
 
-                        # Function to load target BED file into IGV
+                # Function to load target BED file into IGV
                 def _load_target_bed():
-                        """Load the target BED file as a track in IGV"""
-                        try:
-                            # First check if IGV is actually ready
+                    """Load the target BED file as a track in IGV"""
+                    try:
+                        # First check if IGV is actually ready
                         if not _is_igv_ready():
                             igv_status.set_text("IGV is not ready - cannot load BED file.")
                             return
@@ -1173,19 +1172,19 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             
                                     # Try to find the BED file in robin resources
                                     try:
-                                    from robin import resources
-                                    bed_file_path = os.path.join(
-                                        os.path.dirname(os.path.abspath(resources.__file__)),
-                                        bed_filename
-                                    )
-                                    if not os.path.exists(bed_file_path):
-                                        bed_file_path = None
+                                        from robin import resources
+                                        bed_file_path = os.path.join(
+                                            os.path.dirname(os.path.abspath(resources.__file__)),
+                                            bed_filename
+                                        )
+                                        if not os.path.exists(bed_file_path):
+                                            bed_file_path = None
                                     except Exception:
-                                    pass
+                                        pass
                             
                                     # Fallback paths
                                     if not bed_file_path:
-                                    possible_paths = [
+                                        possible_paths = [
                                         bed_filename,
                                         f"data/{bed_filename}",
                                         f"/usr/local/share/{bed_filename}",
@@ -1253,48 +1252,48 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         igv_status.set_text(f"Loaded BED file: {bed_name}")
                         ui.notify(f"Target BED file loaded: {bed_name}", type="positive")
 
-                        except Exception as e:
-                            igv_status.set_text(f"Error loading BED: {e}")
+                    except Exception as e:
+                        igv_status.set_text(f"Error loading BED: {e}")
                         print(f"Error in _load_target_bed: {e}")
 
-                        # Function to check console for errors
+                # Function to check console for errors
                 def _check_console_errors():
-                        """Check the browser console for any JavaScript errors."""
-                        js_check_console = """
-                        try {
-                            const errors = [];
-                    
-                            // Check for basic IGV functionality
-                            if (typeof igv === 'undefined') {
-                                errors.push('IGV library not loaded');
-                            } else if (typeof igv.createBrowser !== 'function') {
-                                errors.push('IGV createBrowser method not available');
-                            } else {
-                                errors.push(`IGV version: ${igv.version || 'unknown'}`);
-                            }
-                    
-                            return errors;
-                        } catch (e) {
-                            return ['Error checking console: ' + e.message];
-                        }
-                        """
+                    """Check the browser console for any JavaScript errors."""
+                    js_check_console = """
+                    try {
+                        const errors = [];
 
-                        try:
-                            errors = ui.run_javascript(js_check_console, timeout=10.0)
+                        // Check for basic IGV functionality
+                        if (typeof igv === 'undefined') {
+                            errors.push('IGV library not loaded');
+                        } else if (typeof igv.createBrowser !== 'function') {
+                            errors.push('IGV createBrowser method not available');
+                        } else {
+                            errors.push(`IGV version: ${igv.version || 'unknown'}`);
+                        }
+                
+                        return errors;
+                    } catch (e) {
+                        return ['Error checking console: ' + e.message];
+                    }
+                    """
+
+                    try:
+                        errors = ui.run_javascript(js_check_console, timeout=10.0)
                         if errors and len(errors) > 0:
                             error_text = "Console errors found:\n" + "\n".join(errors)
                             ui.notify(error_text, type="warning")
                             print(error_text)
                         else:
                             ui.notify("No console errors found", type="positive")
-                        except Exception as e:
-                            ui.notify(f"Error checking console: {e}", type="negative")
+                    except Exception as e:
+                        ui.notify(f"Error checking console: {e}", type="negative")
 
-                        # Function to create an empty IGV browser
+                # Function to create an empty IGV browser
                 def _create_empty_igv():
-                        """Create an empty IGV browser with no tracks."""
-                        try:
-                            if not _check_igv_library():
+                    """Create an empty IGV browser with no tracks."""
+                    try:
+                        if not _check_igv_library():
                             ui.notify("IGV library not available", type="warning")
                             return
 
@@ -1382,26 +1381,26 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         ui.run_javascript(js_empty, timeout=30.0)
                         ui.notify("Empty IGV browser creation initiated", type="info")
 
-                        except Exception as e:
-                            ui.notify(f"Error creating empty IGV: {e}", type="negative")
+                    except Exception as e:
+                        ui.notify(f"Error creating empty IGV: {e}", type="negative")
                         print(f"Error in empty IGV: {e}")
 
-                        # Function to debug IGV state
+                # Function to debug IGV state
                 def _debug_igv_state():
-                        try:
-                            js_debug = """
-                            console.log('=== IGV Debug Info ===');
-                            console.log('window.lj_igv:', window.lj_igv);
-                            console.log('window.lj_igv_browser_ready:', window.lj_igv_browser_ready);
-                    
-                            if (window.lj_igv) {
-                                console.log('IGV browser exists');
-                                console.log('Available methods:', Object.getOwnPropertyNames(window.lj_igv));
-                            } else {
-                                console.log('No IGV browser found');
-                            }
-                    
-                            console.log('Python state check requested');
+                    try:
+                        js_debug = """
+                        console.log('=== IGV Debug Info ===');
+                        console.log('window.lj_igv:', window.lj_igv);
+                        console.log('window.lj_igv_browser_ready:', window.lj_igv_browser_ready);
+                
+                        if (window.lj_igv) {
+                            console.log('IGV browser exists');
+                            console.log('Available methods:', Object.getOwnPropertyNames(window.lj_igv));
+                        } else {
+                            console.log('No IGV browser found');
+                        }
+                
+                        console.log('Python state check requested');
                         """
 
                         ui.run_javascript(js_debug, timeout=10.0)
@@ -1411,20 +1410,20 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         debug_info = f"Python IGV State: initialized={state.get('igv_initialized')}, browser_ready={state.get('igv_browser_ready')}, bam={state.get('igv_loaded_bam')}, tracks_cleared={state.get('tracks_cleared')}"
                         igv_status.set_text(debug_info)
 
-                        except Exception as e:
-                            igv_status.set_text(f"Debug error: {e}")
+                    except Exception as e:
+                        igv_status.set_text(f"Debug error: {e}")
                         print(f"Error in debug: {e}")
 
-                        # IGV control buttons
-                        reload_bam_button = ui.button("Load BAM", on_click=_reload_bam_track)
+                # IGV control buttons
+                reload_bam_button = ui.button("Load BAM", on_click=_reload_bam_track)
 
-                        # Add IGV library status check timer once after a delay
-                        ui.timer(3.0, _check_igv_library, once=True)
+                # Add IGV library status check timer once after a delay
+                ui.timer(3.0, _check_igv_library, once=True)
 
-                        # BAM generation buttons
+                # BAM generation buttons
                 async def _trigger_build_sorted_bam(force_regenerate: bool = False) -> None:
-                        try:
-                            # Debug: Check what's in the launcher
+                    try:
+                        # Debug: Check what's in the launcher
                         debug_info = f"launcher type: {type(launcher)}, workflow_runner: {getattr(launcher, 'workflow_runner', 'None')}"
 
                         if force_regenerate:
@@ -1516,8 +1515,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         except Exception as e:
                             ui.notify(f"Error submitting IGV BAM job: {e}", type="negative")
 
-                        except Exception as e:
-                            try:
+                    except Exception as e:
+                        try:
                             ui.notify(f"Error checking IGV BAM status: {e}", type="negative")
                         except Exception:
                             # Client may have disconnected, ignore UI errors
@@ -2061,7 +2060,6 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 """Export filtered variants to CSV"""
                 try:
                     import tempfile
-                    import os
 
                     # Create temporary file
                     with tempfile.NamedTemporaryFile(
@@ -3516,7 +3514,6 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     """Export gene variants to CSV"""
                     try:
                         import tempfile
-                        import os
 
                         # Create temporary file
                         with tempfile.NamedTemporaryFile(
