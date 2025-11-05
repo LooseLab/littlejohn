@@ -114,28 +114,50 @@ def styled_table(*, columns, rows=None, pagination=20, class_size="table-xs", **
     Args:
         columns: columns definition passed to ui.table
         rows: initial rows
-        pagination: rows per page (0 disables)
+        pagination: rows per page (0 or None disables pagination)
         class_size: table size class (e.g., "table-xs", "table-sm")
         **kwargs: forwarded to ui.table
 
     Returns:
         Tuple of (container, table) where container is the overflow wrapper column and table is the ui.table instance.
     """
+    # Add CSS to hide pagination for tables with no-pagination class (only once)
+    if not hasattr(styled_table, '_pagination_css_added'):
+        ui.add_head_html("""
+            <style>
+                .no-pagination .q-table__bottom {
+                    display: none !important;
+                }
+            </style>
+        """)
+        styled_table._pagination_css_added = True
+    
     # Outer container with M3 styling and mobile touch scrolling support
-    container = ui.column().classes(
-        "w-full overflow-x-auto compact-table elevation-1 rounded-lg"
-    )
+    container_classes = "w-full overflow-x-auto compact-table elevation-1 rounded-lg"
+    if pagination == 0 or pagination is None:
+        container_classes += " no-pagination"
+    
+    container = ui.column().classes(container_classes)
     with container:
-        table = ui.table(
-            columns=columns, rows=rows or [], pagination=pagination, **kwargs
-        )
+        # If pagination is 0 or None, disable pagination completely
+        if pagination == 0 or pagination is None:
+            table = ui.table(
+                columns=columns, rows=rows or [], pagination=None, **kwargs
+            )
+        else:
+            table = ui.table(
+                columns=columns, rows=rows or [], pagination=pagination, **kwargs
+            )
         try:
             table.classes(replace=f"table w-full {class_size} text-xs")
         except Exception:
             table.classes(f"table w-full {class_size} text-xs")
         # Use Quasar's dense mode with M3 styling for maximum compactness
         try:
-            table.props("dense flat wrap-cells")
+            if pagination == 0 or pagination is None:
+                table.props("dense flat wrap-cells hide-pagination")
+            else:
+                table.props("dense flat wrap-cells")
         except Exception:
             pass
     return container, table

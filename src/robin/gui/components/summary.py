@@ -13,7 +13,12 @@ try:
 except ImportError:  # pragma: no cover
     ui = None
 
-from robin.gui.config import get_confidence_level as get_classifier_confidence_level
+from robin.gui.config import (
+    get_confidence_level as get_classifier_confidence_level,
+    is_section_enabled,
+    get_enabled_classification_steps,
+    CLASSIFICATION_STEPS,
+)
 
 
 @ui.refreshable
@@ -47,9 +52,17 @@ def _run_info_section(sample_dir: Path, sample_id: str):
 
 
 @ui.refreshable
-def _classification_section(sample_dir: Path):
+def _classification_section(sample_dir: Path, launcher: Any = None):
     """Create refreshable classification section."""
     classification_data = _extract_classification_data(sample_dir)
+    
+    # Get workflow steps from launcher if available
+    workflow_steps = launcher.workflow_steps if launcher and hasattr(launcher, 'workflow_steps') else None
+    enabled_classification_steps = get_enabled_classification_steps(workflow_steps)
+    
+    # Only show section if at least one classification step is enabled
+    if workflow_steps and not enabled_classification_steps:
+        return
     
     with ui.card().classes("w-full"):
         ui.label("Classification Details").classes("text-lg font-semibold text-blue-800")
@@ -57,110 +70,134 @@ def _classification_section(sample_dir: Path):
         
         with ui.row().classes("w-full gap-2 sm:gap-1 flex-wrap mobile-classification-details"):
             # Sturgeon
-            sturgeon_data = classification_data.get("sturgeon", {})
-            _create_classification_dashboard_card_with_data(
-                "Sturgeon", 
-                sturgeon_data.get("classification", "Not available"),
-                sturgeon_data.get("confidence", 0.0),
-                sturgeon_data.get("confidence_level", "Not available"),
-                sturgeon_data.get("features", 0),
-                "psychology", 
-                "AI brain tumor classification"
-            )
+            if not workflow_steps or "sturgeon" in enabled_classification_steps:
+                sturgeon_data = classification_data.get("sturgeon", {})
+                _create_classification_dashboard_card_with_data(
+                    "Sturgeon", 
+                    sturgeon_data.get("classification", "Not available"),
+                    sturgeon_data.get("confidence", 0.0),
+                    sturgeon_data.get("confidence_level", "Not available"),
+                    sturgeon_data.get("features", 0),
+                    "psychology", 
+                    "AI brain tumor classification"
+                )
             
             # NanoDX
-            nanodx_data = classification_data.get("nanodx", {})
-            _create_classification_dashboard_card_with_data(
-                "NanoDX", 
-                nanodx_data.get("classification", "Not available"),
-                nanodx_data.get("confidence", 0.0),
-                nanodx_data.get("confidence_level", "Not available"),
-                nanodx_data.get("features", 0),
-                "biotech", 
-                "Molecular cancer diagnostics"
-            )
+            if not workflow_steps or "nanodx" in enabled_classification_steps:
+                nanodx_data = classification_data.get("nanodx", {})
+                _create_classification_dashboard_card_with_data(
+                    "NanoDX", 
+                    nanodx_data.get("classification", "Not available"),
+                    nanodx_data.get("confidence", 0.0),
+                    nanodx_data.get("confidence_level", "Not available"),
+                    nanodx_data.get("features", 0),
+                    "biotech", 
+                    "Molecular cancer diagnostics"
+                )
             
             # PanNanoDX
-            pannanodx_data = classification_data.get("pannanodx", {})
-            _create_classification_dashboard_card_with_data(
-                "PanNanoDX", 
-                pannanodx_data.get("classification", "Not available"),
-                pannanodx_data.get("confidence", 0.0),
-                pannanodx_data.get("confidence_level", "Not available"),
-                pannanodx_data.get("features", 0),
-                "science", 
-                "Pan-cancer analysis"
-            )
+            if not workflow_steps or "pannanodx" in enabled_classification_steps:
+                pannanodx_data = classification_data.get("pannanodx", {})
+                _create_classification_dashboard_card_with_data(
+                    "PanNanoDX", 
+                    pannanodx_data.get("classification", "Not available"),
+                    pannanodx_data.get("confidence", 0.0),
+                    pannanodx_data.get("confidence_level", "Not available"),
+                    pannanodx_data.get("features", 0),
+                    "science", 
+                    "Pan-cancer analysis"
+                )
             
             # Random Forest
-            rf_data = classification_data.get("random_forest", {})
-            _create_classification_dashboard_card_with_data(
-                "Random Forest", 
-                rf_data.get("classification", "Not available"),
-                rf_data.get("confidence", 0.0),
-                rf_data.get("confidence_level", "Not available"),
-                rf_data.get("features", 0),
-                "forest", 
-                "Machine learning classification"
-            )
+            if not workflow_steps or "random_forest" in enabled_classification_steps:
+                rf_data = classification_data.get("random_forest", {})
+                _create_classification_dashboard_card_with_data(
+                    "Random Forest", 
+                    rf_data.get("classification", "Not available"),
+                    rf_data.get("confidence", 0.0),
+                    rf_data.get("confidence_level", "Not available"),
+                    rf_data.get("features", 0),
+                    "forest", 
+                    "Machine learning classification"
+                )
 
 
 @ui.refreshable
-def _analysis_section(sample_dir: Path):
+def _analysis_section(sample_dir: Path, launcher: Any = None):
     """Create refreshable analysis section."""
-    coverage_data = _extract_coverage_data(sample_dir)
-    cnv_data = _extract_cnv_data(sample_dir)
-    mgmt_data = _extract_mgmt_data(sample_dir)
-    fusion_data = _extract_fusion_data(sample_dir)
+    # Get workflow steps from launcher if available
+    workflow_steps = launcher.workflow_steps if launcher and hasattr(launcher, 'workflow_steps') else None
+    
+    coverage_data = _extract_coverage_data(sample_dir) if not workflow_steps or is_section_enabled("target", workflow_steps) else {}
+    cnv_data = _extract_cnv_data(sample_dir) if not workflow_steps or is_section_enabled("cnv", workflow_steps) else {}
+    mgmt_data = _extract_mgmt_data(sample_dir) if not workflow_steps or is_section_enabled("mgmt", workflow_steps) else {}
+    fusion_data = _extract_fusion_data(sample_dir) if not workflow_steps or is_section_enabled("fusion", workflow_steps) else {}
+    
+    # Check if any analysis section should be shown
+    should_show_target = not workflow_steps or is_section_enabled("target", workflow_steps)
+    should_show_cnv = not workflow_steps or is_section_enabled("cnv", workflow_steps)
+    should_show_mgmt = not workflow_steps or is_section_enabled("mgmt", workflow_steps)
+    should_show_fusion = not workflow_steps or is_section_enabled("fusion", workflow_steps)
+    
+    if workflow_steps and not any([should_show_target, should_show_cnv, should_show_mgmt, should_show_fusion]):
+        return
     
     with ui.card().classes("w-full"):
         ui.label("Analysis Details").classes("text-lg font-semibold text-blue-800")
         ui.separator().classes().style("border: 1px solid var(--md-primary)")
         
         with ui.row().classes("w-full gap-2 sm:gap-1 flex-wrap mobile-analysis-details"):
-            # Coverage Analysis
-            _create_coverage_dashboard_card_with_data(
-                coverage_data.get("quality", "Not available"),
-                coverage_data.get("target_coverage", "Not available"),
-                coverage_data.get("global_coverage", "Not available"),
-                coverage_data.get("enrichment", "Not available")
-            )
+            # Coverage Analysis (target)
+            if should_show_target:
+                _create_coverage_dashboard_card_with_data(
+                    coverage_data.get("quality", "Not available"),
+                    coverage_data.get("target_coverage", "Not available"),
+                    coverage_data.get("global_coverage", "Not available"),
+                    coverage_data.get("enrichment", "Not available")
+                )
             
             # CNV Analysis
-            _create_cnv_dashboard_card_with_data(
-                cnv_data.get("genetic_sex", "Not available"),
-                cnv_data.get("bin_width", "Not available"),
-                cnv_data.get("variance", "Not available"),
-                cnv_data.get("gained", 0),
-                cnv_data.get("lost", 0)
-            )
+            if should_show_cnv:
+                _create_cnv_dashboard_card_with_data(
+                    cnv_data.get("genetic_sex", "Not available"),
+                    cnv_data.get("bin_width", "Not available"),
+                    cnv_data.get("variance", "Not available"),
+                    cnv_data.get("gained", 0),
+                    cnv_data.get("lost", 0)
+                )
             
             # MGMT Analysis
-            _create_mgmt_dashboard_card_with_data(
-                mgmt_data.get("status", "Not available"),
-                mgmt_data.get("methylation_percent", "Not available"),
-                mgmt_data.get("average_methylation", "Not available"),
-                mgmt_data.get("prediction_score", "Not available"),
-                mgmt_data.get("cpg_sites", "Not available")
-            )
+            if should_show_mgmt:
+                _create_mgmt_dashboard_card_with_data(
+                    mgmt_data.get("status", "Not available"),
+                    mgmt_data.get("methylation_percent", "Not available"),
+                    mgmt_data.get("average_methylation", "Not available"),
+                    mgmt_data.get("prediction_score", "Not available"),
+                    mgmt_data.get("cpg_sites", "Not available")
+                )
             
             # Fusion Analysis
-            panel = _get_analysis_panel(sample_dir)
-            _create_fusion_dashboard_card_with_data(
-                panel,
-                fusion_data.get("target_fusions", 0),
-                fusion_data.get("genome_fusions", 0)
-            )
+            if should_show_fusion:
+                panel = _get_analysis_panel(sample_dir)
+                _create_fusion_dashboard_card_with_data(
+                    panel,
+                    fusion_data.get("target_fusions", 0),
+                    fusion_data.get("genome_fusions", 0),
+                    fusion_data.get("target_pairs", 0),
+                    fusion_data.get("target_groups", 0),
+                    fusion_data.get("genome_pairs", 0),
+                    fusion_data.get("genome_groups", 0)
+                )
 
 
-def add_summary_section(sample_dir: Path, sample_id: str) -> None:
+def add_summary_section(sample_dir: Path, sample_id: str, launcher: Any = None) -> None:
     """Build the Summary section at the top of the sample detail page using ui.refreshable."""
     
     # Create refreshable sections synchronously for immediate rendering
     # This ensures they appear at the top of the page
     _run_info_section(sample_dir, sample_id)
-    _classification_section(sample_dir)
-    _analysis_section(sample_dir)
+    _classification_section(sample_dir, launcher)
+    _analysis_section(sample_dir, launcher)
     
     # Start periodic refresh timer (every 30 seconds)
     ui.timer(30.0, lambda: [
@@ -529,7 +566,11 @@ def _create_mgmt_dashboard_card() -> Dict[str, Any]:
 def _create_fusion_dashboard_card_with_data(
     panel: str, 
     target_fusions: int, 
-    genome_fusions: int
+    genome_fusions: int,
+    target_pairs: int = 0,
+    target_groups: int = 0,
+    genome_pairs: int = 0,
+    genome_groups: int = 0
 ) -> None:
     """Create a compact fusion analysis dashboard card with data."""
     with ui.card().classes("mosaic-card flex-1 min-w-0 mobile-dashboard-card"):
@@ -544,11 +585,17 @@ def _create_fusion_dashboard_card_with_data(
         # Panel info and main result
         with ui.row().classes("flex items-start justify-between mb-1 gap-1"):
             ui.label(f"Panel: {panel}").classes("mosaic-card__content text-xs sm:text-sm font-medium break-words flex-1")
-            ui.label(f"{target_fusions} target fusions").classes("px-1 py-0.5 text-xs font-medium rounded-full bg-blue-100 text-blue-800")
+            if target_pairs > 0 or target_groups > 0:
+                ui.label(f"{target_pairs} pairs, {target_groups} groups").classes("px-1 py-0.5 text-xs font-medium rounded-full bg-blue-100 text-blue-800")
+            else:
+                ui.label(f"{target_fusions} target fusions").classes("px-1 py-0.5 text-xs font-medium rounded-full bg-blue-100 text-blue-800")
         
         # Analysis details in compact layout
         with ui.column().classes("mb-1"):
-            ui.label(f"{genome_fusions} genome wide fusions").classes("mosaic-card__subtitle")
+            if genome_pairs > 0 or genome_groups > 0:
+                ui.label(f"{genome_pairs} pairs, {genome_groups} groups").classes("mosaic-card__subtitle")
+            else:
+                ui.label(f"{genome_fusions} genome wide fusions").classes("mosaic-card__subtitle")
         
         # Description
         ui.label("Fusion candidates identified from reads with supplementary alignments").classes("mosaic-card__subtitle")
@@ -1184,7 +1231,14 @@ def _extract_classification_data(sample_dir: Path) -> Dict[str, Any]:
 
 def _extract_fusion_data(sample_dir: Path) -> Dict[str, Any]:
     """Extract fusion analysis data from generated summary files."""
-    fusion_data = {"target_fusions": 0, "genome_fusions": 0}
+    fusion_data = {
+        "target_fusions": 0, 
+        "genome_fusions": 0,
+        "target_pairs": 0,
+        "target_groups": 0,
+        "genome_pairs": 0,
+        "genome_groups": 0
+    }
     
     logging.info(f"[Summary] _extract_fusion_data() called with sample_dir: {sample_dir}")
 
@@ -1254,7 +1308,7 @@ def _extract_fusion_data(sample_dir: Path) -> Dict[str, Any]:
         
         # If still no data, try to load directly from pickle files and count gene_pairs
         try:
-            from robin.gui.components.fusion import _load_processed_pickle
+            from robin.gui.components.fusion import _load_processed_pickle, _count_unique_fusion_pairs, _count_unique_fusion_groups
             target_file = sample_dir / "fusion_candidates_master_processed.csv"
             genome_file = sample_dir / "fusion_candidates_all_processed.csv"
             
@@ -1264,16 +1318,18 @@ def _extract_fusion_data(sample_dir: Path) -> Dict[str, Any]:
             
             
             if target_data and isinstance(target_data, dict):
-                fusion_data["target_fusions"] = target_data.get("candidate_count", 0)
+                # Use filtered counts to match what's displayed in fusion section
+                fusion_data["target_fusions"] = _count_unique_fusion_pairs(target_data)
+                fusion_data["target_pairs"] = _count_unique_fusion_pairs(target_data)
+                fusion_data["target_groups"] = _count_unique_fusion_groups(target_data)
             
             if genome_data and isinstance(genome_data, dict):
-                # Use gene_pairs count if candidate_count is 0 (same logic as GUI)
-                genome_count = genome_data.get("candidate_count", 0)
-                if genome_count == 0 and genome_data.get("gene_pairs"):
-                    genome_count = len(genome_data.get("gene_pairs", []))
-                fusion_data["genome_fusions"] = genome_count
+                # Use filtered counts to match what's displayed in fusion section
+                fusion_data["genome_fusions"] = _count_unique_fusion_pairs(genome_data)
+                fusion_data["genome_pairs"] = _count_unique_fusion_pairs(genome_data)
+                fusion_data["genome_groups"] = _count_unique_fusion_groups(genome_data)
             
-            logging.info(f"[Summary] Fusion data loaded directly from pickle files - target: {fusion_data['target_fusions']}, genome: {fusion_data['genome_fusions']}")
+            logging.info(f"[Summary] Fusion data loaded directly from pickle files - target: {fusion_data['target_fusions']} fusions, {fusion_data['target_pairs']} pairs, {fusion_data['target_groups']} groups; genome: {fusion_data['genome_fusions']} fusions, {fusion_data['genome_pairs']} pairs, {fusion_data['genome_groups']} groups")
             return fusion_data
         except Exception as e:
             logging.debug(f"   Fusion: Failed to load directly from pickle files: {e}")

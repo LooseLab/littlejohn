@@ -1122,8 +1122,11 @@ class WorkflowManager:
                 time.sleep(0.1)
 
         except KeyboardInterrupt:
+            print("\n[SHUTDOWN] Interrupted by user (Ctrl-C)")
+            print("[SHUTDOWN] Initiating graceful shutdown...")
             # Signal workers to stop
             self.running = False
+            print("[SHUTDOWN] Signalled workers to stop")
             raise
 
     def stop(self, timeout: float = 30.0) -> bool:
@@ -2058,11 +2061,18 @@ class WorkflowRunner:
             while self.manager.is_running():
                 time.sleep(0.5)
         except KeyboardInterrupt:
+            print("\n[SHUTDOWN] Interrupted by user (Ctrl-C)")
+            print("[SHUTDOWN] Initiating graceful shutdown...")
             if self.verbose:
                 print("[WorkflowRunner] Shutdown requested.")
             print("[WorkflowRunner] Shutdown requested.")
             # Stop the watcher and workflow manager
+            print("[SHUTDOWN] Stopping file watcher...")
             graceful_shutdown = watcher.stop(timeout=1.0)
+            if graceful_shutdown:
+                print("[SHUTDOWN] File watcher stopped gracefully")
+            else:
+                print("[SHUTDOWN] Warning: File watcher may not have stopped gracefully")
 
             if self.verbose:
                 if graceful_shutdown:

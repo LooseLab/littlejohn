@@ -18,6 +18,178 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _extract_mgmt_specific_sites_from_bed(bed_path: str) -> pd.DataFrame:
+    """
+    Extract MGMT-specific CpG site methylation data from a BED file.
+    
+    This function mirrors the logic from the GUI component to extract
+    strand-specific methylation data for key CpG sites.
+    
+    Args:
+        bed_path: Path to the BED file
+        
+    Returns:
+        DataFrame with CpG site methylation data, or empty DataFrame if extraction fails
+    """
+    try:
+        df = pd.read_csv(bed_path, sep="\t", header=None)
+        
+        # Check if column 10 contains space-separated values (old format)
+        has_space_separated_col10 = False
+        if df.shape[1] > 10 and len(df) > 0:
+            sample_val = str(df.iloc[0, 9])
+            has_space_separated_col10 = ' ' in sample_val or '\t' in sample_val
+        
+        # Check if this is the new bedmethyl format (separate columns) or old format
+        if df.shape[1] >= 12 and not has_space_separated_col10:
+            # New bedmethyl format with separate columns
+            cols = [
+                "Chromosome",
+                "Start",
+                "End",
+                "Modified_Base_Code",
+                "Score",
+                "Strand",
+                "Start2",
+                "End2",
+                "RGB",
+                "Nvalid_cov",
+                "Fraction_Modified",
+                "Nmod",
+            ]
+            num_cols_to_read = min(len(cols), df.shape[1])
+            df = df.iloc[:, :num_cols_to_read]
+            df.columns = cols[:num_cols_to_read]
+            
+            df["Nvalid_cov"] = df["Nvalid_cov"].astype(float)
+            df["Fraction_Modified"] = df["Fraction_Modified"].astype(float)
+            if "Nmod" in df.columns:
+                df["Nmod"] = df["Nmod"].astype(float)
+            else:
+                df["Nmod"] = df["Nvalid_cov"] * df["Fraction_Modified"]
+            
+            df["Start"] = df["Start"].astype(int)
+            df["Coverage"] = df["Nvalid_cov"]
+            df["Modified_Fraction"] = df["Fraction_Modified"] * 100.0
+        elif df.shape[1] >= 10:
+            # Old format with space-separated Coverage_Info in column 10
+            cols = [
+                "Chromosome",
+                "Start",
+                "End",
+                "Name",
+                "Score",
+                "Strand",
+                "Start2",
+                "End2",
+                "RGB",
+                "Coverage_Info",
+            ]
+            df = df.iloc[:, :len(cols)]
+            df.columns = cols
+            
+            cov_split = df["Coverage_Info"].astype(str).str.split()
+            df["Coverage"] = cov_split.str[0].astype(float)
+            fraction_val = cov_split.str[1].astype(float).fillna(0.0)
+            is_percentage = (fraction_val > 1.0).any() if len(fraction_val) > 0 else False
+            
+            if is_percentage:
+                df["Modified_Fraction"] = fraction_val
+                df["Fraction_Modified"] = df["Modified_Fraction"] / 100.0
+            else:
+                df["Fraction_Modified"] = fraction_val
+                df["Modified_Fraction"] = df["Fraction_Modified"] * 100.0
+            
+            df["Nvalid_cov"] = df["Coverage"]
+            df["Nmod"] = df["Coverage"] * df["Fraction_Modified"]
+            df["Start"] = df["Start"].astype(int)
+        else:
+            return pd.DataFrame()
+        
+        # Define CpG pairs and labels
+        cpg_pairs = [
+            (129467255, 129467256),
+            (129467258, 129467259),
+            (129467262, 129467263),
+            (129467272, 129467273),
+        ]
+        label_map = {
+            "129467255/129467256": "1",
+            "129467258/129467259": "2",
+            "129467262/129467263": "3",
+            "129467272/129467273": "4",
+        }
+        
+        rows = []
+        for p1, p2 in cpg_pairs:
+            pos_key = f"{p1}/{p2}"
+            site_label = label_map.get(pos_key, "Unknown")
+            
+            # Check forward strand reads at position p1
+            fwd_p1 = df[
+                (df["Chromosome"] == "chr10")
+                & (df["Start"] == p1 - 1)
+                & (df["Strand"] == "+")
+            ]
+            
+            # Check reverse strand reads at position p2
+            rev_p2 = df[
+                (df["Chromosome"] == "chr10")
+                & (df["Start"] == p2 - 1)
+                & (df["Strand"] == "-")
+            ]
+            
+            # Get forward strand data
+            if not fwd_p1.empty:
+                cov_f = float(fwd_p1["Nvalid_cov"].iloc[0])
+                mf = float(fwd_p1["Fraction_Modified"].iloc[0])
+                nmod_f = float(fwd_p1["Nmod"].iloc[0])
+                meth_fwd_count = int(round(nmod_f))
+                meth_fwd_pct = float(fwd_p1["Modified_Fraction"].iloc[0])
+            else:
+                cov_f = 0.0
+                mf = 0.0
+                meth_fwd_count = 0
+                meth_fwd_pct = 0.0
+            
+            # Get reverse strand data
+            if not rev_p2.empty:
+                cov_r = float(rev_p2["Nvalid_cov"].iloc[0])
+                mr = float(rev_p2["Fraction_Modified"].iloc[0])
+                nmod_r = float(rev_p2["Nmod"].iloc[0])
+                meth_rev_count = int(round(nmod_r))
+                meth_rev_pct = float(rev_p2["Modified_Fraction"].iloc[0])
+            else:
+                cov_r = 0.0
+                mr = 0.0
+                meth_rev_count = 0
+                meth_rev_pct = 0.0
+            
+            # Only add row if we have data
+            if cov_f > 0 or cov_r > 0:
+                tot = cov_f + cov_r
+                weighted = ((cov_f * mf) + (cov_r * mr)) / tot if tot > 0 else 0.0
+                weighted_pct = weighted * 100.0
+                
+                rows.append({
+                    "Site_Label": f"Site {site_label}",
+                    "Position": pos_key,
+                    "Coverage_Forward": int(cov_f),
+                    "Coverage_Reverse": int(cov_r),
+                    "Total_Coverage": int(tot),
+                    "Methylation_Percentage": weighted_pct,
+                    "Forward_Methylation": meth_fwd_pct,
+                    "Reverse_Methylation": meth_rev_pct,
+                    "Forward_Methylated_Count": meth_fwd_count,
+                    "Reverse_Methylated_Count": meth_rev_count,
+                })
+        
+        return pd.DataFrame(rows)
+    except Exception as e:
+        logger.warning(f"Failed to extract CpG sites from BED file {bed_path}: {e}")
+        return pd.DataFrame()
+
+
 class MGMTSection(ReportSection):
     """Section containing the MGMT methylation analysis."""
 
@@ -28,6 +200,8 @@ class MGMTSection(ReportSection):
         mgmt_results = None
         plot_out = None
         specific_sites_file = None
+        bed_file_used = None
+        specific_sites = None
 
         # First, look for "final_mgmt.csv" files (highest priority)
         final_files = [f for f in os.listdir(self.report.output) if f == "final_mgmt.csv"]
@@ -180,125 +354,198 @@ class MGMTSection(ReportSection):
             )
             self.elements.append(Spacer(1, 6))  # Reduced spacing
 
-            # Add specific CpG sites table if available
+            # Try to get CpG sites data from CSV file first, then fall back to BED file
+            # First, try to load from CSV file if it exists
             if specific_sites_file and os.path.exists(specific_sites_file):
-                specific_sites = pd.read_csv(specific_sites_file)
-                if not specific_sites.empty:
-                    self.elements.append(
-                        Paragraph(
-                            "Key CpG Sites Analysis", self.styles.styles["Heading3"]
-                        )
-                    )
-                    self.elements.append(Spacer(1, 6))
-
-                    # Create table header
-                    cpg_data = [
-                        [
-                            "Site",  # Shortened header
-                            "Position",
-                            "Fwd\nCov",  # Shortened headers
-                            "Rev\nCov",
-                            "Total\nCov",
-                            "Combined\nMeth %",
-                            "Fwd\nMeth %",
-                            "Rev\nMeth %",
-                        ]
+                try:
+                    specific_sites = pd.read_csv(specific_sites_file)
+                    logger.debug(f"Loaded CpG sites from CSV: {specific_sites_file}")
+                except Exception as e:
+                    logger.warning(f"Failed to load CpG sites CSV: {e}")
+            
+            # If CSV doesn't exist or is empty, try to extract from BED file
+            if specific_sites is None or specific_sites.empty:
+                # Determine BED file path
+                if last_seen == 999999:  # Final file
+                    bed_candidates = [
+                        os.path.join(self.report.output, "final_mgmt.bed"),
+                        os.path.join(self.report.output, "final_mgmt_mgmt.bed"),
                     ]
-
-                    # Add data rows
-                    for _, row in specific_sites.iterrows():
-                        cpg_data.append(
-                            [
-                                f"Site {row['Site_Label'].split(' ')[1]}",  # Just the number
-                                row["Position"].split("/")[0],  # Just first position
-                                str(row["Coverage_Forward"]),
-                                str(row["Coverage_Reverse"]),
-                                str(row["Total_Coverage"]),
-                                f"{row['Methylation_Percentage']:.1f}",  # Removed % symbol
-                                f"{row['Forward_Methylation']:.1f}",
-                                f"{row['Reverse_Methylation']:.1f}",
-                            ]
-                        )
-
-                    # Create the table with more compact column widths
-                    cpg_table = Table(
-                        cpg_data,
-                        colWidths=[
-                            0.5 * inch,  # Site (reduced)
-                            0.8 * inch,  # Position (reduced)
-                            0.5 * inch,  # Forward Coverage (reduced)
-                            0.5 * inch,  # Reverse Coverage (reduced)
-                            0.5 * inch,  # Total Coverage (reduced)
-                            0.6 * inch,  # Combined Methylation (reduced)
-                            0.6 * inch,  # Forward Methylation (reduced)
-                            0.6 * inch,  # Reverse Methylation (reduced)
-                        ],
-                        repeatRows=1,
+                else:
+                    bed_candidates = [
+                        os.path.join(self.report.output, f"{last_seen}_mgmt.bed"),
+                        os.path.join(self.report.output, f"{last_seen}_mgmt_mgmt.bed"),
+                    ]
+                
+                bed_path = None
+                for candidate in bed_candidates:
+                    if os.path.exists(candidate):
+                        bed_path = candidate
+                        break
+                
+                if bed_path:
+                    try:
+                        specific_sites = _extract_mgmt_specific_sites_from_bed(bed_path)
+                        bed_file_used = bed_path
+                        logger.debug(f"Extracted CpG sites from BED: {bed_path}")
+                    except Exception as e:
+                        logger.warning(f"Failed to extract CpG sites from BED: {e}")
+                        specific_sites = None
+            
+            # Add specific CpG sites table if we have data
+            if specific_sites is not None and not specific_sites.empty:
+                self.elements.append(
+                    Paragraph(
+                        "MGMT CpG Site Methylation Data", self.styles.styles["Heading3"]
                     )
+                )
+                self.elements.append(Spacer(1, 6))
 
-                    # Style the table with more compact settings
-                    cpg_table.setStyle(
-                        TableStyle(
-                            [
-                                # Inherit modern table style
-                                *self.MODERN_TABLE_STYLE._cmds,
-                                # More compact styling
-                                ("FONTSIZE", (0, 0), (-1, -1), 6),  # Even smaller font
-                                (
-                                    "LEADING",
-                                    (0, 0),
-                                    (-1, -1),
-                                    7,
-                                ),  # Tighter line spacing
-                                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-                                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                                # Header styling
-                                ("BACKGROUND", (0, 0), (-1, 0), HexColor("#F3F4F6")),
-                                ("TEXTCOLOR", (0, 0), (-1, 0), HexColor("#374151")),
-                                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                                # Add subtle gridlines
-                                ("GRID", (0, 0), (-1, -1), 0.25, HexColor("#E5E7EB")),
-                                # Reduce padding
-                                ("TOPPADDING", (0, 0), (-1, -1), 2),
-                                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-                                ("LEFTPADDING", (0, 0), (-1, -1), 2),
-                                ("RIGHTPADDING", (0, 0), (-1, -1), 2),
-                            ]
-                        )
-                    )
+                # Create table header - include methylation counts if available
+                has_meth_counts = "Forward_Methylated_Count" in specific_sites.columns
+                cpg_data = [
+                    [
+                        "Site",
+                        "Position",
+                        "Fwd\nCov",
+                        "Rev\nCov",
+                        "Total\nCov",
+                        "Meth %",
+                        "Fwd\nMeth %",
+                        "Rev\nMeth %",
+                    ]
+                ]
+                
+                # Add methylation count columns if available
+                if has_meth_counts:
+                    cpg_data[0].extend(["Fwd\nMeth\nCount", "Rev\nMeth\nCount"])
 
-                    # Add a caption above the table
-                    self.elements.append(
-                        Paragraph(
-                            "Key CpG Sites - Strand-specific methylation analysis",
-                            ParagraphStyle(
-                                "TableCaption",
-                                parent=self.styles.styles["Caption"],
-                                fontSize=7,
-                                leading=8,
-                                spaceBefore=6,
-                                spaceAfter=2,
-                            ),
-                        )
-                    )
-                    self.elements.append(cpg_table)
-                    self.elements.append(Spacer(1, 6))  # Reduced spacing
+                # Add data rows
+                for _, row in specific_sites.iterrows():
+                    # Extract site number from Site_Label
+                    site_label = str(row.get("Site_Label", ""))
+                    site_num = site_label.split(" ")[-1] if " " in site_label else site_label
+                    
+                    # Extract position
+                    position = str(row.get("Position", ""))
+                    pos_display = position.split("/")[0] if "/" in position else position
+                    
+                    row_data = [
+                        f"Site {site_num}",
+                        pos_display,
+                        str(int(row.get("Coverage_Forward", 0))),
+                        str(int(row.get("Coverage_Reverse", 0))),
+                        str(int(row.get("Total_Coverage", 0))),
+                        f"{row.get('Methylation_Percentage', 0.0):.1f}",
+                        f"{row.get('Forward_Methylation', 0.0):.1f}",
+                        f"{row.get('Reverse_Methylation', 0.0):.1f}",
+                    ]
+                    
+                    # Add methylation counts if available
+                    if has_meth_counts:
+                        row_data.extend([
+                            str(int(row.get("Forward_Methylated_Count", 0))),
+                            str(int(row.get("Reverse_Methylated_Count", 0))),
+                        ])
+                    
+                    cpg_data.append(row_data)
 
-                    # Add average methylation in a more compact format
-                    avg_methylation = specific_sites["Methylation_Percentage"].mean()
-                    self.elements.append(
-                        Paragraph(
-                            f"Mean methylation: {avg_methylation:.1f}%",  # Shortened text
-                            ParagraphStyle(
-                                "SiteAverage",
-                                parent=self.styles.styles["Normal"],
-                                fontSize=7,
-                                leading=8,
-                                textColor=HexColor("#2563eb"),
-                            ),
-                        )
+                # Create the table with more compact column widths
+                # Adjust column widths based on whether counts are included
+                if has_meth_counts:
+                    col_widths = [
+                        0.5 * inch,  # Site
+                        0.8 * inch,  # Position
+                        0.5 * inch,  # Forward Coverage
+                        0.5 * inch,  # Reverse Coverage
+                        0.5 * inch,  # Total Coverage
+                        0.5 * inch,  # Combined Methylation %
+                        0.5 * inch,  # Forward Methylation %
+                        0.5 * inch,  # Reverse Methylation %
+                        0.5 * inch,  # Forward Methylated Count
+                        0.5 * inch,  # Reverse Methylated Count
+                    ]
+                else:
+                    col_widths = [
+                        0.5 * inch,  # Site
+                        0.8 * inch,  # Position
+                        0.5 * inch,  # Forward Coverage
+                        0.5 * inch,  # Reverse Coverage
+                        0.5 * inch,  # Total Coverage
+                        0.6 * inch,  # Combined Methylation %
+                        0.6 * inch,  # Forward Methylation %
+                        0.6 * inch,  # Reverse Methylation %
+                    ]
+                
+                cpg_table = Table(
+                    cpg_data,
+                    colWidths=col_widths,
+                    repeatRows=1,
+                )
+
+                # Style the table with more compact settings
+                cpg_table.setStyle(
+                    TableStyle(
+                        [
+                            # Inherit modern table style
+                            *self.MODERN_TABLE_STYLE._cmds,
+                            # More compact styling
+                            ("FONTSIZE", (0, 0), (-1, -1), 6),  # Even smaller font
+                            (
+                                "LEADING",
+                                (0, 0),
+                                (-1, -1),
+                                7,
+                            ),  # Tighter line spacing
+                            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                            # Header styling
+                            ("BACKGROUND", (0, 0), (-1, 0), HexColor("#F3F4F6")),
+                            ("TEXTCOLOR", (0, 0), (-1, 0), HexColor("#374151")),
+                            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                            # Add subtle gridlines
+                            ("GRID", (0, 0), (-1, -1), 0.25, HexColor("#E5E7EB")),
+                            # Reduce padding
+                            ("TOPPADDING", (0, 0), (-1, -1), 2),
+                            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                            ("LEFTPADDING", (0, 0), (-1, -1), 2),
+                            ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+                        ]
                     )
-                    self.elements.append(Spacer(1, 6))  # Reduced spacing
+                )
+
+                # Add a caption above the table
+                self.elements.append(
+                    Paragraph(
+                        "MGMT CpG Site Methylation Data - Strand-specific methylation analysis",
+                        ParagraphStyle(
+                            "TableCaption",
+                            parent=self.styles.styles["Caption"],
+                            fontSize=7,
+                            leading=8,
+                            spaceBefore=6,
+                            spaceAfter=2,
+                        ),
+                    )
+                )
+                self.elements.append(cpg_table)
+                self.elements.append(Spacer(1, 6))  # Reduced spacing
+
+                # Add average methylation in a more compact format
+                avg_methylation = specific_sites["Methylation_Percentage"].mean()
+                self.elements.append(
+                    Paragraph(
+                        f"Mean methylation: {avg_methylation:.1f}%",
+                        ParagraphStyle(
+                            "SiteAverage",
+                            parent=self.styles.styles["Normal"],
+                            fontSize=7,
+                            leading=8,
+                            textColor=HexColor("#2563eb"),
+                        ),
+                    )
+                )
+                self.elements.append(Spacer(1, 6))  # Reduced spacing
 
             # Add file sources information in a more compact format
             if last_seen == 999999:  # Final file
@@ -325,6 +572,13 @@ class MGMTSection(ReportSection):
                     [
                         "CpG Sites",
                         os.path.basename(specific_sites_file),
+                    ]
+                )
+            elif bed_file_used:
+                file_sources.append(
+                    [
+                        "CpG Sites",
+                        os.path.basename(bed_file_used),
                     ]
                 )
 
@@ -470,14 +724,14 @@ class MGMTSection(ReportSection):
                 "PlotFile": "final_mgmt.png" if last_seen == 999999 else (f"{last_seen}_mgmt.png" if last_seen else None),
                 "CpGSitesFile": (
                     os.path.basename(specific_sites_file)
-                    if specific_sites_file
-                    else None
+                    if specific_sites_file and os.path.exists(specific_sites_file)
+                    else (os.path.basename(bed_file_used) if bed_file_used else None)
                 ),
             }
             self.export_frames["mgmt_summary"] = pd.DataFrame([summary_row])
 
-            if specific_sites_file and os.path.exists(specific_sites_file):
-                specific_sites = pd.read_csv(specific_sites_file)
+            # Export CpG sites data if available
+            if specific_sites is not None and not specific_sites.empty:
                 self.export_frames["mgmt_cpg_sites"] = specific_sites
         except Exception as ex:
             logger.error(

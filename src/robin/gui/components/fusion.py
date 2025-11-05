@@ -15,6 +15,13 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # Import pyplot for plotting functionality
 
+# Configure matplotlib to allow more open figures and suppress warnings
+# During preprocessing, many figures may be created
+plt.rcParams['figure.max_open_warning'] = 100  # Increase threshold
+
+# Module-level variable to track last fusion plot figure for cleanup
+_last_fusion_figure = None
+
 # Import DNA Features Viewer components at module level
 try:
     from dna_features_viewer import GraphicFeature, GraphicRecord
@@ -97,6 +104,154 @@ def _create_data_hash(data: Dict[str, Any]) -> str:
         return ""
 
 
+def _count_unique_fusion_pairs(data: Dict[str, Any]) -> int:
+    """Count unique fusion pairs from fusion data.
+    
+    Args:
+        data: Dictionary containing fusion data with annotated_data and goodpairs
+        
+    Returns:
+        Number of unique fusion pairs
+    """
+    try:
+        if not data or data.get("annotated_data") is None:
+            return 0
+        
+        annotated_data = data.get("annotated_data", pd.DataFrame())
+        goodpairs = data.get("goodpairs", pd.Series())
+        
+        if annotated_data.empty:
+            return 0
+        
+        # Filter to good pairs if available
+        if not goodpairs.empty and goodpairs.sum() > 0:
+            aligned_goodpairs = goodpairs.reindex(annotated_data.index, fill_value=False)
+            filtered_data = annotated_data[aligned_goodpairs]
+        else:
+            filtered_data = annotated_data
+        
+        if filtered_data.empty:
+            return 0
+        
+        # Get validated fusion pairs using breakpoint validation
+        clustered_data = _cluster_fusion_reads(filtered_data, max_distance=10000, use_breakpoint_validation=True)
+        
+        if clustered_data.empty:
+            return 0
+        
+        # Count unique fusion pairs
+        unique_pairs = clustered_data["fusion_pair"].nunique()
+        return int(unique_pairs)
+        
+    except Exception as e:
+        logging.warning(f"[Fusion] Failed to count unique fusion pairs: {e}")
+        return 0
+
+
+def _get_validated_fusion_groups(data: Dict[str, Any]) -> List[List[str]]:
+    """Get validated fusion groups from fusion data.
+    
+    A fusion group is validated if it contains at least one validated fusion pair
+    (meeting the minimum read support threshold).
+    
+    Args:
+        data: Dictionary containing fusion data with annotated_data, goodpairs, and gene_groups
+        
+    Returns:
+        List of validated fusion groups (each group is a list of gene names)
+    """
+    try:
+        if not data:
+            return []
+        
+        annotated_data = data.get("annotated_data", pd.DataFrame())
+        goodpairs = data.get("goodpairs", pd.Series())
+        gene_groups = data.get("gene_groups")
+        
+        if annotated_data.empty or not gene_groups or len(gene_groups) == 0:
+            return []
+        
+        # Filter to good pairs if available
+        if not goodpairs.empty and goodpairs.sum() > 0:
+            aligned_goodpairs = goodpairs.reindex(annotated_data.index, fill_value=False)
+            filtered_data = annotated_data[aligned_goodpairs]
+        else:
+            filtered_data = annotated_data
+        
+        if filtered_data.empty:
+            return []
+        
+        # Get validated fusion pairs (these meet the minimum read support threshold)
+        clustered_data = _cluster_fusion_reads(filtered_data, max_distance=10000, use_breakpoint_validation=True)
+        
+        if clustered_data.empty:
+            return []
+        
+        # Extract validated gene pairs from validated breakpoints
+        validated_pairs_set = set()
+        for _, row in clustered_data.iterrows():
+            fusion_pair_str = row["fusion_pair"]  # e.g., "GENE1-GENE2"
+            if fusion_pair_str:
+                genes = [g.strip() for g in fusion_pair_str.split("-") if g.strip()]
+                if len(genes) >= 2:
+                    # Normalize pair (sorted) for consistent comparison
+                    normalized_pair = tuple(sorted(genes))
+                    validated_pairs_set.add(normalized_pair)
+        
+        # Filter gene groups to only include those with at least one validated pair
+        validated_groups = []
+        for group in gene_groups:
+            if not isinstance(group, (list, tuple)) or len(group) < 2:
+                continue
+            
+            # Normalize group genes
+            normalized_group_genes = sorted([str(g).strip() for g in group if g])
+            if len(normalized_group_genes) < 2:
+                continue
+            
+            # Check if this group contains at least one validated pair
+            group_has_validated_pair = False
+            for i in range(len(normalized_group_genes)):
+                for j in range(i + 1, len(normalized_group_genes)):
+                    pair = (normalized_group_genes[i], normalized_group_genes[j])
+                    if pair in validated_pairs_set:
+                        group_has_validated_pair = True
+                        break
+                if group_has_validated_pair:
+                    break
+            
+            if group_has_validated_pair:
+                validated_groups.append(normalized_group_genes)
+        
+        logging.info(f"[Fusion] Validated {len(validated_groups)} fusion groups from {len(gene_groups)} total groups")
+        return validated_groups
+        
+    except Exception as e:
+        logging.warning(f"[Fusion] Failed to get validated fusion groups: {e}")
+        return []
+
+
+def _count_unique_fusion_groups(data: Dict[str, Any]) -> int:
+    """Count unique fusion groups from fusion data.
+    
+    Only counts groups that contain at least one validated fusion pair
+    (meeting the minimum read support threshold).
+    
+    Args:
+        data: Dictionary containing fusion data with gene_groups
+        
+    Returns:
+        Number of unique validated fusion groups
+    """
+    try:
+        validated_groups = _get_validated_fusion_groups(data)
+        return len(validated_groups)
+        
+    except Exception as e:
+        logging.warning(f"[Fusion] Failed to count unique fusion groups: {e}")
+        return 0
+
+
 def _generate_summary_files_from_pickle(sample_dir: Path, force_regenerate: bool = False) -> bool:
     """Generate summary files from existing pickle files if they don't exist.
     
@@ -148,19 +303,18 @@ def _generate_summary_files_from_pickle(sample_dir: Path, force_regenerate: bool
         else:
             logging.warning(f"[Fusion] Failed to load genome-wide data from: {genome_file}")
         
-        # Extract counts
+        # Extract counts using the same filtering logic as the display code
+        # This ensures consistency between summary panel and fusion section
         target_count = 0
         genome_count = 0
         
         if target_data is not None and isinstance(target_data, dict):
-            target_count = target_data.get("candidate_count", 0)
+            target_count = _count_unique_fusion_pairs(target_data)
+            logging.info(f"[Fusion] Summary: Target count (filtered): {target_count}")
         
         if genome_data is not None and isinstance(genome_data, dict):
-            # Use gene_pairs count if candidate_count is 0 (like reporting code does)
-            genome_count = genome_data.get("candidate_count", 0)
-            if genome_count == 0 and genome_data.get("gene_pairs"):
-                genome_count = len(genome_data.get("gene_pairs", []))
-                logging.info(f"[Fusion] Summary: Using gene_pairs count for genome-wide: {genome_count}")
+            genome_count = _count_unique_fusion_pairs(genome_data)
+            logging.info(f"[Fusion] Summary: Genome-wide count (filtered): {genome_count}")
         
         # Generate fusion_summary.csv
         with open(summary_file, "w", newline="") as f:
@@ -330,7 +484,7 @@ def _cluster_fusion_reads(filtered_data: pd.DataFrame, max_distance: int = 10000
         # Validate fusion breakpoints
         validated_breakpoints = _validate_fusion_breakpoints(
             filtered_data, 
-            min_read_support=3, 
+            min_read_support=4, 
             max_breakpoint_distance=100  # Much tighter clustering for breakpoints
         )
         
@@ -437,8 +591,8 @@ def _cluster_fusion_reads(filtered_data: pd.DataFrame, max_distance: int = 10000
                                 _position_in_cluster(gene2_start, gene2_end, gene2_cluster, max_distance)):
                                 cluster_reads.append(row["read_id"])
                         
-                        # Only include clusters with minimum read support (3 or more reads)
-                        if len(cluster_reads) >= 3:
+                        # Only include clusters with minimum read support (4 or more reads)
+                        if len(cluster_reads) >= 4:
                             # Calculate cluster boundaries
                             gene1_min_start = min(gene1_cluster[:, 0])
                             gene1_max_end = max(gene1_cluster[:, 1])
@@ -675,7 +829,7 @@ def _cluster_breakpoints(breakpoint_data: pd.DataFrame, max_distance: int = 100)
     return pd.DataFrame(clustered_results)
 
 
-def _validate_fusion_breakpoints(annotated_data: pd.DataFrame, min_read_support: int = 3, 
+def _validate_fusion_breakpoints(annotated_data: pd.DataFrame, min_read_support: int = 4, 
                                 max_breakpoint_distance: int = 100) -> pd.DataFrame:
     """
     Validate fusion candidates by requiring consistent breakpoint support.
@@ -727,6 +881,55 @@ def _validate_fusion_breakpoints(annotated_data: pd.DataFrame, min_read_support:
     validated_breakpoints = validated_breakpoints.sort_values("supporting_reads", ascending=False)
     
     return validated_breakpoints
+
+
+def _get_validated_fusion_pairs(annotated_data: pd.DataFrame, goodpairs: pd.Series) -> List[List[str]]:
+    """Extract validated fusion pairs from annotated_data for dropdown options.
+    
+    Returns a list of gene pairs as lists (e.g., [["GENE1", "GENE2"], ...])
+    representing validated fusion pairs from breakpoint validation.
+    """
+    try:
+        # Filter to good pairs if available
+        if not goodpairs.empty and goodpairs.sum() > 0:
+            # Align indices to avoid reindexing warning
+            aligned_goodpairs = goodpairs.reindex(annotated_data.index, fill_value=False)
+            filtered_data = annotated_data[aligned_goodpairs]
+        else:
+            filtered_data = annotated_data
+        
+        if filtered_data.empty:
+            return []
+        
+        # Get validated fusion pairs using breakpoint validation
+        clustered_data = _cluster_fusion_reads(filtered_data, max_distance=10000, use_breakpoint_validation=True)
+        
+        if clustered_data.empty:
+            return []
+        
+        # Extract unique gene pairs and convert to list format
+        validated_pairs = []
+        seen_pairs = set()
+        
+        for _, row in clustered_data.iterrows():
+            fusion_pair_str = row["fusion_pair"]  # e.g., "GENE1-GENE2"
+            if fusion_pair_str and fusion_pair_str not in seen_pairs:
+                # Split the fusion pair string into individual genes
+                genes = [g.strip() for g in fusion_pair_str.split("-") if g.strip()]
+                if len(genes) >= 2:
+                    # Sort genes for consistency
+                    genes_sorted = sorted(genes)
+                    pair_key = tuple(genes_sorted)
+                    if pair_key not in seen_pairs:
+                        validated_pairs.append(genes_sorted)
+                        seen_pairs.add(pair_key)
+        
+        logging.info(f"[Fusion] Extracted {len(validated_pairs)} validated fusion pairs for dropdown")
+        return validated_pairs
+        
+    except Exception as e:
+        logging.exception(f"[Fusion] Failed to extract validated fusion pairs: {e}")
+        return []
 
 
 def _make_fusion_summary_table(container: Any, annotated_data: pd.DataFrame, goodpairs: pd.Series) -> Any:
@@ -834,6 +1037,93 @@ def _make_fusion_summary_table(container: Any, annotated_data: pd.DataFrame, goo
         except Exception as e:
             logging.exception(f"[Fusion] Failed to create summary table: {e}")
             ui.label(f"Error creating fusion summary: {str(e)}").classes("text-red-600")
+            return None
+
+
+def _make_fusion_groups_table(container: Any, data: Dict[str, Any]) -> Any:
+    """Create a table showing validated fusion groups (gene lists that may contain 2+ genes).
+    
+    Only shows groups that contain at least one validated fusion pair
+    (meeting the minimum read support threshold).
+    
+    Args:
+        container: UI container to place the table in
+        data: Dictionary containing fusion data with annotated_data, goodpairs, and gene_groups
+    """
+    validated_groups = _get_validated_fusion_groups(data)
+    
+    if not validated_groups or len(validated_groups) == 0:
+        with container:
+            ui.label("No validated fusion groups found").classes("text-gray-600")
+        return None
+
+    with container:
+        # Use styled_table for consistent styling
+        from robin.gui.theme import styled_table
+        
+        try:
+            # Create columns definition
+            columns = [
+                {"name": "group_id", "label": "Group ID", "field": "group_id", "sortable": True},
+                {"name": "genes", "label": "Genes", "field": "genes", "sortable": True},
+                {"name": "gene_count", "label": "Gene Count", "field": "gene_count", "sortable": True},
+            ]
+            
+            # Format the data for display
+            rows = []
+            for idx, group in enumerate(validated_groups):
+                if not isinstance(group, (list, tuple)) or len(group) == 0:
+                    continue
+                
+                # Sort genes for consistent display
+                sorted_genes = sorted([str(g).strip() for g in group if g])
+                if len(sorted_genes) == 0:
+                    continue
+                
+                rows.append({
+                    "group_id": idx + 1,
+                    "genes": " - ".join(sorted_genes),
+                    "gene_count": len(sorted_genes),
+                })
+            
+            if not rows:
+                ui.label("No valid fusion groups found").classes("text-gray-600")
+                return None
+            
+            # Sort by gene count (descending), then by gene names
+            rows.sort(key=lambda x: (-x["gene_count"], x["genes"]))
+            
+            # Add title
+            ui.label("Fusion Groups").classes("text-sm font-medium mb-2")
+            
+            # Create styled table
+            table_container, table = styled_table(
+                columns=columns,
+                rows=rows,
+                pagination=20,
+                class_size="table-xs"
+            )
+            
+            # Add search functionality
+            try:
+                with table.add_slot("top-right"):
+                    with ui.input(placeholder="Search groups...").props("type=search").bind_value(
+                        table, "filter"
+                    ).add_slot("append"):
+                        ui.icon("search")
+            except Exception:
+                pass
+            
+            # Add summary information
+            total_groups = len(rows)
+            multi_gene_groups = sum(1 for r in rows if r["gene_count"] > 2)
+            ui.label(f"Total groups: {total_groups} | Multi-gene groups (>2): {multi_gene_groups}").classes("text-xs text-gray-500 mt-1")
+            
+            return table
+            
+        except Exception as e:
+            logging.exception(f"[Fusion] Failed to create fusion groups table: {e}")
+            ui.label(f"Error creating fusion groups table: {str(e)}").classes("text-red-600")
             return None
 
 
@@ -1025,6 +1315,9 @@ def _plot_gene_group(
                     )
 
                     # Update the matplotlib element
+                    # Close previous figure if it exists before assigning new one
+                    if hasattr(mpl_element, 'figure') and mpl_element.figure is not None:
+                        plt.close(mpl_element.figure)
                     mpl_element.figure = fig
                     mpl_element.update()
                 
@@ -1056,13 +1349,11 @@ def _create_advanced_fusion_plot(
 
     # Check if DNA Features Viewer is available
     if not DNA_FEATURES_AVAILABLE:
-        logging.warning("DNA Features Viewer not available, using fallback plot")
         return _create_simple_fallback_plot(gene_group, subset)
 
     # Load gene annotation data
     gene_table = _load_gene_annotations()
     if gene_table is None:
-        logging.warning("Could not load gene annotations, using fallback plot")
         return _create_simple_fallback_plot(gene_group, subset)
 
     # Create figure with tight layout - disable constrained layout to avoid conflicts
@@ -1085,7 +1376,15 @@ def _create_advanced_fusion_plot(
     logging.info(f"[Fusion] Creating {num_genes} gene layout with 2 rows (gene structure + read mapping)")
     # Increase figure size and add more padding to prevent tight layout warnings
     # Ensure minimum figure size to prevent zero-size axes warnings
+    # Close previous figure if it exists to prevent accumulation
+    global _last_fusion_figure
+    if _last_fusion_figure is not None:
+        try:
+            plt.close(_last_fusion_figure)
+        except Exception:
+            pass  # Figure might already be closed
     fig, axes = plt.subplots(2, num_genes, figsize=(max(20, 5 * num_genes), 10))
+    _last_fusion_figure = fig
 
     # Handle single gene case
     if num_genes == 1:
@@ -1155,17 +1454,40 @@ def _format_ticks_to_megabases(ax: plt.Axes) -> None:
 def _load_gene_annotations() -> Optional[pd.DataFrame]:
     """Load gene annotation data from the rCNS2_data.csv.gz file."""
     try:
-        # Try to load the gene annotation data
-        gene_data_path = "src/robin/resources/rCNS2_data.csv.gz"
-        if os.path.exists(gene_data_path):
+        # Try to find the gene annotation file using robin resources
+        gene_data_path = None
+        
+        # First try to use robin resources to find the correct path
+        try:
+            from robin import resources
+            resources_dir = os.path.dirname(resources.__file__)
+            gene_data_path = os.path.join(resources_dir, "rCNS2_data.csv.gz")
+            if not os.path.exists(gene_data_path):
+                gene_data_path = None
+        except ImportError:
+            pass
+        
+        # Fallback to relative path if resources import failed
+        if not gene_data_path or not os.path.exists(gene_data_path):
+            # Try relative path from current working directory
+            possible_paths = [
+                "src/robin/resources/rCNS2_data.csv.gz",
+                "robin/resources/rCNS2_data.csv.gz",
+                os.path.join(os.path.dirname(__file__), "..", "..", "resources", "rCNS2_data.csv.gz"),
+            ]
+            
+            for path in possible_paths:
+                abs_path = os.path.abspath(path)
+                if os.path.exists(abs_path):
+                    gene_data_path = abs_path
+                    break
+        
+        if gene_data_path and os.path.exists(gene_data_path):
             gene_table = pd.read_csv(gene_data_path)
-            logging.info(f"Loaded gene annotations: {len(gene_table)} entries")
             return gene_table
         else:
-            logging.warning(f"Gene annotation file not found: {gene_data_path}")
             return None
     except Exception as e:
-        logging.error(f"Error loading gene annotations: {e}")
         return None
 
 
@@ -1179,9 +1501,16 @@ def _plot_gene_structure_with_dna_features(
 ):
     """Plot gene structure using DNA Features Viewer exactly as in the original code."""
     try:
+        # Strip whitespace from gene name to handle leading/trailing spaces in the data
+        gene_name_clean = gene_name.strip() if isinstance(gene_name, str) else gene_name
+        
         # Filter gene table for this specific gene and chromosome
-        gene_info = gene_table[
-            (gene_table["gene_name"] == gene_name) & (gene_table["Seqid"] == chrom)
+        # Also strip whitespace from gene_table gene_name column for matching
+        gene_table_clean = gene_table.copy()
+        gene_table_clean["gene_name"] = gene_table_clean["gene_name"].astype(str).str.strip()
+        
+        gene_info = gene_table_clean[
+            (gene_table_clean["gene_name"] == gene_name_clean) & (gene_table_clean["Seqid"] == chrom)
         ]
 
         if gene_info.empty:
@@ -1206,43 +1535,56 @@ def _plot_gene_structure_with_dna_features(
             # Convert tick labels to megabases
             _format_ticks_to_megabases(ax)
             return
-
+        
         # Create DNA Features Viewer visualization
         features = []
+        
+        # Determine the overall gene region from annotations
+        gene_start = int(gene_info["Start"].min())
+        gene_end = int(gene_info["End"].max())
+        
+        # Use the wider of the annotation range or the read mapping range
+        plot_start = min(start, gene_start)
+        plot_end = max(end, gene_end)
+        plot_length = plot_end - plot_start
 
         # Add gene features
         for _, row in gene_info.iterrows():
-            if row["Type"] == "gene":
-                # Main gene feature
-                strand = 1 if row["Strand"] == "+" else -1
-                features.append(
-                    GraphicFeature(
-                        start=int(row["Start"]),
-                        end=int(row["End"]),
-                        strand=strand,
-                        thickness=8,
-                        color="#ffd700",  # Gold color for genes
-                        label=row["gene_name"],
-                        fontdict={"color": "black", "fontsize": 8},
+            try:
+                if row["Type"] == "gene":
+                    # Main gene feature
+                    strand = 1 if row["Strand"] == "+" else -1
+                    features.append(
+                        GraphicFeature(
+                            start=int(row["Start"]),
+                            end=int(row["End"]),
+                            strand=strand,
+                            thickness=8,
+                            color="#ffd700",  # Gold color for genes
+                            label=row["gene_name"],
+                            fontdict={"color": "black", "fontsize": 8},
+                        )
                     )
-                )
-            elif row["Type"] == "exon":
-                # Exon features
-                strand = 1 if row["Strand"] == "+" else -1
-                features.append(
-                    GraphicFeature(
-                        start=int(row["Start"]),
-                        end=int(row["End"]),
-                        strand=strand,
-                        thickness=4,
-                        color="#C0C0C0",  # Silver color for exons
+                elif row["Type"] == "exon":
+                    # Exon features
+                    strand = 1 if row["Strand"] == "+" else -1
+                    features.append(
+                        GraphicFeature(
+                            start=int(row["Start"]),
+                            end=int(row["End"]),
+                            strand=strand,
+                            thickness=4,
+                            color="#C0C0C0",  # Silver color for exons
+                        )
                     )
-                )
+            except Exception as e:
+                continue
 
         if features:
-            # Create GraphicRecord and plot it
+            # Create GraphicRecord with the full plot range
+            # DNA Features Viewer uses absolute coordinates, first_index sets the starting point
             record = GraphicRecord(
-                sequence_length=end - start, first_index=start, features=features
+                sequence_length=plot_length, first_index=plot_start, features=features
             )
 
             # Plot on the axis
@@ -1680,7 +2022,15 @@ def _create_simple_fallback_plot(
     gene_group: List[str], subset: pd.DataFrame
 ) -> plt.Figure:
     """Create a simple fallback plot if advanced visualization fails."""
+    # Close previous figure if it exists to prevent accumulation
+    global _last_fusion_figure
+    if _last_fusion_figure is not None:
+        try:
+            plt.close(_last_fusion_figure)
+        except Exception:
+            pass  # Figure might already be closed
     fig, ax = plt.subplots(1, 1, figsize=(10, 4))
+    _last_fusion_figure = fig
 
     # Simple scatter plot
     genes = list(sorted(subset["col4"].unique()))
@@ -1723,10 +2073,13 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             "data_hash": None,
             "summary_table_container": None,
             "summary_table": None,
+            "groups_table_container": None,
+            "groups_table": None,
             "table_container": None,
             "table": None,
             "plot_container": None,
             "card": None,
+            "status_container": None,
             "selected_gene_pair": None,  # Persist selected gene pair
             "dropdown": None,  # Reference to dropdown for value updates
         },
@@ -1736,6 +2089,8 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             "data_hash": None,
             "summary_table_container": None,
             "summary_table": None,
+            "groups_table_container": None,
+            "groups_table": None,
             "table_container": None,
             "table": None,
             "plot_container": None,
@@ -1791,7 +2146,7 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             
             # Configuration for breakpoint validation
             USE_BREAKPOINT_VALIDATION = True  # Set to False to disable breakpoint validation
-            MIN_BREAKPOINT_SUPPORT = 3  # Minimum reads supporting same breakpoint
+            MIN_BREAKPOINT_SUPPORT = 4  # Minimum reads supporting same breakpoint
             MAX_BREAKPOINT_DISTANCE = 100  # Maximum distance for breakpoint clustering
             
             # Load target panel processed
@@ -1845,6 +2200,33 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             # Debug logging
             logging.info(f"[Fusion] Loaded target data: {t is not None}")
             logging.info(f"[Fusion] Loaded genome-wide data: {g is not None}")
+            
+            # Apply same logic to target panel as genome-wide
+            if t is not None:
+                logging.info(f"[Fusion] Target candidate count: {t.get('candidate_count', 0)}")
+                logging.info(f"[Fusion] Target gene groups: {len(t.get('gene_groups', []))}")
+                logging.info(f"[Fusion] Target gene groups content: {t.get('gene_groups', [])}")
+                logging.info(f"[Fusion] Target annotated_data shape: {t.get('annotated_data', pd.DataFrame()).shape}")
+                logging.info(f"[Fusion] Target goodpairs shape: {t.get('goodpairs', pd.Series()).shape}")
+                logging.info(f"[Fusion] Target gene_pairs count: {len(t.get('gene_pairs', []))}")
+                logging.info(f"[Fusion] Target gene_pairs: {t.get('gene_pairs', [])[:10]}...")  # Show first 10
+                
+                # Use the same logic as reporting code - count gene_pairs instead of relying on candidate_count
+                if t.get('gene_pairs') and len(t.get('gene_pairs', [])) > 0:
+                    # Override candidate_count with the actual number of gene pairs (like reporting code does)
+                    t['candidate_count'] = len(t.get('gene_pairs', []))
+                    logging.info(f"[Fusion] Override target candidate_count to: {t['candidate_count']}")
+                    
+                    # Generate gene_groups from gene_pairs if missing (like reporting code does)
+                    if not t.get('gene_groups') or len(t.get('gene_groups', [])) == 0:
+                        # Convert gene_pairs to gene_groups format
+                        gene_groups = []
+                        for gene_pair in t.get('gene_pairs', []):
+                            if isinstance(gene_pair, (tuple, list)) and len(gene_pair) >= 2:
+                                gene_groups.append(list(gene_pair))
+                        t['gene_groups'] = gene_groups
+                        logging.info(f"[Fusion] Generated {len(gene_groups)} gene_groups from gene_pairs")
+            
             if g is not None:
                 logging.info(f"[Fusion] Genome-wide candidate count: {g.get('candidate_count', 0)}")
                 logging.info(f"[Fusion] Genome-wide gene groups: {len(g.get('gene_groups', []))}")
@@ -1912,8 +2294,51 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             target_mtime = target_data.get("mtime")
             target_data_hash = target_data.get("data_hash")
             
+            # Handle case when target data is None (no data loaded)
+            if t is None:
+                # Update if mtime changed or if this is initial load (both mtimes are None)
+                mtime_changed = target_mtime != state["target"].get("mtime")
+                is_initial_load = (
+                    target_mtime is None and 
+                    state["target"].get("mtime") is None and
+                    state["target"].get("data") is None
+                )
+                
+                if mtime_changed or is_initial_load:
+                    state["target"]["data"] = None
+                    state["target"]["mtime"] = target_mtime
+                    state["target"]["data_hash"] = target_data_hash
+                    
+                    # Update summary label
+                    try:
+                        if "summary" in state and state["summary"].get("target_lbl"):
+                            state["summary"]["target_lbl"].text = "Target: -- pairs, -- groups"
+                    except Exception:
+                        pass
+                    
+                    # Clear containers and show status messages
+                    try:
+                        state["target"]["summary_table_container"].clear()
+                        state["target"]["groups_table_container"].clear()
+                        state["target"]["table_container"].clear()
+                        state["target"]["plot_container"].clear()
+                        state["target"]["status_container"].clear()
+                    except Exception:
+                        pass
+                    
+                    # Show status messages
+                    with state["target"]["summary_table_container"].classes("w-full"):
+                        ui.label("No fusion data available").classes("text-gray-600")
+                    with state["target"]["groups_table_container"].classes("w-full"):
+                        ui.label("No validated fusion groups found").classes("text-gray-600")
+                    with state["target"]["table_container"].classes("w-full"):
+                        ui.label("No fusion candidates found yet").classes("text-gray-600")
+                    with state["target"]["status_container"].classes("w-full"):
+                        ui.label("Target panel fusion analysis not available").classes("text-gray-600 text-sm")
+                        ui.label("(Fusion data file not found or could not be loaded)").classes("text-gray-500 text-xs")
+            
             # Always update summary and table when file changes
-            if t is not None and target_mtime != state["target"].get("mtime"):
+            elif t is not None and target_mtime != state["target"].get("mtime"):
                 state["target"]["data"] = t
                 state["target"]["mtime"] = target_mtime
                 state["target"]["data_hash"] = target_data_hash
@@ -1921,10 +2346,13 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 # summary
                 try:
                     if "summary" in state and state["summary"].get("target_lbl"):
+                        # Count unique pairs and groups
+                        unique_pairs = _count_unique_fusion_pairs(t)
+                        unique_groups = _count_unique_fusion_groups(t)
                         state["summary"][
                             "target_lbl"
                         ].text = (
-                            f"Target fusion groups: {int(t.get('candidate_count', 0))}"
+                            f"Target: {unique_pairs} pairs, {unique_groups} groups"
                         )
                 except Exception:
                     pass
@@ -1937,6 +2365,16 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     state["target"]["summary_table_container"],
                     t.get("annotated_data", pd.DataFrame()),
                     t.get("goodpairs", pd.Series()),
+                )
+                
+                # groups table
+                try:
+                    state["target"]["groups_table_container"].clear()
+                except Exception:
+                    pass
+                state["target"]["groups_table"] = _make_fusion_groups_table(
+                    state["target"]["groups_table_container"],
+                    t,
                 )
                 
                 # table
@@ -1952,13 +2390,20 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 # Create visualization on first load or when data changes
                 try:
                     state["target"]["plot_container"].clear()
+                    state["target"]["status_container"].clear()
                 except Exception:
                     pass
-                if t.get("candidate_count", 0) > 0 and t.get("gene_groups"):
+                # Get validated fusion pairs from summary table data
+                validated_pairs = _get_validated_fusion_pairs(
+                    t.get("annotated_data", pd.DataFrame()),
+                    t.get("goodpairs", pd.Series())
+                )
+                logging.info(f"[Fusion] Target panel plotting check: candidate_count={t.get('candidate_count', 0)}, validated_pairs={len(validated_pairs)}")
+                if validated_pairs:
                     with state["target"]["plot_container"].classes("w-full"):
                         with ui.row().classes("w-full"):
                             state["target"]["dropdown"] = ui.select(
-                                options=t.get("gene_groups", []),
+                                options=validated_pairs,
                                 with_input=False,
                                 on_change=lambda e, t=t: _handle_gene_pair_selection("target", e.value, t),
                                 value=state["target"]["selected_gene_pair"]
@@ -1969,14 +2414,19 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                                 ui.label("Select gene pair to see results.").classes(
                                     "drop-shadow font-bold"
                                 )
-                        
-                        # Restore selected gene pair if it exists
-                        if state["target"]["selected_gene_pair"] and state["target"]["dropdown"]:
-                            try:
-                                state["target"]["dropdown"].value = state["target"]["selected_gene_pair"]
-                                _handle_gene_pair_selection("target", state["target"]["selected_gene_pair"], t)
-                            except Exception as e:
-                                logging.warning(f"[Fusion] Failed to restore target selection: {e}")
+                else:
+                    # Show status message when target panel fusion data is not available
+                    with state["target"]["status_container"].classes("w-full"):
+                        ui.label("Target panel fusion analysis not available").classes("text-gray-600 text-sm")
+                        ui.label("(No validated fusion pairs found in target panel)").classes("text-gray-500 text-xs")
+                
+                # Restore selected gene pair if it exists (for both cases above)
+                if state["target"]["selected_gene_pair"] and state["target"]["dropdown"]:
+                    try:
+                        state["target"]["dropdown"].value = state["target"]["selected_gene_pair"]
+                        _handle_gene_pair_selection("target", state["target"]["selected_gene_pair"], t)
+                    except Exception as e:
+                        logging.warning(f"[Fusion] Failed to restore target selection: {e}")
             
             # Only update visualization when data content actually changes (for background refreshes)
             elif t is not None and target_data_hash != state["target"].get("data_hash"):
@@ -1984,13 +2434,20 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 # plot area
                 try:
                     state["target"]["plot_container"].clear()
+                    state["target"]["status_container"].clear()
                 except Exception:
                     pass
-                if t.get("candidate_count", 0) > 0 and t.get("gene_groups"):
+                # Get validated fusion pairs from summary table data
+                validated_pairs = _get_validated_fusion_pairs(
+                    t.get("annotated_data", pd.DataFrame()),
+                    t.get("goodpairs", pd.Series())
+                )
+                logging.info(f"[Fusion] Target panel plotting check: candidate_count={t.get('candidate_count', 0)}, validated_pairs={len(validated_pairs)}")
+                if validated_pairs:
                     with state["target"]["plot_container"].classes("w-full"):
                         with ui.row().classes("w-full"):
                             state["target"]["dropdown"] = ui.select(
-                                options=t.get("gene_groups", []),
+                                options=validated_pairs,
                                 with_input=False,
                                 on_change=lambda e, t=t: _handle_gene_pair_selection("target", e.value, t),
                                 value=state["target"]["selected_gene_pair"]
@@ -2001,23 +2458,24 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                                 ui.label("Select gene pair to see results.").classes(
                                     "drop-shadow font-bold"
                                 )
-                        
-                        # Restore selected gene pair if it exists
-                        if state["target"]["selected_gene_pair"] and state["target"]["dropdown"]:
-                            try:
-                                state["target"]["dropdown"].value = state["target"]["selected_gene_pair"]
-                                _handle_gene_pair_selection("target", state["target"]["selected_gene_pair"], t)
-                            except Exception as e:
-                                logging.warning(f"[Fusion] Failed to restore target selection: {e}")
+                else:
+                    # Show status message when target panel fusion data is not available
+                    with state["target"]["status_container"].classes("w-full"):
+                        ui.label("Target panel fusion analysis not available").classes("text-gray-600 text-sm")
+                        ui.label("(No validated fusion pairs found in target panel)").classes("text-gray-500 text-xs")
+                
+                # Restore selected gene pair if it exists (for both cases above)
+                if state["target"]["selected_gene_pair"] and state["target"]["dropdown"]:
+                    try:
+                        state["target"]["dropdown"].value = state["target"]["selected_gene_pair"]
+                        _handle_gene_pair_selection("target", state["target"]["selected_gene_pair"], t)
+                    except Exception as e:
+                        logging.warning(f"[Fusion] Failed to restore target selection: {e}")
 
             # Update genome-wide UI
             genome_mtime = genome_data.get("mtime")
             genome_data_hash = genome_data.get("data_hash")
             logging.info(f"[Fusion] Genome-wide update check: g={g is not None}, mtime_changed={genome_mtime != state['genome'].get('mtime')}")
-            if g is not None:
-                logging.info(f"[Fusion] Genome-wide UI update: candidate_count={g.get('candidate_count', 0)}, gene_groups_count={len(g.get('gene_groups', []))}")
-                logging.info(f"[Fusion] Genome-wide UI update: has_gene_groups={bool(g.get('gene_groups'))}")
-                logging.info(f"[Fusion] Genome-wide UI update: will_show_dropdown={g.get('candidate_count', 0) > 0 and bool(g.get('gene_groups'))}")
             
             # Always update summary and table when file changes
             if g is not None and genome_mtime != state["genome"].get("mtime"):
@@ -2028,9 +2486,12 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 # summary
                 try:
                     if "summary" in state and state["summary"].get("genome_lbl"):
+                        # Count unique pairs and groups
+                        unique_pairs = _count_unique_fusion_pairs(g)
+                        unique_groups = _count_unique_fusion_groups(g)
                         state["summary"][
                             "genome_lbl"
-                        ].text = f"Genome-wide fusion groups: {int(g.get('candidate_count', 0))}"
+                        ].text = f"Genome-wide: {unique_pairs} pairs, {unique_groups} groups"
                 except Exception:
                     pass
                 # summary table
@@ -2042,6 +2503,16 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     state["genome"]["summary_table_container"],
                     g.get("annotated_data", pd.DataFrame()),
                     g.get("goodpairs", pd.Series()),
+                )
+                
+                # groups table
+                try:
+                    state["genome"]["groups_table_container"].clear()
+                except Exception:
+                    pass
+                state["genome"]["groups_table"] = _make_fusion_groups_table(
+                    state["genome"]["groups_table_container"],
+                    g,
                 )
                 
                 # table
@@ -2060,13 +2531,17 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     state["genome"]["status_container"].clear()
                 except Exception:
                     pass
-                logging.info(f"[Fusion] Genome-wide plotting check: candidate_count={g.get('candidate_count', 0)}, gene_groups={len(g.get('gene_groups', []))}")
-                # More permissive condition - show dropdown if we have any gene groups, even if candidate_count is 0
-                if g.get("gene_groups") and len(g.get("gene_groups", [])) > 0:
+                # Get validated fusion pairs from summary table data
+                validated_pairs = _get_validated_fusion_pairs(
+                    g.get("annotated_data", pd.DataFrame()),
+                    g.get("goodpairs", pd.Series())
+                )
+                logging.info(f"[Fusion] Genome-wide plotting check: candidate_count={g.get('candidate_count', 0)}, validated_pairs={len(validated_pairs)}")
+                if validated_pairs:
                     with state["genome"]["plot_container"].classes("w-full"):
                         with ui.row().classes("w-full"):
                             state["genome"]["dropdown"] = ui.select(
-                                options=g.get("gene_groups", []),
+                                options=validated_pairs,
                                 with_input=False,
                                 on_change=lambda e, g=g: _handle_gene_pair_selection("genome", e.value, g),
                                 value=state["genome"]["selected_gene_pair"]
@@ -2100,13 +2575,17 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     state["genome"]["status_container"].clear()
                 except Exception:
                     pass
-                logging.info(f"[Fusion] Genome-wide plotting check: candidate_count={g.get('candidate_count', 0)}, gene_groups={len(g.get('gene_groups', []))}")
-                # More permissive condition - show dropdown if we have any gene groups, even if candidate_count is 0
-                if g.get("gene_groups") and len(g.get("gene_groups", [])) > 0:
+                # Get validated fusion pairs from summary table data
+                validated_pairs = _get_validated_fusion_pairs(
+                    g.get("annotated_data", pd.DataFrame()),
+                    g.get("goodpairs", pd.Series())
+                )
+                logging.info(f"[Fusion] Genome-wide plotting check: candidate_count={g.get('candidate_count', 0)}, validated_pairs={len(validated_pairs)}")
+                if validated_pairs:
                     with state["genome"]["plot_container"].classes("w-full"):
                         with ui.row().classes("w-full"):
                             state["genome"]["dropdown"] = ui.select(
-                                options=g.get("gene_groups", []),
+                                options=validated_pairs,
                                 with_input=False,
                                 on_change=lambda e, g=g: _handle_gene_pair_selection("genome", e.value, g),
                                 value=state["genome"]["selected_gene_pair"]
@@ -2143,22 +2622,25 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             with ui.column().classes("gap-1 items-end"):
                 state.setdefault("summary", {})
                 state["summary"]["target_lbl"] = ui.label(
-                    "Target fusion groups: --"
+                    "Target: -- pairs, -- groups"
                 ).classes("text-sm text-gray-600")
                 state["summary"]["genome_lbl"] = ui.label(
-                    "Genome-wide fusion groups: --"
+                    "Genome-wide: -- pairs, -- groups"
                 ).classes("text-sm text-gray-600")
 
         # Target Panel
         ui.label("Target Panel").classes("text-base font-medium mt-1 mb-1")
         state["target"]["summary_table_container"] = ui.column().classes("w-full")
+        state["target"]["groups_table_container"] = ui.column().classes("w-full mt-2")
         state["target"]["plot_container"] = ui.column().classes("w-full")
         state["target"]["table_container"] = ui.column().classes("w-full mt-2")
+        state["target"]["status_container"] = ui.column().classes("w-full mt-2")
 
         # Genome-wide
         ui.separator()
         ui.label("Genome-wide").classes("text-base font-medium mt-2 mb-1")
         state["genome"]["summary_table_container"] = ui.column().classes("w-full")
+        state["genome"]["groups_table_container"] = ui.column().classes("w-full mt-2")
         state["genome"]["plot_container"] = ui.column().classes("w-full")
         state["genome"]["table_container"] = ui.column().classes("w-full mt-2")
         state["genome"]["status_container"] = ui.column().classes("w-full mt-2")
@@ -2178,19 +2660,17 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 else Path("/dev/null")
             )
             if "summary" in state:
-                t_count0 = (
-                    int(t0.get("candidate_count", 0)) if isinstance(t0, dict) else 0
-                )
-                g_count0 = (
-                    int(g0.get("candidate_count", 0)) if isinstance(g0, dict) else 0
-                )
+                t_pairs0 = _count_unique_fusion_pairs(t0) if isinstance(t0, dict) else 0
+                t_groups0 = _count_unique_fusion_groups(t0) if isinstance(t0, dict) else 0
+                g_pairs0 = _count_unique_fusion_pairs(g0) if isinstance(g0, dict) else 0
+                g_groups0 = _count_unique_fusion_groups(g0) if isinstance(g0, dict) else 0
                 try:
                     state["summary"][
                         "target_lbl"
-                    ].text = f"Target fusion groups: {t_count0}"
+                    ].text = f"Target: {t_pairs0} pairs, {t_groups0} groups"
                     state["summary"][
                         "genome_lbl"
-                    ].text = f"Genome-wide fusion groups: {g_count0}"
+                    ].text = f"Genome-wide: {g_pairs0} pairs, {g_groups0} groups"
                 except Exception:
                     pass
         except Exception:

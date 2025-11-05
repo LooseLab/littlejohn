@@ -142,24 +142,212 @@ def locus_figure(
 
     fig = captured["fig"]
 
-    # Optionally overlay vertical lines at CpG site positions
-    if site_rows:
-        try:
-            ax = _choose_main_axis(fig)
-            for row in site_rows:
-                pos_str = str(row.get("pos", ""))
-                parts = [p.strip() for p in pos_str.split("/") if p.strip().isdigit()]
-                for p in parts:
-                    try:
-                        x = float(p)
-                        ax.axvline(
-                            x, color="crimson", linestyle="--", linewidth=0.8, alpha=0.5
-                        )
-                    except Exception:
-                        continue
-            fig.tight_layout()
-        except Exception:
-            pass
+    # Always add MGMT CpG site annotations if we're in the MGMT interval
+    # Check if interval matches MGMT region (chr10:129466536-129467536)
+    try:
+        import logging
+        
+        # Determine which sites to annotate
+        mgmt_sites = []
+        if "chr10" in interval and "129466" in interval:
+            # Use site_rows if available, otherwise use default positions
+            if site_rows:
+                for row in site_rows:
+                    pos_str = str(row.get("pos", ""))
+                    site_label = str(row.get("site", ""))
+                    # Extract just the number (e.g., "1" from "Site 1" or "1" from "Site 1 (CpG ...)")
+                    site_num = site_label.split("(")[0].strip().replace("Site ", "").strip()
+                    if not site_num:
+                        # Fallback: try to extract number from the label
+                        import re
+                        match = re.search(r'\d+', site_label)
+                        site_num = match.group(0) if match else site_label.strip()
+                    
+                    parts = [p.strip() for p in pos_str.split("/") if p.strip().isdigit()]
+                    if len(parts) >= 2:
+                        try:
+                            p1 = float(parts[0])
+                            p2 = float(parts[1])
+                            mgmt_sites.append((p1, p2, site_num))
+                        except (ValueError, IndexError):
+                            continue
+            
+            # If no sites from site_rows, use default MGMT positions
+            if not mgmt_sites:
+                mgmt_sites = [
+                    (129467255, 129467256, "1"),
+                    (129467258, 129467259, "2"),
+                    (129467262, 129467263, "3"),
+                    (129467272, 129467273, "4"),
+                ]
+            
+            # Get all axes in the figure
+            axes = [ax for ax in fig.get_axes() if hasattr(ax, 'get_xlim')]
+            
+            if not axes:
+                axes = [fig.gca()]
+            
+            # Parse the interval to get the start position (methylartist uses relative coordinates)
+            interval_start = None
+            try:
+                # Parse interval like "chr10:129466536-129467536"
+                if ":" in interval:
+                    chrom, coords = interval.split(":", 1)
+                    if "-" in coords:
+                        start_str, end_str = coords.split("-", 1)
+                        interval_start = int(start_str)
+                        interval_end = int(end_str)
+            except Exception:
+                pass
+            
+            # Convert absolute genomic positions to relative positions (relative to interval start)
+            if interval_start:
+                relative_mgmt_sites = []
+                for p1, p2, label in mgmt_sites:
+                    rel_p1 = p1 - interval_start
+                    rel_p2 = p2 - interval_start
+                    relative_mgmt_sites.append((rel_p1, rel_p2, label))
+                mgmt_sites = relative_mgmt_sites
+            
+            # Find the main axis for text annotations (only calculate once)
+            main_ax = _choose_main_axis(fig)
+            
+            # Pre-calculate all label positions with proper staggering
+            # First, collect all sites that need annotations
+            label_positions_dict = {}
+            if main_ax:
+                ylim = main_ax.get_ylim()
+                y_range = ylim[1] - ylim[0]
+                xlim = main_ax.get_xlim()
+                x_range = xlim[1] - xlim[0]
+                
+                # Estimate label width in data coordinates (approximate)
+                # Font size 9 with padding means roughly 0.02-0.03 of x_range per character
+                max_label_len = max([len(l) for _, _, l in mgmt_sites]) if mgmt_sites else 1
+                label_width_data = (max_label_len + 2) * 0.015 * x_range
+                
+                # Calculate center positions for all sites
+                site_centers = []
+                for p1, p2, label in mgmt_sites:
+                    center_x = (p1 + p2) / 2.0
+                    if xlim[0] <= center_x <= xlim[1]:
+                        site_centers.append((center_x, label))
+                
+                # Sort by x position to process left to right
+                site_centers.sort(key=lambda x: x[0])
+                
+                # Calculate staggered y positions to avoid overlap
+                base_y_offset = 0.02
+                vertical_spacing = 0.025  # Fraction of y_range for spacing
+                
+                for idx, (center_x, label) in enumerate(site_centers):
+                    # Start with base position
+                    annotation_y = ylim[1] - (base_y_offset * y_range)
+                    
+                    # Check for horizontal overlap with previously placed labels
+                    overlap_threshold = label_width_data * 0.8  # 80% of label width
+                    stagger_level = 0
+                    
+                    # Find all overlapping labels and determine best stagger position
+                    overlapping_labels = []
+                    for existing_label, (existing_x, existing_y, existing_stagger) in label_positions_dict.items():
+                        if abs(center_x - existing_x) < overlap_threshold:
+                            overlapping_labels.append((existing_x, existing_y, existing_stagger))
+                    
+                    if overlapping_labels:
+                        # Find the maximum stagger level among overlapping labels
+                        max_stagger = max([s for _, _, s in overlapping_labels])
+                        stagger_level = max_stagger + 1
+                        
+                        # Alternate direction: even stagger levels go up, odd levels go down
+                        # This creates a zigzag pattern
+                        if stagger_level % 2 == 0:
+                            # Go up from the highest overlapping label
+                            max_y = max([y for _, y, _ in overlapping_labels])
+                            annotation_y = max_y + (vertical_spacing * y_range)
+                        else:
+                            # Go down from the lowest overlapping label
+                            min_y = min([y for _, y, _ in overlapping_labels])
+                            annotation_y = min_y - (vertical_spacing * y_range)
+                        
+                        # Ensure we don't go outside the plot area
+                        annotation_y = max(ylim[0] + 0.05 * y_range, min(ylim[1] - 0.02 * y_range, annotation_y))
+                    
+                    # Store the position with stagger level
+                    label_positions_dict[label] = (center_x, annotation_y, stagger_level)
+            
+            # Add vertical lines to ALL axes (all subplots)
+            for ax_idx, ax in enumerate(axes):
+                try:
+                    xlim = ax.get_xlim()
+                    
+                    # For each MGMT site, draw vertical lines at both CpG positions
+                    for p1, p2, label in mgmt_sites:
+                        # Only draw if positions are within the visible x-axis range
+                        if xlim[0] <= p1 <= xlim[1] or xlim[0] <= p2 <= xlim[1]:
+                            # Draw dashed vertical lines - more subtle, lower zorder so data points appear on top
+                            ax.axvline(
+                                p1, 
+                                color="crimson", 
+                                linestyle="--",
+                                linewidth=1.0,
+                                alpha=0.5,
+                                zorder=5
+                            )
+                            ax.axvline(
+                                p2, 
+                                color="crimson", 
+                                linestyle="--",
+                                linewidth=1.0,
+                                alpha=0.5,
+                                zorder=5
+                            )
+                            
+                            # Add text annotation on the main axis only
+                            if ax == main_ax and label in label_positions_dict:
+                                center_x, annotation_y, _ = label_positions_dict[label]
+                                
+                                ax.text(
+                                    center_x,
+                                    annotation_y,
+                                    label,
+                                    ha="center",
+                                    va="bottom",
+                                    fontsize=9,
+                                    fontweight="bold",
+                                    color="crimson",
+                                    bbox=dict(
+                                        boxstyle="round,pad=0.3",
+                                        facecolor="white",
+                                        edgecolor="crimson",
+                                        alpha=0.9,
+                                        linewidth=1.5,
+                                    ),
+                                    zorder=10,
+                                )
+                except Exception as e:
+                    logging.debug(f"[MGMT] Failed to add annotations to axis: {e}")
+                    continue
+            
+            # Use constrained_layout instead of tight_layout to avoid warnings
+            try:
+                fig.set_constrained_layout(True)
+            except Exception:
+                # Fallback to tight_layout if constrained_layout fails
+                try:
+                    import warnings
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        fig.tight_layout()
+                except Exception:
+                    pass
+            
+            logging.debug(f"[MGMT] Successfully added annotations for {len(mgmt_sites)} sites")
+        else:
+            logging.debug(f"[MGMT] Interval {interval} is not MGMT region, skipping annotations")
+    except Exception as e:
+        import logging
+        logging.exception(f"[MGMT] Failed to add annotations: {e}")
 
     return fig
 

@@ -10,8 +10,8 @@ from typing import Dict, Tuple, Any
 # Confidence thresholds for different classifiers
 CLASSIFIER_CONFIDENCE_THRESHOLDS: Dict[str, Dict[str, float]] = {
     "sturgeon": {
-        "high": 85.0,
-        "medium": 65.0,
+        "high": 95.0,
+        "medium": 80.0,
         "low": 0.0,
     },
     "nanodx": {

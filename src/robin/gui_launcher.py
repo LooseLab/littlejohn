@@ -28,9 +28,11 @@ from robin.analysis.master_csv_manager import MasterCSVManager
 
 from typing import Optional, Dict, Any, List
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field, asdict
 from enum import Enum
 import os
+import json
+import pickle
 
 from robin.gui import theme, images
 
@@ -57,6 +59,7 @@ class UpdateType(Enum):
     PROGRESS_UPDATE = "progress_update"
     ERROR_UPDATE = "error_update"
     SAMPLES_UPDATE = "samples_update"
+    WARNING_NOTIFICATION = "warning_notification"
 
 
 @dataclass
@@ -67,6 +70,44 @@ class GUIUpdate:
     timestamp: float
     data: Dict[str, Any]
     priority: int = 0  # Higher priority updates are processed first
+
+
+@dataclass
+class SampleRecord:
+    """Master record for a single sample with all tracked information."""
+    
+    sample_id: str
+    origin: str = "Live"  # Live, Pre-existing, or Complete
+    run_start: str = ""
+    device: str = ""
+    flowcell: str = ""
+    active_jobs: int = 0
+    total_jobs: int = 0
+    completed_jobs: int = 0
+    failed_jobs: int = 0
+    job_types: str = ""
+    last_seen: str = ""  # Formatted timestamp string
+    _last_seen_raw: float = 0.0  # Raw timestamp for sorting
+    _dirty: bool = False  # Flag to indicate record needs UI update
+    _file_mtime: float = 0.0  # master.csv modification time
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for table rows."""
+        return {
+            "sample_id": self.sample_id,
+            "origin": self.origin,
+            "run_start": self.run_start,
+            "device": self.device,
+            "flowcell": self.flowcell,
+            "active_jobs": self.active_jobs,
+            "total_jobs": self.total_jobs,
+            "completed_jobs": self.completed_jobs,
+            "failed_jobs": self.failed_jobs,
+            "job_types": self.job_types,
+            "last_seen": self.last_seen,
+            "actions": "View",
+            "_last_seen_raw": self._last_seen_raw,
+        }
 
 
 class GUILauncher:
@@ -82,6 +123,11 @@ class GUILauncher:
         self.monitored_directory = ""
         self.reload = reload
         self.center = None  # Center ID for the analysis
+        
+        # Sample status transition timeout (in seconds)
+        # Change to 60 for testing (1 minute), 3600 for production (60 minutes)
+        self.completion_timeout_seconds = 60  # Set to 3600 for production
+        
         # Message queue for non-blocking communication
         self.update_queue = queue.PriorityQueue()
         self.gui_ready = threading.Event()
@@ -102,6 +148,9 @@ class GUILauncher:
         # Runtime state
         self._start_time: Optional[float] = None
         self._is_running: bool = False
+        
+        # Track which samples have had target.bam finalization triggered
+        self._finalized_samples: set = set()
 
         # Log ring buffer (last 1000 entries)
         self._log_buffer = deque(maxlen=1000)
@@ -118,6 +167,12 @@ class GUILauncher:
         # Caching for samples data
         self._last_cache_time: float = 0.0
         self._cache_duration: float = 30.0  # Cache for 30 seconds
+        
+        # Master record system - centralized source of truth for samples
+        self._samples_master_record: Dict[str, SampleRecord] = {}
+        self._samples_record_lock = threading.Lock()
+        self._master_record_cache_file: Optional[Path] = None  # Set when monitored_directory is known
+        self._background_scan_interval: float = 10.0  # Scan every 10 seconds
         # MGMT per-sample cache (latest count seen)
         self._mgmt_state: Dict[str, Dict[str, Any]] = {}
         # Coverage per-sample cache (file mtimes, computed metrics)
@@ -130,6 +185,332 @@ class GUILauncher:
         self._cnv_state: Dict[str, Dict[str, Any]] = {}
         # Cache last seen queue status so we can populate immediately on page creation
         self._last_queue_status: Dict[str, Any] = {}
+
+    # ========== Master Record System Methods ==========
+    
+    def _setup_master_record_cache(self) -> None:
+        """Initialize cache file path when monitored_directory is known."""
+        try:
+            if self.monitored_directory:
+                base = Path(self.monitored_directory)
+                if base.exists():
+                    # Store cache in the monitored directory
+                    self._master_record_cache_file = base / ".samples_master_record.pkl"
+                    logging.info(f"Master record cache file: {self._master_record_cache_file}")
+        except Exception as e:
+            logging.debug(f"Error setting up cache file: {e}")
+
+    def _load_master_record_cache(self) -> bool:
+        """Load master record from cache file. Returns True if successful."""
+        try:
+            if not self._master_record_cache_file or not self._master_record_cache_file.exists():
+                return False
+            
+            with open(self._master_record_cache_file, 'rb') as f:
+                cached_data = pickle.load(f)
+            
+            if isinstance(cached_data, dict):
+                # Convert dicts back to SampleRecord objects
+                with self._samples_record_lock:
+                    self._samples_master_record = {
+                        sid: SampleRecord(**data) if isinstance(data, dict) else data
+                        for sid, data in cached_data.items()
+                    }
+                logging.info(f"Loaded {len(self._samples_master_record)} samples from cache")
+                # Mark all as dirty to trigger UI refresh
+                for record in self._samples_master_record.values():
+                    record._dirty = True
+                return True
+        except Exception as e:
+            logging.debug(f"Error loading master record cache: {e}")
+        return False
+
+    def _save_master_record_cache(self) -> None:
+        """Save master record to cache file."""
+        try:
+            if not self._master_record_cache_file:
+                return
+            
+            with self._samples_record_lock:
+                # Convert SampleRecord objects to dicts for pickle
+                cache_data = {
+                    sid: asdict(record)
+                    for sid, record in self._samples_master_record.items()
+                }
+            
+            # Save to temporary file first, then rename (atomic operation)
+            temp_file = self._master_record_cache_file.with_suffix('.pkl.tmp')
+            with open(temp_file, 'wb') as f:
+                pickle.dump(cache_data, f)
+            temp_file.replace(self._master_record_cache_file)
+            logging.debug(f"Saved master record cache ({len(cache_data)} samples)")
+        except Exception as e:
+            logging.debug(f"Error saving master record cache: {e}")
+
+    def _background_scan_samples(self) -> None:
+        """Background process that scans folder and updates master record.
+        This runs in a separate timer and does NOT block the UI thread."""
+        try:
+            if not self.monitored_directory:
+                return
+            
+            base = Path(self.monitored_directory)
+            if not base.exists():
+                return
+            
+            # Scan all sample directories
+            now_ts = time.time()
+            updated_any = False
+            
+            with self._samples_record_lock:
+                # Track which samples we've seen in this scan
+                seen_sample_ids = set()
+                
+                for sample_dir in base.iterdir():
+                    if not sample_dir.is_dir():
+                        continue
+                    
+                    sid = sample_dir.name
+                    seen_sample_ids.add(sid)
+                    master_csv = sample_dir / "master.csv"
+                    
+                    if not master_csv.exists():
+                        continue
+                    
+                    try:
+                        # Get file modification time
+                        file_mtime = master_csv.stat().st_mtime
+                        
+                        # Get or create record
+                        record = self._samples_master_record.get(sid)
+                        if record is None:
+                            # New sample - create record
+                            record = SampleRecord(sample_id=sid)
+                            record._dirty = True
+                            updated_any = True
+                            # Check if it's pre-existing
+                            if sid in self._preexisting_sample_ids:
+                                record.origin = "Pre-existing"
+                            else:
+                                record.origin = "Live"
+                        elif file_mtime > record._file_mtime:
+                            # File has changed - update record
+                            record._dirty = True
+                            updated_any = True
+                        
+                        # Update file mtime
+                        record._file_mtime = file_mtime
+                        
+                        # Read master.csv for metadata
+                        try:
+                            with master_csv.open("r", newline="") as fh:
+                                reader = csv.DictReader(fh)
+                                first_row = next(reader, None)
+                            if first_row:
+                                # Update run info
+                                record.run_start = self._format_timestamp_for_display(
+                                    first_row.get("run_info_run_time", "")
+                                )
+                                record.device = first_row.get("run_info_device", "") or ""
+                                record.flowcell = first_row.get("run_info_flow_cell", "") or ""
+                                
+                                # Update last_seen from saved value or use file mtime
+                                try:
+                                    saved_last = float(
+                                        first_row.get("samples_overview_last_seen", 0.0) or 0.0
+                                    )
+                                    if saved_last > 0:
+                                        record._last_seen_raw = saved_last
+                                    else:
+                                        record._last_seen_raw = file_mtime
+                                except Exception:
+                                    record._last_seen_raw = file_mtime
+                                
+                                # Update job counts from persisted overview
+                                record.active_jobs = int(
+                                    first_row.get("samples_overview_active_jobs", 0) or 0
+                                )
+                                record.total_jobs = int(
+                                    first_row.get("samples_overview_total_jobs", 0) or 0
+                                )
+                                record.completed_jobs = int(
+                                    first_row.get("samples_overview_completed_jobs", 0) or 0
+                                )
+                                record.failed_jobs = int(
+                                    first_row.get("samples_overview_failed_jobs", 0) or 0
+                                )
+                                record.job_types = str(
+                                    first_row.get("samples_overview_job_types", "") or ""
+                                )
+                        except Exception as e:
+                            logging.debug(f"Error reading master.csv for {sid}: {e}")
+                        
+                        # Update last_seen formatted string
+                        record.last_seen = time.strftime(
+                            "%Y-%m-%d %H:%M:%S", time.localtime(record._last_seen_raw)
+                        )
+                        
+                        # Update origin based on inactivity timeout AND active jobs status
+                        prev_origin = record.origin
+                        # Only mark as Complete if timeout passed AND no active jobs
+                        if record.origin == "Live" and (now_ts - record._last_seen_raw) >= self.completion_timeout_seconds:
+                            if record.active_jobs == 0:
+                                record.origin = "Complete"
+                                record._dirty = True
+                                # Trigger finalization if transitioning from Live to Complete
+                                if prev_origin == "Live" and sid not in self._finalized_samples:
+                                    self._trigger_target_bam_finalization(sid)
+                                    self._finalized_samples.add(sid)
+                            # If there are active jobs, keep as Live even if timeout passed
+                        elif record.origin == "Pre-existing" and (now_ts - record._last_seen_raw) >= self.completion_timeout_seconds:
+                            # Keep as Pre-existing if it was pre-existing and still inactive
+                            pass
+                        elif record.origin == "Complete":
+                            # Reactivate if file was modified recently OR if there are active jobs
+                            if (now_ts - record._last_seen_raw) < self.completion_timeout_seconds or record.active_jobs > 0:
+                                record.origin = "Live"
+                                record._dirty = True
+                        
+                        # Save to master record
+                        self._samples_master_record[sid] = record
+                        
+                        # Persist overview to master.csv via MasterCSVManager
+                        try:
+                            manager = MasterCSVManager(str(base))
+                            persist_payload = {
+                                "active_jobs": int(record.active_jobs),
+                                "total_jobs": int(record.total_jobs),
+                                "completed_jobs": int(record.completed_jobs),
+                                "failed_jobs": int(record.failed_jobs),
+                                "job_types": record.job_types,
+                                "last_seen": float(record._last_seen_raw),
+                            }
+                            manager.update_sample_overview(sid, persist_payload)
+                        except Exception as e:
+                            logging.debug(f"Error persisting overview for {sid}: {e}")
+                    
+                    except Exception as e:
+                        logging.debug(f"Error processing sample {sid}: {e}")
+                
+                # Remove samples that no longer exist
+                to_remove = set(self._samples_master_record.keys()) - seen_sample_ids
+                if to_remove:
+                    for sid in to_remove:
+                        del self._samples_master_record[sid]
+                    updated_any = True
+                    logging.debug(f"Removed {len(to_remove)} deleted samples from master record")
+            
+            # Save cache if anything changed
+            if updated_any:
+                self._save_master_record_cache()
+                # Trigger UI refresh if table exists
+                if hasattr(self, "samples_table"):
+                    self._refresh_table_from_master()
+        
+        except Exception as e:
+            logging.error(f"Error in background sample scan: {e}")
+
+    def _refresh_table_from_master(self) -> None:
+        """Fast UI refresh - reads from master record and applies filters.
+        This is called from the background scanner and does NOT do file I/O."""
+        try:
+            if not hasattr(self, "samples_table"):
+                return
+            
+            # Get all records from master
+            with self._samples_record_lock:
+                records = list(self._samples_master_record.values())
+            
+            # Convert to row dicts
+            rows = [record.to_dict() for record in records]
+            
+            # Update cached rows
+            self._last_samples_rows = rows
+            self._last_cache_time = time.time()
+            
+            # Apply filters and update table
+            self._apply_samples_table_filters()
+            
+        except Exception as e:
+            logging.error(f"Error refreshing table from master: {e}")
+
+    def _update_master_record_from_workflow(self, samples_data: List[Dict[str, Any]]) -> None:
+        """Update master record from workflow polling data.
+        This merges workflow stats into the master record without doing file I/O."""
+        try:
+            with self._samples_record_lock:
+                for s in samples_data:
+                    sid = s.get("sample_id", "") or "unknown"
+                    if sid == "unknown":
+                        continue
+                    
+                    last_seen = float(s.get("last_seen", time.time()))
+                    
+                    # Get or create record
+                    record = self._samples_master_record.get(sid)
+                    if record is None:
+                        # Create new record (will be populated by background scan)
+                        record = SampleRecord(
+                            sample_id=sid,
+                            _last_seen_raw=last_seen,
+                            last_seen=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_seen)),
+                        )
+                        if sid in self._preexisting_sample_ids:
+                            record.origin = "Pre-existing"
+                        else:
+                            record.origin = "Live"
+                    
+                    # Update job counts from workflow data (these are more current than file scans)
+                    record.active_jobs = s.get("active_jobs", 0)
+                    record.total_jobs = s.get("total_jobs", 0)
+                    record.completed_jobs = s.get("completed_jobs", 0)
+                    record.failed_jobs = s.get("failed_jobs", 0)
+                    
+                    # Update job types
+                    job_types = s.get("job_types", [])
+                    if isinstance(job_types, list):
+                        record.job_types = ",".join(sorted(set(job_types)))
+                    else:
+                        record.job_types = str(job_types or "")
+                    
+                    # Update last_seen if this is newer
+                    if last_seen > record._last_seen_raw:
+                        record._last_seen_raw = last_seen
+                        record.last_seen = time.strftime(
+                            "%Y-%m-%d %H:%M:%S", time.localtime(last_seen)
+                        )
+                        record._dirty = True
+                    
+                    # Mark as dirty to trigger UI update
+                    record._dirty = True
+                    self._samples_master_record[sid] = record
+                
+                # Persist updates to master.csv
+                try:
+                    base = Path(self.monitored_directory) if self.monitored_directory else None
+                    if base and base.exists():
+                        manager = MasterCSVManager(str(base))
+                        for record in self._samples_master_record.values():
+                            if record._dirty:
+                                persist_payload = {
+                                    "active_jobs": int(record.active_jobs),
+                                    "total_jobs": int(record.total_jobs),
+                                    "completed_jobs": int(record.completed_jobs),
+                                    "failed_jobs": int(record.failed_jobs),
+                                    "job_types": record.job_types,
+                                    "last_seen": float(record._last_seen_raw),
+                                }
+                                manager.update_sample_overview(record.sample_id, persist_payload)
+                                record._dirty = False
+                except Exception as e:
+                    logging.debug(f"Error persisting workflow updates: {e}")
+            
+            # Trigger UI refresh
+            if hasattr(self, "samples_table"):
+                self._refresh_table_from_master()
+        
+        except Exception as e:
+            logging.error(f"Error updating master record from workflow: {e}")
 
     def launch_gui(
         self,
@@ -149,14 +530,19 @@ class GUILauncher:
         self.center = center
 
         # Store absolute monitored directory to avoid relative path issues
-
-        # Store absolute monitored directory to avoid relative path issues
         try:
             self.monitored_directory = (
                 str(Path(monitored_directory).resolve()) if monitored_directory else ""
             )
         except Exception:
             self.monitored_directory = monitored_directory
+        
+        # Setup master record cache when directory is known
+        if self.monitored_directory:
+            self._setup_master_record_cache()
+            # Try to load cache immediately for fast startup
+            if self._load_master_record_cache():
+                logging.info("Loaded samples from cache - table will populate immediately")
 
         try:
             # Start GUI in completely isolated background thread
@@ -409,12 +795,17 @@ class GUILauncher:
             elif update.update_type == UpdateType.ERROR_UPDATE:
                 self._update_errors(update.data)
             elif update.update_type == UpdateType.SAMPLES_UPDATE:
-                # Store the data and update table directly (ui.timer fails with slot error)
+                # Update master record from workflow polling data
+                # This merges workflow stats into master record without file I/O
                 self._pending_samples_data = update.data
                 try:
-                    self._update_samples_table_sync(self._pending_samples_data)
+                    samples_list = update.data.get("samples", [])
+                    if samples_list:
+                        self._update_master_record_from_workflow(samples_list)
                 except Exception as e:
-                    logging.error(f"[GUI] Samples table update failed: {e}")
+                    logging.error(f"[GUI] Samples master record update failed: {e}")
+            elif update.update_type == UpdateType.WARNING_NOTIFICATION:
+                self._show_warning_notification(update.data)
 
         except Exception as e:
             logging.debug(f"Error handling GUI update: {e}")
@@ -649,6 +1040,38 @@ class GUILauncher:
         except Exception as e:
             logging.debug(f"Error updating error information: {e}")
 
+    def _show_warning_notification(self, data: Dict[str, Any]):
+        """Show a warning notification in the GUI with dismiss button."""
+        try:
+            if ui is None:
+                return
+            
+            message = data.get("message", "")
+            title = data.get("title", "Warning")
+            sample_id = data.get("sample_id", "")
+            filename = data.get("filename", "")
+            
+            # Build notification message
+            if sample_id:
+                notification_msg = f"[{sample_id}] {message}"
+            elif filename:
+                notification_msg = f"[{filename}] {message}"
+            else:
+                notification_msg = message
+            
+            # Show dismissible warning notification
+            # NiceGUI notifications are dismissible by default with a close button
+            # timeout=0 makes it persistent until manually dismissed
+            ui.notify(
+                notification_msg,
+                type="warning",
+                timeout=0,  # Persistent until manually dismissed (close button available)
+                position="top-right",
+            )
+            
+        except Exception as e:
+            logging.debug(f"Error showing warning notification: {e}")
+
     def _format_duration(self, seconds):
         """Format duration in seconds to human readable format."""
         if seconds < 60:
@@ -694,7 +1117,11 @@ class GUILauncher:
                 """Individual sample detail page."""
                 _setup_global_resources()
 
-                # Add a page visit handler to refresh plots
+                # Clear cached state BEFORE creating the page so plots refresh on load
+                # This ensures all graphs load properly on each page visit
+                self._refresh_sample_plots(sample_id)
+                
+                # Add a page visit handler to refresh plots on reconnect
                 def on_page_visit():
                     """Handle page visit - refresh plots if needed."""
                     try:
@@ -709,9 +1136,6 @@ class GUILauncher:
                         )
                     except Exception as e:
                         logging.debug(f"Page visit handler failed for {sample_id}: {e}")
-
-                # Also try to refresh immediately when the page is created
-                ui.timer(2.0, lambda: self._refresh_sample_plots(sample_id), once=True)
 
                 # Register the page visit handler
                 ui.context.client.on_connect(on_page_visit)
@@ -789,16 +1213,26 @@ class GUILauncher:
                     # Rate limit GUI updates to prevent system lockup
                     # Increased from 0.3s to 2.0s to reduce update frequency
                     app.timer(2.0, self._drain_updates_on_ui, active=True)
-                    # Delay initial sample scanning to prevent startup lockup
-                    # Increased from 0.5s to 5.0s to allow GUI to fully initialize
+                    
+                    # Background master record scanner - scans folder periodically
+                    # Runs every 10 seconds to keep master record up to date
+                    # First scan happens immediately if cache was loaded, otherwise after 1 second
+                    initial_delay = 1.0 if not self._samples_master_record else 0.1
                     app.timer(
-                        5.0,
-                        lambda: self._scan_and_seed_samples_async(preexisting=True),
+                        initial_delay,
+                        lambda: self._background_scan_samples(),
                         once=True,
                     )
-                    # Increase polling interval for new samples to reduce load
-                    # Increased from 10.0s to 30.0s to reduce file system pressure
-                    app.timer(30.0, self._scan_for_new_samples_async, active=True)
+                    # Subsequent scans every 10 seconds
+                    app.timer(self._background_scan_interval, self._background_scan_samples, active=True)
+                    
+                    # If cache was not loaded, do initial preexisting scan after GUI is ready
+                    if not self._samples_master_record:
+                        app.timer(
+                            2.0,
+                            lambda: self._background_scan_samples(),  # Initial scan
+                            once=True,
+                        )
                     
                     # Process progress queue for report generation
                     app.timer(0.1, self._process_progress_queue, active=True)
@@ -1099,21 +1533,34 @@ class GUILauncher:
                                 break
                     except Exception:
                         pass
+                    
+                    # Populate table from master record if available (fast initial load)
+                    try:
+                        if self._samples_master_record:
+                            logging.info("Populating table from master record cache")
+                            self._refresh_table_from_master()
+                    except Exception as e:
+                        logging.debug(f"Error populating table from master record: {e}")
 
-                    # Per-row action button to view sample
+                    # Per-row action buttons (Finalize only shows for Complete/Pre-existing samples)
                     try:
                         self.samples_table.add_slot(
                             "body-cell-actions",
                             """
 <q-td key=\"actions\" :props=\"props\">
-  <q-btn color=\"primary\" size=\"sm\" label=\"View\"
-         @click=\"$parent.$emit('action', props.row.sample_id)\" />
+  <q-btn-group>
+    <q-btn color=\"primary\" size=\"sm\" label=\"View\"
+           @click=\"$parent.$emit('action', props.row.sample_id)\" />
+    <q-btn v-if=\"props.row.origin === 'Complete' || props.row.origin === 'Pre-existing'\"
+           color=\"secondary\" size=\"sm\" label=\"Finalize\" icon=\"merge_type\"
+           @click=\"$parent.$emit('finalize-target', props.row.sample_id)\" />
+  </q-btn-group>
 </q-td>
 """,
                         )
                     except Exception:
                         pass
-
+                    
                     # Add export checkbox as rightmost column
                     try:
                         self.samples_table.add_slot(
@@ -1128,7 +1575,7 @@ class GUILauncher:
                         )
                     except Exception:
                         pass
-
+                    
                     # Handle action emitted from table slot
                     try:
                         self.samples_table.on(
@@ -1139,6 +1586,23 @@ class GUILauncher:
                                 else ui.notify("Invalid button payload", type="warning")
                             ),
                         )
+                    except Exception:
+                        pass
+                    
+                    # Handle finalize-target action
+                    def _on_finalize_target(event):
+                        try:
+                            sample_id = getattr(event, "args", None) if hasattr(event, "args") else None
+                            if isinstance(sample_id, str):
+                                self._trigger_target_bam_finalization(sample_id)
+                                ui.notify(f"Triggered target.bam finalization for {sample_id}", type="positive")
+                            else:
+                                ui.notify("Invalid sample ID", type="warning")
+                        except Exception as e:
+                            ui.notify(f"Error triggering finalization: {e}", type="negative")
+                    
+                    try:
+                        self.samples_table.on("finalize-target", _on_finalize_target)
                     except Exception:
                         pass
 
@@ -1256,13 +1720,15 @@ class GUILauncher:
                                                 create_pdf,
                                                 pdf_path,
                                                 str(sample_dir),
-                                                state.get("type", "detailed"),
+                                                self.center or "Unknown",
+                                                report_type=state.get("type", "detailed"),
                                                 export_csv_dir=export_csv_dir,
                                                 export_xlsx=False,
                                                 export_zip=bool(
                                                     state.get("export_csv", False)
                                                 ),
                                                 progress_callback=sample_progress_callback,  # Pass the dialog-only callback
+                                                workflow_steps=self.workflow_steps if hasattr(self, 'workflow_steps') else None,
                                             )
                                         else:
                                             # Use custom callback that updates dialog only
@@ -1273,13 +1739,15 @@ class GUILauncher:
                                             pdf_file = create_pdf(
                                                 pdf_path,
                                                 str(sample_dir),
-                                                state.get("type", "detailed"),
+                                                self.center or "Unknown",
+                                                report_type=state.get("type", "detailed"),
                                                 export_csv_dir=export_csv_dir,
                                                 export_xlsx=False,
                                                 export_zip=bool(
                                                     state.get("export_csv", False)
                                                 ),
                                                 progress_callback=sample_progress_callback,  # Pass the dialog-only callback
+                                                workflow_steps=self.workflow_steps if hasattr(self, 'workflow_steps') else None,
                                             )
                                         
                                         # Queue file for download instead of downloading immediately
@@ -1570,13 +2038,30 @@ class GUILauncher:
                 if not existing or last_seen >= existing.get("_last_seen_raw", 0):
                     origin_value = (
                         "Pre-existing"
-                        if sid in self._preexisting_sample_ids and (time.time() - last_seen) >= 3600
+                        if sid in self._preexisting_sample_ids and (time.time() - last_seen) >= self.completion_timeout_seconds
                         else "Live"
                     )
-                    # Flip Live samples to Complete if inactive for 60 minutes
+                    # Flip Live samples to Complete if inactive for configured timeout
+                    prev_origin = None
+                    if existing:
+                        prev_origin = existing.get("origin")
+                    else:
+                        # Check previous rows for this sample
+                        existing_rows = self._last_samples_rows or []
+                        for prev_row in existing_rows:
+                            if prev_row.get("sample_id") == sid:
+                                prev_origin = prev_row.get("origin")
+                                break
                     try:
-                        if origin_value == "Live" and (time.time() - last_seen) >= 3600:
-                            origin_value = "Complete"
+                        active_jobs_count = s.get("active_jobs", 0)
+                        # Only mark as Complete if timeout passed AND no active jobs
+                        if origin_value == "Live" and (time.time() - last_seen) >= self.completion_timeout_seconds:
+                            if active_jobs_count == 0:
+                                origin_value = "Complete"
+                                # Trigger finalization if transitioning from Live to Complete
+                                if prev_origin == "Live" or prev_origin is None:
+                                    self._trigger_target_bam_finalization(sid)
+                            # If there are active jobs, keep as Live even if timeout passed
                     except Exception:
                         pass
                     by_id[sid] = {
@@ -1769,13 +2254,17 @@ class GUILauncher:
             # Origin filter, compute dynamic 'Complete' for display if needed
             now_ts = time.time()
             for r in rows:
-                try:
-                    if r.get("origin") == "Live":
-                        last_raw = float(r.get("_last_seen_raw", 0))
-                        if last_raw and (now_ts - last_raw) >= 3600:
-                            r["origin"] = "Complete"
-                except Exception:
-                    pass
+                    try:
+                        if r.get("origin") == "Live":
+                            last_raw = float(r.get("_last_seen_raw", 0))
+                            active_jobs_count = r.get("active_jobs", 0)
+                            # Only mark as Complete if timeout passed AND no active jobs
+                            if last_raw and (now_ts - last_raw) >= self.completion_timeout_seconds:
+                                if active_jobs_count == 0:
+                                    r["origin"] = "Complete"
+                                # If there are active jobs, keep as Live even if timeout passed
+                    except Exception:
+                        pass
 
             origin = (self._samples_filters or {}).get("origin", "All")
             if origin and origin != "All":
@@ -2153,11 +2642,13 @@ class GUILauncher:
                     create_pdf,
                     pdf_path,
                     str(sample_dir),
-                    state.get("type", "detailed"),
+                    self.center or "Unknown",
+                    report_type=state.get("type", "detailed"),
                     export_csv_dir=export_csv_dir,
                     export_xlsx=False,
                     export_zip=bool(state.get("export_csv", False)),
                     progress_callback=combined_callback,
+                    workflow_steps=self.workflow_steps if hasattr(self, 'workflow_steps') else None,
                 )
                 
                 # Mark report as completed
@@ -2226,11 +2717,13 @@ class GUILauncher:
                     create_pdf,
                     pdf_path,
                     str(sample_dir),
-                    state.get("type", "detailed"),
+                    self.center or "Unknown",
+                    report_type=state.get("type", "detailed"),
                     export_csv_dir=export_csv_dir,
                     export_xlsx=False,
                     export_zip=bool(state.get("export_csv", False)),
                     progress_callback=progress_callback,
+                    workflow_steps=self.workflow_steps if hasattr(self, 'workflow_steps') else None,
                 )
                 
                 # Mark report as completed
@@ -2267,14 +2760,29 @@ class GUILauncher:
                     ui.label(
                         "This sample ID has not been seen yet in the current session."
                     ).classes("text-sm text-gray-600")
+                    ui.label(
+                        "Redirecting to sample list..."
+                    ).classes("text-sm text-gray-500 mt-2")
                     ui.button(
                         "Back to Samples", on_click=lambda: ui.navigate.to("/live_data")
                     ).props("color=primary")
+                
                 # Soft redirect after short delay
-                try:
-                    ui.timer(1.5, lambda: ui.navigate.to("/live_data"), once=True)
-                except Exception:
-                    pass
+                def redirect_to_samples():
+                    """Redirect to the sample list page."""
+                    try:
+                        ui.navigate.to("/live_data")
+                    except Exception as e:
+                        logging.warning(f"Failed to redirect to /live_data: {e}")
+                        # Fallback: try using JavaScript redirect
+                        try:
+                            ui.run_javascript('window.location.href = "/live_data"')
+                        except Exception as e2:
+                            logging.error(f"Failed JavaScript redirect: {e2}")
+                
+                # Create and activate the timer
+                redirect_timer = ui.timer(2.0, redirect_to_samples, once=True)
+                redirect_timer.activate()
                 return
 
             sample_dir = (
@@ -2350,7 +2858,7 @@ class GUILauncher:
                                 from robin.gui.components.summary import add_summary_section
 
                             # Create the UI components immediately on the main thread
-                            add_summary_section(sample_dir, sample_id)
+                            add_summary_section(sample_dir, sample_id, self)
                         except Exception as e:
                             logging.exception(f"[GUI] Summary section failed: {e}")
                             try:
@@ -2358,96 +2866,111 @@ class GUILauncher:
                             except Exception:
                                 pass
 
+                        # Import section visibility helper
+                        try:
+                            from robin.gui.config import is_section_enabled, get_enabled_classification_steps
+                        except ImportError:
+                            is_section_enabled = lambda name, steps: True
+                            get_enabled_classification_steps = lambda steps: {"sturgeon", "nanodx", "random_forest", "pannanodx"}
+                        
+                        workflow_steps = self.workflow_steps if hasattr(self, 'workflow_steps') else None
+                        
                         # Classification section (refactored component) - create UI immediately
-                        try:
+                        enabled_classification_steps = get_enabled_classification_steps(workflow_steps)
+                        if not workflow_steps or enabled_classification_steps:
                             try:
-                                from .gui.components.classification import add_classification_section  # type: ignore
-                            except ImportError:
-                                # Try absolute import if relative fails
-                                from robin.gui.components.classification import (
-                                    add_classification_section,
-                                )
+                                try:
+                                    from .gui.components.classification import add_classification_section  # type: ignore
+                                except ImportError:
+                                    # Try absolute import if relative fails
+                                    from robin.gui.components.classification import (
+                                        add_classification_section,
+                                    )
 
-                            # Create the UI components immediately on the main thread
-                            add_classification_section(sample_dir)
-                        except Exception as e:
-                            logging.exception(f"[GUI] Classification section failed: {e}")
-                            try:
-                                ui.notify(
-                                    f"Classification section failed: {e}", type="warning"
-                                )
-                            except Exception:
-                                pass
+                                # Create the UI components immediately on the main thread
+                                add_classification_section(sample_dir, self)
+                            except Exception as e:
+                                logging.exception(f"[GUI] Classification section failed: {e}")
+                                try:
+                                    ui.notify(
+                                        f"Classification section failed: {e}", type="warning"
+                                    )
+                                except Exception:
+                                    pass
 
-                        # Coverage section (refactored component) - create UI immediately
-                        try:
+                        # Coverage section (target) - create UI immediately
+                        if not workflow_steps or is_section_enabled("target", workflow_steps):
                             try:
-                                from .gui.components.coverage import add_coverage_section  # type: ignore
-                            except ImportError:
-                                # Try absolute import if relative fails
-                                from robin.gui.components.coverage import (
-                                    add_coverage_section,
-                                )
+                                try:
+                                    from .gui.components.coverage import add_coverage_section  # type: ignore
+                                except ImportError:
+                                    # Try absolute import if relative fails
+                                    from robin.gui.components.coverage import (
+                                        add_coverage_section,
+                                    )
 
-                            # Create the UI components immediately on the main thread
-                            add_coverage_section(self, sample_dir)
-                        except Exception as e:
-                            try:
-                                ui.notify(f"Coverage section failed: {e}", type="warning")
-                            except Exception:
-                                pass
+                                # Create the UI components immediately on the main thread
+                                add_coverage_section(self, sample_dir)
+                            except Exception as e:
+                                try:
+                                    ui.notify(f"Coverage section failed: {e}", type="warning")
+                                except Exception:
+                                    pass
 
                         # MGMT section (refactored component) - create UI immediately
-                        try:
+                        if not workflow_steps or is_section_enabled("mgmt", workflow_steps):
                             try:
-                                from .gui.components.mgmt import add_mgmt_section  # type: ignore
-                            except ImportError:
-                                # Try absolute import if relative fails
-                                from robin.gui.components.mgmt import add_mgmt_section
+                                try:
+                                    from .gui.components.mgmt import add_mgmt_section  # type: ignore
+                                except ImportError:
+                                    # Try absolute import if relative fails
+                                    from robin.gui.components.mgmt import add_mgmt_section
 
-                            # Create the UI components immediately on the main thread
-                            add_mgmt_section(self, sample_dir)
-                        except Exception as e:
-                            logging.exception(f"[GUI] MGMT section failed: {e}")
-                            try:
-                                ui.notify(f"MGMT section failed: {e}", type="warning")
-                            except Exception:
-                                pass
+                                # Create the UI components immediately on the main thread
+                                add_mgmt_section(self, sample_dir)
+                            except Exception as e:
+                                logging.exception(f"[GUI] MGMT section failed: {e}")
+                                try:
+                                    ui.notify(f"MGMT section failed: {e}", type="warning")
+                                except Exception:
+                                    pass
 
                         # CNV section (refactored component) - create UI immediately
-                        try:
+                        if not workflow_steps or is_section_enabled("cnv", workflow_steps):
                             try:
-                                from .gui.components.cnv import add_cnv_section  # type: ignore
-                            except ImportError:
-                                # Try absolute import if relative fails
-                                from robin.gui.components.cnv import add_cnv_section
+                                try:
+                                    from .gui.components.cnv import add_cnv_section  # type: ignore
+                                except ImportError:
+                                    # Try absolute import if relative fails
+                                    from robin.gui.components.cnv import add_cnv_section
 
-                            # Create the UI components immediately on the main thread
-                            # Pass launcher for shared state access (launcher._cnv_state)
-                            add_cnv_section(self, sample_dir)
-                        except Exception as e:
-                            logging.exception(f"[GUI] CNV section failed: {e}")
-                            try:
-                                ui.notify(f"CNV section failed: {e}", type="warning")
-                            except Exception:
-                                pass
+                                # Create the UI components immediately on the main thread
+                                # Pass launcher for shared state access (launcher._cnv_state)
+                                add_cnv_section(self, sample_dir)
+                            except Exception as e:
+                                logging.exception(f"[GUI] CNV section failed: {e}")
+                                try:
+                                    ui.notify(f"CNV section failed: {e}", type="warning")
+                                except Exception:
+                                    pass
 
                         # Fusion section (target and genome-wide; excludes full SV UI) - create UI immediately
-                        try:
+                        if not workflow_steps or is_section_enabled("fusion", workflow_steps):
                             try:
-                                from .gui.components.fusion import add_fusion_section  # type: ignore
-                            except ImportError:
-                                # Try absolute import if relative fails
-                                from robin.gui.components.fusion import add_fusion_section
+                                try:
+                                    from .gui.components.fusion import add_fusion_section  # type: ignore
+                                except ImportError:
+                                    # Try absolute import if relative fails
+                                    from robin.gui.components.fusion import add_fusion_section
 
-                            # Create the UI components immediately on the main thread
-                            add_fusion_section(self, sample_dir)
-                        except Exception as e:
-                            logging.exception(f"[GUI] Fusion section failed: {e}")
-                            try:
-                                ui.notify(f"Fusion section failed: {e}", type="warning")
-                            except Exception:
-                                pass
+                                # Create the UI components immediately on the main thread
+                                add_fusion_section(self, sample_dir)
+                            except Exception as e:
+                                logging.exception(f"[GUI] Fusion section failed: {e}")
+                                try:
+                                    ui.notify(f"Fusion section failed: {e}", type="warning")
+                                except Exception:
+                                    pass
 
                         # Files in output directory
                         with ui.card().classes("w-full"):
@@ -3109,6 +3632,59 @@ class GUILauncher:
         except Exception:
             pass
 
+    def _trigger_target_bam_finalization(self, sample_id: str) -> None:
+        """Trigger target.bam finalization for a sample that has transitioned to Complete."""
+        if sample_id in self._finalized_samples:
+            return  # Already finalized
+        
+        if not self.monitored_directory:
+            return
+        
+        try:
+            from robin.analysis.target_analysis import finalize_accumulation_for_sample
+            import csv
+            
+            # Read target_panel from master.csv
+            sample_dir = Path(self.monitored_directory) / sample_id
+            master_csv = sample_dir / "master.csv"
+            target_panel = "rCNS2"  # Default
+            
+            if master_csv.exists():
+                try:
+                    with master_csv.open("r", newline="") as fh:
+                        reader = csv.DictReader(fh)
+                        first_row = next(reader, None)
+                        if first_row:
+                            panel = first_row.get("analysis_panel", "").strip()
+                            if panel:
+                                target_panel = panel
+                except Exception:
+                    pass  # Use default
+            
+            # Trigger finalization in background thread to avoid blocking GUI
+            import threading
+            def finalize_in_background():
+                try:
+                    logging.info(f"Triggering target.bam finalization for sample {sample_id} (status: Complete)")
+                    result = finalize_accumulation_for_sample(
+                        sample_id=sample_id,
+                        work_dir=str(self.monitored_directory),
+                        target_panel=target_panel
+                    )
+                    if result.get("status") != "error":
+                        self._finalized_samples.add(sample_id)
+                        logging.info(f"Successfully finalized target.bam for sample {sample_id}")
+                    else:
+                        logging.warning(f"Target.bam finalization returned error for {sample_id}: {result.get('error', 'Unknown')}")
+                except Exception as e:
+                    logging.error(f"Error finalizing target.bam for {sample_id}: {e}")
+            
+            thread = threading.Thread(target=finalize_in_background, daemon=True)
+            thread.start()
+            
+        except Exception as e:
+            logging.error(f"Failed to trigger target.bam finalization for {sample_id}: {e}")
+    
     def _scan_and_seed_samples(self, preexisting: bool = False) -> None:
         """Synchronous version - kept for backward compatibility and io_bound calls"""
         try:
@@ -3171,12 +3747,25 @@ class GUILauncher:
                         pass
                     origin_value = (
                         "Pre-existing"
-                        if sid in self._preexisting_sample_ids and (time.time() - last_seen) >= 3600
+                        if sid in self._preexisting_sample_ids and (time.time() - last_seen) >= self.completion_timeout_seconds
                         else "Live"
                     )
                     try:
-                        if origin_value == "Live" and (time.time() - last_seen) >= 3600:
-                            origin_value = "Complete"
+                        # Only mark as Complete if timeout passed AND no active jobs
+                        if origin_value == "Live" and (time.time() - last_seen) >= self.completion_timeout_seconds:
+                            if ov_active == 0:
+                                origin_value = "Complete"
+                                # Check if this is a transition from Live to Complete
+                                existing = self._last_samples_rows or []
+                                prev_origin = None
+                                for prev_row in existing:
+                                    if prev_row.get("sample_id") == sid:
+                                        prev_origin = prev_row.get("origin")
+                                        break
+                                # Trigger finalization if transitioning from Live to Complete
+                                if prev_origin == "Live" or prev_origin is None:
+                                    self._trigger_target_bam_finalization(sid)
+                            # If there are active jobs, keep as Live even if timeout passed
                     except Exception:
                         pass
                     rows.append(
@@ -3419,12 +4008,15 @@ class GUILauncher:
                     
                 origin_value = (
                     "Pre-existing"
-                    if sid in self._preexisting_sample_ids and (time.time() - last_seen) >= 3600
+                    if sid in self._preexisting_sample_ids and (time.time() - last_seen) >= self.completion_timeout_seconds
                     else "Live"
                 )
                 try:
-                    if origin_value == "Live" and (time.time() - last_seen) >= 3600:
-                        origin_value = "Complete"
+                    # Only mark as Complete if timeout passed AND no active jobs
+                    if origin_value == "Live" and (time.time() - last_seen) >= self.completion_timeout_seconds:
+                        if ov_active == 0:
+                            origin_value = "Complete"
+                        # If there are active jobs, keep as Live even if timeout passed
                 except Exception:
                     pass
                     
@@ -3627,10 +4219,19 @@ class GUILauncher:
                                 "%H:%M:%S", time.localtime(last_seen)
                             )
                             updated["_last_seen_raw"] = last_seen
-                            # Determine origin based on inactivity threshold
+                            # Determine origin based on inactivity threshold AND active jobs status
+                            prev_origin = existing_row.get("origin")
                             try:
-                                if (time.time() - last_seen) >= 3600:
-                                    updated["origin"] = "Complete"
+                                # Only mark as Complete if timeout passed AND no active jobs
+                                if (time.time() - last_seen) >= self.completion_timeout_seconds:
+                                    if ov_active == 0:
+                                        updated["origin"] = "Complete"
+                                        # Trigger finalization if transitioning from Live to Complete
+                                        if prev_origin == "Live":
+                                            self._trigger_target_bam_finalization(sid)
+                                    else:
+                                        # If there are active jobs, keep as Live even if timeout passed
+                                        updated["origin"] = "Live"
                                 else:
                                     updated["origin"] = "Live"
                             except Exception:
