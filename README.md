@@ -11,6 +11,7 @@
 - [About](#about)
 - [Installation](#installation)
 - [Usage](#usage)
+- [Known Issues](#known-issues)
 - [Available Commands](#available-commands)
 - [Performance Features](#performance-features)
 - [License](#license)
@@ -121,6 +122,17 @@ All assets are automatically verified using SHA256 checksums. If verification fa
 
 ## Usage
 
+ROBIN expects to analyse BAM files generated during sequencing by an Oxford Nanopore Technologies sequencer. ROBIN presumes real time HAC basecalling (SUP is not required). ROBIN presumes data have been called with 5hmC 5mC methylation calling in MinKNOW. ROBIN presumes real time alignment is running in MinKNOW - ROBIN does not realign your reads. 
+
+ROBIN assumes that BAM files are being output in small batches. We recommend setting file output to one bam for every 10,000 to 50,000 reads. We do not support real time processing of BAM files in 1 hour chunks (the default output). 
+
+ROBIN does not pod5 data or fastq data from the sequencer - you can deselect these options if you wish.
+
+***Important***
+
+On platforms with 64Gb of RAM or less we recommend restarting your device prior to a run. As an example, if you are running a p2i and start a run on position A and later on position B we recommend you restart at the end of the run on position B (once base calling is complete). You can simply restart dorado if you know how to do this. We find dorado holds on to memory for an indefinite period of time and this can cause problems.
+
+
 The primary command for running robin workflows is:
 
 ```bash
@@ -166,6 +178,15 @@ robin workflow ~/data/bam_files \
   --verbose \
   --log-level INFO
 ```
+
+
+## Known Issues
+
+1. Currently SNP calling is not enabled in this version of ROBIN. It will be re-enabled in the near future.
+2. CNV change inference is based on extensive heuristics - every call should be checked by visual inspection.
+3. If you ctrl-c to end ROBIN it will do its best to clean up and stop gracefully but may fail.
+4. CSV data export is in development but is not currently available - it will be enabled in the near future.
+5. Many other unknown issues - please open an issue and we will resolve where possible.
 
 ## Available Commands
 
