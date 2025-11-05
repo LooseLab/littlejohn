@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 class RobinReport:
     """Main class for generating ROBIN PDF reports."""
 
-    def __init__(self, filename, output, center: str, progress_callback=None):
+    def __init__(self, filename, output, center: str, progress_callback=None, workflow_steps=None):
         """Initialize the report generator.
 
         Args:
@@ -29,12 +29,14 @@ class RobinReport:
             output: Directory containing analysis output files
             center: Center ID running the analysis
             progress_callback: Optional callback function for progress updates
+            workflow_steps: Optional list of workflow steps to determine which sections to include
         """
         self.filename = filename
         self.output = output
         self.center = center
         self.sample_id = os.path.basename(os.path.normpath(output))
         self.progress_callback = progress_callback
+        self.workflow_steps = workflow_steps
 
         # Handle filename with None prefix
         if filename.startswith("None"):
@@ -107,18 +109,48 @@ class RobinReport:
         from .sections.run_data import RunDataSection
         from .sections.disclaimer import DisclaimerSection
         from .sections.variants import VariantsSection
+        
+        # Import section visibility helpers
+        try:
+            from robin.gui.config import is_section_enabled, get_enabled_classification_steps
+        except ImportError:
+            # Fallback if gui.config is not available
+            is_section_enabled = lambda name, steps: True
+            get_enabled_classification_steps = lambda steps: {"sturgeon", "nanodx", "random_forest", "pannanodx"}
 
-        # Add sections in order
-        self.sections = [
-            ClassificationSection(self),
-            CNVSection(self),
-            VariantsSection(self),
-            FusionSection(self),
-            CoverageSection(self),
-            MGMTSection(self),
-            RunDataSection(self),
-            DisclaimerSection(self),
-        ]
+        # Build sections list conditionally based on workflow_steps
+        sections = []
+        
+        # Classification section (only if at least one classification step is enabled)
+        if not self.workflow_steps or get_enabled_classification_steps(self.workflow_steps):
+            sections.append(ClassificationSection(self))
+        
+        # CNV section
+        if not self.workflow_steps or is_section_enabled("cnv", self.workflow_steps):
+            sections.append(CNVSection(self))
+        
+        # Variants section (always included if available)
+        sections.append(VariantsSection(self))
+        
+        # Fusion section
+        if not self.workflow_steps or is_section_enabled("fusion", self.workflow_steps):
+            sections.append(FusionSection(self))
+        
+        # Coverage section (target)
+        if not self.workflow_steps or is_section_enabled("target", self.workflow_steps):
+            sections.append(CoverageSection(self))
+        
+        # MGMT section
+        if not self.workflow_steps or is_section_enabled("mgmt", self.workflow_steps):
+            sections.append(MGMTSection(self))
+        
+        # Run data section (always included)
+        sections.append(RunDataSection(self))
+        
+        # Disclaimer section (always included)
+        sections.append(DisclaimerSection(self))
+
+        self.sections = sections
 
     def generate_report(
         self,
@@ -391,19 +423,25 @@ def create_pdf(
     export_xlsx=False,
     export_zip=False,
     progress_callback=None,
+    workflow_steps=None,
 ):
     """Create a PDF report from ROBIN analysis results.
 
     Args:
         filename: Output PDF filename
         output: Directory containing analysis output files
+        center: Center ID running the analysis
         report_type: Type of report to generate ('summary' or 'detailed')
+        export_csv_dir: Directory to export CSV files
+        export_xlsx: Whether to export XLSX files
+        export_zip: Whether to create ZIP archive
         progress_callback: Optional callback function for progress updates
+        workflow_steps: Optional list of workflow steps to determine which sections to include
 
     Returns:
         Path to the generated PDF file
     """
-    report = RobinReport(filename, output, center, progress_callback)
+    report = RobinReport(filename, output, center, progress_callback, workflow_steps=workflow_steps)
     return report.generate_report(
         report_type=report_type,
         export_csv_dir=export_csv_dir,

@@ -21,62 +21,104 @@ logger = logging.getLogger(__name__)
 class FusionSection(ReportSection):
     """Section containing the fusion analysis results."""
 
-    def _get_gene_pairs(self, data):
-        """Get unique gene fusion pairs from the processed data."""
+    def _get_validated_fusion_pairs(self, data):
+        """Get validated fusion pairs using the same logic as the GUI.
+        
+        Uses breakpoint validation with minimum 4 reads support.
+        """
         if data is None or data.empty:
             return []
-
-        # For processed data, we can use the 'tag' column which contains gene pairs
-        # or fall back to grouping by read_id if needed
-        if 'tag' in data.columns:
-            # Extract gene pairs from the tag column (format: "gene1,gene2")
-            gene_pairs = []
-            for tag in data['tag'].unique():
-                if ',' in tag:
-                    genes = tag.split(',')
-                    if len(genes) >= 2:
-                        # Sort genes to ensure consistent ordering
-                        gene_pair = tuple(sorted(genes))
-                        gene_pairs.append(gene_pair)
+        
+        try:
+            # Import validation functions from GUI module
+            from robin.gui.components.fusion import _cluster_fusion_reads
             
-            # Get unique pairs
-            unique_pairs = list(set(gene_pairs))
-            return unique_pairs
-        else:
-            # Fallback to original method if tag column not available
-            return self._get_gene_pairs_fallback(data)
+            # Use breakpoint validation (same as GUI)
+            clustered_data = _cluster_fusion_reads(
+                data, 
+                max_distance=10000, 
+                use_breakpoint_validation=True
+            )
+            
+            if clustered_data.empty:
+                return []
+            
+            # Extract unique validated gene pairs
+            validated_pairs = []
+            seen_pairs = set()
+            
+            for _, row in clustered_data.iterrows():
+                fusion_pair_str = row["fusion_pair"]  # e.g., "GENE1-GENE2"
+                if fusion_pair_str and fusion_pair_str not in seen_pairs:
+                    genes = [g.strip() for g in fusion_pair_str.split("-") if g.strip()]
+                    if len(genes) >= 2:
+                        # Sort genes for consistency
+                        genes_sorted = sorted(genes)
+                        pair_key = tuple(genes_sorted)
+                        if pair_key not in seen_pairs:
+                            validated_pairs.append(pair_key)
+                            seen_pairs.add(pair_key)
+            
+            return validated_pairs
+            
+        except Exception as e:
+            logger.warning(f"Failed to get validated fusion pairs, falling back to simple method: {e}")
+            return self._get_gene_pairs_simple(data)
 
-    def _get_gene_pairs_fallback(self, data):
-        """Fallback method for getting gene pairs from raw data."""
+    def _get_gene_pairs_simple(self, data):
+        """Simple fallback method for getting gene pairs (without breakpoint validation)."""
         if data is None or data.empty:
             return []
 
-        # Group reads by readID to find pairs
-        read_groups = data.groupby("readID")
-        gene_pairs = []
+        # For processed data, use read_id grouping
+        if 'read_id' in data.columns:
+            read_groups = data.groupby("read_id")
+        elif 'readID' in data.columns:
+            read_groups = data.groupby("readID")
+        else:
+            return []
 
-        # First collect all read IDs for each gene pair
+        gene_pairs = []
         gene_pair_reads = {}
+        
         for _, group in read_groups:
-            genes = group["Gene"].unique()
+            # Get genes from col4 (Gene column)
+            if 'col4' in group.columns:
+                genes = group["col4"].unique()
+            elif 'Gene' in group.columns:
+                genes = group["Gene"].unique()
+            else:
+                continue
+                
             if len(genes) >= 2:
-                # Sort genes to ensure consistent ordering
-                genes = sorted(genes)
+                genes = sorted([str(g).strip() for g in genes if g])
                 for i in range(len(genes) - 1):
                     for j in range(i + 1, len(genes)):
                         pair = (genes[i], genes[j])
                         if pair not in gene_pair_reads:
                             gene_pair_reads[pair] = set()
-                        gene_pair_reads[pair].add(group["readID"].iloc[0])
+                        # Get read ID
+                        if 'read_id' in group.columns:
+                            read_id = group["read_id"].iloc[0]
+                        elif 'readID' in group.columns:
+                            read_id = group["readID"].iloc[0]
+                        else:
+                            continue
+                        gene_pair_reads[pair].add(read_id)
 
-        # Only include pairs with 3 or more supporting reads
+        # Only include pairs with 4 or more supporting reads (matching GUI)
         for pair, reads in gene_pair_reads.items():
-            if len(reads) >= 3:
+            if len(reads) >= 4:
                 gene_pairs.append(pair)
 
-        # Get unique pairs
-        unique_pairs = list(set(gene_pairs))
-        return unique_pairs
+        return list(set(gene_pairs))
+
+    def _get_gene_pairs(self, data):
+        """Get unique gene fusion pairs from the processed data.
+        
+        Uses validated fusion pairs with breakpoint validation (same as GUI).
+        """
+        return self._get_validated_fusion_pairs(data)
 
     def _get_gene_networks(self, gene_pairs):
         """Create networks of connected genes."""
@@ -151,7 +193,7 @@ class FusionSection(ReportSection):
         return fusion_data
 
     def _format_fusion_table(self, data, title):
-        """Create a formatted table for fusion data."""
+        """Create a formatted table for fusion data using validated fusion pairs."""
         if data is None or data.empty:
             return None
 
@@ -184,91 +226,87 @@ class FusionSection(ReportSection):
                 Paragraph("Fusion Pair", header_style),
                 Paragraph("Chr 1", header_style),
                 Paragraph("Chr 2", header_style),
-                Paragraph("Gene 1 Position", header_style),
-                Paragraph("Gene 2 Position", header_style),
+                Paragraph("Gene 1 Breakpoint", header_style),
+                Paragraph("Gene 2 Breakpoint", header_style),
                 Paragraph("Reads", header_style),
             ]
         ]
 
-        # Track processed pairs to avoid duplicates
-        processed_pairs = set()
-        fusion_details = {}
-
-        if 'tag' in data.columns:
-            # Use processed data structure
-            for tag in data['tag'].unique():
-                if ',' in tag and tag not in processed_pairs:
-                    processed_pairs.add(tag)
-                    genes = tag.split(',')
+        try:
+            # Use validated fusion pairs (same as GUI)
+            from robin.gui.components.fusion import _cluster_fusion_reads
+            
+            # Get validated fusion pairs using breakpoint validation
+            clustered_data = _cluster_fusion_reads(
+                data, 
+                max_distance=10000, 
+                use_breakpoint_validation=True
+            )
+            
+            if clustered_data.empty:
+                return None
+            
+            # Build fusion details from validated breakpoints
+            fusion_details = {}
+            for _, row in clustered_data.iterrows():
+                fusion_pair_str = row["fusion_pair"]  # e.g., "GENE1-GENE2"
+                if fusion_pair_str:
+                    genes = [g.strip() for g in fusion_pair_str.split("-") if g.strip()]
                     if len(genes) >= 2:
-                        gene_pair = f"{genes[0]}-{genes[1]}"
+                        gene_pair = "-".join(sorted(genes))
                         
-                        # Get supporting reads count
-                        supporting_reads = len(data[data['tag'] == tag]['read_id'].unique())
-                        
-                        # Get gene information from the data
-                        gene_info = {}
-                        for gene in genes:
-                            gene_data = data[data['col4'] == gene]
-                            if not gene_data.empty:
-                                first_row = gene_data.iloc[0]
-                                gene_info[gene] = {
-                                    "chrom": first_row.get('reference_id', 'Unknown'),
-                                    "position": f"{first_row.get('reference_start', 'N/A')}-{first_row.get('reference_end', 'N/A')}",
-                                }
+                        # Get breakpoint information from validated data
+                        fusion_details[gene_pair] = {
+                            "chrom1": row.get("chr1", "Unknown"),
+                            "chrom2": row.get("chr2", "Unknown"),
+                            "pos1": row.get("gene1_position", "N/A"),
+                            "pos2": row.get("gene2_position", "N/A"),
+                            "supporting_reads": int(row.get("reads", 0)),
+                        }
+            
+            # Add rows to table using Paragraph objects for wrappable text
+            for gene_pair, details in sorted(fusion_details.items()):
+                table_data.append(
+                    [
+                        Paragraph(gene_pair, cell_style),
+                        Paragraph(details["chrom1"], cell_style),
+                        Paragraph(details["chrom2"], cell_style),
+                        Paragraph(details["pos1"], cell_style),
+                        Paragraph(details["pos2"], cell_style),
+                        Paragraph(str(details["supporting_reads"]), cell_style),
+                    ]
+                )
 
-                        # Only store fusion details if we have complete information
-                        if len(gene_info) == 2 and supporting_reads >= 3:
-                            fusion_details[gene_pair] = {
-                                "chrom1": gene_info[genes[0]]["chrom"],
-                                "chrom2": gene_info[genes[1]]["chrom"],
-                                "pos1": gene_info[genes[0]]["position"],
-                                "pos2": gene_info[genes[1]]["position"],
-                                "supporting_reads": supporting_reads,
-                            }
-        else:
-            # Fallback to original method for raw data
+            # Return None if no fusions meet the threshold
+            if len(table_data) == 1:  # Only header row
+                return None
+
+            # Define column widths (in inches) - adjusted for better proportions
+            col_widths = [1.8, 0.5, 0.5, 1.6, 1.6, 0.6]
+
+            # Create and style the table
+            table = Table(
+                table_data, colWidths=[inch * width for width in col_widths], repeatRows=1
+            )
+            table.setStyle(
+                TableStyle(
+                    [
+                        # Inherit modern table style
+                        *self.MODERN_TABLE_STYLE._cmds,
+                        # Preserve specific alignments
+                        ("ALIGN", (0, 0), (0, -1), "LEFT"),  # Left-align Fusion Pair
+                        ("ALIGN", (1, 0), (2, -1), "CENTER"),  # Center-align Chromosomes
+                        ("ALIGN", (3, 0), (4, -1), "LEFT"),  # Left-align positions
+                        ("ALIGN", (5, 0), (5, -1), "RIGHT"),  # Right-align Supporting Reads
+                    ]
+                )
+            )
+
+            return table
+            
+        except Exception as e:
+            logger.warning(f"Failed to create fusion table with validation, using fallback: {e}")
             return self._format_fusion_table_fallback(data, title, header_style, cell_style)
-
-        # Add rows to table using Paragraph objects for wrappable text
-        for gene_pair, details in fusion_details.items():
-            table_data.append(
-                [
-                    Paragraph(gene_pair, cell_style),
-                    Paragraph(details["chrom1"], cell_style),
-                    Paragraph(details["chrom2"], cell_style),
-                    Paragraph(details["pos1"], cell_style),
-                    Paragraph(details["pos2"], cell_style),
-                    Paragraph(str(details["supporting_reads"]), cell_style),
-                ]
-            )
-
-        # Return None if no fusions meet the threshold
-        if len(table_data) == 1:  # Only header row
-            return None
-
-        # Define column widths (in inches) - adjusted for better proportions
-        col_widths = [1.8, 0.5, 0.5, 1.6, 1.6, 0.6]
-
-        # Create and style the table
-        table = Table(
-            table_data, colWidths=[inch * width for width in col_widths], repeatRows=1
-        )
-        table.setStyle(
-            TableStyle(
-                [
-                    # Inherit modern table style
-                    *self.MODERN_TABLE_STYLE._cmds,
-                    # Preserve specific alignments
-                    ("ALIGN", (0, 0), (0, -1), "LEFT"),  # Left-align Fusion Pair
-                    ("ALIGN", (1, 0), (2, -1), "CENTER"),  # Center-align Chromosomes
-                    ("ALIGN", (3, 0), (4, -1), "LEFT"),  # Left-align positions
-                    ("ALIGN", (5, 0), (5, -1), "RIGHT"),  # Right-align Supporting Reads
-                ]
-            )
-        )
-
-        return table
 
     def _format_fusion_table_fallback(self, data, title, header_style, cell_style):
         """Fallback method for formatting fusion table from raw data."""
@@ -306,9 +344,9 @@ class FusionSection(ReportSection):
                                 gene_pair_reads[gene_pair] = set()
                             gene_pair_reads[gene_pair].add(read_id)
 
-        # Second pass: process each gene pair with 3 or more supporting reads
+        # Second pass: process each gene pair with 4 or more supporting reads (matching GUI)
         for gene_pair, reads in gene_pair_reads.items():
-            if len(reads) >= 3 and gene_pair not in processed_pairs:
+            if len(reads) >= 4 and gene_pair not in processed_pairs:
                 processed_pairs.add(gene_pair)
                 genes = gene_pair.split("-")
 
@@ -467,7 +505,7 @@ class FusionSection(ReportSection):
             source_text = "Data sources:\n"
             source_text += f"- Target panel fusions: {fusion_data['master_path']}\n"
             source_text += f"- Genome-wide fusions: {fusion_data['all_path']}\n"
-            source_text += "\nNote: Fusion candidates are identified from reads with supplementary alignments and filtered based on mapping quality (>50) and alignment length (>200bp). Processed data includes pre-computed gene pairs and networks."
+            source_text += "\nNote: Fusion candidates are identified from reads with supplementary alignments and filtered based on mapping quality (>50) and alignment length (>200bp). Only fusions with 4 or more supporting reads and validated breakpoints are reported."
 
             self.elements.append(Paragraph(source_text, self.styles.styles["Normal"]))
 
@@ -494,70 +532,97 @@ class FusionSection(ReportSection):
 
                 # Detailed tables if available
                 def _fusion_rows(df):
+                    """Get validated fusion rows for export (same as GUI logic)."""
                     if df is None or df.empty:
                         return []
                     
-                    if 'tag' in df.columns:
-                        # Use processed data structure
+                    try:
+                        # Use validated fusion pairs (same as GUI)
+                        from robin.gui.components.fusion import _cluster_fusion_reads
+                        
+                        # Get validated fusion pairs using breakpoint validation
+                        clustered_data = _cluster_fusion_reads(
+                            df, 
+                            max_distance=10000, 
+                            use_breakpoint_validation=True
+                        )
+                        
+                        if clustered_data.empty:
+                            return []
+                        
+                        # Build rows from validated breakpoints
                         rows = []
-                        for tag in df['tag'].unique():
-                            if ',' in tag:
-                                genes = tag.split(',')
+                        seen_pairs = set()
+                        
+                        for _, row in clustered_data.iterrows():
+                            fusion_pair_str = row["fusion_pair"]  # e.g., "GENE1-GENE2"
+                            if fusion_pair_str and fusion_pair_str not in seen_pairs:
+                                seen_pairs.add(fusion_pair_str)
+                                genes = [g.strip() for g in fusion_pair_str.split("-") if g.strip()]
                                 if len(genes) >= 2:
-                                    supporting_reads = len(df[df['tag'] == tag]['read_id'].unique())
-                                    if supporting_reads >= 3:
-                                        gene_pair = f"{genes[0]}-{genes[1]}"
-                                        
-                                        # Get gene information
-                                        gene_info = {}
-                                        for gene in genes:
-                                            gene_data = df[df['col4'] == gene]
-                                            if not gene_data.empty:
-                                                first_row = gene_data.iloc[0]
-                                                gene_info[gene] = {
-                                                    "chrom": first_row.get('reference_id', 'Unknown'),
-                                                    "position": f"{first_row.get('reference_start', 'N/A')}-{first_row.get('reference_end', 'N/A')}",
-                                                }
-                                        
-                                        if len(gene_info) == 2:
-                                            rows.append({
-                                                "FusionPair": gene_pair,
-                                                "Chrom1": gene_info[genes[0]]["chrom"],
-                                                "Chrom2": gene_info[genes[1]]["chrom"],
-                                                "Gene1Pos": gene_info[genes[0]]["position"],
-                                                "Gene2Pos": gene_info[genes[1]]["position"],
-                                                "SupportingReads": supporting_reads,
-                                            })
+                                    gene_pair = "-".join(sorted(genes))
+                                    rows.append({
+                                        "FusionPair": gene_pair,
+                                        "Chrom1": row.get("chr1", "Unknown"),
+                                        "Chrom2": row.get("chr2", "Unknown"),
+                                        "Gene1Pos": row.get("gene1_position", "N/A"),
+                                        "Gene2Pos": row.get("gene2_position", "N/A"),
+                                        "SupportingReads": int(row.get("reads", 0)),
+                                    })
                         return rows
-                    else:
-                        # Fallback to original method for raw data
-                        read_groups = df.groupby("readID")
+                    except Exception as e:
+                        logger.warning(f"Failed to get validated fusion rows for export: {e}")
+                        # Fallback to simple method with >= 4 reads
+                        read_groups = df.groupby("read_id" if "read_id" in df.columns else "readID")
                         gene_pair_reads = {}
                         for read_id, group in read_groups:
-                            genes = sorted(group["Gene"].unique())
+                            if 'col4' in group.columns:
+                                genes = sorted(group["col4"].unique())
+                            elif 'Gene' in group.columns:
+                                genes = sorted(group["Gene"].unique())
+                            else:
+                                continue
                             if len(genes) >= 2:
                                 for i in range(len(genes) - 1):
                                     for j in range(i + 1, len(genes)):
                                         gene_pair = f"{genes[i]}-{genes[j]}"
-                                        gene_pair_reads.setdefault(gene_pair, set()).add(
-                                            read_id
-                                        )
+                                        gene_pair_reads.setdefault(gene_pair, set()).add(read_id)
                         rows = []
                         for gene_pair, reads in gene_pair_reads.items():
-                            if len(reads) >= 3:
-                                g1, g2 = gene_pair.split("-")
-                                g1row = df[df["Gene"] == g1].iloc[0]
-                                g2row = df[df["Gene"] == g2].iloc[0]
-                                rows.append(
-                                    {
+                            if len(reads) >= 4:  # Minimum 4 reads (matching GUI)
+                                # Get gene information
+                                if 'col4' in df.columns:
+                                    g1_data = df[df['col4'] == gene_pair.split('-')[0]]
+                                    g2_data = df[df['col4'] == gene_pair.split('-')[1]]
+                                elif 'Gene' in df.columns:
+                                    g1_data = df[df["Gene"] == gene_pair.split('-')[0]]
+                                    g2_data = df[df["Gene"] == gene_pair.split('-')[1]]
+                                else:
+                                    continue
+                                
+                                if not g1_data.empty and not g2_data.empty:
+                                    g1row = g1_data.iloc[0]
+                                    g2row = g2_data.iloc[0]
+                                    
+                                    if 'reference_id' in g1row.index:
+                                        chrom1 = g1row.get('reference_id', 'Unknown')
+                                        chrom2 = g2row.get('reference_id', 'Unknown')
+                                        pos1 = f"{g1row.get('reference_start', 'N/A')}-{g1row.get('reference_end', 'N/A')}"
+                                        pos2 = f"{g2row.get('reference_start', 'N/A')}-{g2row.get('reference_end', 'N/A')}"
+                                    else:
+                                        chrom1 = g1row.get('chromBED', 'Unknown')
+                                        chrom2 = g2row.get('chromBED', 'Unknown')
+                                        pos1 = f"{g1row.get('BS', 'N/A')}-{g1row.get('BE', 'N/A')}"
+                                        pos2 = f"{g2row.get('BS', 'N/A')}-{g2row.get('BE', 'N/A')}"
+                                    
+                                    rows.append({
                                         "FusionPair": gene_pair,
-                                        "Chrom1": g1row["chromBED"],
-                                        "Chrom2": g2row["chromBED"],
-                                        "Gene1Pos": f"{g1row['BS']}-{g1row['BE']}",
-                                        "Gene2Pos": f"{g2row['BS']}-{g2row['BE']}",
+                                        "Chrom1": chrom1,
+                                        "Chrom2": chrom2,
+                                        "Gene1Pos": pos1,
+                                        "Gene2Pos": pos2,
                                         "SupportingReads": len(reads),
-                                    }
-                                )
+                                    })
                         return rows
 
                 master_rows = _fusion_rows(fusion_data["master_candidates"])

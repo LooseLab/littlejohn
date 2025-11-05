@@ -563,6 +563,41 @@ def extract_bam_metadata(bam_path: str) -> BamMetadata:
 
 
 # ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+
+def _send_alignment_warning_notification(
+    warning_msg: str, sample_id: str, filename: str
+) -> None:
+    """
+    Send an alignment warning notification to the GUI.
+    
+    Args:
+        warning_msg: The warning message to display
+        sample_id: Sample ID for context
+        filename: BAM filename for context
+    """
+    try:
+        from robin.gui.app import send_gui_update
+        from robin.gui_launcher import UpdateType
+        
+        send_gui_update(
+            UpdateType.WARNING_NOTIFICATION,
+            {
+                "message": warning_msg,
+                "sample_id": sample_id,
+                "filename": filename,
+                "title": "BAM Alignment Warning",
+            },
+            priority=5,  # Medium-high priority for warnings
+        )
+    except Exception:
+        # Fail silently if GUI is not available - logging already happened
+        pass
+
+
+# ============================================================================
 # JOB HANDLER FUNCTION
 # ============================================================================
 
@@ -593,6 +628,59 @@ def bam_preprocessing_handler(job, center: str = None):
         logger.debug(f"Extracting metadata from: {bam_path}")
         metadata = extract_bam_metadata(bam_path)
         logger.debug(f"Extracted metadata: {metadata.extracted_data}")
+
+        # Step 2.5: Check for alignment data and warn if missing
+        mapped_reads = metadata.extracted_data.get("mapped_reads", 0)
+        unmapped_reads = metadata.extracted_data.get("unmapped_reads", 0)
+        total_reads = mapped_reads + unmapped_reads
+        sample_id = metadata.extracted_data.get("sample_id", "unknown")
+        
+        if total_reads > 0:
+            # Check if BAM file has no mapped reads (no alignment data)
+            if mapped_reads == 0:
+                warning_msg = (
+                    f"BAM file contains no alignment data. "
+                    f"Found {unmapped_reads:,} unmapped reads but {mapped_reads:,} mapped reads. "
+                    f"This file may not be suitable for analysis that requires aligned reads."
+                )
+                logger.warning(f"WARNING: {warning_msg}")
+                # Store warning in metadata for downstream display
+                metadata.extracted_data["alignment_warning"] = warning_msg
+                job.context.add_metadata("alignment_warning", warning_msg)
+                # Send GUI notification
+                _send_alignment_warning_notification(
+                    warning_msg, sample_id, os.path.basename(bam_path)
+                )
+            # Check if mapped reads are very low relative to total (less than 1%)
+            elif total_reads > 100 and mapped_reads > 0:
+                mapped_percentage = (mapped_reads / total_reads) * 100
+                if mapped_percentage < 1.0:
+                    warning_msg = (
+                        f"BAM file has very few aligned reads. "
+                        f"Only {mapped_reads:,} mapped reads ({mapped_percentage:.2f}%) out of {total_reads:,} total reads. "
+                        f"This may indicate alignment issues or a file that is not suitable for analysis requiring aligned reads."
+                    )
+                    logger.warning(f"WARNING: {warning_msg}")
+                    # Store warning in metadata for downstream display
+                    metadata.extracted_data["alignment_warning"] = warning_msg
+                    job.context.add_metadata("alignment_warning", warning_msg)
+                    # Send GUI notification
+                    _send_alignment_warning_notification(
+                        warning_msg, sample_id, os.path.basename(bam_path)
+                    )
+        elif total_reads == 0:
+            # Edge case: BAM file has no reads at all
+            warning_msg = (
+                f"BAM file contains no reads. "
+                f"This file may be empty or corrupted."
+            )
+            logger.warning(f"WARNING: {warning_msg}")
+            metadata.extracted_data["alignment_warning"] = warning_msg
+            job.context.add_metadata("alignment_warning", warning_msg)
+            # Send GUI notification
+            _send_alignment_warning_notification(
+                warning_msg, sample_id, os.path.basename(bam_path)
+            )
 
         # Step 3: Store metadata in job context
         job.context.add_metadata("bam_metadata", metadata.extracted_data)

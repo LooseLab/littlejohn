@@ -59,6 +59,7 @@ class UpdateType(Enum):
     PROGRESS_UPDATE = "progress_update"
     ERROR_UPDATE = "error_update"
     SAMPLES_UPDATE = "samples_update"
+    WARNING_NOTIFICATION = "warning_notification"
 
 
 @dataclass
@@ -803,6 +804,8 @@ class GUILauncher:
                         self._update_master_record_from_workflow(samples_list)
                 except Exception as e:
                     logging.error(f"[GUI] Samples master record update failed: {e}")
+            elif update.update_type == UpdateType.WARNING_NOTIFICATION:
+                self._show_warning_notification(update.data)
 
         except Exception as e:
             logging.debug(f"Error handling GUI update: {e}")
@@ -1036,6 +1039,38 @@ class GUILauncher:
 
         except Exception as e:
             logging.debug(f"Error updating error information: {e}")
+
+    def _show_warning_notification(self, data: Dict[str, Any]):
+        """Show a warning notification in the GUI with dismiss button."""
+        try:
+            if ui is None:
+                return
+            
+            message = data.get("message", "")
+            title = data.get("title", "Warning")
+            sample_id = data.get("sample_id", "")
+            filename = data.get("filename", "")
+            
+            # Build notification message
+            if sample_id:
+                notification_msg = f"[{sample_id}] {message}"
+            elif filename:
+                notification_msg = f"[{filename}] {message}"
+            else:
+                notification_msg = message
+            
+            # Show dismissible warning notification
+            # NiceGUI notifications are dismissible by default with a close button
+            # timeout=0 makes it persistent until manually dismissed
+            ui.notify(
+                notification_msg,
+                type="warning",
+                timeout=0,  # Persistent until manually dismissed (close button available)
+                position="top-right",
+            )
+            
+        except Exception as e:
+            logging.debug(f"Error showing warning notification: {e}")
 
     def _format_duration(self, seconds):
         """Format duration in seconds to human readable format."""
@@ -1685,13 +1720,15 @@ class GUILauncher:
                                                 create_pdf,
                                                 pdf_path,
                                                 str(sample_dir),
-                                                state.get("type", "detailed"),
+                                                self.center or "Unknown",
+                                                report_type=state.get("type", "detailed"),
                                                 export_csv_dir=export_csv_dir,
                                                 export_xlsx=False,
                                                 export_zip=bool(
                                                     state.get("export_csv", False)
                                                 ),
                                                 progress_callback=sample_progress_callback,  # Pass the dialog-only callback
+                                                workflow_steps=self.workflow_steps if hasattr(self, 'workflow_steps') else None,
                                             )
                                         else:
                                             # Use custom callback that updates dialog only
@@ -1702,13 +1739,15 @@ class GUILauncher:
                                             pdf_file = create_pdf(
                                                 pdf_path,
                                                 str(sample_dir),
-                                                state.get("type", "detailed"),
+                                                self.center or "Unknown",
+                                                report_type=state.get("type", "detailed"),
                                                 export_csv_dir=export_csv_dir,
                                                 export_xlsx=False,
                                                 export_zip=bool(
                                                     state.get("export_csv", False)
                                                 ),
                                                 progress_callback=sample_progress_callback,  # Pass the dialog-only callback
+                                                workflow_steps=self.workflow_steps if hasattr(self, 'workflow_steps') else None,
                                             )
                                         
                                         # Queue file for download instead of downloading immediately
@@ -2603,11 +2642,13 @@ class GUILauncher:
                     create_pdf,
                     pdf_path,
                     str(sample_dir),
-                    state.get("type", "detailed"),
+                    self.center or "Unknown",
+                    report_type=state.get("type", "detailed"),
                     export_csv_dir=export_csv_dir,
                     export_xlsx=False,
                     export_zip=bool(state.get("export_csv", False)),
                     progress_callback=combined_callback,
+                    workflow_steps=self.workflow_steps if hasattr(self, 'workflow_steps') else None,
                 )
                 
                 # Mark report as completed
@@ -2676,11 +2717,13 @@ class GUILauncher:
                     create_pdf,
                     pdf_path,
                     str(sample_dir),
-                    state.get("type", "detailed"),
+                    self.center or "Unknown",
+                    report_type=state.get("type", "detailed"),
                     export_csv_dir=export_csv_dir,
                     export_xlsx=False,
                     export_zip=bool(state.get("export_csv", False)),
                     progress_callback=progress_callback,
+                    workflow_steps=self.workflow_steps if hasattr(self, 'workflow_steps') else None,
                 )
                 
                 # Mark report as completed
@@ -2717,14 +2760,29 @@ class GUILauncher:
                     ui.label(
                         "This sample ID has not been seen yet in the current session."
                     ).classes("text-sm text-gray-600")
+                    ui.label(
+                        "Redirecting to sample list..."
+                    ).classes("text-sm text-gray-500 mt-2")
                     ui.button(
                         "Back to Samples", on_click=lambda: ui.navigate.to("/live_data")
                     ).props("color=primary")
+                
                 # Soft redirect after short delay
-                try:
-                    ui.timer(1.5, lambda: ui.navigate.to("/live_data"), once=True)
-                except Exception:
-                    pass
+                def redirect_to_samples():
+                    """Redirect to the sample list page."""
+                    try:
+                        ui.navigate.to("/live_data")
+                    except Exception as e:
+                        logging.warning(f"Failed to redirect to /live_data: {e}")
+                        # Fallback: try using JavaScript redirect
+                        try:
+                            ui.run_javascript('window.location.href = "/live_data"')
+                        except Exception as e2:
+                            logging.error(f"Failed JavaScript redirect: {e2}")
+                
+                # Create and activate the timer
+                redirect_timer = ui.timer(2.0, redirect_to_samples, once=True)
+                redirect_timer.activate()
                 return
 
             sample_dir = (
@@ -2800,7 +2858,7 @@ class GUILauncher:
                                 from robin.gui.components.summary import add_summary_section
 
                             # Create the UI components immediately on the main thread
-                            add_summary_section(sample_dir, sample_id)
+                            add_summary_section(sample_dir, sample_id, self)
                         except Exception as e:
                             logging.exception(f"[GUI] Summary section failed: {e}")
                             try:
@@ -2808,96 +2866,111 @@ class GUILauncher:
                             except Exception:
                                 pass
 
+                        # Import section visibility helper
+                        try:
+                            from robin.gui.config import is_section_enabled, get_enabled_classification_steps
+                        except ImportError:
+                            is_section_enabled = lambda name, steps: True
+                            get_enabled_classification_steps = lambda steps: {"sturgeon", "nanodx", "random_forest", "pannanodx"}
+                        
+                        workflow_steps = self.workflow_steps if hasattr(self, 'workflow_steps') else None
+                        
                         # Classification section (refactored component) - create UI immediately
-                        try:
+                        enabled_classification_steps = get_enabled_classification_steps(workflow_steps)
+                        if not workflow_steps or enabled_classification_steps:
                             try:
-                                from .gui.components.classification import add_classification_section  # type: ignore
-                            except ImportError:
-                                # Try absolute import if relative fails
-                                from robin.gui.components.classification import (
-                                    add_classification_section,
-                                )
+                                try:
+                                    from .gui.components.classification import add_classification_section  # type: ignore
+                                except ImportError:
+                                    # Try absolute import if relative fails
+                                    from robin.gui.components.classification import (
+                                        add_classification_section,
+                                    )
 
-                            # Create the UI components immediately on the main thread
-                            add_classification_section(sample_dir)
-                        except Exception as e:
-                            logging.exception(f"[GUI] Classification section failed: {e}")
-                            try:
-                                ui.notify(
-                                    f"Classification section failed: {e}", type="warning"
-                                )
-                            except Exception:
-                                pass
+                                # Create the UI components immediately on the main thread
+                                add_classification_section(sample_dir, self)
+                            except Exception as e:
+                                logging.exception(f"[GUI] Classification section failed: {e}")
+                                try:
+                                    ui.notify(
+                                        f"Classification section failed: {e}", type="warning"
+                                    )
+                                except Exception:
+                                    pass
 
-                        # Coverage section (refactored component) - create UI immediately
-                        try:
+                        # Coverage section (target) - create UI immediately
+                        if not workflow_steps or is_section_enabled("target", workflow_steps):
                             try:
-                                from .gui.components.coverage import add_coverage_section  # type: ignore
-                            except ImportError:
-                                # Try absolute import if relative fails
-                                from robin.gui.components.coverage import (
-                                    add_coverage_section,
-                                )
+                                try:
+                                    from .gui.components.coverage import add_coverage_section  # type: ignore
+                                except ImportError:
+                                    # Try absolute import if relative fails
+                                    from robin.gui.components.coverage import (
+                                        add_coverage_section,
+                                    )
 
-                            # Create the UI components immediately on the main thread
-                            add_coverage_section(self, sample_dir)
-                        except Exception as e:
-                            try:
-                                ui.notify(f"Coverage section failed: {e}", type="warning")
-                            except Exception:
-                                pass
+                                # Create the UI components immediately on the main thread
+                                add_coverage_section(self, sample_dir)
+                            except Exception as e:
+                                try:
+                                    ui.notify(f"Coverage section failed: {e}", type="warning")
+                                except Exception:
+                                    pass
 
                         # MGMT section (refactored component) - create UI immediately
-                        try:
+                        if not workflow_steps or is_section_enabled("mgmt", workflow_steps):
                             try:
-                                from .gui.components.mgmt import add_mgmt_section  # type: ignore
-                            except ImportError:
-                                # Try absolute import if relative fails
-                                from robin.gui.components.mgmt import add_mgmt_section
+                                try:
+                                    from .gui.components.mgmt import add_mgmt_section  # type: ignore
+                                except ImportError:
+                                    # Try absolute import if relative fails
+                                    from robin.gui.components.mgmt import add_mgmt_section
 
-                            # Create the UI components immediately on the main thread
-                            add_mgmt_section(self, sample_dir)
-                        except Exception as e:
-                            logging.exception(f"[GUI] MGMT section failed: {e}")
-                            try:
-                                ui.notify(f"MGMT section failed: {e}", type="warning")
-                            except Exception:
-                                pass
+                                # Create the UI components immediately on the main thread
+                                add_mgmt_section(self, sample_dir)
+                            except Exception as e:
+                                logging.exception(f"[GUI] MGMT section failed: {e}")
+                                try:
+                                    ui.notify(f"MGMT section failed: {e}", type="warning")
+                                except Exception:
+                                    pass
 
                         # CNV section (refactored component) - create UI immediately
-                        try:
+                        if not workflow_steps or is_section_enabled("cnv", workflow_steps):
                             try:
-                                from .gui.components.cnv import add_cnv_section  # type: ignore
-                            except ImportError:
-                                # Try absolute import if relative fails
-                                from robin.gui.components.cnv import add_cnv_section
+                                try:
+                                    from .gui.components.cnv import add_cnv_section  # type: ignore
+                                except ImportError:
+                                    # Try absolute import if relative fails
+                                    from robin.gui.components.cnv import add_cnv_section
 
-                            # Create the UI components immediately on the main thread
-                            # Pass launcher for shared state access (launcher._cnv_state)
-                            add_cnv_section(self, sample_dir)
-                        except Exception as e:
-                            logging.exception(f"[GUI] CNV section failed: {e}")
-                            try:
-                                ui.notify(f"CNV section failed: {e}", type="warning")
-                            except Exception:
-                                pass
+                                # Create the UI components immediately on the main thread
+                                # Pass launcher for shared state access (launcher._cnv_state)
+                                add_cnv_section(self, sample_dir)
+                            except Exception as e:
+                                logging.exception(f"[GUI] CNV section failed: {e}")
+                                try:
+                                    ui.notify(f"CNV section failed: {e}", type="warning")
+                                except Exception:
+                                    pass
 
                         # Fusion section (target and genome-wide; excludes full SV UI) - create UI immediately
-                        try:
+                        if not workflow_steps or is_section_enabled("fusion", workflow_steps):
                             try:
-                                from .gui.components.fusion import add_fusion_section  # type: ignore
-                            except ImportError:
-                                # Try absolute import if relative fails
-                                from robin.gui.components.fusion import add_fusion_section
+                                try:
+                                    from .gui.components.fusion import add_fusion_section  # type: ignore
+                                except ImportError:
+                                    # Try absolute import if relative fails
+                                    from robin.gui.components.fusion import add_fusion_section
 
-                            # Create the UI components immediately on the main thread
-                            add_fusion_section(self, sample_dir)
-                        except Exception as e:
-                            logging.exception(f"[GUI] Fusion section failed: {e}")
-                            try:
-                                ui.notify(f"Fusion section failed: {e}", type="warning")
-                            except Exception:
-                                pass
+                                # Create the UI components immediately on the main thread
+                                add_fusion_section(self, sample_dir)
+                            except Exception as e:
+                                logging.exception(f"[GUI] Fusion section failed: {e}")
+                                try:
+                                    ui.notify(f"Fusion section failed: {e}", type="warning")
+                                except Exception:
+                                    pass
 
                         # Files in output directory
                         with ui.card().classes("w-full"):
