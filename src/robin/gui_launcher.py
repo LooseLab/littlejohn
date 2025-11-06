@@ -1142,6 +1142,13 @@ class GUILauncher:
 
                 self._create_sample_detail_page(sample_id)
 
+            # Create sample details page
+            @ui.page("/live_data/{sample_id}/details")
+            def sample_details(sample_id: str):
+                """Sample details page with comprehensive information."""
+                _setup_global_resources()
+                self._create_sample_details_page(sample_id)
+
             # Download API endpoint
             @ui.page("/api/download/{sample_id}/{filename}")
             def download_file(sample_id: str, filename: str):
@@ -2818,7 +2825,20 @@ class GUILauncher:
                         ui.label("Detailed sample information.").classes(
                             "text-sm ml-4 opacity-80"
                         )
-                    with ui.column():
+                    with ui.column().classes("flex gap-2 items-center"):
+                        # Check if target.bam exists to show "More Details" button
+                        target_bam_exists = False
+                        if sample_dir and sample_dir.exists():
+                            target_bam = sample_dir / "target.bam"
+                            target_bam_exists = target_bam.exists() and target_bam.is_file()
+                        
+                        if target_bam_exists:
+                            ui.button(
+                                "More Details",
+                                on_click=lambda: ui.navigate.to(f"/live_data/{sample_id}/details")
+                            ).classes(
+                                "text-sm font-semibold px-3 py-1 rounded bg-secondary text-white"
+                            )
                         ui.button(
                             "Generate Report", on_click=confirm_report_generation
                         ).classes(
@@ -2907,6 +2927,7 @@ class GUILauncher:
                                     # Try absolute import if relative fails
                                     from robin.gui.components.coverage import (
                                         add_coverage_section,
+                                        add_igv_viewer,
                                     )
 
                                 # Create the UI components immediately on the main thread
@@ -3286,6 +3307,104 @@ class GUILauncher:
                         ui.timer(30.0, _refresh_sample_detail_async)
                     except Exception:
                         pass
+
+    def _create_sample_details_page(self, sample_id: str):
+        """Create the sample details page with comprehensive information."""
+        
+        # Get sample directory
+        sample_dir = (
+            Path(self.monitored_directory) / sample_id
+            if self.monitored_directory
+            else None
+        )
+        
+        # Check if sample is known
+        if self._known_sample_ids and sample_id not in self._known_sample_ids:
+            with theme.frame(
+                f"R.O.B.I.N - Sample Details",
+                smalltitle="Details",
+                batphone=False,
+                center=self.center,
+                setup_notifications=self._setup_notification_system,
+            ):
+                with ui.column().classes("w-full items-center justify-center p-8"):
+                    ui.label(f"Unknown sample: {sample_id}").classes(
+                        "text-xl font-semibold text-red-600"
+                    )
+                    ui.label(
+                        "This sample ID has not been seen yet in the current session."
+                    ).classes("text-sm text-gray-600")
+                    ui.button(
+                        "Back to Sample", 
+                        on_click=lambda: ui.navigate.to(f"/live_data/{sample_id}")
+                    ).props("color=primary").classes("mt-4")
+                    ui.button(
+                        "Back to Samples", 
+                        on_click=lambda: ui.navigate.to("/live_data")
+                    ).classes("mt-2")
+            return
+        
+        # Create the page with theme frame
+        with theme.frame(
+            f"R.O.B.I.N - Sample Details: {sample_id}",
+            smalltitle=f"{sample_id} Details",
+            batphone=False,
+            center=self.center,
+            setup_notifications=self._setup_notification_system,
+        ):
+            # Main content - full width like sample page
+            with ui.column().classes("w-full p-4 gap-4"):
+                # Header section
+                with ui.row().classes("w-full flex justify-between items-center flex-wrap gap-2"):
+                    with ui.column():
+                        ui.label(f"Sample Details: {sample_id}").classes("text-2xl font-bold")
+                        ui.label("Comprehensive sample information and analysis results.").classes(
+                            "text-sm ml-4 opacity-80"
+                        )
+                    with ui.column():
+                        ui.button(
+                            "Back to Sample", 
+                            on_click=lambda: ui.navigate.to(f"/live_data/{sample_id}")
+                        ).classes("bg-primary text-white rounded-md mobile-button")
+                
+                ui.separator().classes().style("border: 1px solid var(--md-primary)")
+                
+                # Placeholder content
+                with ui.column().classes("w-full gap-4"):
+                    ui.label("Sample Details Page").classes("text-headline-medium text-center")
+                    ui.label(f"This is a placeholder page for sample: {sample_id}").classes(
+                        "text-body-medium text-center text-gray-600"
+                    )
+                    
+                    # Sample information section
+                    with ui.card().classes("w-full elevation-2 rounded-lg p-4"):
+                        ui.label("Sample Information").classes("text-headline-small font-bold mb-4")
+                        
+                        if sample_dir and sample_dir.exists():
+                            ui.label(f"Sample Directory: {sample_dir}").classes("text-body-medium mb-2")
+                            ui.label("Status: Directory found").classes("text-body-medium text-green-600")
+                        else:
+                            ui.label("Status: Directory not found").classes("text-body-medium text-red-600")
+                            if sample_dir:
+                                ui.label(f"Expected path: {sample_dir}").classes("text-body-small text-gray-500")
+                    
+                    # Center information
+                    if self.center:
+                        with ui.card().classes("w-full elevation-2 rounded-lg p-4"):
+                            ui.label("Analysis Center").classes("text-headline-small font-bold mb-4")
+                            ui.label(f"Center: {self.center}").classes("text-body-medium")
+                    
+                    # IGV Viewer section - full width
+                    if sample_dir and sample_dir.exists():
+                        from robin.gui.components.coverage import add_igv_viewer
+                        add_igv_viewer(self, sample_dir)
+                    
+                    # Placeholder for future sections
+                    with ui.card().classes("w-full elevation-2 rounded-lg p-4"):
+                        ui.label("Analysis Results").classes("text-headline-small font-bold mb-4")
+                        ui.label("Detailed analysis results will be displayed here.").classes(
+                            "text-body-medium text-gray-600"
+                        )
 
     def _create_workflow_monitor(self):
         """Create the main workflow monitoring page."""
