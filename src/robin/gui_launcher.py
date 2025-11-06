@@ -1142,6 +1142,13 @@ class GUILauncher:
 
                 self._create_sample_detail_page(sample_id)
 
+            # Create sample details page
+            @ui.page("/live_data/{sample_id}/details")
+            def sample_details(sample_id: str):
+                """Sample details page with comprehensive information."""
+                _setup_global_resources()
+                self._create_sample_details_page(sample_id)
+
             # Download API endpoint
             @ui.page("/api/download/{sample_id}/{filename}")
             def download_file(sample_id: str, filename: str):
@@ -2818,7 +2825,20 @@ class GUILauncher:
                         ui.label("Detailed sample information.").classes(
                             "text-sm ml-4 opacity-80"
                         )
-                    with ui.column():
+                    with ui.column().classes("flex gap-2 items-center"):
+                        # Check if target.bam exists to show "More Details" button
+                        target_bam_exists = False
+                        if sample_dir and sample_dir.exists():
+                            target_bam = sample_dir / "target.bam"
+                            target_bam_exists = target_bam.exists() and target_bam.is_file()
+                        
+                        if target_bam_exists:
+                            ui.button(
+                                "More Details",
+                                on_click=lambda: ui.navigate.to(f"/live_data/{sample_id}/details")
+                            ).classes(
+                                "text-sm font-semibold px-3 py-1 rounded bg-secondary text-white"
+                            )
                         ui.button(
                             "Generate Report", on_click=confirm_report_generation
                         ).classes(
@@ -2907,6 +2927,7 @@ class GUILauncher:
                                     # Try absolute import if relative fails
                                     from robin.gui.components.coverage import (
                                         add_coverage_section,
+                                        add_igv_viewer,
                                     )
 
                                 # Create the UI components immediately on the main thread
@@ -3286,6 +3307,828 @@ class GUILauncher:
                         ui.timer(30.0, _refresh_sample_detail_async)
                     except Exception:
                         pass
+
+    def _create_sample_details_page(self, sample_id: str):
+        """Create the sample details page with comprehensive information."""
+        
+        # Get sample directory
+        sample_dir = (
+            Path(self.monitored_directory) / sample_id
+            if self.monitored_directory
+            else None
+        )
+        
+        # Check if sample is known
+        if self._known_sample_ids and sample_id not in self._known_sample_ids:
+            with theme.frame(
+                f"R.O.B.I.N - Sample Details",
+                smalltitle="Details",
+                batphone=False,
+                center=self.center,
+                setup_notifications=self._setup_notification_system,
+            ):
+                with ui.column().classes("w-full items-center justify-center p-8"):
+                    ui.label(f"Unknown sample: {sample_id}").classes(
+                        "text-xl font-semibold text-red-600"
+                    )
+                    ui.label(
+                        "This sample ID has not been seen yet in the current session."
+                    ).classes("text-sm text-gray-600")
+                    ui.button(
+                        "Back to Sample", 
+                        on_click=lambda: ui.navigate.to(f"/live_data/{sample_id}")
+                    ).props("color=primary").classes("mt-4")
+                    ui.button(
+                        "Back to Samples", 
+                        on_click=lambda: ui.navigate.to("/live_data")
+                    ).classes("mt-2")
+            return
+        
+        # Create the page with theme frame
+        with theme.frame(
+            f"R.O.B.I.N - Sample Details: {sample_id}",
+            smalltitle=f"{sample_id} Details",
+            batphone=False,
+            center=self.center,
+            setup_notifications=self._setup_notification_system,
+        ):
+            # Main content - full width like sample page
+            with ui.column().classes("w-full p-4 gap-4"):
+                # Header section
+                with ui.row().classes("w-full flex justify-between items-center flex-wrap gap-2"):
+                    with ui.column():
+                        ui.label(f"Sample Details: {sample_id}").classes("text-2xl font-bold")
+                        ui.label("IGV Viewer, sample information and analysis results.").classes(
+                            "text-sm ml-4 opacity-80"
+                        )
+                    with ui.column():
+                        ui.button(
+                            "Back to Sample", 
+                            on_click=lambda: ui.navigate.to(f"/live_data/{sample_id}")
+                        ).classes("bg-primary text-white rounded-md mobile-button")
+                
+                ui.separator().classes().style("border: 1px solid var(--md-primary)")
+                
+                # Placeholder content
+                with ui.column().classes("w-full gap-4"):
+                    ui.label("Sample Details Page").classes("text-headline-medium text-center")
+                    # Sample information section
+                    with ui.card().classes("w-full elevation-2 rounded-lg p-4"):
+                        ui.label("Sample Information").classes("text-headline-small font-bold mb-4")
+                        
+                        if sample_dir and sample_dir.exists():
+                            ui.label(f"Sample Directory: {sample_dir}").classes("text-body-medium mb-2")
+                            ui.label("Status: Directory found").classes("text-body-medium text-green-600")
+                        else:
+                            ui.label("Status: Directory not found").classes("text-body-medium text-red-600")
+                            if sample_dir:
+                                ui.label(f"Expected path: {sample_dir}").classes("text-body-small text-gray-500")
+                    
+                    # Center information
+                    if self.center:
+                        with ui.card().classes("w-full elevation-2 rounded-lg p-4"):
+                            ui.label("Analysis Center").classes("text-headline-small font-bold mb-4")
+                            ui.label(f"Center: {self.center}").classes("text-body-medium")
+                    
+                    # IGV Viewer section - moved to top, before tables
+                    if sample_dir and sample_dir.exists():
+                        from robin.gui.components.coverage import add_igv_viewer
+                        add_igv_viewer(self, sample_dir)
+                    
+                    # Fusion Pairs Table section
+                    if sample_dir and sample_dir.exists():
+                        from robin.gui.components.fusion import (
+                            _load_processed_pickle,
+                            _cluster_fusion_reads
+                        )
+                        import pandas as pd
+                        
+                        # Load fusion data
+                        fusion_data_loaded = False
+                        fusion_data = None
+                        try:
+                            target_file = sample_dir / "fusion_candidates_master_processed.csv"
+                            genome_file = sample_dir / "fusion_candidates_all_processed.csv"
+                            
+                            # Try to load target panel data first, then genome-wide
+                            if target_file.exists():
+                                fusion_data = _load_processed_pickle(target_file)
+                                if fusion_data and fusion_data.get("annotated_data") is not None:
+                                    fusion_data_loaded = True
+                            elif genome_file.exists():
+                                fusion_data = _load_processed_pickle(genome_file)
+                                if fusion_data and fusion_data.get("annotated_data") is not None:
+                                    fusion_data_loaded = True
+                        except Exception as e:
+                            logging.warning(f"Failed to load fusion data: {e}")
+                        
+                        if fusion_data_loaded and fusion_data:
+                            annotated_data = fusion_data.get("annotated_data", pd.DataFrame())
+                            goodpairs = fusion_data.get("goodpairs", pd.Series())
+                            
+                            if not annotated_data.empty:
+                                # Filter to good pairs if available
+                                if not goodpairs.empty and goodpairs.sum() > 0:
+                                    aligned_goodpairs = goodpairs.reindex(annotated_data.index, fill_value=False)
+                                    filtered_data = annotated_data[aligned_goodpairs]
+                                else:
+                                    filtered_data = annotated_data
+                                
+                                # Cluster fusion reads
+                                clustered_data = _cluster_fusion_reads(
+                                    filtered_data, 
+                                    max_distance=10000, 
+                                    use_breakpoint_validation=True
+                                )
+                                
+                                if not clustered_data.empty:
+                                    with ui.card().classes("w-full elevation-2 rounded-lg p-4"):
+                                        ui.label("Fusion Pairs").classes("text-headline-small font-bold mb-4")
+                                        ui.label("Click on a row to view the fusion pair in IGV.").classes(
+                                            "text-body-small text-gray-600 mb-2"
+                                        )
+                                        
+                                        # Create columns for the table
+                                        from robin.gui.theme import styled_table
+                                        
+                                        columns = [
+                                            {"name": "fusion_pair", "label": "Fusion Pair", "field": "fusion_pair", "sortable": True},
+                                            {"name": "chr1", "label": "Chr 1", "field": "chr1", "sortable": True},
+                                            {"name": "pos1", "label": "Breakpoint 1", "field": "pos1", "sortable": True},
+                                            {"name": "chr2", "label": "Chr 2", "field": "chr2", "sortable": True},
+                                            {"name": "pos2", "label": "Breakpoint 2", "field": "pos2", "sortable": True},
+                                            {"name": "reads", "label": "Supporting Reads", "field": "reads", "sortable": True},
+                                            {"name": "action", "label": "View in IGV", "field": "action", "sortable": False}
+                                        ]
+                                        
+                                        # Format rows for display
+                                        rows = []
+                                        fusion_region_map = {}  # Store region info for each row
+                                        
+                                        # Import re for position parsing
+                                        import re
+                                        
+                                        for idx, row in clustered_data.iterrows():
+                                            # Try to get start/end coordinates from the row if available
+                                            # (e.g., from breakpoint validation)
+                                            if all(col in row for col in ["gene1_start", "gene1_end", "gene2_start", "gene2_end"]):
+                                                # Use actual start/end coordinates if available
+                                                start1_raw = int(row["gene1_start"])
+                                                end1_raw = int(row["gene1_end"])
+                                                start2_raw = int(row["gene2_start"])
+                                                end2_raw = int(row["gene2_end"])
+                                            else:
+                                                # Parse from position strings (format: "start-end")
+                                                pos1_str = str(row.get("gene1_position", ""))
+                                                pos2_str = str(row.get("gene2_position", ""))
+                                                
+                                                # Parse range format "start-end" or just a single number
+                                                pos1_match = re.match(r'(\d+)[-–—](\d+)', pos1_str.replace(',', ''))
+                                                pos2_match = re.match(r'(\d+)[-–—](\d+)', pos2_str.replace(',', ''))
+                                                
+                                                if pos1_match and pos2_match:
+                                                    # Extract both start and end from the range
+                                                    start1_raw = int(pos1_match.group(1))
+                                                    end1_raw = int(pos1_match.group(2))
+                                                    start2_raw = int(pos2_match.group(1))
+                                                    end2_raw = int(pos2_match.group(2))
+                                                else:
+                                                    # Fallback: try to extract single coordinates
+                                                    pos1_single = re.search(r'(\d+)', pos1_str.replace(',', ''))
+                                                    pos2_single = re.search(r'(\d+)', pos2_str.replace(',', ''))
+                                                    if pos1_single and pos2_single:
+                                                        # Single coordinate - use it as both start and end
+                                                        start1_raw = end1_raw = int(pos1_single.group(1))
+                                                        start2_raw = end2_raw = int(pos2_single.group(1))
+                                                    else:
+                                                        # Skip this row if we can't parse coordinates
+                                                        continue
+                                            
+                                            # Use the actual range (start to end), then add/subtract 10kb padding
+                                            padding = 10000
+                                            min1 = min(start1_raw, end1_raw)
+                                            max1 = max(start1_raw, end1_raw)
+                                            min2 = min(start2_raw, end2_raw)
+                                            max2 = max(start2_raw, end2_raw)
+                                            
+                                            # Subtract 10kb from min and add 10kb to max
+                                            start1 = max(1, min1 - padding)
+                                            end1 = max1 + padding
+                                            start2 = max(1, min2 - padding)
+                                            end2 = max2 + padding
+                                            
+                                            chr1 = str(row.get("chr1", "Unknown"))
+                                            chr2 = str(row.get("chr2", "Unknown"))
+                                            
+                                            # Format region as "chr1:start-end chr2:start-end"
+                                            region = f"{chr1}:{start1}-{end1} {chr2}:{start2}-{end2}"
+                                            
+                                            # For display, show the breakpoint range (not the padded version)
+                                            # Use a single representative coordinate or the range midpoint
+                                            display_pos1 = f"{min1:,}-{max1:,}" if min1 != max1 else f"{min1:,}"
+                                            display_pos2 = f"{min2:,}-{max2:,}" if min2 != max2 else f"{min2:,}"
+                                            
+                                            formatted_row = {
+                                                "fusion_pair": row.get("fusion_pair", ""),
+                                                "chr1": chr1,
+                                                "pos1": display_pos1,
+                                                "chr2": chr2,
+                                                "pos2": display_pos2,
+                                                "reads": int(row.get("reads", 0)),
+                                                "action": "🔍"  # Icon for viewing in IGV
+                                            }
+                                            
+                                            rows.append(formatted_row)
+                                            fusion_region_map[len(rows) - 1] = region
+                                        
+                                        if rows:
+                                            # Store fusion regions mapped by fusion pair for easy lookup
+                                            fusion_regions_by_pair = {}
+                                            for idx, row_data in enumerate(rows):
+                                                fusion_regions_by_pair[row_data["fusion_pair"]] = fusion_region_map[idx]
+                                            
+                                            # Create JavaScript map of regions for IGV navigation
+                                            import json
+                                            js_regions_json = json.dumps(fusion_regions_by_pair)
+                                            
+                                            # Function to navigate IGV to a fusion region
+                                            def navigate_to_fusion_region(fusion_pair: str):
+                                                """Navigate IGV browser to the specified fusion pair region."""
+                                                if fusion_pair in fusion_regions_by_pair:
+                                                    region = fusion_regions_by_pair[fusion_pair]
+                                                    # Escape region string for JavaScript
+                                                    escaped_region = region.replace('"', '\\"').replace("'", "\\'")
+                                                    js_navigate = f"""
+                                                        (function() {{
+                                                            try {{
+                                                                if (window.lj_igv && window.lj_igv_browser_ready) {{
+                                                                    console.log('[IGV] Navigating to fusion region: {escaped_region}');
+                                                                    window.lj_igv.search('{escaped_region}');
+                                                                }} else {{
+                                                                    console.warn('[IGV] Browser not ready yet, will navigate when ready');
+                                                                    setTimeout(function() {{
+                                                                        if (window.lj_igv && window.lj_igv_browser_ready) {{
+                                                                            window.lj_igv.search('{escaped_region}');
+                                                                        }}
+                                                                    }}, 500);
+                                                                }}
+                                                            }} catch (error) {{
+                                                                console.error('[IGV] Navigation error:', error);
+                                                            }}
+                                                        }})();
+                                                    """
+                                                    ui.run_javascript(js_navigate, timeout=5.0)
+                                            
+                                            # Initialize fusion regions map in window BEFORE creating table
+                                            # This ensures it's available when the slot template renders
+                                            js_init_regions = f"""
+                                                (function() {{
+                                                    window.fusionRegionsMap = window.fusionRegionsMap || {{}};
+                                                    Object.assign(window.fusionRegionsMap, {js_regions_json});
+                                                    console.log('[Fusion] Initialized fusion regions map with', Object.keys(window.fusionRegionsMap).length, 'regions');
+                                                }})();
+                                            """
+                                            ui.run_javascript(js_init_regions, timeout=5.0)
+                                            
+                                            # Create styled table
+                                            table_container, fusion_table = styled_table(
+                                                columns=columns,
+                                                rows=rows,
+                                                pagination=20,
+                                                class_size="table-xs"
+                                            )
+                                            
+                                            # Add clickable action button column using slot that emits events to Python
+                                            try:
+                                                # Use Vue event emission which is more reliable than window functions
+                                                fusion_table.add_slot(
+                                                    "body-cell-action",
+                                                    """
+<q-td key="action" :props="props">
+  <q-btn 
+    icon="visibility" 
+    size="sm" 
+    dense 
+    flat 
+    color="primary"
+    @click="$parent.$emit('fusion-view-igv', props.row.fusion_pair)"
+    title="View in IGV"
+  />
+</q-td>
+"""
+                                                )
+                                                
+                                                # Handle the event from the slot
+                                                def on_fusion_view_igv(e):
+                                                    """Handle fusion view IGV event from table button."""
+                                                    try:
+                                                        fusion_pair = e.args if isinstance(e.args, str) else getattr(e, 'args', None)
+                                                        if fusion_pair:
+                                                            logging.debug(f"[Fusion] Button clicked for: {fusion_pair}")
+                                                            navigate_to_fusion_region(fusion_pair)
+                                                    except Exception as ex:
+                                                        logging.warning(f"Error handling fusion view IGV event: {ex}")
+                                                
+                                                fusion_table.on("fusion-view-igv", on_fusion_view_igv)
+                                                logging.debug("Added action button column slot with event handler")
+                                            except Exception as slot_ex:
+                                                logging.warning(f"Could not add action column slot: {slot_ex}")
+                                                import traceback
+                                                logging.warning(traceback.format_exc())
+                                                
+                                                # Fallback: Use JavaScript with inline region lookup
+                                                try:
+                                                    # Create a safer inline handler that doesn't rely on window functions
+                                                    js_inline_handler = f"""
+                                                        (function() {{
+                                                            // Store regions as a constant in the closure
+                                                            const fusionRegions = {js_regions_json};
+                                                            
+                                                            // Create handler function immediately
+                                                            window.handleFusionNav = function(fusionPair) {{
+                                                                console.log('[Fusion] Navigation handler called for:', fusionPair);
+                                                                const region = fusionRegions[fusionPair];
+                                                                if (region) {{
+                                                                    console.log('[Fusion] Navigating to:', region);
+                                                                    function nav() {{
+                                                                        if (window.lj_igv && window.lj_igv_browser_ready) {{
+                                                                            window.lj_igv.search(region);
+                                                                            return true;
+                                                                        }}
+                                                                        return false;
+                                                                    }}
+                                                                    if (!nav()) {{
+                                                                        setTimeout(nav, 500);
+                                                                        setTimeout(nav, 1500);
+                                                                    }}
+                                                                }}
+                                                            }};
+                                                            console.log('[Fusion] Created navigation handler');
+                                                        }})();
+                                                    """
+                                                    ui.run_javascript(js_inline_handler, timeout=5.0)
+                                                    
+                                                    # Wait a moment for JS to execute, then add slot
+                                                    ui.timer(0.1, lambda: None, once=True)
+                                                    
+                                                    fusion_table.add_slot(
+                                                        "body-cell-action",
+                                                        """
+<q-td key="action" :props="props">
+  <q-btn 
+    icon="visibility" 
+    size="sm" 
+    dense 
+    flat 
+    color="primary"
+    @click="window.handleFusionNav && window.handleFusionNav(props.row.fusion_pair)"
+    title="View in IGV"
+  />
+</q-td>
+"""
+                                                    )
+                                                except Exception as fallback_ex:
+                                                    logging.warning(f"Fallback approach also failed: {fallback_ex}")
+                                            
+                                            # Use JavaScript to attach click handlers to rows - improved with event delegation
+                                            js_attach_handlers = f"""
+                                                (function() {{
+                                                    let attached = false;
+                                                    
+                                                    function attachFusionHandlers() {{
+                                                        if (attached) return;
+                                                        
+                                                        console.log('[Fusion] Attaching click handlers...');
+                                                        
+                                                        // Use event delegation on the document body for better reliability
+                                                        function handleFusionRowClick(e) {{
+                                                            // Check if click is on a fusion table row
+                                                            let target = e.target;
+                                                            let row = target.closest('tbody tr');
+                                                            
+                                                            if (!row) return;
+                                                            
+                                                            // Check if this row is in a fusion table
+                                                            const table = row.closest('table');
+                                                            if (!table) return;
+                                                            
+                                                            const headers = table.querySelectorAll('thead th');
+                                                            let isFusionTable = false;
+                                                            for (let i = 0; i < headers.length; i++) {{
+                                                                if ((headers[i].textContent || '').toLowerCase().includes('fusion pair')) {{
+                                                                    isFusionTable = true;
+                                                                    break;
+                                                                }}
+                                                            }}
+                                                            
+                                                            if (!isFusionTable) return;
+                                                            
+                                                            // Skip if clicking on the action button (let button handle it)
+                                                            if (target.closest('button') || target.closest('.q-btn')) {{
+                                                                return;
+                                                            }}
+                                                            
+                                                            e.preventDefault();
+                                                            e.stopPropagation();
+                                                            
+                                                            console.log('[Fusion] Row clicked');
+                                                            
+                                                            // Get fusion pair from first cell
+                                                            const cells = row.querySelectorAll('td');
+                                                            if (cells.length > 0) {{
+                                                                const fusionPair = cells[0].textContent.trim();
+                                                                console.log('[Fusion] Fusion pair:', fusionPair);
+                                                                
+                                                                if (fusionPair && window.fusionRegionsMap && window.fusionRegionsMap[fusionPair]) {{
+                                                                    const region = window.fusionRegionsMap[fusionPair];
+                                                                    console.log('[Fusion] Navigating to region:', region);
+                                                                    
+                                                                    // Visual feedback
+                                                                    row.style.backgroundColor = '#e3f2fd';
+                                                                    setTimeout(function() {{
+                                                                        row.style.backgroundColor = '';
+                                                                    }}, 400);
+                                                                    
+                                                                    // Navigate IGV
+                                                                    function navIGV() {{
+                                                                        if (window.lj_igv && window.lj_igv_browser_ready) {{
+                                                                            try {{
+                                                                                window.lj_igv.search(region);
+                                                                                console.log('[Fusion] IGV navigation successful');
+                                                                                return true;
+                                                                            }} catch(err) {{
+                                                                                console.error('[Fusion] IGV error:', err);
+                                                                                return false;
+                                                                            }}
+                                                                        }}
+                                                                        return false;
+                                                                    }}
+                                                                    
+                                                                    if (!navIGV()) {{
+                                                                        setTimeout(function() {{ navIGV(); }}, 500);
+                                                                        setTimeout(function() {{ navIGV(); }}, 1500);
+                                                                    }}
+                                                                }}
+                                                            }}
+                                                        }}
+                                                        
+                                                        // Attach event listener to document (event delegation)
+                                                        document.addEventListener('click', handleFusionRowClick, true);
+                                                        
+                                                        // Also make rows visually clickable
+                                                        const tables = document.querySelectorAll('table');
+                                                        tables.forEach(function(table) {{
+                                                            const headers = table.querySelectorAll('thead th');
+                                                            let isFusionTable = false;
+                                                            for (let i = 0; i < headers.length; i++) {{
+                                                                if ((headers[i].textContent || '').toLowerCase().includes('fusion pair')) {{
+                                                                    isFusionTable = true;
+                                                                    break;
+                                                                }}
+                                                            }}
+                                                            
+                                                            if (isFusionTable) {{
+                                                                const tbody = table.querySelector('tbody');
+                                                                if (tbody) {{
+                                                                    const rows = tbody.querySelectorAll('tr');
+                                                                    rows.forEach(function(row) {{
+                                                                        row.style.cursor = 'pointer';
+                                                                    }});
+                                                                    console.log('[Fusion] Made', rows.length, 'rows clickable');
+                                                                }}
+                                                            }}
+                                                        }});
+                                                        
+                                                        attached = true;
+                                                        console.log('[Fusion] Click handlers attached successfully');
+                                                    }}
+                                                    
+                                                    // Try multiple times to ensure table is rendered
+                                                    attachFusionHandlers();
+                                                    setTimeout(attachFusionHandlers, 300);
+                                                    setTimeout(attachFusionHandlers, 800);
+                                                    setTimeout(attachFusionHandlers, 1500);
+                                                    setTimeout(attachFusionHandlers, 2500);
+                                                }})();
+                                            """
+                                            
+                                            # Execute JavaScript after table is created
+                                            ui.timer(0.5, lambda: ui.run_javascript(js_attach_handlers, timeout=10.0), once=True)
+                                            ui.timer(2.0, lambda: ui.run_javascript(js_attach_handlers, timeout=10.0), once=True)
+                                            
+                                            # Add summary
+                                            total_fusions = len(rows)
+                                            total_reads = sum(r["reads"] for r in rows)
+                                            ui.label(
+                                                f"Total fusions: {total_fusions} | Total supporting reads: {total_reads}"
+                                            ).classes("text-xs text-gray-500 mt-2")
+                                        else:
+                                            ui.label("No fusion pairs found").classes("text-gray-600")
+                                else:
+                                    with ui.card().classes("w-full elevation-2 rounded-lg p-4"):
+                                        ui.label("Fusion Pairs").classes("text-headline-small font-bold mb-4")
+                                        ui.label("No validated fusion pairs found").classes("text-gray-600")
+                            else:
+                                with ui.card().classes("w-full elevation-2 rounded-lg p-4"):
+                                    ui.label("Fusion Pairs").classes("text-headline-small font-bold mb-4")
+                                    ui.label("Fusion data is empty").classes("text-gray-600")
+                        else:
+                            with ui.card().classes("w-full elevation-2 rounded-lg p-4"):
+                                ui.label("Fusion Pairs").classes("text-headline-small font-bold mb-4")
+                                ui.label("Fusion analysis data not available. Please run fusion analysis first.").classes(
+                                    "text-gray-600"
+                                )
+                    
+                    # Target Genes Table section
+                    if sample_dir and sample_dir.exists():
+                        target_coverage_file = sample_dir / "target_coverage.csv"
+                        bed_coverage_file = sample_dir / "bed_coverage_main.csv"
+                        
+                        # Try target_coverage.csv first, fallback to bed_coverage_main.csv
+                        coverage_file = None
+                        if target_coverage_file.exists():
+                            coverage_file = target_coverage_file
+                        elif bed_coverage_file.exists():
+                            coverage_file = bed_coverage_file
+                        
+                        if coverage_file:
+                            try:
+                                import pandas as pd
+                                df = pd.read_csv(coverage_file)
+                                
+                                # Ensure we have the required columns
+                                required_cols = ["chrom", "startpos", "endpos", "name"]
+                                if all(col in df.columns for col in required_cols):
+                                    # Calculate coverage if not present
+                                    if "coverage" not in df.columns:
+                                        if "length" in df.columns and "bases" in df.columns:
+                                            df["coverage"] = df["bases"] / df["length"]
+                                        elif "startpos" in df.columns and "endpos" in df.columns:
+                                            df["length"] = df["endpos"] - df["startpos"] + 1
+                                            if "bases" in df.columns:
+                                                df["coverage"] = df["bases"] / df["length"]
+                                            else:
+                                                df["coverage"] = 0
+                                    
+                                    # Prepare table data
+                                    table_data = []
+                                    gene_regions_by_name = {}  # Store regions for navigation
+                                    for _, row in df.iterrows():
+                                        gene_name = str(row["name"])
+                                        chrom = str(row["chrom"])
+                                        startpos_raw = int(row["startpos"])
+                                        endpos_raw = int(row["endpos"])
+                                        
+                                        # Store region info for navigation (with 10kb padding)
+                                        padding = 10000
+                                        startpos_nav = max(1, startpos_raw - padding)
+                                        endpos_nav = endpos_raw + padding
+                                        region = f"{chrom}:{startpos_nav}-{endpos_nav}"
+                                        gene_regions_by_name[gene_name] = region
+                                        
+                                        table_data.append({
+                                            "chrom": chrom,
+                                            "startpos": f"{startpos_raw:,}",  # Format with commas for display
+                                            "endpos": f"{endpos_raw:,}",  # Format with commas for display
+                                            "name": gene_name,
+                                            "coverage": float(row.get("coverage", 0)),
+                                            "action": "🔍"  # Icon for viewing in IGV
+                                        })
+                                    
+                                    if table_data:
+                                        with ui.card().classes("w-full elevation-2 rounded-lg p-4"):
+                                            ui.label("Target Genes").classes("text-headline-small font-bold mb-4")
+                                            ui.label("Click on a gene row to view it in IGV.").classes(
+                                                "text-body-small text-gray-600 mb-2"
+                                            )
+                                            
+                                            from robin.gui.theme import styled_table
+                                            
+                                            columns = [
+                                                {"name": "name", "label": "Gene Name", "field": "name", "sortable": True},
+                                                {"name": "chrom", "label": "Chromosome", "field": "chrom", "sortable": True},
+                                                {"name": "startpos", "label": "Start", "field": "startpos", "sortable": True},
+                                                {"name": "endpos", "label": "End", "field": "endpos", "sortable": True},
+                                                {"name": "coverage", "label": "Coverage (x)", "field": "coverage", "sortable": True},
+                                                {"name": "action", "label": "View in IGV", "field": "action", "sortable": False}
+                                            ]
+                                            
+                                            table_container, gene_table = styled_table(
+                                                columns=columns,
+                                                rows=table_data,
+                                                pagination=25,
+                                                class_size="table-xs"
+                                            )
+                                            
+                                            # Add search functionality
+                                            try:
+                                                with gene_table.add_slot("top-right"):
+                                                    with ui.input(placeholder="Search genes...").props("type=search").bind_value(
+                                                        gene_table, "filter"
+                                                    ).add_slot("append"):
+                                                        ui.icon("search")
+                                            except Exception:
+                                                pass
+                                            
+                                            # Add colored coverage badges
+                                            try:
+                                                gene_table.add_slot(
+                                                    "body-cell-coverage",
+                                                    """
+    <q-td key="coverage" :props="props">
+    <q-badge :color="props.value >= 30 ? 'green' : props.value >= 20 ? 'blue' : props.value >= 10 ? 'orange' : 'red'">
+        {{ Number(props.value).toFixed(2) }}
+    </q-badge>
+    </q-td>
+    """,
+                                                )
+                                            except Exception:
+                                                pass
+                                            
+                                            # Function to navigate IGV to a gene region
+                                            import json
+                                            js_gene_regions_json = json.dumps(gene_regions_by_name)
+                                            
+                                            def navigate_to_gene_region(gene_name: str):
+                                                """Navigate IGV browser to the specified gene region."""
+                                                if gene_name in gene_regions_by_name:
+                                                    region = gene_regions_by_name[gene_name]
+                                                    # Escape region string for JavaScript
+                                                    escaped_region = region.replace('"', '\\"').replace("'", "\\'")
+                                                    js_navigate = f"""
+                                                        (function() {{
+                                                            try {{
+                                                                if (window.lj_igv && window.lj_igv_browser_ready) {{
+                                                                    console.log('[IGV] Navigating to gene region: {escaped_region}');
+                                                                    window.lj_igv.search('{escaped_region}');
+                                                                }} else {{
+                                                                    console.warn('[IGV] Browser not ready yet, will navigate when ready');
+                                                                    setTimeout(function() {{
+                                                                        if (window.lj_igv && window.lj_igv_browser_ready) {{
+                                                                            window.lj_igv.search('{escaped_region}');
+                                                                        }}
+                                                                    }}, 500);
+                                                                }}
+                                                            }} catch (error) {{
+                                                                console.error('[IGV] Navigation error:', error);
+                                                            }}
+                                                        }})();
+                                                    """
+                                                    ui.run_javascript(js_navigate, timeout=5.0)
+                                            
+                                            # Store regions in window object for JavaScript access
+                                            js_init_gene_regions = f"""
+                                                window.geneRegionsMap = window.geneRegionsMap || {{}};
+                                                Object.assign(window.geneRegionsMap, {js_gene_regions_json});
+                                                console.log('[Gene] Loaded', Object.keys(window.geneRegionsMap).length, 'gene regions');
+                                            """
+                                            ui.run_javascript(js_init_gene_regions, timeout=5.0)
+                                            
+                                            # Add clickable action button column using slot that emits events to Python
+                                            try:
+                                                # Use Vue event emission which is more reliable than window functions
+                                                gene_table.add_slot(
+                                                    "body-cell-action",
+                                                    """
+<q-td key="action" :props="props">
+  <q-btn 
+    icon="visibility" 
+    size="sm" 
+    dense 
+    flat 
+    color="primary"
+    @click="$parent.$emit('gene-view-igv', props.row.name)"
+    title="View in IGV"
+  />
+</q-td>
+"""
+                                                )
+                                                
+                                                # Handle the event from the slot
+                                                def on_gene_view_igv(e):
+                                                    """Handle gene view IGV event from table button."""
+                                                    try:
+                                                        gene_name = e.args if isinstance(e.args, str) else getattr(e, 'args', None)
+                                                        if gene_name:
+                                                            logging.debug(f"[Gene] Button clicked for: {gene_name}")
+                                                            navigate_to_gene_region(gene_name)
+                                                    except Exception as ex:
+                                                        logging.warning(f"Error handling gene view IGV event: {ex}")
+                                                
+                                                gene_table.on("gene-view-igv", on_gene_view_igv)
+                                                logging.debug("Added action button column slot with event handler")
+                                            except Exception as slot_ex:
+                                                logging.warning(f"Could not add action column slot: {slot_ex}")
+                                                import traceback
+                                                logging.warning(traceback.format_exc())
+                                            
+                                            # Also add row click handlers as a fallback
+                                            try:
+                                                # Create JavaScript to handle row clicks
+                                                js_gene_table_handlers = f"""
+                                                    (function() {{
+                                                        // Store regions in window for JavaScript access
+                                                        window.geneRegionsMap = window.geneRegionsMap || {{}};
+                                                        Object.assign(window.geneRegionsMap, {js_gene_regions_json});
+                                                        
+                                                        function attachGeneTableHandlers() {{
+                                                            // Find tables with "Gene Name" header
+                                                            const tables = document.querySelectorAll('table');
+                                                            
+                                                            tables.forEach(function(table) {{
+                                                                const headers = table.querySelectorAll('thead th');
+                                                                let isGeneTable = false;
+                                                                
+                                                                for (let i = 0; i < headers.length; i++) {{
+                                                                    const headerText = (headers[i].textContent || '').toLowerCase();
+                                                                    if (headerText.includes('gene name') && headerText.includes('chromosome')) {{
+                                                                        isGeneTable = true;
+                                                                        break;
+                                                                    }}
+                                                                }}
+                                                                
+                                                                if (isGeneTable) {{
+                                                                    const tbody = table.querySelector('tbody');
+                                                                    if (tbody) {{
+                                                                        const rows = tbody.querySelectorAll('tr');
+                                                                        rows.forEach(function(row) {{
+                                                                            // Skip if clicking on the action button (let button handle it)
+                                                                            if (row.hasAttribute('data-gene-handled')) return;
+                                                                            row.setAttribute('data-gene-handled', 'true');
+                                                                            
+                                                                            // Make row clickable (but button takes precedence)
+                                                                            row.style.cursor = 'pointer';
+                                                                            
+                                                                            row.onclick = function(e) {{
+                                                                                // Don't handle if clicking on button
+                                                                                if (e.target.closest('button') || e.target.closest('.q-btn')) {{
+                                                                                    return;
+                                                                                }}
+                                                                                
+                                                                                e.preventDefault();
+                                                                                e.stopPropagation();
+                                                                                
+                                                                                const cells = row.querySelectorAll('td');
+                                                                                if (cells.length >= 5) {{
+                                                                                    const geneName = cells[0].textContent.trim();
+                                                                                    
+                                                                                    if (geneName && window.geneRegionsMap && window.geneRegionsMap[geneName]) {{
+                                                                                        const region = window.geneRegionsMap[geneName];
+                                                                                        console.log('[Gene] Row clicked, navigating to region:', region);
+                                                                                        
+                                                                                        // Visual feedback
+                                                                                        const origBg = row.style.backgroundColor;
+                                                                                        row.style.backgroundColor = '#e3f2fd';
+                                                                                        setTimeout(function() {{
+                                                                                            row.style.backgroundColor = origBg;
+                                                                                        }}, 400);
+                                                                                        
+                                                                                        // Navigate IGV
+                                                                                        function navIGV() {{
+                                                                                            if (window.lj_igv && window.lj_igv_browser_ready) {{
+                                                                                                try {{
+                                                                                                    window.lj_igv.search(region);
+                                                                                                    console.log('[Gene] IGV navigation successful');
+                                                                                                    return true;
+                                                                                                }} catch(err) {{
+                                                                                                    console.error('[Gene] IGV error:', err);
+                                                                                                    return false;
+                                                                                                }}
+                                                                                            }}
+                                                                                            return false;
+                                                                                        }}
+                                                                                        
+                                                                                        if (!navIGV()) {{
+                                                                                            setTimeout(function() {{ navIGV(); }}, 500);
+                                                                                            setTimeout(function() {{ navIGV(); }}, 1500);
+                                                                                        }}
+                                                                                    }}
+                                                                                }}
+                                                                            }};
+                                                                        }});
+                                                                    }}
+                                                                }}
+                                                            }});
+                                                        }}
+                                                        
+                                                        attachGeneTableHandlers();
+                                                        setTimeout(attachGeneTableHandlers, 300);
+                                                        setTimeout(attachGeneTableHandlers, 800);
+                                                        setTimeout(attachGeneTableHandlers, 1500);
+                                                    }})();
+                                                """
+                                                
+                                                ui.timer(0.5, lambda: ui.run_javascript(js_gene_table_handlers, timeout=10.0), once=True)
+                                                ui.timer(2.0, lambda: ui.run_javascript(js_gene_table_handlers, timeout=10.0), once=True)
+                                            except Exception as e:
+                                                logging.warning(f"Could not add gene table click handlers: {e}")
+                                            
+                                            # Add summary
+                                            total_genes = len(table_data)
+                                            ui.label(f"Total target genes: {total_genes}").classes("text-xs text-gray-500 mt-2")
+                                        
+                            except Exception as e:
+                                logging.warning(f"Could not load target gene table: {e}")
 
     def _create_workflow_monitor(self):
         """Create the main workflow monitoring page."""
