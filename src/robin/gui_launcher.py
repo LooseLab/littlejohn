@@ -3390,6 +3390,11 @@ class GUILauncher:
                             ui.label("Analysis Center").classes("text-headline-small font-bold mb-4")
                             ui.label(f"Center: {self.center}").classes("text-body-medium")
                     
+                    # IGV Viewer section - moved to top, before tables
+                    if sample_dir and sample_dir.exists():
+                        from robin.gui.components.coverage import add_igv_viewer
+                        add_igv_viewer(self, sample_dir)
+                    
                     # Fusion Pairs Table section
                     if sample_dir and sample_dir.exists():
                         from robin.gui.components.fusion import (
@@ -3834,7 +3839,7 @@ class GUILauncher:
                                     "text-gray-600"
                                 )
                     
-                    # Target Genes Table section - before IGV viewer
+                    # Target Genes Table section
                     if sample_dir and sample_dir.exists():
                         target_coverage_file = sample_dir / "target_coverage.csv"
                         bed_coverage_file = sample_dir / "bed_coverage_main.csv"
@@ -4124,11 +4129,6 @@ class GUILauncher:
                                         
                             except Exception as e:
                                 logging.warning(f"Could not load target gene table: {e}")
-                    
-                    # IGV Viewer section - full width
-                    if sample_dir and sample_dir.exists():
-                        from robin.gui.components.coverage import add_igv_viewer
-                        add_igv_viewer(self, sample_dir)
 
     def _create_workflow_monitor(self):
         """Create the main workflow monitoring page."""
