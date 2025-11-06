@@ -158,8 +158,13 @@ except ImportError:
 
 def run_bedtools(bamfile, bedfile, tempbamfile):
     """
-    This function extracts the target sites from the bamfile.
-
+    Extract target regions from BAM file, keeping all mappings (primary, secondary, supplementary)
+    for reads that overlap the target regions.
+    
+    This function uses a two-step process:
+    1. Extract read names from primary alignments that overlap target regions
+    2. Extract ALL alignments (primary, secondary, supplementary) for those read names
+    
     Parameters
     ----------
     bamfile : str
@@ -172,24 +177,143 @@ def run_bedtools(bamfile, bedfile, tempbamfile):
     logger = logging.getLogger("robin.target")
 
     try:
-        # Use subprocess.run with shell=True for commands with redirection
-        # Or open the output file and redirect stdout there
-        with open(tempbamfile, "w") as outfile:
-            result = subprocess.run(
-                ["bedtools", "intersect", "-a", bamfile, "-b", bedfile],
-                stdout=outfile,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-            )
-
-        if result.returncode != 0:
-            logger.error(f"Error running bedtools: {result.stderr}")
+        # Step 1: Extract read names from primary alignments overlapping target regions
+        # Use bedtools to find primary alignments (filtering out supplementary and secondary)
+        # Flag 2304 = 0x800 (supplementary) | 0x100 (secondary)
+        # We use -F 2304 to exclude supplementary and secondary, keeping only primary alignments
+        logger.debug(f"Step 1: Extracting read names from primary alignments overlapping {bedfile}")
+        
+        # Read BED file to get regions
+        regions = []
+        with open(bedfile, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split('\t')
+                if len(parts) >= 3:
+                    chrom = parts[0]
+                    start = int(parts[1])
+                    end = int(parts[2])
+                    regions.append((chrom, start, end))
+        
+        if not regions:
+            logger.warning(f"No valid regions found in BED file: {bedfile}")
+            # Create empty BAM file
+            with pysam.AlignmentFile(bamfile, "rb") as in_bam:
+                header = in_bam.header.copy()
+                with pysam.AlignmentFile(tempbamfile, "wb", header=header) as out_bam:
+                    pass
+            pysam.index(tempbamfile)
             return
-
-        pysam.index(tempbamfile)
+        
+        # Open input BAM and collect read names from primary alignments overlapping regions
+        read_names = set()
+        with pysam.AlignmentFile(bamfile, "rb") as in_bam:
+            # Check if BAM is indexed by checking for index file
+            index_file = f"{bamfile}.bai"
+            use_indexed = os.path.exists(index_file)
+            
+            if not use_indexed:
+                logger.debug("BAM file is not indexed, using full-scan method")
+            
+            if use_indexed:
+                # Use indexed access (faster)
+                for chrom, start, end in regions:
+                    try:
+                        # Fetch reads overlapping this region
+                        for read in in_bam.fetch(chrom, start, end):
+                            # Only consider primary alignments (not supplementary or secondary)
+                            # Flag checks: not supplementary (0x800) and not secondary (0x100)
+                            if not (read.flag & 0x800) and not (read.flag & 0x100):
+                                read_names.add(read.query_name)
+                    except ValueError:
+                        # Chromosome not found in BAM, skip
+                        logger.debug(f"Chromosome {chrom} not found in BAM file, skipping")
+                        continue
+            else:
+                # BAM is not indexed, iterate through all reads
+                # Create a dictionary of regions for fast lookup
+                region_dict = {}
+                for chrom, start, end in regions:
+                    if chrom not in region_dict:
+                        region_dict[chrom] = []
+                    region_dict[chrom].append((start, end))
+                
+                # Iterate through all reads
+                for read in in_bam.fetch(until_eof=True):
+                    # Only consider primary alignments
+                    if not (read.flag & 0x800) and not (read.flag & 0x100):
+                        if read.reference_name in region_dict:
+                            read_start = read.reference_start
+                            read_end = read.reference_end
+                            # Check if read overlaps any region on this chromosome
+                            for reg_start, reg_end in region_dict[read.reference_name]:
+                                if not (read_end <= reg_start or read_start >= reg_end):
+                                    read_names.add(read.query_name)
+                                    break
+        
+        logger.debug(f"Found {len(read_names)} unique read names overlapping target regions")
+        
+        if not read_names:
+            logger.warning("No reads found overlapping target regions")
+            # Create empty BAM file with same header
+            with pysam.AlignmentFile(bamfile, "rb") as in_bam:
+                header = in_bam.header.copy()
+                with pysam.AlignmentFile(tempbamfile, "wb", header=header) as out_bam:
+                    pass
+            pysam.index(tempbamfile)
+            return
+        
+        # Step 2: Extract ALL alignments (primary, secondary, supplementary) for those read names
+        logger.debug(f"Step 2: Extracting all alignments for {len(read_names)} read names")
+        
+        reads_written = 0
+        with pysam.AlignmentFile(bamfile, "rb") as in_bam:
+            header = in_bam.header.copy()
+            with pysam.AlignmentFile(tempbamfile, "wb", header=header) as out_bam:
+                # Iterate through all reads in the BAM file
+                for read in in_bam.fetch(until_eof=True):
+                    if read.query_name in read_names:
+                        out_bam.write(read)
+                        reads_written += 1
+                
+                # Ensure all data is written to disk before closing
+                out_bam.flush()
+                logger.debug(f"Wrote {reads_written} alignments (including secondary/supplementary) to output BAM")
+        
+        # Verify the file was written successfully before indexing
+        if not os.path.exists(tempbamfile):
+            raise RuntimeError(f"Output BAM file was not created: {tempbamfile}")
+        
+        file_size = os.path.getsize(tempbamfile)
+        if file_size == 0:
+            logger.warning(f"Output BAM file is empty: {tempbamfile}")
+        else:
+            logger.debug(f"Output BAM file size: {file_size} bytes")
+        
+        # Index the output BAM (only if file has content)
+        if file_size > 0:
+            try:
+                pysam.index(tempbamfile)
+                logger.info(f"Successfully extracted target regions to {tempbamfile} ({reads_written} alignments)")
+            except Exception as e:
+                logger.error(f"Failed to index BAM file {tempbamfile}: {e}")
+                # Try to verify if the BAM file is valid
+                try:
+                    with pysam.AlignmentFile(tempbamfile, "rb") as test_bam:
+                        test_count = test_bam.count(until_eof=True)
+                        logger.info(f"BAM file is readable, contains {test_count} reads")
+                except Exception as verify_error:
+                    logger.error(f"BAM file appears corrupted: {verify_error}")
+                    raise
+        else:
+            logger.warning(f"Skipping indexing for empty BAM file: {tempbamfile}")
+        
     except Exception as e:
         logger.error(f"Error in run_bedtools: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 
 def get_covdfs(bamfile, bedfile=None):

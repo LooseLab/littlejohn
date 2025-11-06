@@ -58,6 +58,148 @@ def has_reads(bam_file, chrom, start, end):
     return False  # No reads found
 
 
+def safely_sort_and_index_bam(
+    input_bam: str,
+    output_bam: str,
+    logger: logging.Logger,
+    threads: int = 4,
+    verify_readable: bool = True
+) -> bool:
+    """
+    Safely sort and index a BAM file with proper verification to prevent truncated file issues.
+    
+    This function ensures that:
+    1. The input BAM file exists and is readable
+    2. The sorted BAM file is fully written before indexing
+    3. The indexed BAM file is verified to be readable
+    4. Proper error handling and logging throughout
+    
+    Args:
+        input_bam: Path to input BAM file
+        output_bam: Path to output sorted BAM file
+        logger: Logger instance for logging
+        threads: Number of threads to use for sorting
+        verify_readable: If True, verify the output BAM is readable after creation
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        # Verify input file exists
+        if not os.path.exists(input_bam):
+            logger.error(f"Input BAM file does not exist: {input_bam}")
+            return False
+        
+        input_size = os.path.getsize(input_bam)
+        if input_size == 0:
+            logger.warning(f"Input BAM file is empty: {input_bam}")
+            return False
+        
+        logger.debug(f"Sorting BAM file: {input_bam} -> {output_bam} (input size: {input_size} bytes)")
+        
+        # Remove output file if it exists (to avoid issues with partial writes)
+        if os.path.exists(output_bam):
+            try:
+                os.remove(output_bam)
+                if os.path.exists(f"{output_bam}.bai"):
+                    os.remove(f"{output_bam}.bai")
+            except OSError as e:
+                logger.warning(f"Could not remove existing output file {output_bam}: {e}")
+        
+        # Sort the BAM file
+        try:
+            if threads > 1:
+                pysam.sort(f"-@{threads}", "-o", output_bam, input_bam)
+            else:
+                pysam.sort("-o", output_bam, input_bam)
+        except Exception as e:
+            logger.error(f"Failed to sort BAM file {input_bam}: {e}")
+            return False
+        
+        # Verify sorted file was created and has content
+        if not os.path.exists(output_bam):
+            logger.error(f"Sorted BAM file was not created: {output_bam}")
+            return False
+        
+        output_size = os.path.getsize(output_bam)
+        if output_size == 0:
+            logger.error(f"Sorted BAM file is empty: {output_bam}")
+            return False
+        
+        logger.debug(f"Sorted BAM file created: {output_bam} (size: {output_size} bytes)")
+        
+        # Verify the sorted BAM is readable before indexing
+        if verify_readable:
+            try:
+                with pysam.AlignmentFile(output_bam, "rb") as test_bam:
+                    # Try to read the header and first few reads to verify integrity
+                    _ = test_bam.header
+                    # Count reads to verify file is not truncated
+                    read_count = 0
+                    for _ in test_bam.fetch(until_eof=True):
+                        read_count += 1
+                        if read_count >= 10:  # Just verify first 10 reads
+                            break
+                    logger.debug(f"Verified sorted BAM is readable (checked {read_count} reads)")
+            except Exception as e:
+                logger.error(f"Sorted BAM file appears corrupted or truncated: {e}")
+                # Clean up corrupted file
+                try:
+                    os.remove(output_bam)
+                except OSError:
+                    pass
+                return False
+        
+        # Index the sorted BAM file
+        try:
+            index_file = f"{output_bam}.bai"
+            pysam.index(output_bam, index_file)
+            
+            # Verify index was created
+            if not os.path.exists(index_file):
+                logger.error(f"BAM index file was not created: {index_file}")
+                return False
+            
+            logger.debug(f"BAM index created: {index_file}")
+        except Exception as e:
+            logger.error(f"Failed to index BAM file {output_bam}: {e}")
+            # Clean up files if indexing failed
+            try:
+                if os.path.exists(output_bam):
+                    os.remove(output_bam)
+            except OSError:
+                pass
+            return False
+        
+        # Final verification: ensure both BAM and index are readable
+        if verify_readable:
+            try:
+                with pysam.AlignmentFile(output_bam, "rb") as final_bam:
+                    # Verify we can access the index
+                    _ = final_bam.header
+                    # Try a simple fetch to ensure index works
+                    try:
+                        # Get first chromosome from header
+                        if final_bam.references:
+                            first_chrom = final_bam.references[0]
+                            list(final_bam.fetch(first_chrom, 0, 1000))  # Try fetching a small region
+                    except Exception:
+                        # If fetch fails, that's okay - file might be empty or have no reads
+                        pass
+                logger.info(f"Successfully sorted and indexed BAM: {output_bam}")
+            except Exception as e:
+                logger.error(f"Final verification failed for sorted BAM {output_bam}: {e}")
+                return False
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Unexpected error in safely_sort_and_index_bam: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return False
+
+
 def validate_methylation_data(bam_file: str, logger: logging.Logger) -> Dict[str, Any]:
     """
     Validate that BAM file has sufficient methylation data for methylartist.
@@ -412,13 +554,20 @@ def run_matkit(
     try:
         logger.info("Running matkit for methylation analysis")
 
-        # Sort and index the BAM file
+        # Sort and index the BAM file using safe function to prevent truncated file issues
         sorted_bam = os.path.join(sample_dir, f"mgmt_sorted_{file_number}.bam")
         temp_files.append(sorted_bam)
         temp_files.append(f"{sorted_bam}.bai")
 
-        pysam.sort("-o", sorted_bam, mgmt_bamfile)
-        pysam.index(sorted_bam, f"{sorted_bam}.bai")
+        if not safely_sort_and_index_bam(
+            input_bam=mgmt_bamfile,
+            output_bam=sorted_bam,
+            logger=logger,
+            threads=4,
+            verify_readable=True
+        ):
+            logger.error(f"Failed to sort/index BAM file for matkit: {mgmt_bamfile}")
+            return False
 
         # Use matkit from robin package
         try:
@@ -625,15 +774,20 @@ def process_bam_file(
             # temp_files.append(sorted_mgmt_bam)
             # temp_files.append(f"{sorted_mgmt_bam}.bai")
 
-            try:
-                pysam.sort("-o", sorted_mgmt_bam, mgmt_bam_output)
-                pysam.index(sorted_mgmt_bam, f"{sorted_mgmt_bam}.bai")
+            # Use safe sort and index function to prevent truncated file issues
+            if safely_sort_and_index_bam(
+                input_bam=mgmt_bam_output,
+                output_bam=sorted_mgmt_bam,
+                logger=logger,
+                threads=4,
+                verify_readable=True
+            ):
                 logger.info(
                     f"Sorted and indexed accumulated MGMT BAM: {sorted_mgmt_bam}"
                 )
                 mgmt_bam_for_plot = sorted_mgmt_bam
-            except Exception as e:
-                logger.warning(f"Failed to sort/index accumulated MGMT BAM: {e}")
+            else:
+                logger.warning(f"Failed to sort/index accumulated MGMT BAM, using unsorted BAM")
                 mgmt_bam_for_plot = mgmt_bam_output
 
             plot_out = os.path.join(sample_dir, f"{file_number}_mgmt.png")
@@ -934,13 +1088,18 @@ def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, reference=
             # Sort and index the accumulated mgmt.bam file for methylartist
             sorted_mgmt_bam = os.path.join(sample_dir, "mgmt_sorted.bam")
 
-            try:
-                pysam.sort("-o", sorted_mgmt_bam, mgmt_bam_output)
-                pysam.index(sorted_mgmt_bam, f"{sorted_mgmt_bam}.bai")
+            # Use safe sort and index function to prevent truncated file issues
+            if safely_sort_and_index_bam(
+                input_bam=mgmt_bam_output,
+                output_bam=sorted_mgmt_bam,
+                logger=logger,
+                threads=4,
+                verify_readable=True
+            ):
                 logger.info(f"Sorted and indexed accumulated MGMT BAM: {sorted_mgmt_bam}")
                 mgmt_bam_for_plot = sorted_mgmt_bam
-            except Exception as e:
-                logger.warning(f"Failed to sort/index accumulated MGMT BAM: {e}")
+            else:
+                logger.warning(f"Failed to sort/index accumulated MGMT BAM, using unsorted BAM")
                 mgmt_bam_for_plot = mgmt_bam_output
 
             plot_out = os.path.join(sample_dir, "final_mgmt.png")

@@ -96,6 +96,10 @@ def add_igv_viewer(launcher: Any, sample_dir: Path) -> None:
                                 if (statusEl) {
                                     statusEl.textContent = 'IGV browser ready';
                                 }
+                                
+                                // Auto-load target BED file if available
+                                // This will be triggered by the BAM loading function, but we can also try here
+                                console.log('[IGV] Browser ready, target BED will be loaded with BAM');
                             })
                             .catch(function(error) {
                                 console.error('[IGV] Browser creation failed:', error);
@@ -267,8 +271,10 @@ def add_igv_viewer(launcher: Any, sample_dir: Path) -> None:
                                 type: 'alignment',
                                 order: Number.MAX_VALUE,
                                 visibilityWindow: 500000,
-                                height: 200,
-                                autoScale: true
+                                height: 600,
+                                autoScale: true,
+                                colorBy: 'tag',
+                                tag: 'SA'
                             }};
                             
                             console.log('[IGV] Track config:', trackConfig);
@@ -560,7 +566,7 @@ def add_igv_viewer(launcher: Any, sample_dir: Path) -> None:
                             js_add_track = f"""
                                 if (window.lj_igv && window.lj_igv_browser_ready) {{
                                     console.log('[DEBUG] Adding track to newly created browser...');
-                                    const track = {{ name: '{sample_dir.name}', url: '{bam_url}', indexURL: '{bai_url}', format: 'bam' }};
+                                    const track = {{ name: '{sample_dir.name}', url: '{bam_url}', indexURL: '{bai_url}', format: 'bam', type: 'alignment', height: 600, autoScale: true, colorBy: 'tag', tag: 'SA' }};
                                     window.lj_igv.loadTrack(track).then(() => {{
                                         console.log('[DEBUG] Track loaded successfully');
                                     }}).catch(error => {{
@@ -587,7 +593,7 @@ def add_igv_viewer(launcher: Any, sample_dir: Path) -> None:
                         if (window.lj_igv && window.lj_igv_browser_ready) {{
                             console.log('Adding track to existing IGV browser...');
                     
-                            const track = {{ name: '{sample_dir.name}', url: '{bam_url}', indexURL: '{bai_url}', format: 'bam' }};
+                            const track = {{ name: '{sample_dir.name}', url: '{bam_url}', indexURL: '{bai_url}', format: 'bam', type: 'alignment', height: 600, autoScale: true }};
                             console.log('Track to load:', track);
                     
                             try {{
@@ -869,7 +875,11 @@ def add_igv_viewer(launcher: Any, sample_dir: Path) -> None:
                     indexURL: '{current_bam_url}.bai',
                     format: 'bam',
                     visibilityWindow: 1000000,
-                    type: 'alignment'
+                    type: 'alignment',
+                    height: 600,
+                    autoScale: true,
+                    colorBy: 'tag',
+                    tag: 'SA'
                     }};
             
                     // Add the track to the browser
@@ -2119,7 +2129,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 if (window.lj_igv && window.lj_igv_browser_ready) {{
                                     console.log('Adding track to existing IGV browser...');
                             
-                                    const track = {{ name: '{sample_dir.name}', url: '{bam_url}', indexURL: '{bai_url}', format: 'bam' }};
+                                    const track = {{ name: '{sample_dir.name}', url: '{bam_url}', indexURL: '{bai_url}', format: 'bam', type: 'alignment', height: 600, autoScale: true, colorBy: 'tag', tag: 'SA' }};
                                     console.log('Track to load:', track);
                             
                                     try {{
@@ -2380,7 +2390,9 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                     indexURL: '{current_bam_url}.bai',
                                     format: 'bam',
                                     visibilityWindow: 1000000,
-                                    type: 'alignment'
+                                    type: 'alignment',
+                                    height: 600,
+                                    autoScale: true
                                     }};
                             
                                     // Add the track to the browser
