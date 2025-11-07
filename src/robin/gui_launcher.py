@@ -144,6 +144,10 @@ class GUILauncher:
         self.total_updates_processed = 0
         # Monotonic tiebreaker for priority queue to avoid tuple comparison of GUIUpdate
         self._update_seq: int = 0
+        
+        # Throttle queue size warnings to avoid log spam
+        self._last_queue_warning_time: float = 0.0
+        self._queue_warning_interval: float = 10.0  # Only log once every 10 seconds
 
         # Runtime state
         self._start_time: Optional[float] = None
@@ -579,7 +583,14 @@ class GUILauncher:
             # Rate limiting: Skip low-priority updates if queue is getting too large
             queue_size = self.update_queue.qsize()
             if queue_size > 100 and priority < 5:
-                logging.error(f"[GUI] Skipping low-priority update due to queue size: {queue_size}")
+                # Throttle warnings to avoid log spam (only log once every 10 seconds)
+                current_time = time.time()
+                if current_time - self._last_queue_warning_time >= self._queue_warning_interval:
+                    logging.warning(
+                        f"[GUI] Queue backlog detected (size: {queue_size}), "
+                        f"skipping low-priority updates. This is normal under heavy load."
+                    )
+                    self._last_queue_warning_time = current_time
                 return
             
             # Rate limiting: Skip duplicate updates of the same type within 1 second
@@ -3394,6 +3405,11 @@ class GUILauncher:
                     if sample_dir and sample_dir.exists():
                         from robin.gui.components.coverage import add_igv_viewer
                         add_igv_viewer(self, sample_dir)
+                    
+                    # SNP Analysis section
+                    if sample_dir and sample_dir.exists():
+                        from robin.gui.components.snp import add_snp_section
+                        add_snp_section(self, sample_dir)
                     
                     # Fusion Pairs Table section
                     if sample_dir and sample_dir.exists():

@@ -2440,6 +2440,62 @@ def finalize_accumulation_for_sample(
             logger.info(f"Final merge complete for {sample_id}")
             result["final_merge"] = "success" if target_bam_exists else "failed"
             result["batch_files_merged"] = len(batch_bams)
+            
+            # Trigger SNP analysis if target.bam was successfully created
+            if target_bam_exists:
+                logger.info(f"Triggering SNP analysis for sample {sample_id} after target.bam creation")
+                try:
+                    # Try to find reference genome
+                    reference = None
+                    # Check common reference locations
+                    possible_refs = [
+                        os.path.join(sample_output_dir, "reference.fasta"),
+                        os.path.join(sample_output_dir, "reference.fa"),
+                        os.path.join(work_dir, "reference.fasta"),
+                        os.path.join(work_dir, "reference.fa"),
+                        os.environ.get("robin_REFERENCE"),
+                    ]
+                    
+                    for ref_path in possible_refs:
+                        if ref_path and os.path.exists(ref_path):
+                            reference = ref_path
+                            logger.info(f"Found reference genome: {reference}")
+                            break
+                    
+                    if reference:
+                        # Run SNP analysis in background thread to avoid blocking
+                        import threading
+                        def run_snp_in_background():
+                            try:
+                                logger.info(f"Starting SNP analysis for {sample_id} in background")
+                                snp_result = run_snp_analysis(
+                                    sample_dir=sample_output_dir,
+                                    threads=4,
+                                    force_regenerate=False,
+                                    reference=reference
+                                )
+                                if snp_result:
+                                    logger.info(f"SNP analysis completed for {sample_id}: {snp_result}")
+                                    result["snp_analysis"] = "success"
+                                    result["snp_output_dir"] = snp_result
+                                else:
+                                    logger.warning(f"SNP analysis failed for {sample_id}")
+                                    result["snp_analysis"] = "failed"
+                            except Exception as e:
+                                logger.error(f"Error running SNP analysis for {sample_id}: {e}")
+                                result["snp_analysis"] = "error"
+                                result["snp_error"] = str(e)
+                        
+                        thread = threading.Thread(target=run_snp_in_background, daemon=True)
+                        thread.start()
+                        logger.info(f"SNP analysis thread started for {sample_id}")
+                    else:
+                        logger.info(f"No reference genome found for {sample_id} - skipping SNP analysis")
+                        result["snp_analysis"] = "no_reference"
+                except Exception as e:
+                    logger.warning(f"Failed to trigger SNP analysis for {sample_id}: {e}")
+                    result["snp_analysis"] = "error"
+                    result["snp_error"] = str(e)
         else:
             logger.info(f"No batch BAM files found for {sample_id}")
             result["final_merge"] = "no_batch_files"
