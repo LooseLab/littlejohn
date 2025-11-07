@@ -1612,8 +1612,11 @@ class GUILauncher:
                         try:
                             sample_id = getattr(event, "args", None) if hasattr(event, "args") else None
                             if isinstance(sample_id, str):
-                                self._trigger_target_bam_finalization(sample_id)
-                                ui.notify(f"Triggered target.bam finalization for {sample_id}", type="positive")
+                                self._trigger_target_bam_finalization(sample_id, trigger_snp=True)
+                                ui.notify(
+                                    f"Triggered run finalization and SNP analysis for {sample_id}",
+                                    type="positive",
+                                )
                             else:
                                 ui.notify("Invalid sample ID", type="warning")
                         except Exception as e:
@@ -4491,11 +4494,69 @@ class GUILauncher:
         except Exception:
             pass
 
-    def _trigger_target_bam_finalization(self, sample_id: str) -> None:
-        """Trigger target.bam finalization for a sample that has transitioned to Complete."""
-        if sample_id in self._finalized_samples:
-            return  # Already finalized
-        
+    def _locate_reference_for_sample(self, sample_dir: Path) -> Optional[str]:
+        """Locate a reference genome for SNP analysis, preferring CLI-specified value."""
+
+        # 1. Prefer reference supplied on the command line / workflow runner
+        try:
+            runner = getattr(self, "workflow_runner", None)
+            runner_reference = None
+
+            if runner is not None:
+                runner_reference = getattr(runner, "reference", None)
+
+                # Some wrappers may store the reference on an inner object
+                if not runner_reference and hasattr(runner, "manager"):
+                    runner_reference = getattr(runner.manager, "reference", None)
+
+            if runner_reference:
+                ref_path = Path(str(runner_reference))
+                if ref_path.exists():
+                    logging.info(
+                        "Using reference genome specified via command line: %s",
+                        ref_path,
+                    )
+                    return str(ref_path)
+                logging.warning(
+                    "Reference genome provided via command line does not exist: %s",
+                    ref_path,
+                )
+        except Exception as exc:
+            logging.debug(f"Error checking workflow runner for reference genome: {exc}")
+
+        # 2. Fallback to legacy heuristics (sample directory, monitored directory, env var)
+        candidates: List[Path] = []
+
+        try:
+            candidates.extend([
+                sample_dir / "reference.fasta",
+                sample_dir / "reference.fa",
+            ])
+
+            base_dir = Path(self.monitored_directory) if self.monitored_directory else sample_dir.parent
+            if base_dir:
+                candidates.extend([
+                    base_dir / "reference.fasta",
+                    base_dir / "reference.fa",
+                ])
+
+            env_reference = os.environ.get("robin_REFERENCE")
+            if env_reference:
+                candidates.append(Path(env_reference))
+        except Exception as exc:
+            logging.debug(f"Error assembling fallback reference candidates for {sample_dir}: {exc}")
+
+        for candidate in candidates:
+            try:
+                if candidate and candidate.exists():
+                    return str(candidate)
+            except Exception:
+                continue
+
+        return None
+
+    def _trigger_target_bam_finalization(self, sample_id: str, *, trigger_snp: bool = False) -> None:
+        """Trigger target.bam finalization for a sample. Optionally start SNP analysis afterwards."""
         if not self.monitored_directory:
             return
         
@@ -4520,21 +4581,79 @@ class GUILauncher:
                 except Exception:
                     pass  # Use default
             
-            # Trigger finalization in background thread to avoid blocking GUI
+            already_finalized = sample_id in self._finalized_samples
+
+            # Trigger finalization (and optional SNP analysis) in background thread to avoid blocking GUI
             import threading
             def finalize_in_background():
                 try:
-                    logging.info(f"Triggering target.bam finalization for sample {sample_id} (status: Complete)")
-                    result = finalize_accumulation_for_sample(
-                        sample_id=sample_id,
-                        work_dir=str(self.monitored_directory),
-                        target_panel=target_panel
-                    )
-                    if result.get("status") != "error":
-                        self._finalized_samples.add(sample_id)
-                        logging.info(f"Successfully finalized target.bam for sample {sample_id}")
+                    finalization_succeeded = True
+
+                    if already_finalized:
+                        logging.info(f"Sample {sample_id} already finalized; skipping target.bam merge")
                     else:
-                        logging.warning(f"Target.bam finalization returned error for {sample_id}: {result.get('error', 'Unknown')}")
+                        logging.info(
+                            f"Triggering target.bam finalization for sample {sample_id} (status: Complete)"
+                        )
+                        result = finalize_accumulation_for_sample(
+                            sample_id=sample_id,
+                            work_dir=str(self.monitored_directory),
+                            target_panel=target_panel
+                        )
+                        if result.get("status") != "error":
+                            self._finalized_samples.add(sample_id)
+                            logging.info(
+                                f"Successfully finalized target.bam for sample {sample_id}"
+                            )
+                        else:
+                            finalization_succeeded = False
+                            logging.warning(
+                                f"Target.bam finalization returned error for {sample_id}: {result.get('error', 'Unknown')}"
+                            )
+
+                    if trigger_snp and finalization_succeeded:
+                        try:
+                            from robin.analysis.target_analysis import run_snp_analysis
+                        except ImportError as exc:
+                            logging.error(f"Unable to import SNP analysis module: {exc}")
+                            return
+
+                        reference_path = self._locate_reference_for_sample(sample_dir)
+                        if not reference_path:
+                            logging.warning(
+                                f"Reference genome not found for {sample_id}; skipping SNP analysis"
+                            )
+                            return
+
+                        target_bam = sample_dir / "target.bam"
+                        if not target_bam.exists():
+                            logging.warning(
+                                f"target.bam not found for {sample_id}; cannot run SNP analysis"
+                            )
+                            return
+
+                        try:
+                            logging.info(
+                                f"Starting manual SNP analysis for {sample_id} using reference {reference_path}"
+                            )
+                            snp_result = run_snp_analysis(
+                                sample_dir=str(sample_dir),
+                                threads=4,
+                                force_regenerate=False,
+                                reference=reference_path,
+                            )
+                            if snp_result:
+                                logging.info(
+                                    f"SNP analysis completed for {sample_id}; results in {snp_result}"
+                                )
+                            else:
+                                logging.warning(
+                                    f"SNP analysis did not produce results for {sample_id}"
+                                )
+                        except Exception as snp_exc:
+                            logging.error(
+                                f"Error running SNP analysis for {sample_id}: {snp_exc}", exc_info=True
+                            )
                 except Exception as e:
                     logging.error(f"Error finalizing target.bam for {sample_id}: {e}")
             
