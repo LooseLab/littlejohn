@@ -871,7 +871,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                     summary_text += ", ".join(parts)
                     cnv_events_summary.set_text(summary_text)
                 else:
-                    cnv_events_summary.set_text("No significant CNV events detected")
+                    cnv_events_summary.set_text("No threshold triggered CNV events detected")
             else:
                 cnv_events_table.rows = []
                 cnv_events_summary.set_text("CNV data not available")

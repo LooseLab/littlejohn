@@ -129,13 +129,25 @@ def locus_figure(
     # Final safeguard: ensure all argv entries are plain strings
     argv = [str(a) for a in argv]
 
+    # Check if BAM file is indexed before calling methylartist
+    import os
+    bai_path = f"{bam_path}.bai"
+    if not os.path.exists(bai_path):
+        raise RuntimeError(f"BAM file is not indexed: {bam_path}. Index file (.bai) not found.")
+
     captured = {"fig": None}
 
     with _patch_fig_savefig(captured), _patch_argv(
         argv
     ), _suppress_methylartist_warnings():
         # Execute the installed CLI script as __main__
-        runpy.run_path(cli, run_name="__main__")
+        # Catch SystemExit exceptions from methylartist (e.g., when BAM is not indexed)
+        try:
+            runpy.run_path(cli, run_name="__main__")
+        except SystemExit as e:
+            # Convert SystemExit to RuntimeError for better error handling
+            error_msg = str(e) if str(e) else "methylartist exited unexpectedly"
+            raise RuntimeError(f"methylartist failed: {error_msg}")
 
     if captured["fig"] is None:
         raise RuntimeError("methylartist locus did not produce a figure.")
