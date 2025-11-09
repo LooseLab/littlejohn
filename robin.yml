@@ -11,6 +11,10 @@ dependencies:
   - bioconda::snpeff
   - bioconda::samtools
   - bioconda::bedtools
+  - conda-forge::pkg-config
+  - conda-forge::cairo
+  - conda-forge::pycairo
+  - conda-forge::gobject-introspection
   - r-optparse
   - r-data.table
   - conda-forge::r-ranger

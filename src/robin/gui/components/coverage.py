@@ -60,63 +60,80 @@ def add_igv_viewer(launcher: Any, sample_dir: Path) -> None:
                         const el = document.getElementById('igv-container');
                         if (!el) {
                             console.error('[IGV] Container element not found');
-                            return;
+                            return 'missing-element';
                         }
-                        
-                        // Check if browser already exists
+
                         if (window.lj_igv && window.lj_igv_browser_ready) {
                             console.log('[IGV] Browser already exists');
-                            return;
+                            return 'already-ready';
                         }
-                        
+
+                        if (window.lj_igv_initializing) {
+                            console.log('[IGV] Initialization already in progress');
+                            return 'initializing';
+                        }
+
                         // Clear any existing content
                         el.innerHTML = '';
-                        
-                        // Initialize flag
+
+                        window.lj_igv_initializing = true;
                         window.lj_igv_browser_ready = false;
-                        
-                        // Create browser
+
                         console.log('[IGV] Creating browser with hg38 genome...');
-                        const options = { 
+                        const options = {
                             genome: 'hg38',
                             showRuler: true,
                             showNavigation: true,
                             showCenterGuide: true,
                             defaultLocus: 'chr1:1-500000'
                         };
-                        
+
                         igv.createBrowser(el, options)
                             .then(function(browser) {
                                 console.log('[IGV] Browser created successfully');
                                 window.lj_igv = browser;
                                 window.lj_igv_browser_ready = true;
-                                
-                                // Update status
+                                window.lj_igv_initializing = false;
+
                                 const statusEl = document.querySelector('[data-igv-status]');
                                 if (statusEl) {
                                     statusEl.textContent = 'IGV browser ready';
                                 }
-                                
-                                // Auto-load target BED file if available
-                                // This will be triggered by the BAM loading function, but we can also try here
+
                                 console.log('[IGV] Browser ready, target BED will be loaded with BAM');
                             })
                             .catch(function(error) {
                                 console.error('[IGV] Browser creation failed:', error);
                                 window.lj_igv_browser_ready = false;
-                                
+                                window.lj_igv_initializing = false;
+
                                 const statusEl = document.querySelector('[data-igv-status]');
                                 if (statusEl) {
-                                    statusEl.textContent = 'IGV browser creation failed: ' + error.message;
+                                    statusEl.textContent = 'IGV browser creation failed: ' + (error && error.message ? error.message : error);
                                 }
                             });
+
+                        return 'started';
                     } catch (error) {
                         console.error('[IGV] Initialization error:', error);
+                        window.lj_igv_browser_ready = false;
+                        window.lj_igv_initializing = false;
+                        return 'error';
                     }
                 })();
             """
             try:
-                ui.run_javascript(js_init, timeout=30.0)
+                init_result = ui.run_javascript(js_init, timeout=5.0)
+                if init_result == "missing-element":
+                    igv_status.set_text("IGV container element not found.")
+                elif init_result == "error":
+                    igv_status.set_text("IGV initialization failed (see console).")
+                elif init_result == "started":
+                    igv_status.set_text("IGV browser initialization started...")
+                elif init_result == "initializing":
+                    igv_status.set_text("IGV browser is still initializing...")
+                elif init_result == "already-ready":
+                    igv_status.set_text("IGV browser already ready.")
             except Exception as e:
                 print(f"Error initializing IGV browser: {e}")
                 igv_status.set_text(f"Error initializing IGV: {e}")

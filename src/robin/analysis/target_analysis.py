@@ -78,6 +78,7 @@ import subprocess
 import shutil
 import glob
 import fcntl
+from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
 from io import StringIO
@@ -85,6 +86,7 @@ import numpy as np
 import pandas as pd
 import pysam
 from robin.logging_config import get_job_logger
+from robin.analysis.snp_processing import build_snp_display_data
 
 # Optional import for Docker functionality
 try:
@@ -2593,6 +2595,8 @@ def run_snp_analysis(
     threads: int = 4,
     force_regenerate: bool = False,
     reference: Optional[str] = None,
+    annotation_only: bool = False,
+    annotation_verbose: bool = False,
 ) -> str:
     """
     Run SNP analysis using Clair3 for a sample.
@@ -2602,11 +2606,14 @@ def run_snp_analysis(
     - Clair3 variant calling
     - snpEff annotation
     - SnpSift annotation with ClinVar data
+    - Optional annotation-only reruns with verbose logging
 
     Args:
         sample_dir: Path to the sample output directory
         threads: Number of threads to use for processing
         force_regenerate: If True, force recreation even if output exists
+        annotation_only: If True, run only the snpEff/SnpSift annotation steps
+        annotation_verbose: If True, run annotation steps with verbose logging enabled
 
     Returns:
         The path to the output directory containing SNP results (empty string on failure)
@@ -2616,7 +2623,14 @@ def run_snp_analysis(
     # CRITICAL: Immediate logging to see if we even get here
     logger.info("ENTERING run_snp_analysis function")
     logger.info(
-        f"Parameters: sample_dir={sample_dir}, threads={threads}, force_regenerate={force_regenerate}, reference={reference}"
+        "Parameters: sample_dir=%s, threads=%s, force_regenerate=%s, "
+        "reference=%s, annotation_only=%s, annotation_verbose=%s",
+        sample_dir,
+        threads,
+        force_regenerate,
+        reference,
+        annotation_only,
+        annotation_verbose,
     )
 
     # Also log to stderr to make sure we see it
@@ -2640,13 +2654,17 @@ def run_snp_analysis(
             os.path.join(clair_dir, "snpsift_indel_output.vcf"),
         ]
 
-        if not force_regenerate and all(os.path.exists(f) for f in snp_output_files):
+        if annotation_only:
+            logger.info("Annotation-only mode enabled; skipping existing output shortcut.")
+        elif not force_regenerate and all(os.path.exists(f) for f in snp_output_files):
             logger.info(f"SNP analysis already present in {clair_dir}")
             return clair_dir
 
         logger.info("STEP 3: Checking for required input files")
         target_bam = os.path.join(sample_dir, "target.bam")
         targets_bed = os.path.join(sample_dir, "targets_exceeding_threshold.bed")
+        output_snv_vcf = os.path.join(clair_dir, "output_done.vcf.gz")
+        output_indel_vcf = os.path.join(clair_dir, "output_indel_done.vcf.gz")
 
         logger.info("CHECKING INPUT FILES FOR CLAIR3")
         logger.info(f"  Sample directory: {sample_dir}")
@@ -2654,13 +2672,26 @@ def run_snp_analysis(
         logger.info(f"  Targets BED path: {targets_bed}")
         logger.info(f"  Reference path: {reference}")
 
-        if not os.path.exists(target_bam):
-            logger.error(f"target.bam not found: {target_bam}")
-            return ""
+        if annotation_only:
+            missing_annotation_inputs = [
+                path for path in [output_snv_vcf, output_indel_vcf] if not os.path.exists(path)
+            ]
+            if missing_annotation_inputs:
+                for missing in missing_annotation_inputs:
+                    logger.error(f"Annotation input not found: {missing}")
+                logger.error(
+                    "Annotation-only mode requires existing Clair3 outputs. "
+                    "Run the full SNP pipeline first."
+                )
+                return ""
+        else:
+            if not os.path.exists(target_bam):
+                logger.error(f"target.bam not found: {target_bam}")
+                return ""
 
-        if not os.path.exists(targets_bed):
-            logger.error(f"targets_exceeding_threshold.bed not found: {targets_bed}")
-            return ""
+            if not os.path.exists(targets_bed):
+                logger.error(f"targets_exceeding_threshold.bed not found: {targets_bed}")
+                return ""
 
         # Check for reference genome
         if not reference:
@@ -2680,83 +2711,91 @@ def run_snp_analysis(
                     break
 
         if not reference:
-            logger.error(
-                "Reference genome not found. SNP calling requires a reference genome."
-            )
-            return ""
+            if annotation_only:
+                logger.warning(
+                    "Reference genome not found, continuing because annotation-only mode is enabled."
+                )
+            else:
+                logger.error(
+                    "Reference genome not found. SNP calling requires a reference genome."
+                )
+                return ""
 
         logger.info(f"Starting SNP analysis for sample: {os.path.basename(sample_dir)}")
         logger.info(f"Reference: {reference}")
         logger.info(f"Target BAM: {target_bam}")
         logger.info(f"Targets BED: {targets_bed}")
 
-        logger.info("STEP 4: Sorting target BAM for Clair3")
-        sorted_bam = os.path.join(clair_dir, "sorted_targets_exceeding.bam")
-        logger.info(f"Sorting BAM: {target_bam} -> {sorted_bam}")
-
-        try:
-            # Check if sorted BAM already exists and is valid
-            if os.path.exists(sorted_bam) and os.path.exists(sorted_bam + ".bai"):
-                logger.info(f"Sorted BAM already exists: {sorted_bam}")
-                # Verify the file is readable
-                try:
-                    test_bam = pysam.AlignmentFile(sorted_bam, "rb")
-                    test_bam.close()
-                    logger.info("Sorted BAM file is valid and readable")
-                except Exception as e:
-                    logger.warning(
-                        f"Existing sorted BAM appears corrupted, regenerating: {e}"
-                    )
-                    os.remove(sorted_bam)
-                    if os.path.exists(sorted_bam + ".bai"):
-                        os.remove(sorted_bam + ".bai")
-                    raise Exception("Corrupted BAM file")
-            else:
-                logger.info("Creating new sorted BAM file...")
-
-            # Sort the BAM file
-            logger.info(f"Sorting BAM with {threads} threads...")
-            pysam.sort(f"-@{threads}", "-o", sorted_bam, target_bam)
-
-            # Verify the sorted file was created
-            if not os.path.exists(sorted_bam):
-                raise Exception(f"Sorted BAM file was not created: {sorted_bam}")
-
-            # Create index
-            logger.info("Creating BAM index...")
-            pysam.index(sorted_bam)
-
-            # Verify index was created
-            if not os.path.exists(sorted_bam + ".bai"):
-                raise Exception(f"BAM index was not created: {sorted_bam}.bai")
-
-            # Final verification
-            file_size = os.path.getsize(sorted_bam)
-            logger.info(
-                f"BAM sorting completed successfully: {sorted_bam} ({file_size / (1024**2):.1f} MB)"
-            )
-
-        except Exception as e:
-            logger.error(f"BAM sorting failed: {e}")
-            # Clean up any partial files
-            for file_path in [sorted_bam, sorted_bam + ".bai"]:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-                    logger.info(f"Cleaned up partial file: {file_path}")
-            return ""
-
-        logger.info("STEP 5: Running Clair3 pipeline")
-        logger.info("Running Clair3 pipeline...")
-
-        # Run Clair3 pipeline using Docker
-        logger.info("CHECKING DOCKER AVAILABILITY")
-        if docker is None:
-            logger.error("Docker module not available. Cannot run Clair3 pipeline.")
-            return ""
+        if annotation_only:
+            logger.info("Annotation-only mode enabled; skipping Clair3 variant calling.")
+            sorted_bam = os.path.join(clair_dir, "sorted_targets_exceeding.bam")
         else:
-            logger.info("Docker module is available")
+            logger.info("STEP 4: Sorting target BAM for Clair3")
+            sorted_bam = os.path.join(clair_dir, "sorted_targets_exceeding.bam")
+            logger.info(f"Sorting BAM: {target_bam} -> {sorted_bam}")
 
-        try:
+            try:
+                # Check if sorted BAM already exists and is valid
+                if os.path.exists(sorted_bam) and os.path.exists(sorted_bam + ".bai"):
+                    logger.info(f"Sorted BAM already exists: {sorted_bam}")
+                    # Verify the file is readable
+                    try:
+                        test_bam = pysam.AlignmentFile(sorted_bam, "rb")
+                        test_bam.close()
+                        logger.info("Sorted BAM file is valid and readable")
+                    except Exception as e:
+                        logger.warning(
+                            f"Existing sorted BAM appears corrupted, regenerating: {e}"
+                        )
+                        os.remove(sorted_bam)
+                        if os.path.exists(sorted_bam + ".bai"):
+                            os.remove(sorted_bam + ".bai")
+                        raise Exception("Corrupted BAM file")
+                else:
+                    logger.info("Creating new sorted BAM file...")
+
+                # Sort the BAM file
+                logger.info(f"Sorting BAM with {threads} threads...")
+                pysam.sort(f"-@{threads}", "-o", sorted_bam, target_bam)
+
+                # Verify the sorted file was created
+                if not os.path.exists(sorted_bam):
+                    raise Exception(f"Sorted BAM file was not created: {sorted_bam}")
+
+                # Create index
+                logger.info("Creating BAM index...")
+                pysam.index(sorted_bam)
+
+                # Verify index was created
+                if not os.path.exists(sorted_bam + ".bai"):
+                    raise Exception(f"BAM index was not created: {sorted_bam}.bai")
+
+                # Final verification
+                file_size = os.path.getsize(sorted_bam)
+                logger.info(
+                    f"BAM sorting completed successfully: {sorted_bam} ({file_size / (1024**2):.1f} MB)"
+                )
+
+            except Exception as e:
+                logger.error(f"BAM sorting failed: {e}")
+                # Clean up any partial files
+                for file_path in [sorted_bam, sorted_bam + ".bai"]:
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                        logger.info(f"Cleaned up partial file: {file_path}")
+                return ""
+
+            logger.info("STEP 5: Running Clair3 pipeline")
+            logger.info("Running Clair3 pipeline...")
+
+            # Run Clair3 pipeline using Docker
+            logger.info("CHECKING DOCKER AVAILABILITY")
+            if docker is None:
+                logger.error("Docker module not available. Cannot run Clair3 pipeline.")
+                return ""
+            else:
+                logger.info("Docker module is available")
+
             client = docker.from_env()
 
             # Test Docker connectivity
@@ -2766,6 +2805,12 @@ def run_snp_analysis(
             except Exception as docker_error:
                 logger.error(f"Docker daemon not accessible: {docker_error}")
                 return ""
+
+            # Define container-specific paths using the original working pattern
+            container_bamfile = f"/data/output/{os.path.basename(sorted_bam)}"  # BAM goes to output directory
+            container_bedfile = f"/data/bed/{os.path.basename(targets_bed)}"  # BED goes to bed directory
+            container_reference = f"/data/reference/{os.path.basename(reference)}"  # Reference goes to reference directory
+            container_output = "/data/output"
 
             # Check if Clair3 image exists
             try:
@@ -2781,12 +2826,6 @@ def run_snp_analysis(
                 except Exception as pull_error:
                     logger.error(f"Failed to pull Clair3 image: {pull_error}")
                     return ""
-
-            # Create container-specific paths using the original working pattern
-            container_bamfile = f"/data/output/{os.path.basename(sorted_bam)}"  # BAM goes to output directory
-            container_bedfile = f"/data/bed/{os.path.basename(targets_bed)}"  # BED goes to bed directory
-            container_reference = f"/data/reference/{os.path.basename(reference)}"  # Reference goes to reference directory
-            container_output = "/data/output"
 
             # Clean up old debugging - no longer needed with the fixed approach
 
@@ -2909,9 +2948,9 @@ def run_snp_analysis(
                     logger.error(f"Error splitting BED file: {e}")
                     return []
 
-            # Split BED file into regions
+            # Split BED file into regions (larger chunk size to reduce splits)
             logger.info("Splitting BED file into efficient regions...")
-            regions = split_bed_into_regions(targets_bed, max_region_size=150000000)
+            regions = split_bed_into_regions(targets_bed, max_region_size=500000000)
 
             if not regions:
                 logger.error("Failed to split BED file into regions")
@@ -2931,7 +2970,9 @@ def run_snp_analysis(
                     end = int(start_end[1])
                     region_size = end - start
                     total_bases += region_size
-                    logger.info(f"Region {i+1}: {region} (size: {region_size:,} bases)")
+                    logger.info(
+                        f"Region {i+1}: {region} (size: {region_size:,} bases)"
+                    )
                 except Exception as e:
                     logger.warning(f"Could not parse region size for {region}: {e}")
 
@@ -2940,19 +2981,25 @@ def run_snp_analysis(
             )
             logger.info(f"Average region size: {total_bases // len(regions):,} bases")
 
-            # Process each region separately
+            # Process each region separately (or single pass)
             all_snv_vcfs = []
             all_indel_vcfs = []
 
             for i, region in enumerate(regions):
-                logger.info(f"Processing region {i+1}/{len(regions)}: {region}")
+                region_label = (
+                    region if region is not None else "full_target_bed"
+                )
+                logger.info(f"Processing region {i+1}/{len(regions)}: {region_label}")
                 print(
-                    f"Processing region {i+1}/{len(regions)}: {region} - PRINT STATEMENT"
+                    f"Processing region {i+1}/{len(regions)}: {region_label} - PRINT STATEMENT"
                 )
                 # Create region-specific output directory
-                region_output = f"{container_output}/region_{i+1}"
+                if region is None:
+                    region_output = container_output
+                else:
+                    region_output = f"{container_output}/region_{i+1}"
 
-                # Build Clair3 command for this region
+                # Build Clair3 command for this region or full pass
                 command = (
                     f"/opt/bin/run_clairs_to "
                     f"--tumor_bam_fn {container_bamfile} "
@@ -2964,8 +3011,9 @@ def run_snp_analysis(
                     f"-b {container_bedfile} "
                     f"--chunk_size 5000000 "
                     f"--disable_intermediate_phasing "
-                    f"--region {region}"
                 )
+                if region is not None:
+                    command += f"--region {region}"
 
             logger.info(f"Container input BAM: {container_bamfile}")
             logger.info(f"Container input BED: {container_bedfile}")
@@ -3035,10 +3083,11 @@ def run_snp_analysis(
 
             # Process each region
             for i, region in enumerate(regions):
+                region_label = region
                 print(
-                    f"Processing region {i+1}/{len(regions)}: {region} - PRINT STATEMENT"
+                    f"Processing region {i+1}/{len(regions)}: {region_label} - PRINT STATEMENT"
                 )
-                logger.info(f"Processing region {i+1}/{len(regions)}: {region}")
+                logger.info(f"Processing region {i+1}/{len(regions)}: {region_label}")
 
                 # Create region-specific output directory
                 region_output = f"{container_output}/region_{i+1}"
@@ -3055,8 +3104,8 @@ def run_snp_analysis(
                     f"-b {container_bedfile} "
                     f"--chunk_size 5000000 "
                     f"--disable_intermediate_phasing "
-                    f"--region {region}"
                 )
+                command += f"--region {region}"
 
                 logger.info(f"Running Clair3 command for region {i+1}: {command}")
 
@@ -3154,12 +3203,11 @@ def run_snp_analysis(
 
             logger.info("Clair3 pipeline completed successfully for all regions")
 
-        except ImportError:
-            logger.error("Docker not available. Cannot run Clair3 pipeline.")
-            return ""
-        except Exception as e:
-            logger.error(f"Error running Clair3 pipeline: {e}")
-            return ""
+
+        if annotation_only:
+            logger.info(
+                "Proceeding directly to annotation pipeline using existing Clair3 outputs."
+            )
 
         logger.info("STEP 6: Running annotation pipeline")
         logger.info("Running annotation pipeline...")
@@ -3167,7 +3215,7 @@ def run_snp_analysis(
         try:
             # SNP annotation with snpEff
             logger.info("Starting snpEff annotation for SNPs...")
-            logger.info(f"Input file: {clair_dir}/output_done.vcf.gz")
+            logger.info(f"Input file: {output_snv_vcf}")
             logger.info(f"Output file: {clair_dir}/snpeff_output.vcf")
 
             # Define output file paths
@@ -3177,15 +3225,15 @@ def run_snp_analysis(
             snpsift_indel_out = f"{clair_dir}/snpsift_indel_output.vcf"
 
             # Check if input file exists and has content
-            if os.path.exists(f"{clair_dir}/output_done.vcf.gz"):
-                file_size = os.path.getsize(f"{clair_dir}/output_done.vcf.gz")
+            if os.path.exists(output_snv_vcf):
+                file_size = os.path.getsize(output_snv_vcf)
                 logger.info(f"Input VCF file exists, size: {file_size} bytes")
 
                 # Check first few lines to verify it's a valid VCF
                 try:
                     import gzip
 
-                    with gzip.open(f"{clair_dir}/output_done.vcf.gz", "rt") as f:
+                    with gzip.open(output_snv_vcf, "rt") as f:
                         first_lines = [next(f) for _ in range(5)]
                     logger.info("First 5 lines of input VCF:")
                     for i, line in enumerate(first_lines):
@@ -3194,11 +3242,16 @@ def run_snp_analysis(
                     logger.warning(f"Could not read input VCF file: {e}")
             else:
                 logger.error(
-                    f"Input VCF file does not exist: {clair_dir}/output_done.vcf.gz"
+                    f"Input VCF file does not exist: {output_snv_vcf}"
                 )
 
-            snpeff_cmd = ["snpEff", "-q", "hg38", f"{clair_dir}/output_done.vcf.gz"]
+            snpeff_cmd = ["snpEff"]
+            snpeff_cmd.append("-v" if annotation_verbose else "-q")
+            snpeff_cmd.extend(["hg38", output_snv_vcf])
             logger.info(f"Running snpEff command: {' '.join(snpeff_cmd)}")
+
+            annotation_env = os.environ.copy()
+            annotation_env["_JAVA_OPTIONS"] = "-Xmx16g"
 
             # Check if snpEff is available
             try:
@@ -3217,11 +3270,17 @@ def run_snp_analysis(
             with open(snpeff_out, "w") as fout:
                 logger.info("Starting snpEff execution...")
                 result = subprocess.run(
-                    snpeff_cmd, stdout=fout, stderr=subprocess.PIPE, text=True
+                    snpeff_cmd,
+                    stdout=fout,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=annotation_env,
                 )
                 logger.info(
                     f"snpEff execution completed with return code: {result.returncode}"
                 )
+                if annotation_verbose and result.stderr:
+                    logger.info(f"snpEff stderr output:\n{result.stderr}")
 
             if result.returncode != 0:
                 logger.warning(f"snpEff failed with return code: {result.returncode}")
@@ -3230,7 +3289,7 @@ def run_snp_analysis(
                 # Decompress the gzipped file when copying to .vcf extension
                 import gzip
 
-                with gzip.open(f"{clair_dir}/output_done.vcf.gz", "rt") as f_in:
+                with gzip.open(output_snv_vcf, "rt") as f_in:
                     with open(snpeff_out, "w") as f_out:
                         f_out.write(f_in.read())
                 logger.info("Created uncompressed VCF from gzipped input")
@@ -3283,30 +3342,54 @@ def run_snp_analysis(
                     # Check if SnpSift is available
                     try:
                         snpsift_version = subprocess.run(
-                            ["SnpSift", "-version"], capture_output=True, text=True
+                            ["SnpSift"], capture_output=True, text=True
                         )
-                        if snpsift_version.returncode == 0:
-                            logger.info(
-                                f"SnpSift version: {snpsift_version.stdout.strip()}"
+                        version_output = "\n".join(
+                            part.strip()
+                            for part in (
+                                snpsift_version.stdout,
+                                snpsift_version.stderr,
                             )
+                            if part
+                        )
+                        version_line = ""
+                        for line in version_output.splitlines():
+                            if "SnpSift version" in line:
+                                version_line = line.strip()
+                                break
+                        if version_line:
+                            logger.info(f"SnpSift version: {version_line}")
+                        elif snpsift_version.returncode == 0:
+                            logger.info("SnpSift command executed successfully")
                         else:
                             logger.warning(
-                                f"Could not get SnpSift version: {snpsift_version.stderr}"
+                                "Could not determine SnpSift version from command output"
                             )
                     except FileNotFoundError:
                         logger.error("SnpSift command not found in PATH")
 
-                    snpsift_cmd = ["SnpSift", "annotate", clinvar_path, snpeff_out]
+                    snpsift_cmd = ["SnpSift", "annotate"]
+                    if annotation_verbose:
+                        snpsift_cmd.append("-v")
+                    snpsift_cmd.extend([clinvar_path, snpeff_out])
                     logger.info(f"Running SnpSift command: {' '.join(snpsift_cmd)}")
+
+                    snpsift_env = annotation_env.copy()
 
                     with open(snpsift_out, "w") as fout:
                         logger.info("Starting SnpSift execution...")
                         result = subprocess.run(
-                            snpsift_cmd, stdout=fout, stderr=subprocess.PIPE, text=True
+                            snpsift_cmd,
+                            stdout=fout,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                            env=snpsift_env,
                         )
                         logger.info(
                             f"SnpSift execution completed with return code: {result.returncode}"
                         )
+                        if annotation_verbose and result.stderr:
+                            logger.info(f"SnpSift stderr output:\n{result.stderr}")
 
                     if result.returncode != 0:
                         logger.warning(
@@ -3356,19 +3439,19 @@ def run_snp_analysis(
 
             # INDEL annotation
             logger.info("Starting snpEff annotation for INDELs...")
-            logger.info(f"Input file: {clair_dir}/output_indel_done.vcf.gz")
+            logger.info(f"Input file: {output_indel_vcf}")
             logger.info(f"Output file: {snpeff_indel_out}")
 
             # Check if input file exists and has content
-            if os.path.exists(f"{clair_dir}/output_indel_done.vcf.gz"):
-                file_size = os.path.getsize(f"{clair_dir}/output_indel_done.vcf.gz")
+            if os.path.exists(output_indel_vcf):
+                file_size = os.path.getsize(output_indel_vcf)
                 logger.info(f"INDEL input VCF file exists, size: {file_size} bytes")
 
                 # Check first few lines to verify it's a valid VCF
                 try:
                     import gzip
 
-                    with gzip.open(f"{clair_dir}/output_indel_done.vcf.gz", "rt") as f:
+                    with gzip.open(output_indel_vcf, "rt") as f:
                         first_lines = [next(f) for _ in range(5)]
                     logger.info("First 5 lines of INDEL input VCF:")
                     for i, line in enumerate(first_lines):
@@ -3377,25 +3460,28 @@ def run_snp_analysis(
                     logger.warning(f"Could not read INDEL input VCF file: {e}")
             else:
                 logger.error(
-                    f"INDEL input VCF file does not exist: {clair_dir}/output_indel_done.vcf.gz"
+                    f"INDEL input VCF file does not exist: {output_indel_vcf}"
                 )
 
-            snpeff_indel_cmd = [
-                "snpEff",
-                "-q",
-                "hg38",
-                f"{clair_dir}/output_indel_done.vcf.gz",
-            ]
+            snpeff_indel_cmd = ["snpEff"]
+            snpeff_indel_cmd.append("-v" if annotation_verbose else "-q")
+            snpeff_indel_cmd.extend(["hg38", output_indel_vcf])
             logger.info(f"Running snpEff INDEL command: {' '.join(snpeff_indel_cmd)}")
 
             with open(snpeff_indel_out, "w") as fout:
                 logger.info("Starting snpEff INDEL execution...")
                 result = subprocess.run(
-                    snpeff_indel_cmd, stdout=fout, stderr=subprocess.PIPE, text=True
+                    snpeff_indel_cmd,
+                    stdout=fout,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=annotation_env,
                 )
                 logger.info(
                     f"snpEff INDEL execution completed with return code: {result.returncode}"
                 )
+                if annotation_verbose and result.stderr:
+                    logger.info(f"snpEff INDEL stderr output:\n{result.stderr}")
 
             if result.returncode != 0:
                 logger.warning(
@@ -3406,7 +3492,7 @@ def run_snp_analysis(
                 # Decompress the gzipped file when copying to .vcf extension
                 import gzip
 
-                with gzip.open(f"{clair_dir}/output_indel_done.vcf.gz", "rt") as f_in:
+                with gzip.open(output_indel_vcf, "rt") as f_in:
                     with open(snpeff_indel_out, "w") as f_out:
                         f_out.write(f_in.read())
                 logger.info("Created uncompressed INDEL VCF from gzipped input")
@@ -3453,15 +3539,15 @@ def run_snp_analysis(
                         f"Using ClinVar file for INDEL annotation: {clinvar_path}"
                     )
 
-                    snpsift_indel_cmd = [
-                        "SnpSift",
-                        "annotate",
-                        clinvar_path,
-                        snpeff_indel_out,
-                    ]
+                    snpsift_indel_cmd = ["SnpSift", "annotate"]
+                    if annotation_verbose:
+                        snpsift_indel_cmd.append("-v")
+                    snpsift_indel_cmd.extend([clinvar_path, snpeff_indel_out])
                     logger.info(
                         f"Running SnpSift INDEL command: {' '.join(snpsift_indel_cmd)}"
                     )
+
+                    snpsift_indel_env = annotation_env.copy()
 
                     with open(snpsift_indel_out, "w") as fout:
                         logger.info("Starting SnpSift INDEL execution...")
@@ -3470,10 +3556,13 @@ def run_snp_analysis(
                             stdout=fout,
                             stderr=subprocess.PIPE,
                             text=True,
+                            env=snpsift_indel_env,
                         )
                         logger.info(
                             f"SnpSift INDEL execution completed with return code: {result.returncode}"
                         )
+                        if annotation_verbose and result.stderr:
+                            logger.info(f"SnpSift INDEL stderr output:\n{result.stderr}")
 
                     if result.returncode != 0:
                         logger.warning(
@@ -3574,6 +3663,19 @@ def run_snp_analysis(
                 f"{clair_dir}/snpsift_indel_output.vcf.csv",
             )
 
+            # Build pre-formatted SNP display data for the GUI
+            try:
+                snp_display_path = Path(clair_dir) / "snpsift_output_display.json"
+                snp_display = build_snp_display_data(Path(clair_dir) / "snpsift_output.vcf")
+                if snp_display is not None:
+                    with snp_display_path.open("w", encoding="utf-8") as f_out:
+                        json.dump(snp_display, f_out)
+                    logger.info(f"SNP display data written to {snp_display_path}")
+                else:
+                    logger.warning("Could not generate SNP display data from VCF.")
+            except Exception as display_exc:
+                logger.warning(f"Failed to build SNP display data: {display_exc}")
+
             # Note: VCF files are now properly uncompressed when they have .vcf extensions
             # Compressed .vcf.gz files are only used as input to processing tools
 
@@ -3608,6 +3710,8 @@ def snp_analysis_handler(job, work_dir: Optional[str] = None) -> None:
     - reference: Path to reference genome (optional, will auto-detect)
     - threads: Number of threads to use (default: 4)
     - force_regenerate: Whether to force regeneration of existing results (default: False)
+    - annotation_only: Run only the annotation steps (default: False)
+    - annotation_verbose: Enable verbose logging for snpEff/SnpSift (default: False)
     """
     logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
 
@@ -3676,12 +3780,16 @@ def snp_analysis_handler(job, work_dir: Optional[str] = None) -> None:
         threads = job.context.metadata.get("threads", 4)
         force_regenerate = job.context.metadata.get("force_regenerate", False)
         reference = job.context.metadata.get("reference")
+        annotation_only = job.context.metadata.get("annotation_only", False)
+        annotation_verbose = job.context.metadata.get("annotation_verbose", False)
 
         # Debug logging for reference genome
         logger.info("=== SNP ANALYSIS HANDLER DEBUGGING ===")
         logger.info(f"Job metadata keys: {list(job.context.metadata.keys())}")
         logger.info(f"Job metadata: {job.context.metadata}")
         logger.info(f"Extracted reference: {reference}")
+        logger.info(f"Annotation-only: {annotation_only}")
+        logger.info(f"Annotation-verbose: {annotation_verbose}")
         logger.info("=== END SNP ANALYSIS HANDLER DEBUGGING ===")
 
         if force_regenerate:
@@ -3699,7 +3807,14 @@ def snp_analysis_handler(job, work_dir: Optional[str] = None) -> None:
         # Run SNP analysis
         logger.info("ABOUT TO CALL run_snp_analysis function")
         logger.info(
-            f"Calling run_snp_analysis with: sample_dir={sample_dir}, threads={threads}, force_regenerate={force_regenerate}, reference={reference}"
+            "Calling run_snp_analysis with: sample_dir=%s, threads=%s, "
+            "force_regenerate=%s, reference=%s, annotation_only=%s, annotation_verbose=%s",
+            sample_dir,
+            threads,
+            force_regenerate,
+            reference,
+            annotation_only,
+            annotation_verbose,
         )
 
         output_dir = run_snp_analysis(
@@ -3707,6 +3822,8 @@ def snp_analysis_handler(job, work_dir: Optional[str] = None) -> None:
             threads=threads,
             force_regenerate=force_regenerate,
             reference=reference,
+            annotation_only=annotation_only,
+            annotation_verbose=annotation_verbose,
         )
 
         logger.info(f"run_snp_analysis returned: {output_dir}")

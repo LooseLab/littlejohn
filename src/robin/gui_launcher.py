@@ -156,6 +156,10 @@ class GUILauncher:
         # Track which samples have had target.bam finalization triggered
         self._finalized_samples: set = set()
 
+        # SNP analysis concurrency control
+        self._snp_analysis_lock = threading.Lock()
+        self._snp_analysis_running_sample: Optional[str] = None
+
         # Log ring buffer (last 1000 entries)
         self._log_buffer = deque(maxlen=1000)
 
@@ -1061,6 +1065,7 @@ class GUILauncher:
             title = data.get("title", "Warning")
             sample_id = data.get("sample_id", "")
             filename = data.get("filename", "")
+            level = data.get("level", "warning")
             
             # Build notification message
             if sample_id:
@@ -1070,12 +1075,12 @@ class GUILauncher:
             else:
                 notification_msg = message
             
-            # Show dismissible warning notification
+            # Show dismissible notification
             # NiceGUI notifications are dismissible by default with a close button
             # timeout=0 makes it persistent until manually dismissed
             ui.notify(
                 notification_msg,
-                type="warning",
+                type=level,
                 timeout=0,  # Persistent until manually dismissed (close button available)
                 position="top-right",
             )
@@ -4618,42 +4623,134 @@ class GUILauncher:
                             logging.error(f"Unable to import SNP analysis module: {exc}")
                             return
 
-                        reference_path = self._locate_reference_for_sample(sample_dir)
-                        if not reference_path:
-                            logging.warning(
-                                f"Reference genome not found for {sample_id}; skipping SNP analysis"
-                            )
-                            return
+                        # Ensure only one SNP analysis runs at a time
+                        with self._snp_analysis_lock:
+                            running_sample = self._snp_analysis_running_sample
+                            if running_sample:
+                                if running_sample == sample_id:
+                                    message = "SNP analysis is already running for this sample."
+                                else:
+                                    message = (
+                                        f"SNP analysis already running for sample {running_sample}. "
+                                        "Please wait for it to finish before starting another."
+                                    )
+                                logging.info(message)
+                                self.send_update(
+                                    UpdateType.WARNING_NOTIFICATION,
+                                    {
+                                        "title": "SNP analysis in progress",
+                                        "message": message,
+                                        "sample_id": sample_id,
+                                        "level": "warning",
+                                    },
+                                    priority=6,
+                                )
+                                return
 
-                        target_bam = sample_dir / "target.bam"
-                        if not target_bam.exists():
-                            logging.warning(
-                                f"target.bam not found for {sample_id}; cannot run SNP analysis"
-                            )
-                            return
+                            self._snp_analysis_running_sample = sample_id
 
                         try:
+                            reference_path = self._locate_reference_for_sample(sample_dir)
+                            if not reference_path:
+                                message = (
+                                    "Reference genome not available; skipping SNP analysis. "
+                                    "Please provide a reference via the workflow CLI."
+                                )
+                                logging.warning(message)
+                                self.send_update(
+                                    UpdateType.WARNING_NOTIFICATION,
+                                    {
+                                        "title": "SNP analysis skipped",
+                                        "message": message,
+                                        "sample_id": sample_id,
+                                        "level": "warning",
+                                    },
+                                    priority=6,
+                                )
+                                return
+
+                            target_bam = sample_dir / "target.bam"
+                            if not target_bam.exists():
+                                message = "target.bam not found; cannot run SNP analysis."
+                                logging.warning(message)
+                                self.send_update(
+                                    UpdateType.WARNING_NOTIFICATION,
+                                    {
+                                        "title": "SNP analysis skipped",
+                                        "message": message,
+                                        "sample_id": sample_id,
+                                        "level": "warning",
+                                    },
+                                    priority=6,
+                                )
+                                return
+
                             logging.info(
                                 f"Starting manual SNP analysis for {sample_id} using reference {reference_path}"
                             )
+                            self.send_update(
+                                UpdateType.WARNING_NOTIFICATION,
+                                {
+                                    "title": "SNP analysis started",
+                                    "message": "SNP analysis is running; this may take several minutes.",
+                                    "sample_id": sample_id,
+                                    "level": "info",
+                                },
+                                priority=6,
+                            )
+
                             snp_result = run_snp_analysis(
                                 sample_dir=str(sample_dir),
                                 threads=4,
                                 force_regenerate=False,
                                 reference=reference_path,
                             )
+
                             if snp_result:
                                 logging.info(
                                     f"SNP analysis completed for {sample_id}; results in {snp_result}"
+                                )
+                                self.send_update(
+                                    UpdateType.WARNING_NOTIFICATION,
+                                    {
+                                        "title": "SNP analysis completed",
+                                        "message": "SNP analysis finished successfully.",
+                                        "sample_id": sample_id,
+                                        "level": "positive",
+                                    },
+                                    priority=6,
                                 )
                             else:
                                 logging.warning(
                                     f"SNP analysis did not produce results for {sample_id}"
                                 )
+                                self.send_update(
+                                    UpdateType.WARNING_NOTIFICATION,
+                                    {
+                                        "title": "SNP analysis warning",
+                                        "message": "SNP analysis finished but did not produce annotated results.",
+                                        "sample_id": sample_id,
+                                        "level": "warning",
+                                    },
+                                    priority=6,
+                                )
                         except Exception as snp_exc:
                             logging.error(
                                 f"Error running SNP analysis for {sample_id}: {snp_exc}", exc_info=True
                             )
+                            self.send_update(
+                                UpdateType.WARNING_NOTIFICATION,
+                                {
+                                    "title": "SNP analysis failed",
+                                    "message": f"Error running SNP analysis: {snp_exc}",
+                                    "sample_id": sample_id,
+                                    "level": "negative",
+                                },
+                                priority=6,
+                            )
+                        finally:
+                            with self._snp_analysis_lock:
+                                self._snp_analysis_running_sample = None
                 except Exception as e:
                     logging.error(f"Error finalizing target.bam for {sample_id}: {e}")
             
