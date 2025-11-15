@@ -135,8 +135,11 @@ def _install_manager_hooks(workflow_runner: Any) -> None:
         logging.debug(f"Failed to install manager hooks: {exc}")
 
 
-def _start_polling_updates(manager: Any, interval_seconds: float = 10.0) -> None:
-    """Start a background thread that polls `manager.get_stats()` and sends GUI updates."""
+def _start_polling_updates(manager: Any, interval_seconds: float = 15.0) -> None:
+    """Start a background thread that polls `manager.get_stats()` and sends GUI updates.
+    
+    Reduced default interval from 10s to 15s to reduce update frequency and prevent queue buildup.
+    """
     import threading
 
     def poll() -> None:

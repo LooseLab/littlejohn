@@ -272,8 +272,10 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                 logging.warning(f"[MGMT] Sample directory not found: {sample_dir}")
                 return
             
-            # Run MGMT refresh directly (already in background)
-            _refresh_mgmt_sync(sample_dir, launcher)
+            # Run MGMT refresh in background thread to avoid blocking GUI
+            import threading
+            thread = threading.Thread(target=_refresh_mgmt_sync, args=(sample_dir, launcher), daemon=True)
+            thread.start()
                 
         except Exception as e:
             logging.exception(f"[MGMT] Refresh failed: {e}")

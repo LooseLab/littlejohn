@@ -1278,7 +1278,7 @@ def _generate_output_files(
                         os.path.join(
                             work_dir,
                             sample_id,
-                            "fusion_candidates_master_processed.csv",
+                            "fusion_candidates_master_processed.pkl",
                         ),
                     )
 
@@ -1316,7 +1316,7 @@ def _generate_output_files(
                     preprocess_fusion_data_standalone(
                         result_all,
                         os.path.join(
-                            work_dir, sample_id, "fusion_candidates_all_processed.csv"
+                            work_dir, sample_id, "fusion_candidates_all_processed.pkl"
                         ),
                     )
 
@@ -1815,10 +1815,25 @@ def preprocess_fusion_data_standalone(
             )
 
         # Save processed data as pickle for efficient loading
+        # Use atomic writes to prevent truncation from read/write clashes
         import pickle
-
-        with open(output_file, "wb") as f:
-            pickle.dump(processed_data, f)
+        
+        # Write to temporary file first, then atomically rename to prevent truncation
+        # This ensures readers never see a partially written file
+        temp_file = output_file + ".tmp"
+        try:
+            with open(temp_file, "wb") as f:
+                pickle.dump(processed_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            # Atomic rename - this is the key to preventing truncation
+            os.replace(temp_file, output_file)
+        except Exception as e:
+            # Clean up temp file on error
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except:
+                    pass
+            raise
         
         # Generate summary files for the summary component
         _generate_fusion_summary_files(output_file, processed_data)

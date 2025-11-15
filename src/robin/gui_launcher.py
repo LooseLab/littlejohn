@@ -144,6 +144,11 @@ class GUILauncher:
         self.total_updates_processed = 0
         # Monotonic tiebreaker for priority queue to avoid tuple comparison of GUIUpdate
         self._update_seq: int = 0
+        
+        # Adaptive throttling and update coalescing
+        self._last_update_times: Dict[UpdateType, float] = {}
+        self._last_queue_size_logged: int = 0
+        self._last_log_time: float = 0.0
 
         # Runtime state
         self._start_time: Optional[float] = None
@@ -576,30 +581,40 @@ class GUILauncher:
     ):
         """Send an update to the GUI without blocking the workflow."""
         try:
-            # Rate limiting: Skip low-priority updates if queue is getting too large
+            current_time = time.time()
             queue_size = self.update_queue.qsize()
-            if queue_size > 100 and priority < 5:
-                logging.error(f"[GUI] Skipping low-priority update due to queue size: {queue_size}")
+            
+            # Adaptive threshold: higher threshold for large workloads
+            # Threshold increases based on queue size to prevent dropping updates during bursts
+            threshold = 500 if queue_size < 200 else 1000
+            
+            # Rate limiting: Skip low-priority updates if queue is getting too large
+            if queue_size > threshold and priority < 5:
+                # Only log when queue size changes significantly to reduce log spam
+                if abs(queue_size - self._last_queue_size_logged) > 50 or (current_time - self._last_log_time) > 10.0:
+                    logging.warning(f"[GUI] Skipping low-priority update due to queue size: {queue_size} (threshold: {threshold})")
+                    self._last_queue_size_logged = queue_size
+                    self._last_log_time = current_time
                 return
             
-            # Rate limiting: Skip duplicate updates of the same type within 1 second
-            current_time = time.time()
-            if hasattr(self, '_last_update_times'):
-                last_time = self._last_update_times.get(update_type, 0)
-                if current_time - last_time < 1.0 and priority < 8:
-                    logging.debug(f"[GUI] Skipping duplicate update: {update_type.value}")
-                    return
-            else:
-                self._last_update_times = {}
+            # Update coalescing: Skip duplicate low-priority updates of the same type within 0.5 seconds
+            # This prevents queue buildup from rapid duplicate updates
+            last_time = self._last_update_times.get(update_type, 0)
+            time_since_last = current_time - last_time
             
-            self._last_update_times[update_type] = current_time
+            if priority < 5 and time_since_last < 0.5:
+                # Skip duplicate low-priority updates within coalescing window
+                return
             
+            # Create and enqueue the current update
             update = GUIUpdate(
                 update_type=update_type,
                 timestamp=current_time,
                 data=data,
                 priority=priority,
             )
+            
+            self._last_update_times[update_type] = current_time
 
             # Use negative priority so higher priority updates come first.
             # Include a monotonically increasing sequence as a tiebreaker so
@@ -607,9 +622,12 @@ class GUILauncher:
             self._update_seq += 1
             self.update_queue.put((-priority, self._update_seq, update))
             self.total_updates_enqueued += 1
-            logging.info(
-                f"[GUI] Enqueued update #{self.total_updates_enqueued}: {update.update_type.value}"
-            )
+            
+            # Reduced logging: only log every 100th update or important updates
+            if self.total_updates_enqueued % 100 == 0 or priority >= 8:
+                logging.debug(
+                    f"[GUI] Enqueued update #{self.total_updates_enqueued}: {update_type.value} (queue: {queue_size})"
+                )
 
         except Exception as e:
             # Don't let update failures affect the workflow
@@ -753,27 +771,54 @@ class GUILauncher:
             logging.error(f"Error handling progress update: {e}")
 
     def _drain_updates_on_ui(self):
-        """Drain queued updates and apply them on the UI thread (called by ui.timer)."""
+        """Drain queued updates and apply them on the UI thread (called by ui.timer).
+        
+        Uses adaptive throttling: processes more updates when queue is large,
+        fewer when queue is small. Batches UI updates for better performance.
+        """
         if not self.gui_ready.is_set():
             return
-        processed_any = False
+        
+        processed_count = 0
+        max_updates_per_cycle = 50  # Limit updates per cycle to prevent UI blocking
+        
         try:
-            while True:
+            queue_size = self.update_queue.qsize()
+            
+            # Adaptive processing: process more updates when queue is large
+            if queue_size > 200:
+                max_updates_per_cycle = 100  # Process more aggressively when backlogged
+            elif queue_size > 100:
+                max_updates_per_cycle = 75
+            elif queue_size < 20:
+                max_updates_per_cycle = 25  # Process fewer when queue is small
+            
+            # Process updates in batch
+            while processed_count < max_updates_per_cycle:
                 try:
                     # Entries are (-priority, seq, GUIUpdate)
                     _, _, update = self.update_queue.get_nowait()
                 except queue.Empty:
                     break
+                
                 self._handle_update(update)
                 self.total_updates_processed += 1
-                processed_any = True
-                logging.info(
-                    f"[GUI] Processed update #{self.total_updates_processed}: {update.update_type.value}"
-                )
+                processed_count += 1
+                
+                # Reduced logging: only log every 50th update or when queue size changes significantly
+                if self.total_updates_processed % 50 == 0:
+                    logging.debug(
+                        f"[GUI] Processed update #{self.total_updates_processed}: {update.update_type.value} (queue: {queue_size})"
+                    )
+            
+            # Note: Timer interval is fixed at 0.5s for consistent performance
+            # Adaptive processing (max_updates_per_cycle) handles queue size variations
+                
         except Exception as e:
             logging.debug(f"[GUI] Error draining updates on UI: {e}")
         finally:
-            if processed_any:
+            # Batch UI update: only call ui.update() once per drain cycle
+            if processed_count > 0:
                 try:
                     ui.update()
                 except Exception:
@@ -1217,9 +1262,9 @@ class GUILauncher:
                 """Setup global timers and update processing."""
                 try:
                     self.gui_ready.set()
-                    # Rate limit GUI updates to prevent system lockup
-                    # Increased from 0.3s to 2.0s to reduce update frequency
-                    app.timer(2.0, self._drain_updates_on_ui, active=True)
+                    # Faster drain rate: 0.5s to keep up with high-volume updates
+                    # The _drain_updates_on_ui method adaptively processes more/fewer updates per cycle
+                    app.timer(0.5, self._drain_updates_on_ui, active=True)
                     
                     # Background master record scanner - scans folder periodically
                     # Runs every 10 seconds to keep master record up to date
@@ -3202,14 +3247,10 @@ class GUILauncher:
                         try:
                             # Run file operations in background threads
                             #import concurrent.futures
-                            #with concurrent.futures.ThreadPoolExecutor() as executor:
-                            #    files_future = executor.submit(_refresh_files_list_sync)
-                            #    csv_future = executor.submit(_refresh_csv_summary_sync)
-                                
-                            #    files_result = await asyncio.wrap_future(files_future)
-                            #    csv_result = await asyncio.wrap_future(csv_future)
-                            files_result = _refresh_files_list_sync()
-                            csv_result = _refresh_csv_summary_sync()
+                            # Run file I/O operations in background threads to avoid blocking GUI
+                            import asyncio
+                            files_result = await asyncio.to_thread(_refresh_files_list_sync)
+                            csv_result = await asyncio.to_thread(_refresh_csv_summary_sync)
                             
                             
                             # Update UI with results
@@ -3254,21 +3295,27 @@ class GUILauncher:
                                     pass
                                 _notify_state["files_error"] = True
 
-                        # Refresh master.csv summary
-                        try:
-                            rows2 = _refresh_csv_summary_sync()
-                            summary_table.rows = rows2
-                            summary_table.update()
-                        except Exception as e:
-                            if not _notify_state["csv_error"]:
-                                try:
-                                    ui.notify(
-                                        f"Failed to read master.csv for {sample_id}: {e}",
-                                        type="warning",
-                                    )
-                                except Exception:
-                                    pass
-                                _notify_state["csv_error"] = True
+                        # Refresh master.csv summary (non-blocking)
+                        def update_csv_summary():
+                            try:
+                                rows2 = _refresh_csv_summary_sync()
+                                summary_table.rows = rows2
+                                summary_table.update()
+                            except Exception as e:
+                                if not _notify_state["csv_error"]:
+                                    try:
+                                        ui.notify(
+                                            f"Failed to read master.csv for {sample_id}: {e}",
+                                            type="warning",
+                                        )
+                                    except Exception:
+                                        pass
+                                    _notify_state["csv_error"] = True
+                        
+                        # Run in background thread to avoid blocking GUI
+                        import threading
+                        thread = threading.Thread(target=update_csv_summary, daemon=True)
+                        thread.start()
 
                     # Show content and hide loading after initial data load (only when showing loading)
                     if show_loading and loading_container:
@@ -3407,8 +3454,8 @@ class GUILauncher:
                         fusion_data_loaded = False
                         fusion_data = None
                         try:
-                            target_file = sample_dir / "fusion_candidates_master_processed.csv"
-                            genome_file = sample_dir / "fusion_candidates_all_processed.csv"
+                            target_file = sample_dir / "fusion_candidates_master_processed.pkl"
+                            genome_file = sample_dir / "fusion_candidates_all_processed.pkl"
                             
                             # Try to load target panel data first, then genome-wide
                             if target_file.exists():
@@ -3852,6 +3899,29 @@ class GUILauncher:
                             coverage_file = bed_coverage_file
                         
                         if coverage_file:
+                            # Load coverage data asynchronously to avoid blocking GUI
+                            def load_coverage_data():
+                                try:
+                                    import pandas as pd
+                                    return pd.read_csv(coverage_file)
+                                except Exception as e:
+                                    logging.error(f"Failed to load coverage file {coverage_file}: {e}")
+                                    return None
+                            
+                            # Create placeholder table that will be updated when data loads
+                            coverage_table_placeholder = ui.table(
+                                columns=[
+                                    {"name": "gene", "label": "Gene", "field": "gene"},
+                                    {"name": "chrom", "label": "Chrom", "field": "chrom"},
+                                    {"name": "startpos", "label": "Start", "field": "startpos"},
+                                    {"name": "endpos", "label": "End", "field": "endpos"},
+                                    {"name": "coverage", "label": "Coverage", "field": "coverage"},
+                                ],
+                                rows=[],
+                            ).classes("w-full")
+                            
+                            # Load coverage data synchronously (fast enough for typical file sizes)
+                            # Note: This runs during page creation, not during user interaction
                             try:
                                 import pandas as pd
                                 df = pd.read_csv(coverage_file)
@@ -4126,7 +4196,6 @@ class GUILauncher:
                                             # Add summary
                                             total_genes = len(table_data)
                                             ui.label(f"Total target genes: {total_genes}").classes("text-xs text-gray-500 mt-2")
-                                        
                             except Exception as e:
                                 logging.warning(f"Could not load target gene table: {e}")
 
@@ -4674,7 +4743,7 @@ class GUILauncher:
             
             # Define job type patterns and their corresponding files
             job_patterns = {
-                "fusion": ["fusion_candidates_master_processed.csv", "fusion_candidates_all_processed.csv", "fusion_summary.csv"],
+                "fusion": ["fusion_candidates_master_processed.pkl", "fusion_candidates_all_processed.pkl", "fusion_summary.csv"],
                 "cnv": ["cnv_results.csv", "cnv_summary.csv", "copy_numbers.pkl"],
                 "mgmt": ["final_mgmt.csv", "*_mgmt.csv"],
                 "coverage": ["coverage_summary.csv", "coverage_results.csv"],

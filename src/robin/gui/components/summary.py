@@ -1248,7 +1248,7 @@ def _extract_fusion_data(sample_dir: Path) -> Dict[str, Any]:
         logging.info(f"[Summary] Found fusion files: {[f.name for f in fusion_files]}")
         
         # Debug: Check if genome-wide processed file exists
-        genome_file = sample_dir / "fusion_candidates_all_processed.csv"
+        genome_file = sample_dir / "fusion_candidates_all_processed.pkl"
         logging.info(f"[Summary] Genome-wide processed file exists: {genome_file.exists()}")
         if genome_file.exists():
             logging.info(f"[Summary] Genome-wide processed file size: {genome_file.stat().st_size} bytes")
@@ -1309,8 +1309,8 @@ def _extract_fusion_data(sample_dir: Path) -> Dict[str, Any]:
         # If still no data, try to load directly from pickle files and count gene_pairs
         try:
             from robin.gui.components.fusion import _load_processed_pickle, _count_unique_fusion_pairs, _count_unique_fusion_groups
-            target_file = sample_dir / "fusion_candidates_master_processed.csv"
-            genome_file = sample_dir / "fusion_candidates_all_processed.csv"
+            target_file = sample_dir / "fusion_candidates_master_processed.pkl"
+            genome_file = sample_dir / "fusion_candidates_all_processed.pkl"
             
             
             target_data = _load_processed_pickle(target_file)

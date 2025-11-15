@@ -272,8 +272,8 @@ def _generate_summary_files_from_pickle(sample_dir: Path, force_regenerate: bool
             pass  # Will overwrite existing file
         
         # Load data from pickle files
-        target_file = sample_dir / "fusion_candidates_master_processed.csv"
-        genome_file = sample_dir / "fusion_candidates_all_processed.csv"
+        target_file = sample_dir / "fusion_candidates_master_processed.pkl"
+        genome_file = sample_dir / "fusion_candidates_all_processed.pkl"
         
         logging.info(f"[Fusion] Checking for target file: {target_file}")
         logging.info(f"[Fusion] Target file exists: {target_file.exists()}")
@@ -355,7 +355,7 @@ def _generate_summary_files_from_pickle(sample_dir: Path, force_regenerate: bool
 def _load_processed_pickle(file_path: Path) -> Optional[Dict[str, Any]]:
     """Load the preprocessed fusion data structure written by preprocess_fusion_data_standalone.
 
-    Note: Although the extension is .csv, the file is a pickle per current pipeline.
+    Note: The file is a pickle format with .pkl extension.
     """
     try:
         logging.info(f"[Fusion] Attempting to load pickle from: {file_path}")
@@ -2056,8 +2056,8 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
     """Build the Fusion UI section (target panel and genome-wide only).
 
     Expects files written by fusion_work.preprocess_fusion_data_standalone:
-    - fusion_candidates_master_processed.csv (pickle payload)
-    - fusion_candidates_all_processed.csv (pickle payload)
+    - fusion_candidates_master_processed.pkl (pickle format)
+    - fusion_candidates_all_processed.pkl (pickle format)
     """
     logging.info(f"[Fusion] add_fusion_section() called with sample_dir: {sample_dir}")
     
@@ -2150,8 +2150,8 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             MAX_BREAKPOINT_DISTANCE = 100  # Maximum distance for breakpoint clustering
             
             # Load target panel processed
-            target_file = sample_dir / "fusion_candidates_master_processed.csv"
-            genome_file = sample_dir / "fusion_candidates_all_processed.csv"
+            target_file = sample_dir / "fusion_candidates_master_processed.pkl"
+            genome_file = sample_dir / "fusion_candidates_all_processed.pkl"
             
             logging.info(f"[Fusion] Target file: {target_file}")
             logging.info(f"[Fusion] Genome file: {genome_file}")
@@ -2650,12 +2650,12 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
         # Prime summary values on first load
         try:
             t0 = _load_processed_pickle(
-                (sample_dir / "fusion_candidates_master_processed.csv")
+                (sample_dir / "fusion_candidates_master_processed.pkl")
                 if sample_dir
                 else Path("/dev/null")
             )
             g0 = _load_processed_pickle(
-                (sample_dir / "fusion_candidates_all_processed.csv")
+                (sample_dir / "fusion_candidates_all_processed.pkl")
                 if sample_dir
                 else Path("/dev/null")
             )
