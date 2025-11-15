@@ -407,7 +407,7 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                     elif not bai_path.exists():
                         logging.debug(f"[MGMT] BAM file exists but index (.bai) not found: {bam_path}")
                     else:
-                        # Try to open and validate the BAM file
+                        # Try to open and validate the BAM file and its index
                         import pysam
                         try:
                             with pysam.AlignmentFile(str(bam_path), "rb") as test_bam:
@@ -415,8 +415,15 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                                 _ = test_bam.header
                                 # Verify file contains alignment data by checking if it has references
                                 if test_bam.references:
-                                    bam_is_valid = True
-                                    logging.debug(f"[MGMT] BAM file validated successfully: {bam_path}")
+                                    # Verify the index is actually readable
+                                    try:
+                                        # Check if index is accessible
+                                        test_bam.check_index()
+                                        bam_is_valid = True
+                                        logging.debug(f"[MGMT] BAM file and index validated successfully: {bam_path}")
+                                    except Exception as idx_error:
+                                        # Index exists but is not readable/invalid
+                                        logging.debug(f"[MGMT] BAM index exists but is invalid: {bam_path} - {idx_error}")
                                 else:
                                     logging.debug(f"[MGMT] BAM file has no references (empty or invalid): {bam_path}")
                         except ValueError as e:

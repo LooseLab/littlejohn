@@ -129,11 +129,71 @@ def locus_figure(
     # Final safeguard: ensure all argv entries are plain strings
     argv = [str(a) for a in argv]
 
-    # Check if BAM file is indexed before calling methylartist
+    # Check if BAM file is indexed and the index is valid before calling methylartist
     import os
+    import pysam
+    import logging
+    
     bai_path = f"{bam_path}.bai"
     if not os.path.exists(bai_path):
         raise RuntimeError(f"BAM file is not indexed: {bam_path}. Index file (.bai) not found.")
+    
+    # Check if index file has content (not empty)
+    try:
+        bai_size = os.path.getsize(bai_path)
+        if bai_size == 0:
+            raise RuntimeError(
+                f"BAM index file is empty: {bai_path}. "
+                f"The index file exists but has no content. "
+                f"This may indicate the index creation was interrupted. "
+                f"Try regenerating the index."
+            )
+    except OSError as e:
+        logging.warning(f"[MGMT] Could not check index file size: {bai_path} - {e}")
+        # Continue anyway - might be a permission issue
+    
+    # Verify the index is actually readable and valid
+    try:
+        with pysam.AlignmentFile(bam_path, "rb") as test_bam:
+            # Try to access the header first
+            _ = test_bam.header
+            
+            # Verify file has references
+            if not test_bam.references:
+                raise RuntimeError(
+                    f"BAM file has no references: {bam_path}. "
+                    f"The file may be empty or corrupted."
+                )
+            
+            # Verify the index is actually readable
+            try:
+                test_bam.check_index()
+            except AttributeError:
+                # Older pysam versions might not have check_index
+                # Try to actually use the index by fetching a small region
+                first_chrom = test_bam.references[0]
+                # Try fetching a small region - this will fail if index is invalid
+                list(test_bam.fetch(first_chrom, 0, min(1000, test_bam.get_reference_length(first_chrom) or 1000)))
+            except Exception as idx_error:
+                logging.warning(f"[MGMT] BAM index exists but is not readable: {bai_path} - {idx_error}")
+                raise RuntimeError(
+                    f"BAM file index is invalid or corrupted: {bam_path}. "
+                    f"The index file exists but cannot be read. "
+                    f"Error: {idx_error}. "
+                    f"This may indicate the index is incomplete or corrupted. "
+                    f"Try regenerating the index with: pysam.index('{bam_path}')"
+                )
+    except RuntimeError:
+        # Re-raise our custom RuntimeError
+        raise
+    except Exception as e:
+        # Other errors (file not readable, etc.)
+        logging.warning(f"[MGMT] Failed to validate BAM index: {bam_path} - {e}")
+        raise RuntimeError(
+            f"BAM file index validation failed: {bam_path}. "
+            f"Error: {e}. "
+            f"The index file exists but may be invalid or the BAM file may be corrupted."
+        )
 
     captured = {"fig": None}
 
