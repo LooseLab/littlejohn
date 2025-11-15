@@ -394,7 +394,40 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                         pass
 
             bam_path = sample_dir / "mgmt_sorted.bam"
+            bai_path = sample_dir / "mgmt_sorted.bam.bai"
+            
+            # Validate BAM file before attempting to use it
+            # Check if file exists, has content, is indexed, and is valid
+            bam_is_valid = False
             if bam_path.exists():
+                try:
+                    # Check file size (must be non-zero)
+                    if bam_path.stat().st_size == 0:
+                        logging.debug(f"[MGMT] BAM file exists but is empty: {bam_path}")
+                    elif not bai_path.exists():
+                        logging.debug(f"[MGMT] BAM file exists but index (.bai) not found: {bam_path}")
+                    else:
+                        # Try to open and validate the BAM file
+                        import pysam
+                        try:
+                            with pysam.AlignmentFile(str(bam_path), "rb") as test_bam:
+                                # Verify header can be read
+                                _ = test_bam.header
+                                # Verify file contains alignment data by checking if it has references
+                                if test_bam.references:
+                                    bam_is_valid = True
+                                    logging.debug(f"[MGMT] BAM file validated successfully: {bam_path}")
+                                else:
+                                    logging.debug(f"[MGMT] BAM file has no references (empty or invalid): {bam_path}")
+                        except ValueError as e:
+                            # This catches "file does not contain alignment data" errors
+                            logging.debug(f"[MGMT] BAM file is not valid (no alignment data): {bam_path} - {e}")
+                        except Exception as e:
+                            logging.debug(f"[MGMT] BAM file validation failed: {bam_path} - {e}")
+                except Exception as e:
+                    logging.debug(f"[MGMT] Error checking BAM file: {bam_path} - {e}")
+            
+            if bam_is_valid:
                 try:
                     from robin.analysis.methylation_wrapper import (
                         locus_figure,
@@ -457,8 +490,18 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                     mgmt_mpl.figure = fig
                     mgmt_mpl.update()
             else:
-                logging.warning(f"[MGMT] BAM file not found: {bam_path}")
-                # Create a placeholder plot indicating BAM file is missing
+                # BAM file doesn't exist or is not valid (incomplete, not indexed, or corrupted)
+                if not bam_path.exists():
+                    logging.debug(f"[MGMT] BAM file not found: {bam_path}")
+                    status_msg = "MGMT BAM file not found\n(mgmt_sorted.bam)"
+                    status_color = 'orange'
+                else:
+                    # File exists but is invalid (empty, not indexed, or corrupted)
+                    logging.debug(f"[MGMT] BAM file exists but is not ready for visualization: {bam_path}")
+                    status_msg = "MGMT BAM file is being processed\n(please wait...)"
+                    status_color = 'blue'
+                
+                # Create a placeholder plot indicating BAM file status
                 import matplotlib.pyplot as plt
                 if hasattr(mgmt_mpl, 'figure') and mgmt_mpl.figure is not None:
                     try:
@@ -466,9 +509,9 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                     except Exception:
                         pass
                 fig, ax = plt.subplots(figsize=(24, 12))
-                ax.text(0.5, 0.5, "MGMT BAM file not found\n(mgmt_sorted.bam)", 
+                ax.text(0.5, 0.5, status_msg, 
                        ha='center', va='center', transform=ax.transAxes,
-                       fontsize=10, color='orange')
+                       fontsize=10, color=status_color)
                 ax.set_xlim(0, 1)
                 ax.set_ylim(0, 1)
                 ax.axis('off')
