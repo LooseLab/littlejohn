@@ -145,14 +145,78 @@ def locus_figure(
         try:
             runpy.run_path(cli, run_name="__main__")
         except SystemExit as e:
-            # Convert SystemExit to RuntimeError for better error handling
-            error_msg = str(e) if str(e) else "methylartist exited unexpectedly"
-            raise RuntimeError(f"methylartist failed: {error_msg}")
+            # SystemExit(0) is normal for successful completion
+            # Only raise error if exit code is non-zero
+            exit_code = e.code if hasattr(e, 'code') else 0
+            if exit_code != 0:
+                error_msg = str(e) if str(e) else f"methylartist exited with code {exit_code}"
+                raise RuntimeError(f"methylartist failed: {error_msg}")
 
-    if captured["fig"] is None:
-        raise RuntimeError("methylartist locus did not produce a figure.")
-
+    # Try to get figure from capture first
     fig = captured["fig"]
+    
+    # Fallback: if savefig wasn't called, try to get the figure from matplotlib's figure manager
+    if fig is None:
+        import matplotlib.pyplot as plt
+        import logging
+        
+        # Try to get the current figure
+        try:
+            # Get all figure numbers
+            figure_numbers = plt.get_fignums()
+            if figure_numbers:
+                # Get the most recent figure (highest number)
+                latest_fig_num = max(figure_numbers)
+                fig = plt.figure(latest_fig_num)
+                logging.debug(f"[MGMT] Captured figure from matplotlib figure manager (figure {latest_fig_num})")
+            else:
+                # Try to get current figure (might be None)
+                fig = plt.gcf()
+                if fig and len(fig.get_axes()) > 0:
+                    logging.debug(f"[MGMT] Captured current figure from matplotlib")
+                else:
+                    fig = None
+        except Exception as e:
+            logging.debug(f"[MGMT] Failed to get figure from matplotlib figure manager: {e}")
+            fig = None
+    
+    if fig is None:
+        # Provide more helpful error message
+        import logging
+        logging.error(f"[MGMT] methylartist locus did not produce a figure. "
+                     f"BAM: {bam_path}, Interval: {interval}")
+        raise RuntimeError(
+            f"methylartist locus did not produce a figure. "
+            f"This may indicate that the BAM file has no reads in the specified interval "
+            f"({interval}) or methylartist encountered an error. "
+            f"Check that the BAM file contains methylation data (MM/ML tags) for this region."
+        )
+    
+    # Verify the figure has content (axes with data)
+    try:
+        axes = fig.get_axes()
+        if not axes:
+            import logging
+            logging.warning(f"[MGMT] Figure has no axes - methylartist may have produced an empty figure")
+            # Still return the figure - let the caller handle empty figures
+        else:
+            # Check if at least one axis has data
+            has_data = False
+            for ax in axes:
+                if hasattr(ax, 'has_data') and ax.has_data():
+                    has_data = True
+                    break
+                # Check if axis has any artists (lines, patches, etc.)
+                if len(ax.get_children()) > 0:
+                    has_data = True
+                    break
+            if not has_data:
+                import logging
+                logging.debug(f"[MGMT] Figure axes exist but contain no data - this may indicate no reads in interval")
+    except Exception as e:
+        import logging
+        logging.debug(f"[MGMT] Could not verify figure content: {e}")
+        # Continue anyway - figure might still be valid
 
     # Always add MGMT CpG site annotations if we're in the MGMT interval
     # Check if interval matches MGMT region (chr10:129466536-129467536)
