@@ -454,7 +454,11 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                         ],
                         site_rows=site_rows,
                     )
-                    logging.debug(f"[MGMT] Locus figure created successfully, figure number: {fig.number}")
+                    if fig is not None:
+                        fig_number = getattr(fig, 'number', 'unknown')
+                        logging.debug(f"[MGMT] Locus figure created successfully, figure number: {fig_number}")
+                    else:
+                        logging.warning("[MGMT] Locus figure creation returned None")
                     
                     # Update matplotlib element with the figure
                     # Suppress GridSpec warnings when updating figure
