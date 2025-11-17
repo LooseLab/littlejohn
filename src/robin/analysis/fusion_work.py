@@ -1385,9 +1385,211 @@ def _save_fusion_metadata(
         # Don't raise - just log the error so processing can continue
 
 
+def _migrate_old_fusion_metadata(metadata_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Migrate old format fusion metadata to new format for backward compatibility.
+    
+    This function handles data generated from the main branch and converts it
+    to be compatible with the fusion_bug branch format.
+    
+    Args:
+        metadata_dict: Dictionary loaded from JSON file (may be old format)
+        
+    Returns:
+        Updated dictionary compatible with current FusionMetadata structure
+    """
+    migrated = metadata_dict.copy()
+    
+    # Ensure all required fields exist with defaults
+    required_fields = {
+        "sample_id": "unknown",
+        "file_path": "",
+        "analysis_timestamp": time.time(),
+        "target_fusion_path": None,
+        "genome_wide_fusion_path": None,
+        "analysis_results": {},
+        "processing_steps": [],
+        "error_message": None,
+        "fusion_data": {},
+        "target_panel": None,
+    }
+    
+    # Fill in missing fields
+    for field, default_value in required_fields.items():
+        if field not in migrated:
+            migrated[field] = default_value
+    
+    # Ensure processing_steps is a list
+    if not isinstance(migrated.get("processing_steps"), list):
+        migrated["processing_steps"] = []
+    
+    # Ensure analysis_results is a dict
+    if not isinstance(migrated.get("analysis_results"), dict):
+        migrated["analysis_results"] = {}
+    
+    # Ensure fusion_data is a dict with required structure
+    if not isinstance(migrated.get("fusion_data"), dict):
+        migrated["fusion_data"] = {}
+    
+    fusion_data = migrated["fusion_data"]
+    
+    # Ensure required fusion_data keys exist
+    if "target_candidates" not in fusion_data:
+        fusion_data["target_candidates"] = []
+    if "genome_wide_candidates" not in fusion_data:
+        fusion_data["genome_wide_candidates"] = []
+    
+    # Migrate old CSV-based data to fusion_data structure if needed
+    # Check if we have CSV files but no fusion_data entries
+    # Try to determine sample directory from various paths
+    sample_dir = None
+    if metadata_dict.get("target_fusion_path"):
+        sample_dir = os.path.dirname(metadata_dict.get("target_fusion_path"))
+    elif metadata_dict.get("genome_wide_fusion_path"):
+        sample_dir = os.path.dirname(metadata_dict.get("genome_wide_fusion_path"))
+    elif metadata_dict.get("file_path"):
+        # Try to infer from file_path
+        file_path = metadata_dict.get("file_path")
+        if file_path:
+            # Assume work_dir structure: work_dir/sample_id/file.bam
+            potential_dir = os.path.dirname(file_path)
+            if os.path.basename(potential_dir):  # If there's a parent directory
+                sample_dir = potential_dir
+    
+    if sample_dir and os.path.exists(sample_dir):
+        target_csv = os.path.join(sample_dir, "target_fusion.csv")
+        genome_csv = os.path.join(sample_dir, "genome_wide_fusion.csv")
+        
+        # If fusion_data is empty but CSV files exist, try to load from CSVs
+        if (not fusion_data.get("target_candidates") and 
+            not fusion_data.get("genome_wide_candidates") and
+            (os.path.exists(target_csv) or os.path.exists(genome_csv))):
+            
+            logger.info(f"Migrating fusion data from CSV files for {migrated.get('sample_id', 'unknown')}")
+            
+            try:
+                # Load target fusion CSV if it exists
+                if os.path.exists(target_csv):
+                    try:
+                        target_df = pd.read_csv(target_csv)
+                        if not target_df.empty:
+                            fusion_data["target_candidates"] = target_df.to_dict("records")
+                            logger.info(f"Migrated {len(fusion_data['target_candidates'])} target candidates from CSV")
+                    except Exception as e:
+                        logger.warning(f"Could not migrate target fusion CSV: {e}")
+                
+                # Load genome-wide fusion CSV if it exists
+                if os.path.exists(genome_csv):
+                    try:
+                        genome_df = pd.read_csv(genome_csv)
+                        if not genome_df.empty:
+                            fusion_data["genome_wide_candidates"] = genome_df.to_dict("records")
+                            logger.info(f"Migrated {len(fusion_data['genome_wide_candidates'])} genome-wide candidates from CSV")
+                    except Exception as e:
+                        logger.warning(f"Could not migrate genome-wide fusion CSV: {e}")
+                
+                # Update analysis results counts
+                if fusion_data.get("target_candidates") or fusion_data.get("genome_wide_candidates"):
+                    migrated["analysis_results"]["target_candidates_count"] = len(fusion_data.get("target_candidates", []))
+                    migrated["analysis_results"]["genome_wide_candidates_count"] = len(fusion_data.get("genome_wide_candidates", []))
+                    migrated["processing_steps"].append("migrated_from_csv")
+                    
+            except Exception as e:
+                logger.warning(f"Error during CSV migration: {e}")
+    
+    return migrated
+
+
+def _create_metadata_from_csv_files(work_dir: str, sample_id: str) -> Optional[FusionMetadata]:
+    """
+    Create FusionMetadata from CSV files when metadata JSON doesn't exist.
+    This provides backward compatibility for data generated from main branch.
+    
+    Args:
+        work_dir: Working directory
+        sample_id: Sample ID
+        
+    Returns:
+        FusionMetadata object if CSV files found, None otherwise
+    """
+    try:
+        sample_dir = os.path.join(work_dir, sample_id)
+        if not os.path.exists(sample_dir):
+            return None
+        
+        target_csv = os.path.join(sample_dir, "target_fusion.csv")
+        genome_csv = os.path.join(sample_dir, "genome_wide_fusion.csv")
+        
+        # Check if CSV files exist
+        has_target = os.path.exists(target_csv)
+        has_genome = os.path.exists(genome_csv)
+        
+        if not (has_target or has_genome):
+            return None
+        
+        logger.info(f"Creating fusion metadata from CSV files for {sample_id}")
+        
+        # Create new metadata object
+        fusion_metadata = FusionMetadata(
+            sample_id=sample_id,
+            file_path="",  # Unknown for old data
+            analysis_timestamp=time.time(),
+            target_fusion_path=target_csv if has_target else None,
+            genome_wide_fusion_path=genome_csv if has_genome else None,
+            target_panel=None,  # Unknown for old data
+        )
+        
+        # Load CSV data into fusion_data
+        fusion_data = {}
+        
+        if has_target:
+            try:
+                target_df = pd.read_csv(target_csv)
+                if not target_df.empty:
+                    fusion_data["target_candidates"] = target_df.to_dict("records")
+                    logger.info(f"Loaded {len(fusion_data['target_candidates'])} target candidates from CSV")
+            except Exception as e:
+                logger.warning(f"Could not load target fusion CSV: {e}")
+                fusion_data["target_candidates"] = []
+        else:
+            fusion_data["target_candidates"] = []
+        
+        if has_genome:
+            try:
+                genome_df = pd.read_csv(genome_csv)
+                if not genome_df.empty:
+                    fusion_data["genome_wide_candidates"] = genome_df.to_dict("records")
+                    logger.info(f"Loaded {len(fusion_data['genome_wide_candidates'])} genome-wide candidates from CSV")
+            except Exception as e:
+                logger.warning(f"Could not load genome-wide fusion CSV: {e}")
+                fusion_data["genome_wide_candidates"] = []
+        else:
+            fusion_data["genome_wide_candidates"] = []
+        
+        fusion_metadata.fusion_data = fusion_data
+        fusion_metadata.analysis_results = {
+            "target_candidates_count": len(fusion_data.get("target_candidates", [])),
+            "genome_wide_candidates_count": len(fusion_data.get("genome_wide_candidates", [])),
+        }
+        fusion_metadata.processing_steps = ["created_from_csv_files"]
+        
+        # Save the created metadata for future use
+        try:
+            _save_fusion_metadata(fusion_metadata, work_dir, sample_id)
+            logger.info(f"Saved created fusion metadata for {sample_id}")
+        except Exception as e:
+            logger.warning(f"Could not save created metadata: {e}")
+        
+        return fusion_metadata
+        
+    except Exception as e:
+        logger.warning(f"Error creating metadata from CSV files: {e}")
+        return None
+
+
 def _load_fusion_metadata(work_dir: str, sample_id: str) -> Optional[FusionMetadata]:
     """
-    Load existing fusion metadata from disk.
+    Load existing fusion metadata from disk with backward compatibility.
 
     Args:
         work_dir: Working directory
@@ -1402,14 +1604,27 @@ def _load_fusion_metadata(work_dir: str, sample_id: str) -> Optional[FusionMetad
         metadata_path = os.path.join(sample_dir, f"{sample_id}_fusion_metadata.json")
 
         if not os.path.exists(metadata_path):
-            return None
+            # Try to create metadata from CSV files if they exist (backward compatibility)
+            return _create_metadata_from_csv_files(work_dir, sample_id)
 
         # Load from JSON file
         with open(metadata_path, "r") as f:
             metadata_dict = json.load(f)
 
+        # Migrate old format to new format if needed
+        metadata_dict = _migrate_old_fusion_metadata(metadata_dict)
+
         # Convert dictionary back to FusionMetadata object
-        fusion_metadata = FusionMetadata(**metadata_dict)
+        try:
+            fusion_metadata = FusionMetadata(**metadata_dict)
+        except TypeError as e:
+            # If there are extra fields in the old format, filter them out
+            logger.warning(f"Extra fields in metadata, filtering: {e}")
+            # Get only the fields that FusionMetadata expects
+            from dataclasses import fields
+            valid_fields = {f.name for f in fields(FusionMetadata)}
+            filtered_dict = {k: v for k, v in metadata_dict.items() if k in valid_fields}
+            fusion_metadata = FusionMetadata(**filtered_dict)
 
         # Ensure the loaded metadata has the correct structure
         if (
@@ -1424,6 +1639,14 @@ def _load_fusion_metadata(work_dir: str, sample_id: str) -> Optional[FusionMetad
         if "genome_wide_candidates" not in fusion_metadata.fusion_data:
             fusion_metadata.fusion_data["genome_wide_candidates"] = []
 
+        # Save migrated metadata back to disk if migration occurred
+        if "migrated_from_csv" in fusion_metadata.processing_steps:
+            try:
+                _save_fusion_metadata(fusion_metadata, work_dir, sample_id)
+                logger.info(f"Saved migrated fusion metadata for {sample_id}")
+            except Exception as e:
+                logger.warning(f"Could not save migrated metadata: {e}")
+
         logger.debug(f"Loaded fusion metadata from {metadata_path}")
         logger.debug(
             f"Existing data: {len(fusion_metadata.fusion_data.get('target_candidates', []))} target, {len(fusion_metadata.fusion_data.get('genome_wide_candidates', []))} genome-wide"
@@ -1433,6 +1656,8 @@ def _load_fusion_metadata(work_dir: str, sample_id: str) -> Optional[FusionMetad
 
     except Exception as e:
         logger.warning(f"Error loading fusion metadata: {str(e)}")
+        import traceback
+        logger.debug(f"Traceback: {traceback.format_exc()}")
         return None
 
 
