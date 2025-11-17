@@ -517,23 +517,36 @@ class CoverageSection(ReportSection):
         """Add the detailed coverage analysis section."""
         if not hasattr(self, "cov_df_main"):
             return
-        # Create plots and convert to Images with specified dimensions
-        chrom_plot = Image(
-            self._create_chromosome_coverage_plot(), width=6 * inch, height=3 * inch
-        )
-        target_plot = Image(
-            self._create_target_coverage_plot(), width=6 * inch, height=3 * inch
-        )
-        box_plot = Image(self._create_target_boxplot(), width=6 * inch, height=3 * inch)
+        try:
+            # Create plots and convert to Images with specified dimensions
+            chrom_buf = self._create_chromosome_coverage_plot()
+            target_buf = self._create_target_coverage_plot()
+            box_buf = self._create_target_boxplot()
+            
+            # Validate buffers before creating Image objects
+            if chrom_buf and chrom_buf.getvalue():
+                chrom_plot = Image(chrom_buf, width=6 * inch, height=3 * inch)
+                self.elements.append(chrom_plot)
+            else:
+                logger.warning("Skipping chromosome coverage plot - invalid buffer")
+            
+            if target_buf and target_buf.getvalue():
+                target_plot = Image(target_buf, width=6 * inch, height=3 * inch)
+                self.elements.append(target_plot)
+            else:
+                logger.warning("Skipping target coverage plot - invalid buffer")
+            
+            if box_buf and box_buf.getvalue():
+                box_plot = Image(box_buf, width=6 * inch, height=3 * inch)
+                self.elements.append(box_plot)
+            else:
+                logger.warning("Skipping box plot - invalid buffer")
 
-        self.elements.append(chrom_plot)
-        # Add target coverage plot
-        self.elements.append(target_plot)
-
-        self.elements.append(box_plot)
-
-        # Add coverage distribution statistics
-        self._add_coverage_distribution()
+            # Add coverage distribution statistics
+            self._add_coverage_distribution()
+        except Exception as e:
+            logger.error(f"Error processing detailed coverage section: {str(e)}")
+            # Continue execution - don't break the entire report
 
     def _add_coverage_distribution(self):
         """Add coverage distribution analysis."""
