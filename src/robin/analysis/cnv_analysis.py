@@ -817,16 +817,17 @@ def save_analysis_counter(sample_id: str, counter: int, work_dir: str, logger) -
         logger.error(f"Error saving counter for {sample_id}: {e}")
 
 
-def find_significant_regions(values, chrom):
+def find_significant_regions(values, chrom, bin_width):
     """
-    Find regions with significant CNV changes.
+    Find regions with significant CNV changes and merge adjacent regions.
 
     Args:
         values: CNV values for a chromosome
         chrom: Chromosome name
+        bin_width: Width of bins in base pairs
 
     Returns:
-        List of significant regions
+        List of significant regions (merged adjacent regions)
     """
     regions = []
     threshold = 0.5  # CNV change threshold
@@ -835,20 +836,50 @@ def find_significant_regions(values, chrom):
     values_array = np.array(values)
     significant_indices = np.where(np.abs(values_array) > threshold)[0]
 
-    for i in significant_indices:
-        regions.append(
-            {
-                "chromosome": chrom,
-                "start": i * 1000000,  # Approximate position
-                "end": (i + 1) * 1000000,
-                "type": "gain" if values_array[i] > 0 else "loss",
-            }
-        )
+    # If no significant regions, return empty list
+    if len(significant_indices) == 0:
+        return regions
+
+    # Merge adjacent indices into continuous regions
+    current_start_idx = significant_indices[0]
+    current_type = "gain" if values_array[significant_indices[0]] > 0 else "loss"
+
+    for i in range(1, len(significant_indices)):
+        idx = significant_indices[i]
+        prev_idx = significant_indices[i - 1]
+        idx_type = "gain" if values_array[idx] > 0 else "loss"
+
+        # If adjacent and same type, continue the region
+        if idx == prev_idx + 1 and idx_type == current_type:
+            continue
+        else:
+            # Save the previous region
+            regions.append(
+                {
+                    "chromosome": chrom,
+                    "start": current_start_idx * bin_width,
+                    "end": (significant_indices[i - 1] + 1) * bin_width,
+                    "type": current_type,
+                }
+            )
+            # Start new region
+            current_start_idx = idx
+            current_type = idx_type
+
+    # Don't forget the last region
+    regions.append(
+        {
+            "chromosome": chrom,
+            "start": current_start_idx * bin_width,
+            "end": (significant_indices[-1] + 1) * bin_width,
+            "type": current_type,
+        }
+    )
 
     return regions
 
 
-def generate_bed_files(bed_dir, analysis_counter, breakpoints, cnv_data, logger):
+def generate_bed_files(bed_dir, analysis_counter, breakpoints, cnv_data, bin_width, logger):
     """
     Generate BED files for CNV regions and breakpoints.
 
@@ -857,6 +888,7 @@ def generate_bed_files(bed_dir, analysis_counter, breakpoints, cnv_data, logger)
         analysis_counter: Current analysis counter
         breakpoints: Detected breakpoints
         cnv_data: CNV data
+        bin_width: Width of bins in base pairs
         logger: Logger instance
     """
     try:
@@ -866,7 +898,7 @@ def generate_bed_files(bed_dir, analysis_counter, breakpoints, cnv_data, logger)
             for chrom, values in cnv_data.items():
                 if len(values) > 0:
                     # Find regions with significant CNV changes
-                    significant_regions = find_significant_regions(values, chrom)
+                    significant_regions = find_significant_regions(values, chrom, bin_width)
                     for region in significant_regions:
                         f.write(
                             f"{chrom}\t{region['start']}\t{region['end']}\t{region['type']}\n"
@@ -977,7 +1009,7 @@ def save_cnv_files(
         os.makedirs(bed_dir, exist_ok=True)
 
         # Generate BED files for CNV regions and breakpoints
-        generate_bed_files(bed_dir, analysis_counter, breakpoints, result3_cnv, logger)
+        generate_bed_files(bed_dir, analysis_counter, breakpoints, result3_cnv, bin_width, logger)
 
         logger.debug(f"Saved all CNV files to {sample_dir}")
 
