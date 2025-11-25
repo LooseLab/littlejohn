@@ -1066,7 +1066,7 @@ def accumulate_fusion_candidates(
             # Save accumulated metadata
             _save_fusion_metadata(fusion_metadata, work_dir, sample_id)
             
-            # Generate output files with accumulated data
+            # Generate output files with accumulated data (includes fusion breakpoint BED)
             _generate_output_files(sample_id, fusion_metadata.analysis_results, fusion_metadata, work_dir)
             
             # Clean up staging files
@@ -1326,6 +1326,9 @@ def _generate_output_files(
         with open(sv_count_file, "w") as f:
             f.write("0")
 
+    # Generate fusion breakpoint BED file
+    _generate_fusion_breakpoint_bed(sample_id, fusion_metadata, work_dir)
+
     return {
         "target_candidates_path": os.path.join(
             work_dir, sample_id, "fusion_candidates_master.csv"
@@ -1334,6 +1337,178 @@ def _generate_output_files(
             work_dir, sample_id, "fusion_candidates_all.csv"
         ),
     }
+
+
+def _get_cnv_bin_width(work_dir: str, sample_id: str) -> int:
+    """
+    Try to load bin_width from CNV analysis results if available.
+    
+    Args:
+        work_dir: Working directory
+        sample_id: Sample ID
+        
+    Returns:
+        bin_width in base pairs, or default 10000 (10kb) if not available
+    """
+    try:
+        sample_dir = os.path.join(work_dir, sample_id)
+        cnv_dict_path = os.path.join(sample_dir, "CNV_dict.npy")
+        
+        if os.path.exists(cnv_dict_path):
+            cnv_dict = np.load(cnv_dict_path, allow_pickle=True).item()
+            bin_width = cnv_dict.get("bin_width")
+            if bin_width and bin_width > 0:
+                logger.debug(f"Loaded bin_width={bin_width} from CNV analysis")
+                return int(bin_width)
+    except Exception as e:
+        logger.debug(f"Could not load bin_width from CNV analysis: {e}")
+    
+    # Default to 10kb if CNV data not available
+    default_bin_width = 10000
+    logger.debug(f"Using default bin_width={default_bin_width}")
+    return default_bin_width
+
+
+def _extract_fusion_breakpoints(fusion_metadata: FusionMetadata) -> List[Dict[str, Any]]:
+    """
+    Extract fusion breakpoint coordinates from fusion metadata.
+    
+    Args:
+        fusion_metadata: FusionMetadata object with fusion candidates
+        
+    Returns:
+        List of dictionaries with fusion breakpoint information
+    """
+    breakpoints = []
+    breakpoint_set = set()  # For deduplication
+    
+    fusion_data = fusion_metadata.fusion_data or {}
+    
+    # Process target candidates
+    target_candidates = fusion_data.get("target_candidates", [])
+    if target_candidates:
+        if isinstance(target_candidates, list):
+            target_df = pd.DataFrame(target_candidates)
+        else:
+            target_df = target_candidates
+        
+        if not target_df.empty and "reference_start" in target_df.columns:
+            # Group by read_id to get fusion pairs
+            for read_id, read_group in target_df.groupby("read_id", observed=True):
+                if len(read_group) >= 2:
+                    # Extract breakpoint coordinates for each gene alignment
+                    for _, row in read_group.iterrows():
+                        chrom = row.get("reference_id", "Unknown")
+                        start = int(row.get("reference_start", 0))
+                        end = int(row.get("reference_end", 0))
+                        gene = row.get("col4", "Unknown")
+                        
+                        if start > 0 and end > start:
+                            bp_key = (chrom, start, end)
+                            if bp_key not in breakpoint_set:
+                                breakpoint_set.add(bp_key)
+                                breakpoints.append({
+                                    "chromosome": chrom,
+                                    "start": start,
+                                    "end": end,
+                                    "gene": gene,
+                                    "read_id": read_id,
+                                    "source": "target"
+                                })
+    
+    # Process genome-wide candidates
+    genome_wide_candidates = fusion_data.get("genome_wide_candidates", [])
+    if genome_wide_candidates:
+        if isinstance(genome_wide_candidates, list):
+            genome_df = pd.DataFrame(genome_wide_candidates)
+        else:
+            genome_df = genome_wide_candidates
+        
+        if not genome_df.empty and "reference_start" in genome_df.columns:
+            # Group by read_id to get fusion pairs
+            for read_id, read_group in genome_df.groupby("read_id", observed=True):
+                if len(read_group) >= 2:
+                    # Extract breakpoint coordinates for each gene alignment
+                    for _, row in read_group.iterrows():
+                        chrom = row.get("reference_id", "Unknown")
+                        start = int(row.get("reference_start", 0))
+                        end = int(row.get("reference_end", 0))
+                        gene = row.get("col4", "Unknown")
+                        
+                        if start > 0 and end > start:
+                            bp_key = (chrom, start, end)
+                            if bp_key not in breakpoint_set:
+                                breakpoint_set.add(bp_key)
+                                breakpoints.append({
+                                    "chromosome": chrom,
+                                    "start": start,
+                                    "end": end,
+                                    "gene": gene,
+                                    "read_id": read_id,
+                                    "source": "genome_wide"
+                                })
+    
+    return breakpoints
+
+
+def _generate_fusion_breakpoint_bed(
+    sample_id: str,
+    fusion_metadata: FusionMetadata,
+    work_dir: str,
+) -> None:
+    """
+    Generate BED file for fusion breakpoints with +/- 1 bin_width regions.
+    
+    Args:
+        sample_id: Sample ID
+        fusion_metadata: FusionMetadata object with fusion candidates
+        work_dir: Working directory
+    """
+    try:
+        # Extract fusion breakpoints
+        fusion_breakpoints = _extract_fusion_breakpoints(fusion_metadata)
+        
+        if not fusion_breakpoints:
+            logger.debug("No fusion breakpoints found - skipping BED file generation")
+            return
+        
+        # Get bin_width from CNV analysis if available, otherwise use default
+        bin_width = _get_cnv_bin_width(work_dir, sample_id)
+        
+        # Create bed_files directory if it doesn't exist
+        sample_dir = os.path.join(work_dir, sample_id)
+        bed_dir = os.path.join(sample_dir, "bed_files")
+        os.makedirs(bed_dir, exist_ok=True)
+        
+        # Generate BED file for fusion breakpoints
+        # Use a counter if available, otherwise use timestamp-based naming
+        fusion_bed_file = os.path.join(bed_dir, "fusion_breakpoints.bed")
+        
+        with open(fusion_bed_file, "w") as f:
+            for bp in fusion_breakpoints:
+                chrom = bp["chromosome"]
+                start = bp["start"]
+                end = bp["end"]
+                gene = bp.get("gene", "Unknown")
+                source = bp.get("source", "unknown")
+                
+                # Calculate midpoint for breakpoint
+                midpoint = (start + end) // 2
+                
+                # Create region +/- 1 bin_width around breakpoint
+                region_start = max(0, midpoint - bin_width)
+                region_end = midpoint + bin_width
+                
+                # Write BED entry: chrom, start, end, name (gene-source)
+                name = f"{gene}-{source}"
+                f.write(f"{chrom}\t{region_start}\t{region_end}\t{name}\n")
+        
+        logger.info(f"Generated fusion breakpoint BED file: {fusion_bed_file} with {len(fusion_breakpoints)} breakpoints")
+        
+    except Exception as e:
+        logger.warning(f"Error generating fusion breakpoint BED file: {e}")
+        import traceback
+        logger.debug(f"Traceback: {traceback.format_exc()}")
 
 
 def find_and_process_bam_files(root_dir):
