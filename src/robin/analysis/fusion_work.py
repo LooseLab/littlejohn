@@ -1545,8 +1545,37 @@ def _generate_fusion_breakpoint_bed(
         # Generate BED file for fusion breakpoints with counter-based naming
         fusion_bed_file = os.path.join(bed_dir, f"fusion_breakpoints_{analysis_counter:03d}.bed")
         
+        # Sort breakpoints by chromosome, then start position, then end position
+        # Handle chromosome sorting (chr1, chr2, ..., chr10, chr11, ..., chrX, chrY, chrM)
+        def sort_key(bp):
+            chrom = bp["chromosome"]
+            start = bp["start"]
+            end = bp["end"]
+            
+            # Extract chromosome number for numeric sorting
+            chrom_num = None
+            if chrom.startswith("chr"):
+                chrom_suffix = chrom[3:]
+                if chrom_suffix == "X":
+                    chrom_num = 100
+                elif chrom_suffix == "Y":
+                    chrom_num = 101
+                elif chrom_suffix == "M":
+                    chrom_num = 102
+                else:
+                    try:
+                        chrom_num = int(chrom_suffix)
+                    except ValueError:
+                        chrom_num = 200  # Put non-standard chromosomes at the end
+            else:
+                chrom_num = 200  # Put non-standard chromosomes at the end
+            
+            return (chrom_num, start, end)
+        
+        sorted_breakpoints = sorted(fusion_breakpoints, key=sort_key)
+        
         with open(fusion_bed_file, "w") as f:
-            for bp in fusion_breakpoints:
+            for bp in sorted_breakpoints:
                 chrom = bp["chromosome"]
                 start = bp["start"]
                 end = bp["end"]
