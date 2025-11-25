@@ -1372,6 +1372,7 @@ def _get_cnv_bin_width(work_dir: str, sample_id: str) -> int:
 def _extract_fusion_breakpoints(fusion_metadata: FusionMetadata) -> List[Dict[str, Any]]:
     """
     Extract fusion breakpoint coordinates from fusion metadata.
+    Only includes fusions that meet the minimum read support threshold.
     
     Args:
         fusion_metadata: FusionMetadata object with fusion candidates
@@ -1383,6 +1384,7 @@ def _extract_fusion_breakpoints(fusion_metadata: FusionMetadata) -> List[Dict[st
     breakpoint_set = set()  # For deduplication
     
     fusion_data = fusion_metadata.fusion_data or {}
+    min_support = get_fusion_threshold("read_support")
     
     # Process target candidates
     target_candidates = fusion_data.get("target_candidates", [])
@@ -1393,11 +1395,28 @@ def _extract_fusion_breakpoints(fusion_metadata: FusionMetadata) -> List[Dict[st
             target_df = target_candidates
         
         if not target_df.empty and "reference_start" in target_df.columns:
-            # Group by read_id to get fusion pairs
-            for read_id, read_group in target_df.groupby("read_id", observed=True):
-                if len(read_group) >= 2:
-                    # Extract breakpoint coordinates for each gene alignment
-                    for _, row in read_group.iterrows():
+            # Filter for fusion candidates (reads mapping to multiple genes)
+            gene_counts = target_df.groupby("read_id", observed=True)["col4"].nunique()
+            fusion_read_ids = gene_counts[gene_counts > 1].index
+            
+            if len(fusion_read_ids) > 0:
+                fusion_df = target_df[target_df["read_id"].isin(fusion_read_ids)]
+                
+                # Apply minimum read support threshold
+                if not fusion_df.empty:
+                    # Create tag column by grouping genes per read_id
+                    lookup = fusion_df.groupby("read_id", observed=True)["col4"].agg(
+                        lambda x: ",".join(sorted(set(x)))
+                    )
+                    fusion_df["tag"] = fusion_df["read_id"].map(lookup)
+                    
+                    # Group by gene pair (tag) and count supporting reads
+                    gene_pair_read_counts = fusion_df.groupby("tag", observed=True)["read_id"].nunique()
+                    valid_gene_pairs = gene_pair_read_counts[gene_pair_read_counts >= min_support].index
+                    filtered_df = fusion_df[fusion_df["tag"].isin(valid_gene_pairs)]
+                    
+                    # Extract breakpoint coordinates for valid fusions
+                    for _, row in filtered_df.iterrows():
                         chrom = row.get("reference_id", "Unknown")
                         start = int(row.get("reference_start", 0))
                         end = int(row.get("reference_end", 0))
@@ -1412,7 +1431,7 @@ def _extract_fusion_breakpoints(fusion_metadata: FusionMetadata) -> List[Dict[st
                                     "start": start,
                                     "end": end,
                                     "gene": gene,
-                                    "read_id": read_id,
+                                    "read_id": row.get("read_id", "Unknown"),
                                     "source": "target"
                                 })
     
@@ -1425,11 +1444,28 @@ def _extract_fusion_breakpoints(fusion_metadata: FusionMetadata) -> List[Dict[st
             genome_df = genome_wide_candidates
         
         if not genome_df.empty and "reference_start" in genome_df.columns:
-            # Group by read_id to get fusion pairs
-            for read_id, read_group in genome_df.groupby("read_id", observed=True):
-                if len(read_group) >= 2:
-                    # Extract breakpoint coordinates for each gene alignment
-                    for _, row in read_group.iterrows():
+            # Filter for fusion candidates (reads mapping to multiple genes)
+            gene_counts_all = genome_df.groupby("read_id", observed=True)["col4"].nunique()
+            fusion_read_ids_all = gene_counts_all[gene_counts_all > 1].index
+            
+            if len(fusion_read_ids_all) > 0:
+                fusion_df_all = genome_df[genome_df["read_id"].isin(fusion_read_ids_all)]
+                
+                # Apply minimum read support threshold
+                if not fusion_df_all.empty:
+                    # Create tag column by grouping genes per read_id
+                    lookup_all = fusion_df_all.groupby("read_id", observed=True)["col4"].agg(
+                        lambda x: ",".join(sorted(set(x)))
+                    )
+                    fusion_df_all["tag"] = fusion_df_all["read_id"].map(lookup_all)
+                    
+                    # Group by gene pair (tag) and count supporting reads
+                    gene_pair_read_counts_all = fusion_df_all.groupby("tag", observed=True)["read_id"].nunique()
+                    valid_gene_pairs_all = gene_pair_read_counts_all[gene_pair_read_counts_all >= min_support].index
+                    filtered_df_all = fusion_df_all[fusion_df_all["tag"].isin(valid_gene_pairs_all)]
+                    
+                    # Extract breakpoint coordinates for valid fusions
+                    for _, row in filtered_df_all.iterrows():
                         chrom = row.get("reference_id", "Unknown")
                         start = int(row.get("reference_start", 0))
                         end = int(row.get("reference_end", 0))
@@ -1444,11 +1480,32 @@ def _extract_fusion_breakpoints(fusion_metadata: FusionMetadata) -> List[Dict[st
                                     "start": start,
                                     "end": end,
                                     "gene": gene,
-                                    "read_id": read_id,
+                                    "read_id": row.get("read_id", "Unknown"),
                                     "source": "genome_wide"
                                 })
     
     return breakpoints
+
+
+def _load_analysis_counter(sample_id: str, work_dir: str) -> int:
+    """
+    Load the analysis counter for a sample from disk.
+    
+    Args:
+        sample_id: Sample ID
+        work_dir: Working directory
+        
+    Returns:
+        Analysis counter value, or 0 if not found
+    """
+    try:
+        counter_file = os.path.join(work_dir, sample_id, "cnv_analysis_counter.txt")
+        if os.path.exists(counter_file):
+            with open(counter_file, "r") as f:
+                return int(f.read().strip())
+    except (ValueError, IOError) as e:
+        logger.debug(f"Could not load analysis counter for {sample_id}: {e}")
+    return 0
 
 
 def _generate_fusion_breakpoint_bed(
@@ -1458,6 +1515,8 @@ def _generate_fusion_breakpoint_bed(
 ) -> None:
     """
     Generate BED file for fusion breakpoints with +/- 1 bin_width regions.
+    Only includes fusions that meet the minimum read support threshold.
+    Uses counter-based naming consistent with other BED files.
     
     Args:
         sample_id: Sample ID
@@ -1465,7 +1524,7 @@ def _generate_fusion_breakpoint_bed(
         work_dir: Working directory
     """
     try:
-        # Extract fusion breakpoints
+        # Extract fusion breakpoints (already filtered by threshold)
         fusion_breakpoints = _extract_fusion_breakpoints(fusion_metadata)
         
         if not fusion_breakpoints:
@@ -1475,14 +1534,16 @@ def _generate_fusion_breakpoint_bed(
         # Get bin_width from CNV analysis if available, otherwise use default
         bin_width = _get_cnv_bin_width(work_dir, sample_id)
         
+        # Load analysis counter for consistent naming
+        analysis_counter = _load_analysis_counter(sample_id, work_dir)
+        
         # Create bed_files directory if it doesn't exist
         sample_dir = os.path.join(work_dir, sample_id)
         bed_dir = os.path.join(sample_dir, "bed_files")
         os.makedirs(bed_dir, exist_ok=True)
         
-        # Generate BED file for fusion breakpoints
-        # Use a counter if available, otherwise use timestamp-based naming
-        fusion_bed_file = os.path.join(bed_dir, "fusion_breakpoints.bed")
+        # Generate BED file for fusion breakpoints with counter-based naming
+        fusion_bed_file = os.path.join(bed_dir, f"fusion_breakpoints_{analysis_counter:03d}.bed")
         
         with open(fusion_bed_file, "w") as f:
             for bp in fusion_breakpoints:
