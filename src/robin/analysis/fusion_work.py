@@ -1328,6 +1328,26 @@ def _generate_output_files(
 
     # Generate fusion breakpoint BED file
     _generate_fusion_breakpoint_bed(sample_id, fusion_metadata, work_dir)
+    
+    # Generate master BED file
+    try:
+        from robin.analysis.master_bed_generator import generate_master_bed
+        
+        # Get analysis counter
+        analysis_counter = _load_analysis_counter(sample_id, work_dir)
+        
+        # Get target_panel from fusion_metadata
+        target_panel = fusion_metadata.target_panel if hasattr(fusion_metadata, 'target_panel') else None
+        
+        generate_master_bed(
+            sample_id=sample_id,
+            work_dir=work_dir,
+            analysis_counter=analysis_counter,
+            target_panel=target_panel,
+            logger_instance=logger,
+        )
+    except Exception as e:
+        logger.warning(f"Could not generate master BED file: {e}")
 
     return {
         "target_candidates_path": os.path.join(

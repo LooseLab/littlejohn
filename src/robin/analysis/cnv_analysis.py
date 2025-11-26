@@ -1011,6 +1011,31 @@ def save_cnv_files(
         # Generate BED files for CNV regions and breakpoints
         generate_bed_files(bed_dir, analysis_counter, breakpoints, result3_cnv, bin_width, logger)
 
+        # Generate master BED file
+        try:
+            from robin.analysis.master_bed_generator import (
+                generate_master_bed,
+                _try_get_target_panel_from_fusion_metadata,
+            )
+            
+            # Extract sample_id from sample_dir
+            sample_id = os.path.basename(sample_dir)
+            # work_dir is the parent of sample_dir
+            work_dir = os.path.dirname(sample_dir)
+            
+            # Try to get target_panel from fusion metadata if available
+            target_panel = _try_get_target_panel_from_fusion_metadata(sample_id, work_dir)
+            
+            generate_master_bed(
+                sample_id=sample_id,
+                work_dir=work_dir,
+                analysis_counter=analysis_counter,
+                target_panel=target_panel,
+                logger_instance=logger,
+            )
+        except Exception as e:
+            logger.warning(f"Could not generate master BED file: {e}")
+
         logger.debug(f"Saved all CNV files to {sample_dir}")
 
     except Exception as e:
