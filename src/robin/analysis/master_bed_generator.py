@@ -117,7 +117,6 @@ def _load_bed_file(bed_path: str, require_bed6: bool = False) -> pd.DataFrame:
         DataFrame with columns: chrom, start, end, name, score, strand
     """
     if not os.path.exists(bed_path):
-        print(f"[Master BED] WARNING: BED file does not exist: {bed_path}")
         return pd.DataFrame()
     
     try:
@@ -178,7 +177,7 @@ def _load_bed_file(bed_path: str, require_bed6: bool = False) -> pd.DataFrame:
             df["strand"] = "."
             df = df[bed6_cols].copy()
         else:
-            print(f"[Master BED] ERROR: BED file has too few columns ({num_cols}): {bed_path}")
+            logger.warning(f"BED file has too few columns ({num_cols}): {bed_path}")
             return pd.DataFrame()
         
         # Fill missing values
@@ -189,12 +188,8 @@ def _load_bed_file(bed_path: str, require_bed6: bool = False) -> pd.DataFrame:
         # Normalize strand values
         df["strand"] = df["strand"].replace({"": ".", "?": "."})
         
-        print(f"[Master BED] Successfully loaded {len(df)} regions from {bed_path} ({num_cols} columns -> BED6)")
         return df[bed6_cols]
     except Exception as e:
-        print(f"[Master BED] ERROR: Error loading BED file {bed_path}: {e}")
-        import traceback
-        print(f"[Master BED] Traceback: {traceback.format_exc()}")
         logger.warning(f"Error loading BED file {bed_path}: {e}")
         return pd.DataFrame()
 
@@ -572,21 +567,14 @@ def generate_master_bed(
     bed_dir = os.path.join(sample_dir, "bed_files")
     
     if not os.path.exists(bed_dir):
-        print(f"[Master BED] ERROR: BED directory does not exist: {bed_dir}")
         log.debug(f"BED directory does not exist: {bed_dir}")
         return None
-    
-    print(f"[Master BED] BED directory: {bed_dir}")
     
     # Get lock file path
     lock_file = os.path.join(sample_dir, "_locks", "master_bed.lock")
     
     try:
-        print(f"[Master BED] Starting generation for sample {sample_id} (counter: {analysis_counter})")
-        log.debug(f"Generating master BED file for sample {sample_id} (counter: {analysis_counter})")
-        
         with FileLock(lock_file, timeout=60.0):
-            print(f"[Master BED] Lock acquired for sample {sample_id}")
             log.debug(f"Generating master BED file for sample {sample_id} (counter: {analysis_counter})")
             
             all_regions = []
@@ -594,25 +582,18 @@ def generate_master_bed(
             # 1. Load and expand CNV regions (new_file_{counter}.bed)
             cnv_bed = _get_latest_bed_file(bed_dir, "new_file_*.bed")
             if cnv_bed:
-                print(f"[Master BED] Loading CNV regions from: {cnv_bed}")
                 log.debug(f"Loading CNV regions from: {cnv_bed}")
                 cnv_df = _load_bed_file(cnv_bed)
                 if not cnv_df.empty:
                     # Expand each region by +/- 10kb
                     expanded_df = _expand_cnv_regions(cnv_df, expand_size=10000)
                     all_regions.append(expanded_df)
-                    print(f"[Master BED] Loaded {len(cnv_df)} CNV regions (expanded to {len(expanded_df)})")
                     log.debug(f"Loaded {len(cnv_df)} CNV regions (expanded to {len(expanded_df)})")
-                else:
-                    print(f"[Master BED] WARNING: CNV BED file is empty: {cnv_bed}")
-            else:
-                print(f"[Master BED] No CNV regions BED file found in {bed_dir}")
             
             # 2. Load CNV breakpoints (breakpoints_{counter}.bed)
             # CNV breakpoints should have both + and - strands
             breakpoints_bed = _get_latest_bed_file(bed_dir, "breakpoints_*.bed")
             if breakpoints_bed:
-                print(f"[Master BED] Loading CNV breakpoints from: {breakpoints_bed}")
                 log.debug(f"Loading CNV breakpoints from: {breakpoints_bed}")
                 bp_df = _load_bed_file(breakpoints_bed)
                 if not bp_df.empty:
@@ -620,18 +601,12 @@ def generate_master_bed(
                     # Duplicate unstranded breakpoints for both strands
                     bp_df = _duplicate_unstranded_regions(bp_df)
                     all_regions.append(bp_df)
-                    print(f"[Master BED] Loaded {len(bp_df)} CNV breakpoints (with both strands)")
                     log.debug(f"Loaded {len(bp_df)} CNV breakpoints (with both strands)")
-                else:
-                    print(f"[Master BED] WARNING: CNV breakpoints BED file is empty: {breakpoints_bed}")
-            else:
-                print(f"[Master BED] No CNV breakpoints BED file found in {bed_dir}")
             
             # 3. Load fusion breakpoints (fusion_breakpoints_{counter}.bed)
             # Fusion breakpoints preserve their strand information
             fusion_bed = _get_latest_bed_file(bed_dir, "fusion_breakpoints_*.bed")
             if fusion_bed:
-                print(f"[Master BED] Loading fusion breakpoints from: {fusion_bed}")
                 log.debug(f"Loading fusion breakpoints from: {fusion_bed}")
                 fusion_df = _load_bed_file(fusion_bed)
                 if not fusion_df.empty:
@@ -639,44 +614,32 @@ def generate_master_bed(
                     # If unstranded, duplicate for both strands
                     fusion_df = _duplicate_unstranded_regions(fusion_df)
                     all_regions.append(fusion_df)
-                    print(f"[Master BED] Loaded {len(fusion_df)} fusion breakpoints (preserving strand)")
                     log.debug(f"Loaded {len(fusion_df)} fusion breakpoints (preserving strand)")
-                else:
-                    print(f"[Master BED] WARNING: Fusion breakpoints BED file is empty: {fusion_bed}")
-            else:
-                print(f"[Master BED] No fusion breakpoints BED file found in {bed_dir}")
             
             if not all_regions:
-                print(f"[Master BED] ERROR: No BED regions found to merge in {bed_dir}")
                 log.debug("No BED regions found to merge")
                 return None
             
             # Combine all regions
             combined_df = pd.concat(all_regions, ignore_index=True)
-            print(f"[Master BED] Combined {len(combined_df)} total regions")
             log.debug(f"Combined {len(combined_df)} total regions")
             
             # Merge overlapping regions
             merged_df = _merge_overlapping_regions(combined_df)
-            print(f"[Master BED] Merged to {len(merged_df)} regions")
             log.debug(f"Merged to {len(merged_df)} regions")
             
             # Add target gene panel regions if available
             if target_panel:
-                print(f"[Master BED] Target panel specified: {target_panel}")
                 target_bed_path = _get_target_bed_path(target_panel)
                 if target_bed_path:
-                    print(f"[Master BED] Loading target panel regions from: {target_bed_path}")
                     log.debug(f"Loading target panel regions: {target_panel}")
                     target_df = _load_bed_file(target_bed_path, require_bed6=True)
                     if not target_df.empty:
                         # Duplicate unstranded target regions for both strands
                         target_df = _duplicate_unstranded_regions(target_df)
-                        print(f"[Master BED] Loaded {len(target_df)} target gene regions (with strand duplication)")
                         
                         # Filter breakpoint regions to only those overlapping with target genes
                         filtered_breakpoints = _intersect_with_target_genes(merged_df, target_bed_path)
-                        print(f"[Master BED] Breakpoint regions overlapping target genes: {len(filtered_breakpoints)}")
                         log.debug(f"Breakpoint regions overlapping target genes: {len(filtered_breakpoints)}")
                         
                         # Combine filtered breakpoints with target gene regions
@@ -685,34 +648,27 @@ def generate_master_bed(
                         else:
                             all_regions_with_target = target_df
                         
-                        print(f"[Master BED] Combined {len(filtered_breakpoints)} breakpoints with {len(target_df)} target gene regions")
                         log.debug(f"Combined {len(filtered_breakpoints)} breakpoints with {len(target_df)} target gene regions")
                         
                         # Merge overlapping regions (target genes may overlap with breakpoints)
                         # Merging preserves strand information
                         merged_df = _merge_overlapping_regions(all_regions_with_target)
-                        print(f"[Master BED] Final merged regions including target genes: {len(merged_df)}")
                         log.debug(f"Final merged regions including target genes: {len(merged_df)}")
                     else:
-                        print(f"[Master BED] WARNING: Target panel BED file is empty: {target_bed_path}")
                         log.warning(f"Target panel BED file is empty: {target_bed_path}")
                         # Still filter merged regions by target genes even if empty
                         merged_df = _intersect_with_target_genes(merged_df, target_bed_path)
                 else:
-                    print(f"[Master BED] WARNING: Target panel BED file not found for {target_panel}")
                     log.warning(f"Target panel BED file not found for {target_panel}")
             else:
-                print(f"[Master BED] No target panel specified - master BED will include all breakpoint regions")
                 log.debug("No target panel specified - master BED will include all breakpoint regions")
             
             if merged_df.empty:
-                print(f"[Master BED] ERROR: No regions remaining after processing")
                 log.debug("No regions remaining after processing")
                 return None
             
             # Sort regions (by chrom, strand, start, end)
             sorted_df = _sort_bed_regions(merged_df)
-            print(f"[Master BED] Sorted {len(sorted_df)} regions")
             
             # Ensure we have all BED6 columns
             bed6_cols = ["chrom", "start", "end", "name", "score", "strand"]
@@ -727,7 +683,6 @@ def generate_master_bed(
             
             # Write master BED file in BED6 format
             master_bed_path = os.path.join(bed_dir, f"master_{analysis_counter:03d}.bed")
-            print(f"[Master BED] Writing master BED6 file to: {master_bed_path}")
             sorted_df[bed6_cols].to_csv(
                 master_bed_path,
                 sep="\t",
@@ -735,19 +690,15 @@ def generate_master_bed(
                 index=False,
             )
             
-            print(f"[Master BED] SUCCESS: Generated master BED file with {len(sorted_df)} regions")
             log.info(f"Generated master BED file: {master_bed_path} with {len(sorted_df)} regions")
             return master_bed_path
             
     except TimeoutError as e:
-        print(f"[Master BED] ERROR: Could not acquire lock for master BED generation: {e}")
         log.error(f"Could not acquire lock for master BED generation: {e}")
         return None
     except Exception as e:
-        print(f"[Master BED] ERROR: Error generating master BED file: {e}")
-        import traceback
-        print(f"[Master BED] Traceback: {traceback.format_exc()}")
         log.error(f"Error generating master BED file: {e}")
+        import traceback
         log.debug(f"Traceback: {traceback.format_exc()}")
         return None
 
