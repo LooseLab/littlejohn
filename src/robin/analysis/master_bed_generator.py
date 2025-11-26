@@ -105,38 +105,92 @@ def _get_latest_bed_file(bed_dir: str, pattern: str) -> Optional[str]:
     return latest_file
 
 
-def _load_bed_file(bed_path: str) -> pd.DataFrame:
+def _load_bed_file(bed_path: str, require_bed6: bool = False) -> pd.DataFrame:
     """
-    Load a BED file into a DataFrame.
+    Load a BED file into a DataFrame, preserving strand information.
     
     Args:
         bed_path: Path to BED file
+        require_bed6: If True, expects BED6 format (chrom, start, end, name, score, strand)
         
     Returns:
-        DataFrame with columns: chrom, start, end, name (optional)
+        DataFrame with columns: chrom, start, end, name, score, strand
     """
     if not os.path.exists(bed_path):
         print(f"[Master BED] WARNING: BED file does not exist: {bed_path}")
         return pd.DataFrame()
     
     try:
-        # Try to read with standard BED format (at least 3 columns)
-        df = pd.read_csv(
+        # Read BED file - handle variable number of columns (BED format can have 3-12 columns)
+        # First, read without column names to detect actual number of columns
+        df_temp = pd.read_csv(
             bed_path,
             sep="\t",
             header=None,
-            names=["chrom", "start", "end", "name", "score", "strand"],
-            usecols=[0, 1, 2, 3],  # Only use first 4 columns
-            dtype={"chrom": str, "start": int, "end": int, "name": str},
-            na_values=["."],
+            nrows=1,  # Just read first row to check column count
         )
+        num_cols = len(df_temp.columns)
         
-        # Fill missing names
-        if "name" in df.columns:
-            df["name"] = df["name"].fillna(".")
+        # Standard BED6 column names
+        bed6_cols = ["chrom", "start", "end", "name", "score", "strand"]
         
-        print(f"[Master BED] Successfully loaded {len(df)} regions from {bed_path}")
-        return df[["chrom", "start", "end", "name"]]
+        # Read full file with appropriate column names based on actual column count
+        if num_cols >= 6:
+            # File has at least 6 columns (BED6 format)
+            col_names = bed6_cols + [f"col{i}" for i in range(6, num_cols)]
+            df = pd.read_csv(
+                bed_path,
+                sep="\t",
+                header=None,
+                names=col_names[:num_cols],
+                dtype={"chrom": str, "start": int, "end": int, "name": str, "score": str, "strand": str},
+                na_values=["."],
+            )
+            # Keep BED6 columns
+            df = df[bed6_cols].copy()
+        elif num_cols >= 4:
+            # File has at least 4 columns (chrom, start, end, name)
+            col_names = ["chrom", "start", "end", "name"] + [f"col{i}" for i in range(4, num_cols)]
+            df = pd.read_csv(
+                bed_path,
+                sep="\t",
+                header=None,
+                names=col_names[:num_cols],
+                dtype={"chrom": str, "start": int, "end": int, "name": str},
+                na_values=["."],
+            )
+            # Add missing BED6 columns
+            df["score"] = "0"
+            df["strand"] = "."
+            df = df[bed6_cols].copy()
+        elif num_cols == 3:
+            # File has only 3 columns (chrom, start, end)
+            df = pd.read_csv(
+                bed_path,
+                sep="\t",
+                header=None,
+                names=["chrom", "start", "end"],
+                dtype={"chrom": str, "start": int, "end": int},
+            )
+            # Add missing BED6 columns
+            df["name"] = "."
+            df["score"] = "0"
+            df["strand"] = "."
+            df = df[bed6_cols].copy()
+        else:
+            print(f"[Master BED] ERROR: BED file has too few columns ({num_cols}): {bed_path}")
+            return pd.DataFrame()
+        
+        # Fill missing values
+        df["name"] = df["name"].fillna(".")
+        df["score"] = df["score"].fillna("0")
+        df["strand"] = df["strand"].fillna(".")
+        
+        # Normalize strand values
+        df["strand"] = df["strand"].replace({"": ".", "?": "."})
+        
+        print(f"[Master BED] Successfully loaded {len(df)} regions from {bed_path} ({num_cols} columns -> BED6)")
+        return df[bed6_cols]
     except Exception as e:
         print(f"[Master BED] ERROR: Error loading BED file {bed_path}: {e}")
         import traceback
@@ -148,13 +202,14 @@ def _load_bed_file(bed_path: str) -> pd.DataFrame:
 def _expand_cnv_regions(df: pd.DataFrame, expand_size: int = 10000) -> pd.DataFrame:
     """
     Expand CNV regions by +/- expand_size around start and end.
+    Adds both + and - strand entries for CNV breakpoints.
     
     Args:
-        df: DataFrame with chrom, start, end columns
+        df: DataFrame with chrom, start, end, name, score, strand columns
         expand_size: Size to expand in base pairs (default 10kb)
         
     Returns:
-        DataFrame with expanded regions
+        DataFrame with expanded regions, duplicated for both strands
     """
     if df.empty:
         return df
@@ -164,15 +219,27 @@ def _expand_cnv_regions(df: pd.DataFrame, expand_size: int = 10000) -> pd.DataFr
     expanded_df["start"] = expanded_df["start"].clip(lower=0)  # Don't go below 0
     expanded_df["end"] = expanded_df["end"] + expand_size
     
-    return expanded_df
+    # For CNV breakpoints, create entries for both strands
+    # Duplicate each region for + and - strands
+    plus_strand = expanded_df.copy()
+    plus_strand["strand"] = "+"
+    
+    minus_strand = expanded_df.copy()
+    minus_strand["strand"] = "-"
+    
+    # Combine both strands
+    result = pd.concat([plus_strand, minus_strand], ignore_index=True)
+    
+    return result
 
 
 def _merge_overlapping_regions(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Merge overlapping regions in a BED DataFrame.
+    Merge overlapping regions in a BED DataFrame, preserving strand information.
+    Regions are merged separately by chromosome and strand.
     
     Args:
-        df: DataFrame with chrom, start, end columns
+        df: DataFrame with chrom, start, end, name, score, strand columns
         
     Returns:
         DataFrame with merged regions
@@ -182,39 +249,51 @@ def _merge_overlapping_regions(df: pd.DataFrame) -> pd.DataFrame:
     
     merged_regions = []
     
-    # Sort by chromosome, then start position
-    df_sorted = df.sort_values(by=["chrom", "start", "end"]).copy()
+    # Sort by chromosome, strand, then start position
+    df_sorted = df.sort_values(by=["chrom", "strand", "start", "end"]).copy()
     
-    # Group by chromosome
-    for chrom, group in df_sorted.groupby("chrom", observed=True):
+    # Group by chromosome and strand
+    for (chrom, strand), group in df_sorted.groupby(["chrom", "strand"], observed=True):
         if group.empty:
             continue
         
-        # Merge overlapping regions within chromosome
+        # Merge overlapping regions within chromosome and strand
         current_start = None
         current_end = None
+        current_name = None
         
         for _, row in group.iterrows():
             start = row["start"]
             end = row["end"]
+            name = row.get("name", "merged")
             
             if current_start is None:
                 # First region
                 current_start = start
                 current_end = end
+                current_name = name
             elif start <= current_end:
                 # Overlaps with current region - extend it
                 current_end = max(current_end, end)
+                # Combine names if different
+                if current_name != name and name != "merged":
+                    if current_name == "merged":
+                        current_name = name
+                    elif name not in current_name:
+                        current_name = f"{current_name},{name}"
             else:
                 # No overlap - save current region and start new one
                 merged_regions.append({
                     "chrom": chrom,
                     "start": current_start,
                     "end": current_end,
-                    "name": "merged"
+                    "name": current_name if current_name else "merged",
+                    "score": row.get("score", "0"),
+                    "strand": strand
                 })
                 current_start = start
                 current_end = end
+                current_name = name
         
         # Don't forget the last region
         if current_start is not None:
@@ -222,7 +301,9 @@ def _merge_overlapping_regions(df: pd.DataFrame) -> pd.DataFrame:
                 "chrom": chrom,
                 "start": current_start,
                 "end": current_end,
-                "name": "merged"
+                "name": current_name if current_name else "merged",
+                "score": "0",
+                "strand": strand
             })
     
     if not merged_regions:
@@ -231,16 +312,49 @@ def _merge_overlapping_regions(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(merged_regions)
 
 
+def _duplicate_unstranded_regions(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Duplicate regions with unstranded ('.') strand to both + and - strands.
+    
+    Args:
+        df: DataFrame with chrom, start, end, name, score, strand columns
+        
+    Returns:
+        DataFrame with unstranded regions duplicated for both strands
+    """
+    if df.empty:
+        return df
+    
+    # Separate stranded and unstranded regions
+    stranded = df[df["strand"].isin(["+", "-"])].copy()
+    unstranded = df[df["strand"] == "."].copy()
+    
+    if unstranded.empty:
+        return stranded
+    
+    # Duplicate unstranded regions for both strands
+    plus_strand = unstranded.copy()
+    plus_strand["strand"] = "+"
+    
+    minus_strand = unstranded.copy()
+    minus_strand["strand"] = "-"
+    
+    # Combine stranded regions with duplicated unstranded regions
+    result = pd.concat([stranded, plus_strand, minus_strand], ignore_index=True)
+    
+    return result
+
+
 def _intersect_with_target_genes(
     regions_df: pd.DataFrame,
     target_bed_path: str
 ) -> pd.DataFrame:
     """
     Filter regions to only include those that overlap with target gene BED file.
-    Keeps the original regions that overlap, not creating new intersection regions.
+    Keeps the original regions that overlap, preserving strand information.
     
     Args:
-        regions_df: DataFrame with chrom, start, end columns
+        regions_df: DataFrame with chrom, start, end, name, score, strand columns
         target_bed_path: Path to target gene BED file
         
     Returns:
@@ -254,11 +368,14 @@ def _intersect_with_target_genes(
         return regions_df
     
     try:
-        # Load target genes
-        target_df = _load_bed_file(target_bed_path)
+        # Load target genes (BED6 format)
+        target_df = _load_bed_file(target_bed_path, require_bed6=True)
         if target_df.empty:
             logger.warning(f"Target BED file is empty: {target_bed_path}")
             return pd.DataFrame()
+        
+        # Duplicate unstranded target regions for both strands
+        target_df = _duplicate_unstranded_regions(target_df)
         
         # Filter regions to only those that overlap with target genes
         overlapping_regions = []
@@ -267,8 +384,9 @@ def _intersect_with_target_genes(
             region_chrom = region_row["chrom"]
             region_start = region_row["start"]
             region_end = region_row["end"]
+            region_strand = region_row.get("strand", ".")
             
-            # Check if this region overlaps with any target gene
+            # Check if this region overlaps with any target gene (same chromosome)
             overlapping_targets = target_df[
                 (target_df["chrom"] == region_chrom) &
                 (target_df["start"] < region_end) &
@@ -277,11 +395,14 @@ def _intersect_with_target_genes(
             
             if not overlapping_targets.empty:
                 # Keep the original region (it overlaps with target genes)
+                # Preserve the region's strand information
                 overlapping_regions.append({
                     "chrom": region_chrom,
                     "start": region_start,
                     "end": region_end,
-                    "name": region_row.get("name", "overlap")
+                    "name": region_row.get("name", "overlap"),
+                    "score": region_row.get("score", "0"),
+                    "strand": region_strand
                 })
         
         if not overlapping_regions:
@@ -296,10 +417,10 @@ def _intersect_with_target_genes(
 
 def _sort_bed_regions(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Sort BED regions by chromosome (numeric order), then start, then end.
+    Sort BED regions by chromosome (numeric order), strand, then start, then end.
     
     Args:
-        df: DataFrame with chrom, start, end columns
+        df: DataFrame with chrom, start, end, strand columns
         
     Returns:
         Sorted DataFrame
@@ -325,10 +446,20 @@ def _sort_bed_regions(df: pd.DataFrame) -> pd.DataFrame:
             except ValueError:
                 return (300, chrom_suffix)
     
+    def strand_sort_key(strand):
+        """Sort strands: +, then -, then ."""
+        if strand == "+":
+            return 0
+        elif strand == "-":
+            return 1
+        else:
+            return 2
+    
     df = df.copy()
-    df["_sort_key"] = df["chrom"].apply(chrom_sort_key)
-    df = df.sort_values(by=["_sort_key", "start", "end"])
-    df = df.drop(columns=["_sort_key"])
+    df["_chrom_sort_key"] = df["chrom"].apply(chrom_sort_key)
+    df["_strand_sort_key"] = df.get("strand", ".").apply(strand_sort_key)
+    df = df.sort_values(by=["_chrom_sort_key", "_strand_sort_key", "start", "end"])
+    df = df.drop(columns=["_chrom_sort_key", "_strand_sort_key"])
     
     return df.reset_index(drop=True)
 
@@ -478,30 +609,38 @@ def generate_master_bed(
                 print(f"[Master BED] No CNV regions BED file found in {bed_dir}")
             
             # 2. Load CNV breakpoints (breakpoints_{counter}.bed)
+            # CNV breakpoints should have both + and - strands
             breakpoints_bed = _get_latest_bed_file(bed_dir, "breakpoints_*.bed")
             if breakpoints_bed:
                 print(f"[Master BED] Loading CNV breakpoints from: {breakpoints_bed}")
                 log.debug(f"Loading CNV breakpoints from: {breakpoints_bed}")
                 bp_df = _load_bed_file(breakpoints_bed)
                 if not bp_df.empty:
+                    # Ensure CNV breakpoints have both strands
+                    # Duplicate unstranded breakpoints for both strands
+                    bp_df = _duplicate_unstranded_regions(bp_df)
                     all_regions.append(bp_df)
-                    print(f"[Master BED] Loaded {len(bp_df)} CNV breakpoints")
-                    log.debug(f"Loaded {len(bp_df)} CNV breakpoints")
+                    print(f"[Master BED] Loaded {len(bp_df)} CNV breakpoints (with both strands)")
+                    log.debug(f"Loaded {len(bp_df)} CNV breakpoints (with both strands)")
                 else:
                     print(f"[Master BED] WARNING: CNV breakpoints BED file is empty: {breakpoints_bed}")
             else:
                 print(f"[Master BED] No CNV breakpoints BED file found in {bed_dir}")
             
             # 3. Load fusion breakpoints (fusion_breakpoints_{counter}.bed)
+            # Fusion breakpoints preserve their strand information
             fusion_bed = _get_latest_bed_file(bed_dir, "fusion_breakpoints_*.bed")
             if fusion_bed:
                 print(f"[Master BED] Loading fusion breakpoints from: {fusion_bed}")
                 log.debug(f"Loading fusion breakpoints from: {fusion_bed}")
                 fusion_df = _load_bed_file(fusion_bed)
                 if not fusion_df.empty:
+                    # Fusion breakpoints should preserve their strand
+                    # If unstranded, duplicate for both strands
+                    fusion_df = _duplicate_unstranded_regions(fusion_df)
                     all_regions.append(fusion_df)
-                    print(f"[Master BED] Loaded {len(fusion_df)} fusion breakpoints")
-                    log.debug(f"Loaded {len(fusion_df)} fusion breakpoints")
+                    print(f"[Master BED] Loaded {len(fusion_df)} fusion breakpoints (preserving strand)")
+                    log.debug(f"Loaded {len(fusion_df)} fusion breakpoints (preserving strand)")
                 else:
                     print(f"[Master BED] WARNING: Fusion breakpoints BED file is empty: {fusion_bed}")
             else:
@@ -529,9 +668,12 @@ def generate_master_bed(
                 if target_bed_path:
                     print(f"[Master BED] Loading target panel regions from: {target_bed_path}")
                     log.debug(f"Loading target panel regions: {target_panel}")
-                    target_df = _load_bed_file(target_bed_path)
+                    target_df = _load_bed_file(target_bed_path, require_bed6=True)
                     if not target_df.empty:
-                        print(f"[Master BED] Loaded {len(target_df)} target gene regions")
+                        # Duplicate unstranded target regions for both strands
+                        target_df = _duplicate_unstranded_regions(target_df)
+                        print(f"[Master BED] Loaded {len(target_df)} target gene regions (with strand duplication)")
+                        
                         # Filter breakpoint regions to only those overlapping with target genes
                         filtered_breakpoints = _intersect_with_target_genes(merged_df, target_bed_path)
                         print(f"[Master BED] Breakpoint regions overlapping target genes: {len(filtered_breakpoints)}")
@@ -547,6 +689,7 @@ def generate_master_bed(
                         log.debug(f"Combined {len(filtered_breakpoints)} breakpoints with {len(target_df)} target gene regions")
                         
                         # Merge overlapping regions (target genes may overlap with breakpoints)
+                        # Merging preserves strand information
                         merged_df = _merge_overlapping_regions(all_regions_with_target)
                         print(f"[Master BED] Final merged regions including target genes: {len(merged_df)}")
                         log.debug(f"Final merged regions including target genes: {len(merged_df)}")
@@ -567,14 +710,25 @@ def generate_master_bed(
                 log.debug("No regions remaining after processing")
                 return None
             
-            # Sort regions
+            # Sort regions (by chrom, strand, start, end)
             sorted_df = _sort_bed_regions(merged_df)
             print(f"[Master BED] Sorted {len(sorted_df)} regions")
             
-            # Write master BED file
+            # Ensure we have all BED6 columns
+            bed6_cols = ["chrom", "start", "end", "name", "score", "strand"]
+            for col in bed6_cols:
+                if col not in sorted_df.columns:
+                    if col == "score":
+                        sorted_df[col] = "0"
+                    elif col == "strand":
+                        sorted_df[col] = "."
+                    else:
+                        sorted_df[col] = "."
+            
+            # Write master BED file in BED6 format
             master_bed_path = os.path.join(bed_dir, f"master_{analysis_counter:03d}.bed")
-            print(f"[Master BED] Writing master BED file to: {master_bed_path}")
-            sorted_df[["chrom", "start", "end", "name"]].to_csv(
+            print(f"[Master BED] Writing master BED6 file to: {master_bed_path}")
+            sorted_df[bed6_cols].to_csv(
                 master_bed_path,
                 sep="\t",
                 header=False,
