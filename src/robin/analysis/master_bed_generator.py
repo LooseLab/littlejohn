@@ -4,7 +4,7 @@ Master BED File Generator for ROBIN
 
 This module generates merged master BED files from CNV and fusion breakpoint BED files.
 The master BED file combines:
-- CNV regions (new_file_{counter}.bed) - expanded by +/- 10kb
+- CNV regions (new_file_{counter}.bed) - split into start/end breakpoints, padded by +/- 10kb
 - CNV breakpoints (breakpoints_{counter}.bed) - merged as-is
 - Fusion breakpoints (fusion_breakpoints_{counter}.bed) - merged as-is
 
@@ -12,10 +12,12 @@ All regions are intersected with the target gene panel and merged to remove over
 """
 
 import os
+import sys
 import logging
 import glob
 import fcntl
 import time
+import argparse
 from typing import List, Tuple, Dict, Optional
 from pathlib import Path
 
@@ -196,35 +198,78 @@ def _load_bed_file(bed_path: str, require_bed6: bool = False) -> pd.DataFrame:
 
 def _expand_cnv_regions(df: pd.DataFrame, expand_size: int = 10000) -> pd.DataFrame:
     """
-    Expand CNV regions by +/- expand_size around start and end.
-    Adds both + and - strand entries for CNV breakpoints.
+    Convert CNV regions into breakpoint regions at start and end positions.
+    Each breakpoint is padded by +/- expand_size and duplicated for both strands.
+    
+    Processing:
+    1. Split each CNV region into two breakpoints: one at start, one at end
+    2. Pad each breakpoint by +/- expand_size (creates 2*expand_size wide regions)
+    3. Duplicate each breakpoint for both + and - strands
     
     Args:
         df: DataFrame with chrom, start, end, name, score, strand columns
-        expand_size: Size to expand in base pairs (default 10kb)
+        expand_size: Size to pad around each breakpoint in base pairs (default 10kb)
         
     Returns:
-        DataFrame with expanded regions, duplicated for both strands
+        DataFrame with breakpoint regions, duplicated for both strands
     """
     if df.empty:
         return df
     
-    expanded_df = df.copy()
-    expanded_df["start"] = expanded_df["start"] - expand_size
-    expanded_df["start"] = expanded_df["start"].clip(lower=0)  # Don't go below 0
-    expanded_df["end"] = expanded_df["end"] + expand_size
+    breakpoint_regions = []
     
-    # For CNV breakpoints, create entries for both strands
-    # Duplicate each region for + and - strands
-    plus_strand = expanded_df.copy()
-    plus_strand["strand"] = "+"
+    for _, row in df.iterrows():
+        chrom = row["chrom"]
+        region_start = row["start"]
+        region_end = row["end"]
+        name = row.get("name", ".")
+        score = row.get("score", "0")
+        
+        # Create start breakpoint: pad around region_start
+        start_bp_start = max(0, region_start - expand_size)
+        start_bp_end = region_start + expand_size
+        
+        # Create end breakpoint: pad around region_end
+        end_bp_start = max(0, region_end - expand_size)
+        end_bp_end = region_end + expand_size
+        
+        # Add start breakpoint for both strands
+        breakpoint_regions.append({
+            "chrom": chrom,
+            "start": start_bp_start,
+            "end": start_bp_end,
+            "name": name,
+            "score": score,
+            "strand": "+"
+        })
+        breakpoint_regions.append({
+            "chrom": chrom,
+            "start": start_bp_start,
+            "end": start_bp_end,
+            "name": name,
+            "score": score,
+            "strand": "-"
+        })
+        
+        # Add end breakpoint for both strands
+        breakpoint_regions.append({
+            "chrom": chrom,
+            "start": end_bp_start,
+            "end": end_bp_end,
+            "name": name,
+            "score": score,
+            "strand": "+"
+        })
+        breakpoint_regions.append({
+            "chrom": chrom,
+            "start": end_bp_start,
+            "end": end_bp_end,
+            "name": name,
+            "score": score,
+            "strand": "-"
+        })
     
-    minus_strand = expanded_df.copy()
-    minus_strand["strand"] = "-"
-    
-    # Combine both strands
-    result = pd.concat([plus_strand, minus_strand], ignore_index=True)
-    
+    result = pd.DataFrame(breakpoint_regions)
     return result
 
 
@@ -410,6 +455,136 @@ def _intersect_with_target_genes(
         return regions_df
 
 
+def _load_fai_file(fai_path: str) -> Dict[str, int]:
+    """
+    Load a FASTA index (.fai) file and return chromosome lengths.
+    
+    Args:
+        fai_path: Path to .fai file
+        
+    Returns:
+        Dictionary mapping chromosome names to lengths
+    """
+    chrom_lengths = {}
+    
+    if not os.path.exists(fai_path):
+        logger.warning(f"FAI file not found: {fai_path}")
+        return chrom_lengths
+    
+    try:
+        with open(fai_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                # FAI format: chrom_name    length    offset    linebases    linewidth
+                parts = line.split('\t')
+                if len(parts) >= 2:
+                    chrom_name = parts[0]
+                    chrom_length = int(parts[1])
+                    chrom_lengths[chrom_name] = chrom_length
+    except Exception as e:
+        logger.error(f"Error loading FAI file {fai_path}: {e}")
+    
+    return chrom_lengths
+
+
+def _calculate_genome_coverage(
+    bed_df: pd.DataFrame,
+    fai_path: Optional[str] = None
+) -> Optional[Dict[str, float]]:
+    """
+    Calculate the proportion of the genome covered by BED regions, accounting for strand.
+    
+    Args:
+        bed_df: DataFrame with chrom, start, end, strand columns
+        fai_path: Optional path to .fai file for genome sizes
+        
+    Returns:
+        Dictionary with coverage statistics, or None if calculation fails
+    """
+    if bed_df.empty:
+        return None
+    
+    if not fai_path or not os.path.exists(fai_path):
+        logger.warning("FAI file not provided or not found - cannot calculate genome coverage")
+        return None
+    
+    # Load chromosome lengths
+    chrom_lengths = _load_fai_file(fai_path)
+    if not chrom_lengths:
+        logger.warning("No chromosome lengths loaded from FAI file")
+        return None
+    
+    # Calculate total genome size (sum of all chromosome lengths)
+    total_genome_size = sum(chrom_lengths.values())
+    if total_genome_size == 0:
+        logger.warning("Total genome size is 0")
+        return None
+    
+    # Check for chromosomes in BED file that aren't in FAI file
+    bed_chroms = set(bed_df["chrom"].unique())
+    fai_chroms = set(chrom_lengths.keys())
+    missing_chroms = bed_chroms - fai_chroms
+    if missing_chroms:
+        logger.warning(f"Chromosomes in BED file not found in FAI file: {sorted(missing_chroms)}")
+    
+    # Calculate coverage for each strand separately
+    strand_coverage = {"+": 0, "-": 0, ".": 0}
+    strand_total_genome = {"+": total_genome_size, "-": total_genome_size, ".": total_genome_size}
+    
+    # Group by strand
+    for strand in ["+", "-", "."]:
+        strand_df = bed_df[bed_df["strand"] == strand].copy()
+        if strand_df.empty:
+            continue
+        
+        # Calculate total covered bases for this strand
+        # Regions are already merged, so we can sum their lengths
+        covered_bases = 0
+        skipped_regions = 0
+        for _, row in strand_df.iterrows():
+            chrom = row["chrom"]
+            start = row["start"]
+            end = row["end"]
+            
+            # Only count if chromosome exists in FAI file
+            if chrom in chrom_lengths:
+                # Clip region to chromosome boundaries
+                region_length = max(0, min(end, chrom_lengths[chrom]) - max(start, 0))
+                covered_bases += region_length
+            else:
+                skipped_regions += 1
+        
+        if skipped_regions > 0:
+            logger.debug(f"Skipped {skipped_regions} {strand} strand regions due to missing chromosomes in FAI file")
+        
+        strand_coverage[strand] = covered_bases
+    
+    # Calculate proportions
+    results = {
+        "total_genome_size": total_genome_size,
+        "plus_strand_coverage": strand_coverage["+"],
+        "minus_strand_coverage": strand_coverage["-"],
+        "unstranded_coverage": strand_coverage["."],
+        "plus_strand_proportion": strand_coverage["+"] / strand_total_genome["+"] if strand_total_genome["+"] > 0 else 0.0,
+        "minus_strand_proportion": strand_coverage["-"] / strand_total_genome["-"] if strand_total_genome["-"] > 0 else 0.0,
+        "unstranded_proportion": strand_coverage["."] / strand_total_genome["."] if strand_total_genome["."] > 0 else 0.0,
+    }
+    
+    # Calculate combined coverage
+    # + and - strands are treated separately (each can have different coverage)
+    # Unstranded regions (if any) are counted once
+    total_covered = strand_coverage["+"] + strand_coverage["-"] + strand_coverage["."]
+    # Total possible coverage: 2 * genome_size (for + and - strands separately)
+    # plus unstranded regions if they exist
+    total_possible_coverage = 2 * total_genome_size
+    results["total_covered_bases"] = total_covered
+    results["total_proportion"] = total_covered / total_possible_coverage if total_possible_coverage > 0 else 0.0
+    
+    return results
+
+
 def _sort_bed_regions(df: pd.DataFrame) -> pd.DataFrame:
     """
     Sort BED regions by chromosome (numeric order), strand, then start, then end.
@@ -543,7 +718,7 @@ def generate_master_bed(
     
     This function:
     1. Loads the latest versions of new_file, breakpoints, and fusion_breakpoints BED files
-    2. Expands CNV regions (new_file) by +/- 10kb
+    2. Converts CNV regions (new_file) into breakpoints at start/end positions, padded by +/- 10kb
     3. Merges overlapping regions
     4. Intersects with target gene panel
     5. Writes master_{counter}.bed
@@ -579,16 +754,16 @@ def generate_master_bed(
             
             all_regions = []
             
-            # 1. Load and expand CNV regions (new_file_{counter}.bed)
+            # 1. Load and convert CNV regions (new_file_{counter}.bed) to breakpoints
             cnv_bed = _get_latest_bed_file(bed_dir, "new_file_*.bed")
             if cnv_bed:
                 log.debug(f"Loading CNV regions from: {cnv_bed}")
                 cnv_df = _load_bed_file(cnv_bed)
                 if not cnv_df.empty:
-                    # Expand each region by +/- 10kb
+                    # Convert each region to start/end breakpoints, padded by +/- 10kb
                     expanded_df = _expand_cnv_regions(cnv_df, expand_size=10000)
                     all_regions.append(expanded_df)
-                    log.debug(f"Loaded {len(cnv_df)} CNV regions (expanded to {len(expanded_df)})")
+                    log.debug(f"Loaded {len(cnv_df)} CNV regions (converted to {len(expanded_df)} breakpoint regions)")
             
             # 2. Load CNV breakpoints (breakpoints_{counter}.bed)
             # CNV breakpoints should have both + and - strands
@@ -638,17 +813,13 @@ def generate_master_bed(
                         # Duplicate unstranded target regions for both strands
                         target_df = _duplicate_unstranded_regions(target_df)
                         
-                        # Filter breakpoint regions to only those overlapping with target genes
-                        filtered_breakpoints = _intersect_with_target_genes(merged_df, target_bed_path)
-                        log.debug(f"Breakpoint regions overlapping target genes: {len(filtered_breakpoints)}")
+                        # Keep all breakpoint regions and add target gene regions
+                        log.debug(f"Keeping all {len(merged_df)} breakpoint regions and adding {len(target_df)} target gene regions")
                         
-                        # Combine filtered breakpoints with target gene regions
-                        if not filtered_breakpoints.empty:
-                            all_regions_with_target = pd.concat([filtered_breakpoints, target_df], ignore_index=True)
-                        else:
-                            all_regions_with_target = target_df
+                        # Combine all breakpoints with target gene regions
+                        all_regions_with_target = pd.concat([merged_df, target_df], ignore_index=True)
                         
-                        log.debug(f"Combined {len(filtered_breakpoints)} breakpoints with {len(target_df)} target gene regions")
+                        log.debug(f"Combined {len(merged_df)} breakpoints with {len(target_df)} target gene regions")
                         
                         # Merge overlapping regions (target genes may overlap with breakpoints)
                         # Merging preserves strand information
@@ -656,8 +827,6 @@ def generate_master_bed(
                         log.debug(f"Final merged regions including target genes: {len(merged_df)}")
                     else:
                         log.warning(f"Target panel BED file is empty: {target_bed_path}")
-                        # Still filter merged regions by target genes even if empty
-                        merged_df = _intersect_with_target_genes(merged_df, target_bed_path)
                 else:
                     log.warning(f"Target panel BED file not found for {target_panel}")
             else:
@@ -702,3 +871,293 @@ def generate_master_bed(
         log.debug(f"Traceback: {traceback.format_exc()}")
         return None
 
+
+def generate_master_bed_from_files(
+    cnv_regions_file: Optional[str] = None,
+    cnv_breakpoints_file: Optional[str] = None,
+    fusion_breakpoints_file: Optional[str] = None,
+    target_bed_file: Optional[str] = None,
+    output_file: str = "master.bed",
+    expand_cnv_size: int = 10000,
+    logger_instance: Optional[logging.Logger] = None,
+) -> Optional[str]:
+    """
+    Generate master BED file from explicit file paths (for CLI/testing).
+    
+    Args:
+        cnv_regions_file: Path to CNV regions BED file (will be expanded by +/- expand_cnv_size)
+        cnv_breakpoints_file: Path to CNV breakpoints BED file
+        fusion_breakpoints_file: Path to fusion breakpoints BED file
+        target_bed_file: Path to target gene panel BED file (optional)
+        output_file: Path to output master BED file
+        expand_cnv_size: Size to expand CNV regions in base pairs (default 10kb)
+        logger_instance: Optional logger instance
+        
+    Returns:
+        Path to generated master BED file, or None if generation failed
+    """
+    if logger_instance:
+        log = logger_instance
+    else:
+        log = logger
+    
+    try:
+        all_regions = []
+        
+        # 1. Load and convert CNV regions to breakpoints
+        if cnv_regions_file and os.path.exists(cnv_regions_file):
+            log.debug(f"Loading CNV regions from: {cnv_regions_file}")
+            cnv_df = _load_bed_file(cnv_regions_file)
+            if not cnv_df.empty:
+                expanded_df = _expand_cnv_regions(cnv_df, expand_size=expand_cnv_size)
+                all_regions.append(expanded_df)
+                log.debug(f"Loaded {len(cnv_df)} CNV regions (converted to {len(expanded_df)} breakpoint regions)")
+        
+        # 2. Load CNV breakpoints
+        if cnv_breakpoints_file and os.path.exists(cnv_breakpoints_file):
+            log.debug(f"Loading CNV breakpoints from: {cnv_breakpoints_file}")
+            bp_df = _load_bed_file(cnv_breakpoints_file)
+            if not bp_df.empty:
+                # Ensure CNV breakpoints have both strands
+                bp_df = _duplicate_unstranded_regions(bp_df)
+                all_regions.append(bp_df)
+                log.debug(f"Loaded {len(bp_df)} CNV breakpoints (with both strands)")
+        
+        # 3. Load fusion breakpoints
+        if fusion_breakpoints_file and os.path.exists(fusion_breakpoints_file):
+            log.debug(f"Loading fusion breakpoints from: {fusion_breakpoints_file}")
+            fusion_df = _load_bed_file(fusion_breakpoints_file)
+            if not fusion_df.empty:
+                # Fusion breakpoints preserve their strand
+                fusion_df = _duplicate_unstranded_regions(fusion_df)
+                all_regions.append(fusion_df)
+                log.debug(f"Loaded {len(fusion_df)} fusion breakpoints (preserving strand)")
+        
+        if not all_regions:
+            log.error("No BED regions found to merge")
+            return None
+        
+        # Combine all regions
+        combined_df = pd.concat(all_regions, ignore_index=True)
+        log.debug(f"Combined {len(combined_df)} total regions")
+        
+        # Merge overlapping regions
+        merged_df = _merge_overlapping_regions(combined_df)
+        log.debug(f"Merged to {len(merged_df)} regions")
+        
+        # Add target gene panel regions if available
+        if target_bed_file and os.path.exists(target_bed_file):
+            log.debug(f"Loading target panel regions from: {target_bed_file}")
+            target_df = _load_bed_file(target_bed_file, require_bed6=True)
+            if not target_df.empty:
+                # Duplicate unstranded target regions for both strands
+                target_df = _duplicate_unstranded_regions(target_df)
+                
+                # Keep all breakpoint regions and add target gene regions
+                log.debug(f"Keeping all {len(merged_df)} breakpoint regions and adding {len(target_df)} target gene regions")
+                
+                # Combine all breakpoints with target gene regions
+                all_regions_with_target = pd.concat([merged_df, target_df], ignore_index=True)
+                
+                log.debug(f"Combined {len(merged_df)} breakpoints with {len(target_df)} target gene regions")
+                
+                # Merge overlapping regions
+                merged_df = _merge_overlapping_regions(all_regions_with_target)
+                log.debug(f"Final merged regions including target genes: {len(merged_df)}")
+        
+        if merged_df.empty:
+            log.error("No regions remaining after processing")
+            return None
+        
+        # Sort regions
+        sorted_df = _sort_bed_regions(merged_df)
+        
+        # Ensure we have all BED6 columns
+        bed6_cols = ["chrom", "start", "end", "name", "score", "strand"]
+        for col in bed6_cols:
+            if col not in sorted_df.columns:
+                if col == "score":
+                    sorted_df[col] = "0"
+                elif col == "strand":
+                    sorted_df[col] = "."
+                else:
+                    sorted_df[col] = "."
+        
+        # Write master BED file in BED6 format
+        sorted_df[bed6_cols].to_csv(
+            output_file,
+            sep="\t",
+            header=False,
+            index=False,
+        )
+        
+        log.info(f"Generated master BED file: {output_file} with {len(sorted_df)} regions")
+        return output_file
+        
+    except Exception as e:
+        log.error(f"Error generating master BED file: {e}")
+        import traceback
+        log.debug(f"Traceback: {traceback.format_exc()}")
+        return None
+
+
+def main():
+    """CLI entry point for standalone testing."""
+    parser = argparse.ArgumentParser(
+        description="Generate master BED file from CNV and fusion breakpoint BED files",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Combine CNV regions and breakpoints:
+  python master_bed_generator.py --cnv-regions new_file_001.bed \\
+                                  --cnv-breakpoints breakpoints_001.bed \\
+                                  --output master.bed
+
+  # Include fusion breakpoints and target panel:
+  python master_bed_generator.py --cnv-regions new_file_001.bed \\
+                                  --cnv-breakpoints breakpoints_001.bed \\
+                                  --fusion-breakpoints fusion_breakpoints_001.bed \\
+                                  --target-panel rCNS2_panel_name_uniq.bed \\
+                                  --output master.bed
+
+  # Custom CNV expansion size:
+  python master_bed_generator.py --cnv-regions new_file_001.bed \\
+                                  --expand-size 5000 \\
+                                  --output master.bed
+        """
+    )
+    
+    parser.add_argument(
+        "--cnv-regions",
+        type=str,
+        help=(
+            "Path to CNV regions BED file (new_file_*.bed). "
+            "Processing: Each CNV region is split into two breakpoints (start and end positions). "
+            "Each breakpoint is padded by +/- expand-size (default 10kb) around the breakpoint position. "
+            "Each breakpoint region is duplicated for both + and - strands. "
+            "Regions are then merged if they overlap (separately by strand)."
+        )
+    )
+    parser.add_argument(
+        "--cnv-breakpoints",
+        type=str,
+        help=(
+            "Path to CNV breakpoints BED file (breakpoints_*.bed). "
+            "Processing: Regions are loaded as-is. If regions have unstranded ('.') strand, "
+            "they are duplicated for both + and - strands. Regions are merged if they overlap (separately by strand)."
+        )
+    )
+    parser.add_argument(
+        "--fusion-breakpoints",
+        type=str,
+        help=(
+            "Path to fusion breakpoints BED file (fusion_breakpoints_*.bed). "
+            "Processing: Regions preserve their original strand information. "
+            "If regions have unstranded ('.') strand, they are duplicated for both + and - strands. "
+            "Regions are merged if they overlap (separately by strand)."
+        )
+    )
+    parser.add_argument(
+        "--target-panel",
+        type=str,
+        help=(
+            "Path to target gene panel BED file (optional, for intersection). "
+            "Processing: Target regions are loaded and unstranded regions are duplicated for both + and - strands. "
+            "All breakpoint regions are kept (not filtered). "
+            "All target gene regions are then added to the final output. "
+            "Final regions are merged if they overlap (separately by strand)."
+        )
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        required=True,
+        help="Path to output master BED file"
+    )
+    parser.add_argument(
+        "--expand-size",
+        type=int,
+        default=10000,
+        help="Size to expand CNV regions in base pairs (default: 10000 = 10kb)"
+    )
+    parser.add_argument(
+        "--fai-file",
+        type=str,
+        help=(
+            "Path to FASTA index (.fai) file (optional). "
+            "If provided, calculates the total proportion of the genome covered by the BED file, "
+            "accounting for strand information (+ and - strands are calculated separately)."
+        )
+    )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Enable verbose logging"
+    )
+    
+    args = parser.parse_args()
+    
+    # Setup logging
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    
+    # Check that at least one input file is provided
+    if not any([args.cnv_regions, args.cnv_breakpoints, args.fusion_breakpoints]):
+        parser.error("At least one input BED file must be provided (--cnv-regions, --cnv-breakpoints, or --fusion-breakpoints)")
+    
+    # Generate master BED file
+    result = generate_master_bed_from_files(
+        cnv_regions_file=args.cnv_regions,
+        cnv_breakpoints_file=args.cnv_breakpoints,
+        fusion_breakpoints_file=args.fusion_breakpoints,
+        target_bed_file=args.target_panel,
+        output_file=args.output,
+        expand_cnv_size=args.expand_size,
+    )
+    
+    if result:
+        print(f"Successfully generated master BED file: {result}")
+        
+        # Calculate genome coverage if FAI file is provided
+        if args.fai_file:
+            try:
+                # Load the generated BED file
+                bed_df = _load_bed_file(result)
+                if not bed_df.empty:
+                    coverage_stats = _calculate_genome_coverage(bed_df, args.fai_file)
+                    if coverage_stats:
+                        print("\n" + "="*60)
+                        print("Genome Coverage Statistics")
+                        print("="*60)
+                        print(f"Total genome size: {coverage_stats['total_genome_size']:,} bp")
+                        print(f"\nCoverage by strand:")
+                        print(f"  + strand: {coverage_stats['plus_strand_coverage']:,} bp "
+                              f"({coverage_stats['plus_strand_proportion']*100:.4f}%)")
+                        print(f"  - strand: {coverage_stats['minus_strand_coverage']:,} bp "
+                              f"({coverage_stats['minus_strand_proportion']*100:.4f}%)")
+                        if coverage_stats['unstranded_coverage'] > 0:
+                            print(f"  . strand: {coverage_stats['unstranded_coverage']:,} bp "
+                                  f"({coverage_stats['unstranded_proportion']*100:.4f}%)")
+                        print(f"\nTotal covered bases: {coverage_stats['total_covered_bases']:,} bp")
+                        print(f"Total proportion covered: {coverage_stats['total_proportion']*100:.4f}%")
+                        print("="*60)
+                    else:
+                        print("Warning: Could not calculate genome coverage statistics", file=sys.stderr)
+                else:
+                    print("Warning: Generated BED file is empty, cannot calculate coverage", file=sys.stderr)
+            except Exception as e:
+                logger.error(f"Error calculating genome coverage: {e}")
+                print(f"Warning: Error calculating genome coverage: {e}", file=sys.stderr)
+        
+        sys.exit(0)
+    else:
+        print("Failed to generate master BED file", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
