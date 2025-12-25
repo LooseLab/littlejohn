@@ -3037,6 +3037,23 @@ class GUILauncher:
                                     ui.notify(f"Fusion section failed: {e}", type="warning")
                                 except Exception:
                                     pass
+                            
+                            # BED Coverage section
+                            try:
+                                try:
+                                    from .gui.components.bed_coverage import add_bed_coverage_section  # type: ignore
+                                except ImportError:
+                                    # Try absolute import if relative fails
+                                    from robin.gui.components.bed_coverage import add_bed_coverage_section
+                                
+                                # Create the UI components immediately on the main thread
+                                add_bed_coverage_section(self, sample_dir)
+                            except Exception as e:
+                                logging.exception(f"[GUI] BED Coverage section failed: {e}")
+                                try:
+                                    ui.notify(f"BED Coverage section failed: {e}", type="warning")
+                                except Exception:
+                                    pass
 
                         # Files in output directory
                         with ui.card().classes("w-full"):

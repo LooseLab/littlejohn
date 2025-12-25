@@ -583,6 +583,47 @@ class TargetAnalysis:
 
         logger.info(f"Target Analysis initialized (staging={'enabled' if use_staging else 'disabled'}, batch_size={batch_size})")
 
+    def _get_master_bed_path(self, sample_id: str) -> Optional[str]:
+        """
+        Get the path to the master BED file for a sample if it exists.
+        Master BED includes target panel + CNV breakpoints + fusion breakpoints + master BED breakpoints.
+        
+        Args:
+            sample_id: Sample ID
+            
+        Returns:
+            Path to master BED file, or None if not found
+        """
+        logger = logging.getLogger("robin.target")
+        try:
+            import glob
+            from robin.analysis.fusion_work import _load_analysis_counter
+            
+            sample_dir = os.path.join(self.work_dir, sample_id)
+            bed_dir = os.path.join(sample_dir, "bed_files")
+            
+            if not os.path.exists(bed_dir):
+                return None
+            
+            # Try to get analysis counter
+            analysis_counter = _load_analysis_counter(sample_id, self.work_dir)
+            master_bed_path = os.path.join(bed_dir, f"master_{analysis_counter:03d}.bed")
+            
+            if os.path.exists(master_bed_path):
+                return master_bed_path
+            
+            # Try to find the latest master BED file if counter-based doesn't exist
+            master_bed_files = glob.glob(os.path.join(bed_dir, "master_*.bed"))
+            if master_bed_files:
+                # Sort by modification time and return the latest
+                latest = max(master_bed_files, key=os.path.getmtime)
+                logger.debug(f"Using latest master BED file: {latest}")
+                return latest
+        except Exception as e:
+            logger.debug(f"Error finding master BED file: {e}")
+        
+        return None
+
     def _find_target_bed(self, target_panel: str) -> str:
         """Find the target BED file from robin resources based on panel type"""
         logger = logging.getLogger("robin.target")
@@ -937,8 +978,13 @@ class TargetAnalysis:
                     dir=sample_output_dir, suffix=".bam"
                 )
 
+                # Prefer master BED file if available, otherwise use original target panel BED
+                # Master BED includes target panel + CNV + fusion + master BED breakpoints
+                sample_id = metadata.get("sample_id", "unknown")
+                targets_bed = self._get_master_bed_path(sample_id) or self.bedfile
+                
                 # Run bedtools intersection
-                run_bedtools(file_path, self.bedfile, tempbamfile.name)
+                run_bedtools(file_path, targets_bed, tempbamfile.name)
 
                 # Check if target BAM has reads
                 if (
@@ -1656,8 +1702,14 @@ class TargetAnalysis:
                         original_bam_files = list(set(source_bam_paths))  # Remove duplicates
                         
                         if original_bam_files:
-                            # Use the original target panel BED file
-                            targets_bed = self.bedfile
+                            # Prefer master BED file if available (includes target panel + CNV + fusion + master BED breakpoints)
+                            # Fall back to original target panel BED file if master BED doesn't exist
+                            targets_bed = self._get_master_bed_path(sample_id) or self.bedfile
+                            
+                            if targets_bed != self.bedfile:
+                                logger.info(f"Using master BED file for target.bam: {targets_bed}")
+                            else:
+                                logger.info(f"Using original target panel BED file for target.bam: {targets_bed}")
                             
                             # Create filtered BAM directory
                             filtered_bams_dir = os.path.join(sample_output_dir, "_filtered_bams")

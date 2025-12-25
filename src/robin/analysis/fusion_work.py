@@ -24,7 +24,7 @@ import fcntl
 import time
 from pathlib import Path
 from collections import defaultdict
-from typing import Dict, Any, Optional, List, Tuple, Set
+from typing import Dict, Any, Optional, List, Tuple, Set, Union
 from dataclasses import dataclass, asdict
 
 # Third-party imports
@@ -154,6 +154,23 @@ class GeneRegion:
         return (
             overlap_end > overlap_start and (overlap_end - overlap_start) > min_overlap
         )
+
+
+@dataclass
+class MasterBedRegion:
+    """Represents a region from the master BED file (breakpoints, CNV regions, etc.).
+    Simpler than GeneRegion - just tracks coordinates without gene names.
+    """
+
+    start: int
+    end: int
+    name: str  # Optional: may contain region identifier from BED file
+
+    def overlaps_with(self, other_start: int, other_end: int) -> bool:
+        """Check if this region overlaps with another region (any overlap counts)."""
+        overlap_start = max(self.start, other_start)
+        overlap_end = min(self.end, other_end)
+        return overlap_end > overlap_start
 
 
 # =============================================================================
@@ -356,6 +373,91 @@ def _ensure_gene_regions_loaded(target_panel: str) -> None:
         logger.info(f"DEBUG: Gene regions for target_panel='{target_panel}' already loaded in cache")
 
 
+def _load_master_bed_regions(bed_file: str) -> Dict[str, List[MasterBedRegion]]:
+    """
+    Load master BED file regions into memory for efficient lookup.
+    Master BED regions don't require gene overlap - breaks can occur anywhere.
+    
+    Args:
+        bed_file: Path to master BED file
+        
+    Returns:
+        Dictionary mapping chromosome names to lists of MasterBedRegion objects
+    """
+    regions = defaultdict(list)
+    
+    if not os.path.exists(bed_file):
+        logger.debug(f"Master BED file does not exist: {bed_file}")
+        return dict(regions)
+    
+    logger.info(f"Loading master BED file: {bed_file}")
+    
+    try:
+        with open(bed_file, "r") as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                
+                parts = line.split("\t")
+                if len(parts) < 3:
+                    continue
+                
+                try:
+                    chrom = parts[0]
+                    start = int(parts[1])
+                    end = int(parts[2])
+                    name = parts[3] if len(parts) > 3 else f"region_{line_num}"
+                    
+                    regions[chrom].append(MasterBedRegion(start, end, name))
+                except (ValueError, IndexError) as e:
+                    logger.debug(f"Skipping invalid line {line_num} in {bed_file}: {e}")
+                    continue
+    
+    except Exception as e:
+        logger.error(f"Error loading master BED file {bed_file}: {e}")
+        return dict(regions)
+    
+    result = dict(regions)
+    total_regions = sum(len(regions) for regions in result.values())
+    logger.info(f"Loaded {total_regions} total regions from master BED file")
+    return result
+
+
+def _get_master_bed_path(work_dir: str, sample_id: str) -> Optional[str]:
+    """
+    Get the path to the master BED file for a sample.
+    
+    Args:
+        work_dir: Working directory
+        sample_id: Sample ID
+        
+    Returns:
+        Path to master BED file, or None if not found
+    """
+    try:
+        analysis_counter = _load_analysis_counter(sample_id, work_dir)
+        sample_dir = os.path.join(work_dir, sample_id)
+        bed_dir = os.path.join(sample_dir, "bed_files")
+        master_bed_path = os.path.join(bed_dir, f"master_{analysis_counter:03d}.bed")
+        
+        if os.path.exists(master_bed_path):
+            return master_bed_path
+        
+        # Try to find the latest master BED file if counter-based doesn't exist
+        if os.path.exists(bed_dir):
+            master_bed_files = glob.glob(os.path.join(bed_dir, "master_*.bed"))
+            if master_bed_files:
+                # Sort by modification time and return the latest
+                latest = max(master_bed_files, key=os.path.getmtime)
+                logger.debug(f"Using latest master BED file: {latest}")
+                return latest
+    except Exception as e:
+        logger.debug(f"Error finding master BED file: {e}")
+    
+    return None
+
+
 # =============================================================================
 # BAM FILE ANALYSIS FUNCTIONS
 # =============================================================================
@@ -374,6 +476,57 @@ def has_supplementary_alignments(bamfile: str) -> bool:
     except Exception as e:
         logging.error(f"Error checking supplementary alignments in {bamfile}: {str(e)}")
         return False
+
+
+def find_reads_mapping_to_master_bed(
+    bamfile: str, master_bed_regions: Dict[str, List[MasterBedRegion]]
+) -> Set[str]:
+    """
+    Find all read names that map to regions in the master BED file.
+    
+    Args:
+        bamfile: Path to BAM file
+        master_bed_regions: Dictionary of master BED regions by chromosome
+        
+    Returns:
+        Set of read names that map to master BED regions
+    """
+    reads_mapping_to_master = set()
+    
+    if not master_bed_regions:
+        return reads_mapping_to_master
+    
+    try:
+        with pysam.AlignmentFile(bamfile, "rb") as bam:
+            for read in bam:
+                if read.is_unmapped:
+                    continue
+                
+                # Get reference information
+                ref_name = (
+                    bam.get_reference_name(read.reference_id)
+                    if read.reference_id >= 0
+                    else None
+                )
+                if not ref_name or ref_name == "chrM":
+                    continue
+                
+                # Check if this read overlaps with any master BED region
+                if ref_name in master_bed_regions:
+                    ref_start = read.reference_start
+                    ref_end = read.reference_end
+                    
+                    for region in master_bed_regions[ref_name]:
+                        if region.overlaps_with(ref_start, ref_end):
+                            reads_mapping_to_master.add(read.query_name)
+                            break  # No need to check other regions for this read
+    
+    except Exception as e:
+        logger.error(f"Error finding reads mapping to master BED in {bamfile}: {e}")
+        raise
+    
+    logger.debug(f"Found {len(reads_mapping_to_master)} reads mapping to master BED regions")
+    return reads_mapping_to_master
 
 
 def find_reads_with_supplementary(bamfile: str) -> Set[str]:
@@ -637,6 +790,153 @@ def _optimize_fusion_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _process_reads_for_master_bed_fusions(
+    bamfile: str,
+    reads_mapping_to_master: Set[str],
+) -> Optional[pd.DataFrame]:
+    """
+    Process reads mapping to master BED regions and track ALL their supplementary alignments.
+    Unlike regular fusion detection, we don't require gene overlap - breaks can occur anywhere.
+    
+    Args:
+        bamfile: Path to BAM file
+        reads_mapping_to_master: Set of read names that map to master BED regions
+        
+    Returns:
+        DataFrame with fusion candidates or None if no candidates found
+    """
+    read_rows = []
+    
+    if not reads_mapping_to_master:
+        return None
+    
+    try:
+        with pysam.AlignmentFile(bamfile, "rb") as bam:
+            for read in bam:
+                # Only process reads that map to master BED regions
+                if read.query_name not in reads_mapping_to_master:
+                    continue
+                
+                # Skip secondary alignments and unmapped reads
+                if read.is_secondary or read.is_unmapped:
+                    continue
+                
+                # Only process reads with supplementary alignments (SA tag)
+                if not read.has_tag("SA"):
+                    continue
+                
+                # Get reference information
+                ref_name = (
+                    bam.get_reference_name(read.reference_id)
+                    if read.reference_id >= 0
+                    else None
+                )
+                if not ref_name or ref_name == "chrM":
+                    continue
+                
+                ref_start = read.reference_start
+                ref_end = read.reference_end
+                
+                # For master BED fusions, we track ALL supplementary alignments
+                # without requiring gene overlap. Create a row for each alignment.
+                read_rows.append(
+                    {
+                        "col1": ref_name,  # Chromosome
+                        "col2": ref_start,  # Region start (read start)
+                        "col3": ref_end,  # Region end (read end)
+                        "col4": "master_bed_region",  # Identifier
+                        "reference_id": ref_name,  # Chromosome
+                        "reference_start": ref_start,  # Read start position
+                        "reference_end": ref_end,  # Read end position
+                        "read_id": read.query_name,  # Read ID
+                        "mapping_quality": read.mapping_quality,  # Mapping quality
+                        "strand": "-" if read.is_reverse else "+",  # Strand
+                        "read_start": read.query_alignment_start,  # Read alignment start
+                        "read_end": read.query_alignment_end,  # Read alignment end
+                        "is_secondary": read.is_secondary,  # Is secondary alignment
+                        "is_supplementary": read.is_supplementary,  # Is supplementary alignment
+                        "mapping_span": ref_end - ref_start,  # Mapping span
+                    }
+                )
+                
+                # Also parse SA tag to get all supplementary alignments
+                try:
+                    sa_tag = read.get_tag("SA")
+                    # SA tag format: "chr,pos,strand,CIGAR,mapQ,NM;chr,pos,strand,CIGAR,mapQ,NM;..."
+                    sa_entries = sa_tag.split(";")
+                    for sa_entry in sa_entries:
+                        if not sa_entry:
+                            continue
+                        sa_parts = sa_entry.split(",")
+                        if len(sa_parts) >= 3:
+                            sa_chrom = sa_parts[0]
+                            sa_pos = int(sa_parts[1])
+                            sa_strand = sa_parts[2]
+                            sa_mapq = int(sa_parts[4]) if len(sa_parts) > 4 else 0
+                            
+                            # Estimate end position from CIGAR if available
+                            if len(sa_parts) > 3:
+                                cigar_str = sa_parts[3]
+                                # Simple estimate: use read length as span (rough approximation)
+                                sa_end = sa_pos + read.query_length
+                            else:
+                                sa_end = sa_pos + 100  # Default small span
+                            
+                            # Skip mitochondrial chromosomes
+                            if sa_chrom == "chrM" or sa_chrom == "M":
+                                continue
+                            
+                            # Add supplementary alignment as a row
+                            read_rows.append(
+                                {
+                                    "col1": sa_chrom,  # Chromosome
+                                    "col2": sa_pos,  # Region start
+                                    "col3": sa_end,  # Region end
+                                    "col4": "master_bed_supplementary",  # Identifier
+                                    "reference_id": sa_chrom,  # Chromosome
+                                    "reference_start": sa_pos,  # Alignment start position
+                                    "reference_end": sa_end,  # Alignment end position
+                                    "read_id": read.query_name,  # Read ID
+                                    "mapping_quality": sa_mapq,  # Mapping quality from SA tag
+                                    "strand": sa_strand,  # Strand
+                                    "read_start": 0,  # Not available from SA tag
+                                    "read_end": read.query_length,  # Not available from SA tag
+                                    "is_secondary": False,  # SA tag entries are supplementary
+                                    "is_supplementary": True,  # This is a supplementary alignment
+                                    "mapping_span": sa_end - sa_pos,  # Mapping span
+                                }
+                            )
+                except (ValueError, KeyError) as e:
+                    logger.debug(f"Could not parse SA tag for read {read.query_name}: {e}")
+                    continue
+    
+    except Exception as e:
+        logger.error(f"Error processing reads for master BED fusions: {str(e)}")
+        raise
+    
+    if not read_rows:
+        return None
+    
+    # Create DataFrame
+    df = pd.DataFrame(read_rows)
+    
+    # Apply memory optimizations
+    df = _optimize_fusion_dataframe(df)
+    
+    # Apply basic filtering thresholds (mapping quality, mapping span)
+    # but NOT gene overlap requirement
+    min_mq = get_fusion_threshold("mapping_quality")
+    min_span = get_fusion_threshold("mapping_span")
+    df = df[(df["mapping_quality"] > min_mq) & (df["mapping_span"] > min_span)].reset_index(
+        drop=True
+    )
+    
+    if df.empty:
+        return None
+    
+    return df
+
+
 def _filter_fusion_candidates(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     """
     Filter fusion candidates to only include reads with supplementary alignments.
@@ -676,6 +976,185 @@ def _filter_fusion_candidates(df: pd.DataFrame) -> Optional[pd.DataFrame]:
 # =============================================================================
 # MAIN PROCESSING FUNCTIONS
 # =============================================================================
+
+
+def process_bam_for_master_bed_fusions(
+    bamfile: str, work_dir: str, sample_id: str, supplementary_read_ids: Optional[List[str]] = None
+) -> Optional[pd.DataFrame]:
+    """
+    Process BAM file to find fusion candidates by tracking ALL supplementary alignments.
+    No longer requires primary alignment to overlap master BED regions.
+    Tracks supplementary mappings from all reads with supplementary alignments,
+    without requiring gene overlap (breaks can occur anywhere).
+    
+    Args:
+        bamfile: Path to BAM file
+        work_dir: Working directory (kept for API compatibility, not used for filtering)
+        sample_id: Sample ID (kept for API compatibility, not used for filtering)
+        supplementary_read_ids: Optional list of read IDs with supplementary alignments
+                               (if available from metadata, avoids checking SA tag for all reads)
+        
+    Returns:
+        DataFrame with master BED fusion candidates or None if no candidates found
+    """
+    try:
+        # Convert supplementary_read_ids to set for fast lookup if provided
+        supplementary_reads_set = set(supplementary_read_ids) if supplementary_read_ids else None
+        
+        # Process ALL reads with supplementary alignments (no master BED overlap requirement)
+        read_rows = []
+        reads_with_supplementary_count = 0
+        
+        try:
+            with pysam.AlignmentFile(bamfile, "rb") as bam:
+                for read in bam:
+                    if read.is_unmapped:
+                        continue
+                    
+                    # Skip secondary alignments (we only process primary alignments)
+                    if read.is_secondary:
+                        continue
+                    
+                    # Get reference information
+                    ref_name = (
+                        bam.get_reference_name(read.reference_id)
+                        if read.reference_id >= 0
+                        else None
+                    )
+                    if not ref_name or ref_name == "chrM":
+                        continue
+                    
+                    # Check for supplementary alignments
+                    # Always check SA tag directly to ensure we catch ALL reads with supplementary alignments
+                    # The supplementary_read_ids list may be incomplete if preprocessing missed some reads
+                    # or if reads were added after preprocessing
+                    has_supplementary = read.has_tag("SA")
+                    
+                    # Optional optimization: if we have a supplementary_read_ids list and the read is not in it,
+                    # we can skip the SA tag check (but this risks missing reads if the list is incomplete)
+                    # For now, we always check SA tag to be safe
+                    if not has_supplementary:
+                        continue
+                    
+                    # Process this read: it has supplementary alignments
+                    reads_with_supplementary_count += 1
+                    
+                    ref_start = read.reference_start
+                    ref_end = read.reference_end
+                    
+                    # Process this read: add primary alignment
+                    read_rows.append(
+                        {
+                            "col1": ref_name,  # Chromosome
+                            "col2": ref_start,  # Region start (read start)
+                            "col3": ref_end,  # Region end (read end)
+                            "col4": "master_bed_region",  # Identifier
+                            "reference_id": ref_name,  # Chromosome
+                            "reference_start": ref_start,  # Read start position
+                            "reference_end": ref_end,  # Read end position
+                            "read_id": read.query_name,  # Read ID
+                            "mapping_quality": read.mapping_quality,  # Mapping quality
+                            "strand": "-" if read.is_reverse else "+",  # Strand
+                            "read_start": read.query_alignment_start,  # Read alignment start
+                            "read_end": read.query_alignment_end,  # Read alignment end
+                            "is_secondary": read.is_secondary,  # Is secondary alignment
+                            "is_supplementary": read.is_supplementary,  # Is supplementary alignment
+                            "mapping_span": ref_end - ref_start,  # Mapping span
+                        }
+                    )
+                    
+                    # Parse SA tag to get all supplementary alignments
+                    if read.has_tag("SA"):
+                        try:
+                            sa_tag = read.get_tag("SA")
+                            # SA tag format: "chr,pos,strand,CIGAR,mapQ,NM;chr,pos,strand,CIGAR,mapQ,NM;..."
+                            sa_entries = sa_tag.split(";")
+                            for sa_entry in sa_entries:
+                                if not sa_entry:
+                                    continue
+                                sa_parts = sa_entry.split(",")
+                                if len(sa_parts) >= 3:
+                                    sa_chrom = sa_parts[0]
+                                    sa_pos = int(sa_parts[1])
+                                    sa_strand = sa_parts[2]
+                                    sa_mapq = int(sa_parts[4]) if len(sa_parts) > 4 else 0
+                                    
+                                    # Estimate end position from CIGAR if available
+                                    if len(sa_parts) > 3:
+                                        cigar_str = sa_parts[3]
+                                        # Simple estimate: use read length as span (rough approximation)
+                                        sa_end = sa_pos + read.query_length
+                                    else:
+                                        sa_end = sa_pos + 100  # Default small span
+                                    
+                                    # Skip mitochondrial chromosomes
+                                    if sa_chrom == "chrM" or sa_chrom == "M":
+                                        continue
+                                    
+                                    # Add supplementary alignment as a row
+                                    read_rows.append(
+                                        {
+                                            "col1": sa_chrom,  # Chromosome
+                                            "col2": sa_pos,  # Region start
+                                            "col3": sa_end,  # Region end
+                                            "col4": "master_bed_supplementary",  # Identifier
+                                            "reference_id": sa_chrom,  # Chromosome
+                                            "reference_start": sa_pos,  # Alignment start position
+                                            "reference_end": sa_end,  # Alignment end position
+                                            "read_id": read.query_name,  # Read ID
+                                            "mapping_quality": sa_mapq,  # Mapping quality from SA tag
+                                            "strand": sa_strand,  # Strand
+                                            "read_start": 0,  # Not available from SA tag
+                                            "read_end": read.query_length,  # Not available from SA tag
+                                            "is_secondary": False,  # SA tag entries are supplementary
+                                            "is_supplementary": True,  # This is a supplementary alignment
+                                            "mapping_span": sa_end - sa_pos,  # Mapping span
+                                        }
+                                    )
+                        except (ValueError, KeyError) as e:
+                            logger.debug(f"Could not parse SA tag for read {read.query_name}: {e}")
+                            continue
+        
+        except Exception as e:
+            logger.error(f"Error processing BAM file for master BED fusions: {e}")
+            raise
+        
+        if reads_with_supplementary_count == 0:
+            logger.debug("No reads with supplementary alignments found")
+            return None
+        
+        logger.info(f"Found {reads_with_supplementary_count} reads with supplementary alignments")
+        
+        if not read_rows:
+            logger.debug("No master BED fusion candidates found (no supplementary alignments)")
+            return None
+        
+        # Create DataFrame
+        df = pd.DataFrame(read_rows)
+        
+        # Apply memory optimizations
+        df = _optimize_fusion_dataframe(df)
+        
+        # Apply basic filtering thresholds (mapping quality, mapping span)
+        # but NOT gene overlap requirement
+        min_mq = get_fusion_threshold("mapping_quality")
+        min_span = get_fusion_threshold("mapping_span")
+        
+        before_filter = len(df)
+        df = df[(df["mapping_quality"] > min_mq) & (df["mapping_span"] > min_span)].reset_index(
+            drop=True
+        )
+        
+        if df.empty:
+            return None
+        
+        logger.info(f"Found {len(df)} master BED fusion candidates")
+        return df
+        
+    except Exception as e:
+        logger.error(f"Error processing master BED fusions: {str(e)}")
+        logger.error("Exception details:", exc_info=True)
+        return None
 
 
 def process_bam_for_fusions_work(
@@ -865,6 +1344,17 @@ def process_bam_with_staging(
             file_path, target_panel
         )
         
+        # Process master BED fusions (tracks supplementary mappings from master BED regions)
+        # Use supplementary_read_ids if available to optimize BAM file reading
+        master_bed_candidates = None
+        try:
+            master_bed_candidates = process_bam_for_master_bed_fusions(
+                file_path, work_dir, sample_id, supplementary_read_ids=supplementary_read_ids
+            )
+        except Exception as e:
+            logger.warning(f"Error processing master BED fusions: {e}")
+            master_bed_candidates = None
+        
         # Apply fusion candidate filtering
         if target_candidates is not None and not target_candidates.empty:
             target_candidates = _filter_fusion_candidates(target_candidates)
@@ -877,6 +1367,7 @@ def process_bam_with_staging(
         
         target_staging = os.path.join(staging_dir, f"target_{counter:06d}.parquet")
         genome_staging = os.path.join(staging_dir, f"genome_{counter:06d}.parquet")
+        master_bed_staging = os.path.join(staging_dir, f"master_bed_{counter:06d}.parquet")
         
         # Save candidates to staging
         if target_candidates is not None and not target_candidates.empty:
@@ -892,6 +1383,14 @@ def process_bam_with_staging(
         else:
             # Save empty marker file
             pd.DataFrame().to_parquet(genome_staging, index=False)
+        
+        # Save master BED candidates to staging
+        if master_bed_candidates is not None and not master_bed_candidates.empty:
+            master_bed_candidates.to_parquet(master_bed_staging, index=False)
+            logger.info(f"Saved {len(master_bed_candidates)} master BED candidates to staging")
+        else:
+            # Save empty marker file
+            pd.DataFrame().to_parquet(master_bed_staging, index=False)
         
         # Check if accumulation should run
         pending_count = _get_pending_count(work_dir, sample_id)
@@ -914,8 +1413,12 @@ def process_bam_with_staging(
             "genome_wide_candidates_count": (
                 len(genome_wide_candidates) if genome_wide_candidates is not None else 0
             ),
+            "master_bed_candidates_count": (
+                len(master_bed_candidates) if master_bed_candidates is not None else 0
+            ),
             "target_candidates": target_candidates,
             "genome_wide_candidates": genome_wide_candidates,
+            "master_bed_candidates": master_bed_candidates,
         }
         
         return results, should_accumulate
@@ -937,6 +1440,7 @@ def accumulate_fusion_candidates(
     target_panel: str,
     force: bool = False,
     batch_size: int = 10,
+    reference: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Batch accumulation of staged fusion candidates with proper locking.
@@ -971,6 +1475,7 @@ def accumulate_fusion_candidates(
             # Find all staging files
             target_files = sorted(glob.glob(os.path.join(staging_dir, "target_*.parquet")))
             genome_files = sorted(glob.glob(os.path.join(staging_dir, "genome_*.parquet")))
+            master_bed_files = sorted(glob.glob(os.path.join(staging_dir, "master_bed_*.parquet")))
             
             if not target_files:
                 logger.info(f"No staged fusion files to accumulate for {sample_id}")
@@ -988,90 +1493,151 @@ def accumulate_fusion_candidates(
                 f"Accumulating {len(target_files)} staged fusion files for {sample_id}"
             )
             
-            # Load all staged files
-            target_dfs = []
-            genome_dfs = []
+            # Load all staged files efficiently
+            # Use list comprehensions to load all files of each type
+            # This is more efficient than sequential loading and doesn't require index matching
             
-            for target_file, genome_file in zip(target_files, genome_files):
-                try:
-                    target_df = pd.read_parquet(target_file)
-                    if not target_df.empty:
-                        target_dfs.append(target_df)
-                    
-                    genome_df = pd.read_parquet(genome_file)
-                    if not genome_df.empty:
-                        genome_dfs.append(genome_df)
-                except Exception as e:
-                    logger.warning(f"Error loading staging file {target_file}: {e}")
-                    continue
+            def load_parquet_files(file_list, file_type="file"):
+                """Load multiple parquet files, skipping empty or failed files."""
+                dfs = []
+                for file_path in file_list:
+                    try:
+                        df = pd.read_parquet(file_path)
+                        if not df.empty:
+                            dfs.append(df)
+                    except Exception as e:
+                        logger.warning(f"Error loading {file_type} staging file {os.path.basename(file_path)}: {e}")
+                        continue
+                return dfs
+            
+            # Load all files of each type (no need to match by index - just load all available)
+            target_dfs = load_parquet_files(target_files, "target")
+            genome_dfs = load_parquet_files(genome_files, "genome")
+            master_bed_dfs = load_parquet_files(master_bed_files, "master_bed")
             
             logger.info(
-                f"Loaded {len(target_dfs)} target and {len(genome_dfs)} genome-wide staging files"
+                f"Loaded {len(target_dfs)} target, {len(genome_dfs)} genome-wide, "
+                f"and {len(master_bed_dfs)} master BED staging files"
             )
             
             # Efficient batch merge using concat
-            batch_target = pd.concat(target_dfs, ignore_index=True) if target_dfs else pd.DataFrame()
-            batch_genome = pd.concat(genome_dfs, ignore_index=True) if genome_dfs else pd.DataFrame()
+            # Optimize for common cases: single file (no concat needed) or empty list
+            def concat_dataframes(df_list):
+                """Efficiently concatenate a list of DataFrames, handling edge cases."""
+                if not df_list:
+                    return pd.DataFrame()
+                elif len(df_list) == 1:
+                    return df_list[0].copy()  # Return a copy to avoid modifying original
+                else:
+                    return pd.concat(df_list, ignore_index=True)
+            
+            batch_target = concat_dataframes(target_dfs)
+            batch_genome = concat_dataframes(genome_dfs)
+            batch_master_bed = concat_dataframes(master_bed_dfs)
             
             logger.info(
-                f"Batch merged: {len(batch_target)} target, {len(batch_genome)} genome-wide candidates"
+                f"Batch merged: {len(batch_target)} target, {len(batch_genome)} genome-wide, "
+                f"{len(batch_master_bed)} master BED candidates"
             )
             
-            # Load existing accumulated metadata
-            existing_metadata = _load_fusion_metadata(work_dir, sample_id)
+            # Debug logging for master BED candidates
+            if len(master_bed_files) > 0:
+                logger.debug(f"Found {len(master_bed_files)} master Bed staging files")
+                logger.debug(f"Loaded {len(master_bed_dfs)} non-empty master BED DataFrames from staging")
+            else:
+                logger.debug("No master BED staging files found")
             
-            if existing_metadata and existing_metadata.fusion_data:
-                # Merge with existing
-                existing_target = existing_metadata.fusion_data.get("target_candidates", [])
-                existing_genome = existing_metadata.fusion_data.get("genome_wide_candidates", [])
-                
-                logger.info(
-                    f"Existing data: {len(existing_target)} target, {len(existing_genome)} genome-wide"
-                )
-                
-                # Convert existing to DataFrames and concatenate
-                if existing_target:
-                    existing_target_df = pd.DataFrame(existing_target)
+            # Load existing accumulated data directly from Parquet files (fast path)
+            # This avoids expensive JSON loading and DataFrame conversion
+            existing_target_df = _load_fusion_candidates_parquet("target_candidates", work_dir, sample_id)
+            existing_genome_df = _load_fusion_candidates_parquet("genome_wide_candidates", work_dir, sample_id)
+            existing_master_bed_df = _load_fusion_candidates_parquet("master_bed_candidates", work_dir, sample_id)
+            
+            # Merge with existing DataFrames (much faster than converting from lists)
+            # Handle case where batch is empty - just use existing data directly
+            if existing_target_df is not None and not existing_target_df.empty:
+                logger.info(f"Existing target data: {len(existing_target_df)} candidates")
+                if batch_target.empty:
+                    batch_target = existing_target_df.copy()
+                else:
                     batch_target = pd.concat([existing_target_df, batch_target], ignore_index=True)
-                
-                if existing_genome:
-                    existing_genome_df = pd.DataFrame(existing_genome)
-                    batch_genome = pd.concat([existing_genome_df, batch_genome], ignore_index=True)
+            elif existing_target_df is not None and existing_target_df.empty:
+                # Existing file exists but is empty - keep batch data (if any)
+                logger.debug("Existing target Parquet file is empty")
             
-            # Convert to list of dicts for storage
-            final_target = batch_target.to_dict("records") if not batch_target.empty else []
-            final_genome = batch_genome.to_dict("records") if not batch_genome.empty else []
+            if existing_genome_df is not None and not existing_genome_df.empty:
+                logger.info(f"Existing genome-wide data: {len(existing_genome_df)} candidates")
+                if batch_genome.empty:
+                    batch_genome = existing_genome_df.copy()
+                else:
+                    batch_genome = pd.concat([existing_genome_df, batch_genome], ignore_index=True)
+            elif existing_genome_df is not None and existing_genome_df.empty:
+                # Existing file exists but is empty - keep batch data (if any)
+                logger.debug("Existing genome-wide Parquet file is empty")
+            
+            if existing_master_bed_df is not None and not existing_master_bed_df.empty:
+                logger.info(f"Existing master BED data: {len(existing_master_bed_df)} candidates")
+                if batch_master_bed.empty:
+                    batch_master_bed = existing_master_bed_df.copy()
+                else:
+                    batch_master_bed = pd.concat([existing_master_bed_df, batch_master_bed], ignore_index=True)
+            elif existing_master_bed_df is not None and existing_master_bed_df.empty:
+                # Existing file exists but is empty - keep batch data (if any)
+                logger.debug("Existing master BED Parquet file is empty")
             
             logger.info(
-                f"Final accumulated: {len(final_target)} target, {len(final_genome)} genome-wide candidates"
+                f"Final accumulated: {len(batch_target)} target, {len(batch_genome)} genome-wide, "
+                f"{len(batch_master_bed)} master BED candidates"
             )
             
-            # Create updated metadata
+            # Additional debug info for master BED
+            if batch_master_bed.empty:
+                logger.debug("Final batch_master_bed is empty - no master BED candidates to save")
+            else:
+                logger.debug(f"Final batch_master_bed has {len(batch_master_bed)} rows, columns: {list(batch_master_bed.columns)}")
+            
+            # Save directly to Parquet files (fast storage, no expensive to_dict conversion)
+            _save_fusion_candidates_parquet(batch_target, "target_candidates", work_dir, sample_id)
+            _save_fusion_candidates_parquet(batch_genome, "genome_wide_candidates", work_dir, sample_id)
+            _save_fusion_candidates_parquet(batch_master_bed, "master_bed_candidates", work_dir, sample_id)
+            
+            # Create updated metadata (with empty lists - data is in Parquet files)
+            # This keeps the metadata structure but avoids storing large lists in JSON
             fusion_metadata = FusionMetadata(
                 sample_id=sample_id,
                 file_path="accumulated",
                 analysis_timestamp=time.time(),
                 target_panel=target_panel,
                 fusion_data={
-                    "target_candidates": final_target,
-                    "genome_wide_candidates": final_genome,
+                    "target_candidates": [],  # Data stored in Parquet, not JSON
+                    "genome_wide_candidates": [],  # Data stored in Parquet, not JSON
+                    "master_bed_candidates": [],  # Data stored in Parquet, not JSON
                 },
                 analysis_results={
-                    "target_candidates_count": len(final_target),
-                    "genome_wide_candidates_count": len(final_genome),
+                    "target_candidates_count": len(batch_target),
+                    "genome_wide_candidates_count": len(batch_genome),
+                    "master_bed_candidates_count": len(batch_master_bed),
                 },
                 processing_steps=["accumulated"],
             )
             
-            # Save accumulated metadata
+            # Save metadata (without large candidate lists - they're in Parquet)
             _save_fusion_metadata(fusion_metadata, work_dir, sample_id)
             
             # Generate output files with accumulated data (includes fusion breakpoint BED)
-            _generate_output_files(sample_id, fusion_metadata.analysis_results, fusion_metadata, work_dir)
+            # Only generate master BED if this is a forced accumulation (final batch)
+            _generate_output_files(
+                sample_id, 
+                fusion_metadata.analysis_results, 
+                fusion_metadata, 
+                work_dir, 
+                reference=reference,
+                generate_master_bed=force  # Only generate master BED on final accumulation
+            )
             
             # Clean up staging files
             logger.info("Cleaning up fusion staging files...")
-            for f in target_files + genome_files:
+            for f in target_files + genome_files + master_bed_files:
                 try:
                     os.remove(f)
                 except OSError as e:
@@ -1087,8 +1653,9 @@ def accumulate_fusion_candidates(
             return {
                 "status": "success",
                 "files_processed": len(target_files),
-                "target_candidates": len(final_target),
-                "genome_wide_candidates": len(final_genome),
+                "target_candidates": len(batch_target),
+                "genome_wide_candidates": len(batch_genome),
+                "master_bed_candidates": len(batch_master_bed),
                 "elapsed_time": elapsed,
             }
     
@@ -1145,6 +1712,13 @@ def process_bam_file(
             file_path, target_panel
         )
 
+        # Process master BED fusions (tracks supplementary mappings from master BED regions)
+        master_bed_candidates = None
+        if work_dir:
+            master_bed_candidates = process_bam_for_master_bed_fusions(
+                file_path, work_dir, sample_id
+            )
+
         # Apply fusion candidate filtering to get the final results
         if target_candidates is not None and not target_candidates.empty:
             target_candidates = _filter_fusion_candidates(target_candidates)
@@ -1161,8 +1735,12 @@ def process_bam_file(
             "genome_wide_candidates_count": (
                 len(genome_wide_candidates) if genome_wide_candidates is not None else 0
             ),
+            "master_bed_candidates_count": (
+                len(master_bed_candidates) if master_bed_candidates is not None else 0
+            ),
             "target_candidates": target_candidates,
             "genome_wide_candidates": genome_wide_candidates,
+            "master_bed_candidates": master_bed_candidates,
         }
 
         # Store fusion data in metadata - APPEND to existing data, don't replace
@@ -1188,6 +1766,15 @@ def process_bam_file(
             new_genome_records = genome_wide_candidates.to_dict("records")
             fusion_metadata.fusion_data["genome_wide_candidates"].extend(
                 new_genome_records
+            )
+        
+        # Store master BED candidates in metadata
+        if master_bed_candidates is not None:
+            if "master_bed_candidates" not in fusion_metadata.fusion_data:
+                fusion_metadata.fusion_data["master_bed_candidates"] = []
+            new_master_bed_records = master_bed_candidates.to_dict("records")
+            fusion_metadata.fusion_data["master_bed_candidates"].extend(
+                new_master_bed_records
             )
 
         # Save updated fusion metadata to disk
@@ -1215,6 +1802,8 @@ def _generate_output_files(
     analysis_results: Dict[str, Any],
     fusion_metadata: FusionMetadata,
     work_dir: str,
+    reference: Optional[str] = None,
+    generate_master_bed: bool = False,
 ) -> Dict[str, str]:
     """
     Generate output files for the analysis, including visualization preprocessing.
@@ -1231,16 +1820,25 @@ def _generate_output_files(
             Dictionary mapping file type to file path
     """
     # Use accumulated data from fusion_metadata instead of just current analysis_results
+    # Load from Parquet files if available (fast path), otherwise use in-memory data
+    target_candidates = None
     if (
         hasattr(fusion_metadata, "fusion_data")
         and fusion_metadata.fusion_data
-        and fusion_metadata.fusion_data.get("target_candidates")
     ):
-
-        # Convert accumulated target candidates back to DataFrame
-        target_candidates_data = fusion_metadata.fusion_data["target_candidates"]
-        if target_candidates_data:
-            target_candidates = pd.DataFrame(target_candidates_data)
+        # Try loading from Parquet first (fast path)
+        target_candidates = _load_fusion_candidates_parquet("target_candidates", work_dir, sample_id)
+        
+        # Fallback to in-memory data if Parquet not available
+        if target_candidates is None or target_candidates.empty:
+            target_candidates_data = fusion_metadata.fusion_data.get("target_candidates")
+            if target_candidates_data:
+                if isinstance(target_candidates_data, pd.DataFrame):
+                    target_candidates = target_candidates_data
+                elif isinstance(target_candidates_data, list):
+                    target_candidates = pd.DataFrame(target_candidates_data)
+    
+    if target_candidates is not None and not target_candidates.empty:
 
             # Filter for fusion candidates using the corrected logic
             gene_counts = target_candidates.groupby("read_id", observed=True)["col4"].nunique()
@@ -1283,18 +1881,27 @@ def _generate_output_files(
                     )
 
     # Use accumulated data from fusion_metadata for genome-wide candidates
+    # Load from Parquet files if available (fast path), otherwise use in-memory data
+    genome_wide_candidates = None
     logger.info(f"Checking genome-wide candidates in fusion_metadata: has_fusion_data={hasattr(fusion_metadata, 'fusion_data')}, fusion_data_exists={fusion_metadata.fusion_data is not None if hasattr(fusion_metadata, 'fusion_data') else False}")
     if (
         hasattr(fusion_metadata, "fusion_data")
         and fusion_metadata.fusion_data
-        and fusion_metadata.fusion_data.get("genome_wide_candidates")
     ):
-        genome_wide_data = fusion_metadata.fusion_data["genome_wide_candidates"]
-        logger.info(f"Found {len(genome_wide_data)} genome-wide candidate records")
-
-        # Convert accumulated genome-wide candidates back to DataFrame
-        if genome_wide_data:
-            genome_wide_candidates = pd.DataFrame(genome_wide_data)
+        # Try loading from Parquet first (fast path)
+        genome_wide_candidates = _load_fusion_candidates_parquet("genome_wide_candidates", work_dir, sample_id)
+        
+        # Fallback to in-memory data if Parquet not available
+        if genome_wide_candidates is None or genome_wide_candidates.empty:
+            genome_wide_data = fusion_metadata.fusion_data.get("genome_wide_candidates")
+            if genome_wide_data:
+                if isinstance(genome_wide_data, pd.DataFrame):
+                    genome_wide_candidates = genome_wide_data
+                elif isinstance(genome_wide_data, list):
+                    genome_wide_candidates = pd.DataFrame(genome_wide_data)
+                    logger.info(f"Found {len(genome_wide_data)} genome-wide candidate records")
+    
+    if genome_wide_candidates is not None and not genome_wide_candidates.empty:
 
             # Filter for fusion candidates using the corrected logic
             gene_counts_all = genome_wide_candidates.groupby("read_id", observed=True)["col4"].nunique()
@@ -1320,6 +1927,55 @@ def _generate_output_files(
                         ),
                     )
 
+    # Save master BED fusion candidates (no gene overlap filtering needed)
+    # Load from Parquet files if available (fast path), otherwise use in-memory data
+    master_bed_candidates = None
+    if (
+        hasattr(fusion_metadata, "fusion_data")
+        and fusion_metadata.fusion_data
+    ):
+        # Try loading from Parquet first (fast path)
+        master_bed_candidates = _load_fusion_candidates_parquet("master_bed_candidates", work_dir, sample_id)
+        
+        # Fallback to in-memory data if Parquet not available
+        if master_bed_candidates is None or master_bed_candidates.empty:
+            master_bed_data = fusion_metadata.fusion_data.get("master_bed_candidates")
+            if master_bed_data:
+                if isinstance(master_bed_data, pd.DataFrame):
+                    master_bed_candidates = master_bed_data
+                elif isinstance(master_bed_data, list):
+                    master_bed_candidates = pd.DataFrame(master_bed_data)
+                    logger.info(f"Found {len(master_bed_data)} master BED candidate records")
+    
+    if master_bed_candidates is not None and not master_bed_candidates.empty:
+
+            # For master BED candidates, we track reads mapping to multiple locations
+            # Group by read_id and count unique regions (chrom:start-end)
+            master_bed_candidates["region_key"] = (
+                master_bed_candidates["reference_id"].astype(str) + ":" +
+                master_bed_candidates["reference_start"].astype(str) + "-" +
+                master_bed_candidates["reference_end"].astype(str)
+            )
+            region_counts = master_bed_candidates.groupby("read_id", observed=True)["region_key"].nunique()
+            multi_region_read_ids = region_counts[region_counts > 1].index
+
+            if len(multi_region_read_ids) > 0:
+                result_master_bed = master_bed_candidates[
+                    master_bed_candidates["read_id"].isin(multi_region_read_ids)
+                ]
+                logger.info(f"Master BED fusion candidates after filtering: {len(result_master_bed)} records")
+
+                if not result_master_bed.empty:
+                    # Drop the temporary region_key column before saving
+                    result_master_bed = result_master_bed.drop(columns=["region_key"])
+                    
+                    # Save the filtered master BED candidates to CSV
+                    result_master_bed.to_csv(
+                        os.path.join(work_dir, sample_id, "fusion_candidates_master_bed.csv"),
+                        index=False,
+                    )
+                    logger.info(f"Saved {len(result_master_bed)} master BED fusion candidates to CSV")
+
     # Create sv_count.txt file with content "0" if it doesn't exist
     sv_count_file = os.path.join(work_dir, sample_id, "sv_count.txt")
     if not os.path.exists(sv_count_file):
@@ -1329,27 +1985,35 @@ def _generate_output_files(
     # Generate fusion breakpoint BED file
     _generate_fusion_breakpoint_bed(sample_id, fusion_metadata, work_dir)
     
-    # Generate master BED file
-    try:
-        from robin.analysis.master_bed_generator import generate_master_bed
-        
-        # Get analysis counter
-        analysis_counter = _load_analysis_counter(sample_id, work_dir)
-        
-        # Get target_panel from fusion_metadata
-        target_panel = fusion_metadata.target_panel if hasattr(fusion_metadata, 'target_panel') else None
-        
-        generate_master_bed(
-            sample_id=sample_id,
-            work_dir=work_dir,
-            analysis_counter=analysis_counter,
-            target_panel=target_panel,
-            logger_instance=logger,
-        )
-    except Exception as e:
-        logger.warning(f"Could not generate master BED file: {e}")
+    # Generate master BED breakpoint BED file (new target regions from supplementary alignments)
+    # Only generate this once per batch (when generate_master_bed=True) to avoid expensive processing
+    # This extraction is computationally expensive and should only run on final accumulated data
+    if generate_master_bed:
+        _generate_master_bed_breakpoint_bed(sample_id, fusion_metadata, work_dir)
+    
+    # Generate master BED file only if requested (should only be done once per batch at the end)
+    if generate_master_bed:
+        try:
+            from robin.analysis.master_bed_generator import generate_master_bed
+            
+            # Get analysis counter
+            analysis_counter = _load_analysis_counter(sample_id, work_dir)
+            
+            # Get target_panel from fusion_metadata
+            target_panel = fusion_metadata.target_panel if hasattr(fusion_metadata, 'target_panel') else None
+            
+            generate_master_bed(
+                sample_id=sample_id,
+                work_dir=work_dir,
+                analysis_counter=analysis_counter,
+                target_panel=target_panel,
+                logger_instance=logger,
+                reference=reference,
+            )
+        except Exception as e:
+            logger.warning(f"Could not generate master BED file: {e}")
 
-    return {
+    output_paths = {
         "target_candidates_path": os.path.join(
             work_dir, sample_id, "fusion_candidates_master.csv"
         ),
@@ -1357,6 +2021,13 @@ def _generate_output_files(
             work_dir, sample_id, "fusion_candidates_all.csv"
         ),
     }
+    
+    # Add master BED candidates path if file exists
+    master_bed_path = os.path.join(work_dir, sample_id, "fusion_candidates_master_bed.csv")
+    if os.path.exists(master_bed_path):
+        output_paths["master_bed_candidates_path"] = master_bed_path
+    
+    return output_paths
 
 
 def _get_cnv_bin_width(work_dir: str, sample_id: str) -> int:
@@ -1406,13 +2077,16 @@ def _extract_fusion_breakpoints(fusion_metadata: FusionMetadata) -> List[Dict[st
     fusion_data = fusion_metadata.fusion_data or {}
     min_support = get_fusion_threshold("read_support")
     
-    # Process target candidates
+    # Process target candidates - load from in-memory data (Parquet loading handled by _load_fusion_metadata)
     target_candidates = fusion_data.get("target_candidates", [])
+    target_df = None
     if target_candidates:
         if isinstance(target_candidates, list):
             target_df = pd.DataFrame(target_candidates)
-        else:
+        elif isinstance(target_candidates, pd.DataFrame):
             target_df = target_candidates
+    
+    if target_df is not None and not target_df.empty:
         
         if not target_df.empty and "reference_start" in target_df.columns:
             # Filter for fusion candidates (reads mapping to multiple genes)
@@ -1455,13 +2129,16 @@ def _extract_fusion_breakpoints(fusion_metadata: FusionMetadata) -> List[Dict[st
                                     "source": "target"
                                 })
     
-    # Process genome-wide candidates
+    # Process genome-wide candidates - load from in-memory data (Parquet loading handled by _load_fusion_metadata)
     genome_wide_candidates = fusion_data.get("genome_wide_candidates", [])
+    genome_df = None
     if genome_wide_candidates:
         if isinstance(genome_wide_candidates, list):
             genome_df = pd.DataFrame(genome_wide_candidates)
-        else:
+        elif isinstance(genome_wide_candidates, pd.DataFrame):
             genome_df = genome_wide_candidates
+    
+    if genome_df is not None and not genome_df.empty:
         
         if not genome_df.empty and "reference_start" in genome_df.columns:
             # Filter for fusion candidates (reads mapping to multiple genes)
@@ -1526,6 +2203,708 @@ def _load_analysis_counter(sample_id: str, work_dir: str) -> int:
     except (ValueError, IOError) as e:
         logger.debug(f"Could not load analysis counter for {sample_id}: {e}")
     return 0
+
+
+def _extract_master_bed_breakpoints(fusion_metadata: FusionMetadata, work_dir: Optional[str] = None, min_read_support: int = 3) -> List[Dict[str, Any]]:
+    """
+    Extract breakpoint coordinates from master BED fusion candidates.
+    Identifies genomic rearrangements (deletions, inversions, translocations) by finding
+    breakpoint pairs (primary + supplementary alignments) supported by multiple reads.
+    
+    A rearrangement event is defined by a breakpoint pair:
+    - Primary alignment location (where the read starts)
+    - Supplementary alignment location (where the read continues)
+    
+    Only includes breakpoint pairs supported by at least min_read_support reads.
+    The breakpoint pairs can be on different chromosomes (translocations).
+    
+    Args:
+        fusion_metadata: FusionMetadata object with master BED candidates
+        work_dir: Working directory (required to load from Parquet files)
+        min_read_support: Minimum number of reads required to support a breakpoint pair (default: 3)
+        
+    Returns:
+        List of dictionaries with master BED breakpoint information (both primary and supplementary regions)
+    """
+    breakpoints = []
+    
+    # Try loading from Parquet files first (fast path, new storage format)
+    master_bed_df = None
+    sample_id = fusion_metadata.sample_id
+    
+    if work_dir and sample_id:
+        master_bed_df = _load_fusion_candidates_parquet("master_bed_candidates", work_dir, sample_id)
+        if master_bed_df is not None and not master_bed_df.empty:
+            logger.debug(f"Loaded {len(master_bed_df)} master BED candidates from Parquet for breakpoint extraction")
+    
+    # Fallback to in-memory data (for backward compatibility)
+    if master_bed_df is None or master_bed_df.empty:
+        fusion_data = fusion_metadata.fusion_data or {}
+        master_bed_candidates = fusion_data.get("master_bed_candidates", [])
+        if master_bed_candidates:
+            if isinstance(master_bed_candidates, list):
+                master_bed_df = pd.DataFrame(master_bed_candidates)
+                logger.debug(f"Loaded {len(master_bed_candidates)} master BED candidates from in-memory data (fallback)")
+            elif isinstance(master_bed_candidates, pd.DataFrame):
+                master_bed_df = master_bed_candidates
+                logger.debug(f"Loaded {len(master_bed_candidates)} master BED candidates from in-memory DataFrame (fallback)")
+        else:
+            logger.debug("No master BED candidates found in Parquet or in-memory data")
+    
+    # Process master BED candidates if we have data
+    # TEMPORARY: Skip breakpoint extraction for performance testing
+    # Set SKIP_MASTER_BED_BREAKPOINTS=True to disable this section
+    SKIP_MASTER_BED_BREAKPOINTS = os.environ.get("SKIP_MASTER_BED_BREAKPOINTS", "False").lower() == "true"
+    
+    if SKIP_MASTER_BED_BREAKPOINTS:
+        logger.info("SKIPPING master BED breakpoint extraction (SKIP_MASTER_BED_BREAKPOINTS=True)")
+        return breakpoints
+    
+    if master_bed_df is not None and not master_bed_df.empty:
+        # Group reads by their breakpoint pairs (primary + supplementary alignments)
+        # Each read with supplementary alignments represents a potential rearrangement
+        if "read_id" not in master_bed_df.columns:
+            logger.debug("Missing required column (read_id) in master BED candidates")
+            return breakpoints
+        
+        # Separate primary and supplementary alignments using col4
+        # col4 is more reliable: "master_bed_region" = primary alignment, "master_bed_supplementary" = supplementary
+        # The is_supplementary flag can be inconsistent (some primary alignments may have is_supplementary=True
+        # if they're part of a chimeric read set in the BAM file)
+        if "col4" in master_bed_df.columns:
+            primary_df = master_bed_df[master_bed_df["col4"] == "master_bed_region"].copy()
+            supplementary_df = master_bed_df[master_bed_df["col4"] == "master_bed_supplementary"].copy()
+        else:
+            # Fallback: use is_supplementary if col4 is not available
+            logger.debug("col4 column not found, using is_supplementary as fallback")
+            if "is_supplementary" not in master_bed_df.columns:
+                logger.debug("Missing required columns (col4 or is_supplementary) in master BED candidates")
+                return breakpoints
+            primary_df = master_bed_df[master_bed_df["is_supplementary"] == False].copy()
+            supplementary_df = master_bed_df[master_bed_df["is_supplementary"] == True].copy()
+        
+        # Debug: check for any misclassified alignments
+        if "is_supplementary" in master_bed_df.columns and "col4" in master_bed_df.columns:
+            misclassified = master_bed_df[
+                (master_bed_df["col4"] == "master_bed_region") & (master_bed_df["is_supplementary"] == True)
+            ]
+            if not misclassified.empty:
+                logger.debug(f"Found {len(misclassified)} primary alignments with is_supplementary=True (using col4 for classification)")
+        
+        if primary_df.empty or supplementary_df.empty:
+            logger.debug("Need both primary and supplementary alignments to identify breakpoint pairs")
+            return breakpoints
+        
+        # Find reads that have both primary and supplementary alignments
+        primary_read_ids = set(primary_df["read_id"].unique())
+        supplementary_read_ids = set(supplementary_df["read_id"].unique())
+        reads_with_both = primary_read_ids & supplementary_read_ids
+        
+        logger.debug(
+            f"Found {len(reads_with_both)} reads with both primary and supplementary alignments "
+            f"(out of {len(primary_read_ids)} reads with primary, {len(supplementary_read_ids)} with supplementary)"
+        )
+        
+        # Debug: log some example read IDs if available
+        if reads_with_both:
+            example_reads = list(reads_with_both)[:3]
+            logger.debug(f"Example reads with both alignments: {example_reads}")
+        elif primary_read_ids:
+            example_primary = list(primary_read_ids)[:3]
+            logger.debug(f"Example reads with only primary: {example_primary}")
+        elif supplementary_read_ids:
+            example_supp = list(supplementary_read_ids)[:3]
+            logger.debug(f"Example reads with only supplementary: {example_supp}")
+        
+        if not reads_with_both:
+            logger.debug("No reads have both primary and supplementary alignments")
+            return breakpoints
+        
+        # Filter to only reads with both primary and supplementary alignments
+        primary_filtered = primary_df[primary_df["read_id"].isin(reads_with_both)].copy()
+        supplementary_filtered = supplementary_df[supplementary_df["read_id"].isin(reads_with_both)].copy()
+        
+        # For each read, create breakpoint pairs (primary + supplementary)
+        # A breakpoint pair represents a potential rearrangement event
+        cluster_distance = 5000  # Maximum distance for clustering breakpoint pairs (5kb)
+        
+        # Build breakpoint pairs: for each read, pair its primary alignment with each supplementary alignment
+        # Optimized: use vectorized operations instead of iterrows()
+        breakpoint_pairs = []
+        
+        # Group by read_id for efficient lookup
+        primary_by_read = primary_filtered.groupby("read_id", observed=True)
+        supplementary_by_read = supplementary_filtered.groupby("read_id", observed=True)
+        
+        for read_id in reads_with_both:
+            # Get all primary and supplementary alignments for this read
+            read_primaries = primary_by_read.get_group(read_id) if read_id in primary_by_read.groups else pd.DataFrame()
+            read_supplementaries = supplementary_by_read.get_group(read_id) if read_id in supplementary_by_read.groups else pd.DataFrame()
+            
+            if read_primaries.empty or read_supplementaries.empty:
+                continue
+            
+            # Create pairs using cross product (much faster than nested loops with iterrows)
+            # Convert to lists of dicts for efficient pairing
+            primaries_list = read_primaries[["reference_id", "reference_start", "reference_end"]].to_dict("records")
+            supplementaries_list = read_supplementaries[["reference_id", "reference_start", "reference_end"]].to_dict("records")
+            
+            # Create all combinations
+            for primary_row in primaries_list:
+                for supp_row in supplementaries_list:
+                    breakpoint_pairs.append({
+                        "read_id": read_id,
+                        "primary_chrom": primary_row["reference_id"],
+                        "primary_start": int(primary_row["reference_start"]),
+                        "primary_end": int(primary_row["reference_end"]),
+                        "supp_chrom": supp_row["reference_id"],
+                        "supp_start": int(supp_row["reference_start"]),
+                        "supp_end": int(supp_row["reference_end"]),
+                    })
+        
+        if not breakpoint_pairs:
+            logger.debug("No breakpoint pairs created")
+            return breakpoints
+        
+        # Cluster similar breakpoint pairs using optimized algorithm
+        # Two breakpoint pairs are similar if:
+        # - Primary locations are close (same chromosome, within cluster_distance)
+        # - Supplementary locations are close (same chromosome, within cluster_distance)
+        # 
+        # Optimization: Group by chromosome pair first to reduce comparisons
+        clustered_pairs = []
+        used_indices = set()
+        
+        # Group pairs by chromosome combination for faster clustering
+        pairs_by_chrom = {}
+        for i, pair in enumerate(breakpoint_pairs):
+            chrom_key = (pair["primary_chrom"], pair["supp_chrom"])
+            if chrom_key not in pairs_by_chrom:
+                pairs_by_chrom[chrom_key] = []
+            pairs_by_chrom[chrom_key].append((i, pair))
+        
+        # Cluster within each chromosome combination
+        for chrom_key, chrom_pairs in pairs_by_chrom.items():
+            if len(chrom_pairs) == 0:
+                continue
+            
+            # Sort pairs within this chromosome combination
+            sorted_chrom_pairs = sorted(chrom_pairs, key=lambda x: (
+                x[1]["primary_start"], x[1]["supp_start"]
+            ))
+            
+            # Cluster pairs in this chromosome group
+            for idx, (orig_i, pair) in enumerate(sorted_chrom_pairs):
+                if orig_i in used_indices:
+                    continue
+                
+                # Start a new cluster
+                cluster_read_ids = {pair["read_id"]}
+                cluster_primary_chrom = pair["primary_chrom"]
+                cluster_primary_starts = [pair["primary_start"]]
+                cluster_primary_ends = [pair["primary_end"]]
+                cluster_supp_chrom = pair["supp_chrom"]
+                cluster_supp_starts = [pair["supp_start"]]
+                cluster_supp_ends = [pair["supp_end"]]
+                used_indices.add(orig_i)
+                
+                # Only check remaining pairs in this chromosome group (much faster)
+                # Calculate cluster bounds once
+                cluster_primary_min = min(cluster_primary_starts)
+                cluster_primary_max = max(cluster_primary_ends)
+                cluster_supp_min = min(cluster_supp_starts)
+                cluster_supp_max = max(cluster_supp_ends)
+                
+                # Iteratively find all similar breakpoint pairs in this chromosome group
+                changed = True
+                while changed:
+                    changed = False
+                    for j, (other_orig_i, other_pair) in enumerate(sorted_chrom_pairs):
+                        if other_orig_i in used_indices:
+                            continue
+                        
+                        # Check if primary locations are similar (same chromosome, close coordinates)
+                        primary_similar = (
+                            other_pair["primary_start"] <= cluster_primary_max + cluster_distance and
+                            other_pair["primary_end"] >= cluster_primary_min - cluster_distance
+                        )
+                        
+                        # Check if supplementary locations are similar (same chromosome, close coordinates)
+                        supp_similar = (
+                            other_pair["supp_start"] <= cluster_supp_max + cluster_distance and
+                            other_pair["supp_end"] >= cluster_supp_min - cluster_distance
+                        )
+                        
+                        # Both primary and supplementary must be similar to cluster
+                        if primary_similar and supp_similar:
+                            cluster_read_ids.add(other_pair["read_id"])
+                            cluster_primary_starts.append(other_pair["primary_start"])
+                            cluster_primary_ends.append(other_pair["primary_end"])
+                            cluster_supp_starts.append(other_pair["supp_start"])
+                            cluster_supp_ends.append(other_pair["supp_end"])
+                            used_indices.add(other_orig_i)
+                            changed = True
+                            # Update cluster bounds for next iteration
+                            cluster_primary_min = min(cluster_primary_starts)
+                            cluster_primary_max = max(cluster_primary_ends)
+                            cluster_supp_min = min(cluster_supp_starts)
+                            cluster_supp_max = max(cluster_supp_ends)
+                
+                # Create clustered breakpoint pair
+                clustered_pairs.append({
+                    "primary_chrom": cluster_primary_chrom,
+                    "primary_start": min(cluster_primary_starts),
+                    "primary_end": max(cluster_primary_ends),
+                    "supp_chrom": cluster_supp_chrom,
+                    "supp_start": min(cluster_supp_starts),
+                    "supp_end": max(cluster_supp_ends),
+                    "read_count": len(cluster_read_ids),
+                    "read_ids": cluster_read_ids,
+                })
+        
+        # Filter for breakpoint pairs with sufficient read support
+        supported_pairs = [
+            p for p in clustered_pairs 
+            if p["read_count"] >= min_read_support
+        ]
+        
+        if len(supported_pairs) > 0:
+            logger.info(
+                f"Found {len(supported_pairs)} master BED breakpoint pairs "
+                f"supported by >= {min_read_support} reads (out of {len(clustered_pairs)} clustered pairs, "
+                f"{len(breakpoint_pairs)} original pairs)"
+            )
+            
+            # Extract breakpoint coordinates for both primary and supplementary regions
+            for pair in supported_pairs:
+                # Add primary region breakpoint
+                if pair["primary_start"] > 0 and pair["primary_end"] > pair["primary_start"]:
+                    breakpoints.append({
+                        "chromosome": pair["primary_chrom"],
+                        "start": pair["primary_start"],
+                        "end": pair["primary_end"],
+                        "read_count": pair["read_count"],
+                        "source": "master_bed"
+                    })
+                
+                # Add supplementary region breakpoint (new target region)
+                if pair["supp_start"] > 0 and pair["supp_end"] > pair["supp_start"]:
+                    breakpoints.append({
+                        "chromosome": pair["supp_chrom"],
+                        "start": pair["supp_start"],
+                        "end": pair["supp_end"],
+                        "read_count": pair["read_count"],
+                        "source": "master_bed"
+                    })
+        else:
+            # Log details for debugging if no supported pairs found
+            if clustered_pairs:
+                max_read_count = max(p["read_count"] for p in clustered_pairs)
+                logger.debug(
+                    f"No master BED breakpoint pairs found with >= {min_read_support} read support. "
+                    f"Found {len(clustered_pairs)} clustered pairs from {len(breakpoint_pairs)} original pairs. "
+                    f"Maximum read count in any cluster: {max_read_count}"
+                )
+            else:
+                logger.debug(
+                    f"No clustered breakpoint pairs created from {len(breakpoint_pairs)} original pairs"
+                )
+    
+    return breakpoints
+
+
+def _generate_master_bed_breakpoint_bed(
+    sample_id: str,
+    fusion_metadata: FusionMetadata,
+    work_dir: str,
+) -> None:
+    """
+    Generate BED file for master BED breakpoints (new target regions from supplementary alignments).
+    Creates regions with +/- 1 bin_width around breakpoints.
+    Uses counter-based naming consistent with other BED files.
+    
+    Args:
+        sample_id: Sample ID
+        fusion_metadata: FusionMetadata object with master BED candidates
+        work_dir: Working directory
+    """
+    try:
+        # Extract master BED breakpoints (load from Parquet files)
+        master_bed_breakpoints = _extract_master_bed_breakpoints(fusion_metadata, work_dir=work_dir)
+        
+        if not master_bed_breakpoints:
+            logger.debug("No master BED breakpoints found - skipping BED file generation")
+            return
+        
+        # Get bin_width from CNV analysis if available, otherwise use default
+        bin_width = _get_cnv_bin_width(work_dir, sample_id)
+        
+        # Load analysis counter for consistent naming
+        analysis_counter = _load_analysis_counter(sample_id, work_dir)
+        
+        # Create bed_files directory if it doesn't exist
+        sample_dir = os.path.join(work_dir, sample_id)
+        bed_dir = os.path.join(sample_dir, "bed_files")
+        os.makedirs(bed_dir, exist_ok=True)
+        
+        # Generate BED file for master BED breakpoints with counter-based naming
+        master_bed_bp_file = os.path.join(bed_dir, f"master_bed_breakpoints_{analysis_counter:03d}.bed")
+        
+        # Sort breakpoints by chromosome, then start position, then end position
+        def sort_key(bp):
+            chrom = bp["chromosome"]
+            start = bp["start"]
+            end = bp["end"]
+            
+            # Extract chromosome number for numeric sorting
+            chrom_num = None
+            if chrom.startswith("chr"):
+                chrom_suffix = chrom[3:]
+                if chrom_suffix == "X":
+                    chrom_num = 100
+                elif chrom_suffix == "Y":
+                    chrom_num = 101
+                elif chrom_suffix == "M":
+                    chrom_num = 102
+                else:
+                    try:
+                        chrom_num = int(chrom_suffix)
+                    except ValueError:
+                        chrom_num = 200  # Put non-standard chromosomes at the end
+            else:
+                chrom_num = 200  # Put non-standard chromosomes at the end
+            
+            return (chrom_num, start, end)
+        
+        sorted_breakpoints = sorted(master_bed_breakpoints, key=sort_key)
+        
+        with open(master_bed_bp_file, "w") as f:
+            for bp in sorted_breakpoints:
+                chrom = bp["chromosome"]
+                start = bp["start"]
+                end = bp["end"]
+                
+                # Calculate midpoint for breakpoint
+                midpoint = (start + end) // 2
+                
+                # Create region +/- 1 bin_width around breakpoint
+                region_start = max(0, midpoint - bin_width)
+                region_end = midpoint + bin_width
+                
+                # Write BED entry: chrom, start, end, name (master_bed-breakpoint)
+                name = "master_bed-breakpoint"
+                f.write(f"{chrom}\t{region_start}\t{region_end}\t{name}\t0\t.\n")
+        
+        # Log summary of read support
+        if master_bed_breakpoints:
+            read_counts = [bp.get("read_count", 0) for bp in master_bed_breakpoints]
+            min_reads = min(read_counts) if read_counts else 0
+            max_reads = max(read_counts) if read_counts else 0
+            avg_reads = sum(read_counts) / len(read_counts) if read_counts else 0
+            logger.info(
+                f"Generated master BED breakpoint BED file: {master_bed_bp_file} with {len(master_bed_breakpoints)} breakpoints "
+                f"(read support: min={min_reads}, max={max_reads}, avg={avg_reads:.1f})"
+            )
+        else:
+            logger.info(f"Generated master BED breakpoint BED file: {master_bed_bp_file} with 0 breakpoints")
+        
+        # Generate master BED events summary CSV for GUI (pre-computed to avoid blocking UI)
+        _generate_master_bed_events_summary(sample_id, fusion_metadata, work_dir)
+        
+    except Exception as e:
+        logger.warning(f"Error generating master BED breakpoint BED file: {e}")
+        import traceback
+        logger.debug(f"Traceback: {traceback.format_exc()}")
+
+
+def _generate_master_bed_events_summary(
+    sample_id: str,
+    fusion_metadata: FusionMetadata,
+    work_dir: str,
+    min_read_support: int = 3,
+    min_mapq: int = 50,
+    cluster_distance: int = 5000,
+) -> None:
+    """
+    Generate master BED events summary CSV file for GUI display.
+    
+    This pre-computes the expensive breakpoint pair clustering so the GUI
+    can just read the results instead of computing them on the UI thread.
+    
+    Uses the same breakpoint pair extraction logic as _extract_master_bed_breakpoints:
+    - Identifies reads with both primary and supplementary alignments
+    - Creates breakpoint pairs (primary + supplementary for each read)
+    - Clusters similar breakpoint pairs (both primary and supplementary locations must be close)
+    - Writes both primary and supplementary regions as separate events to CSV
+    
+    Args:
+        sample_id: Sample ID
+        fusion_metadata: FusionMetadata object with master BED candidates
+        work_dir: Working directory
+        min_read_support: Minimum number of reads required (default: 3)
+        min_mapq: Minimum mapping quality for supplementary mappings (default: 50)
+        cluster_distance: Maximum distance for clustering breakpoint pairs (default: 5000bp)
+    """
+    try:
+        # Load master BED candidates from Parquet
+        master_bed_df = _load_fusion_candidates_parquet("master_bed_candidates", work_dir, sample_id)
+        
+        if master_bed_df is None or master_bed_df.empty:
+            logger.debug("No master BED candidates found - skipping events summary generation")
+            # Write empty file so GUI knows there's no data
+            summary_file = os.path.join(work_dir, sample_id, "master_bed_events_summary.csv")
+            pd.DataFrame().to_csv(summary_file, index=False)
+            return
+        
+        # Check required columns
+        if "read_id" not in master_bed_df.columns:
+            logger.debug("Missing required column (read_id) in master BED candidates")
+            return
+        
+        # Filter to only high-quality supplementary mappings (MapQ >= min_mapq)
+        if "mapping_quality" in master_bed_df.columns and "col4" in master_bed_df.columns:
+            high_quality_mask = (
+                (master_bed_df["col4"] == "master_bed_region") |
+                (master_bed_df["mapping_quality"] >= min_mapq)
+            )
+            master_bed_df = master_bed_df[high_quality_mask].copy()
+            
+            if master_bed_df.empty:
+                logger.debug(f"No high-quality mappings found (MapQ >= {min_mapq})")
+                summary_file = os.path.join(work_dir, sample_id, "master_bed_events_summary.csv")
+                pd.DataFrame().to_csv(summary_file, index=False)
+                return
+        
+        # Separate primary and supplementary alignments using col4
+        if "col4" in master_bed_df.columns:
+            primary_df = master_bed_df[master_bed_df["col4"] == "master_bed_region"].copy()
+            supplementary_df = master_bed_df[master_bed_df["col4"] == "master_bed_supplementary"].copy()
+        else:
+            if "is_supplementary" not in master_bed_df.columns:
+                logger.debug("Missing required columns (col4 or is_supplementary)")
+                return
+            primary_df = master_bed_df[master_bed_df["is_supplementary"] == False].copy()
+            supplementary_df = master_bed_df[master_bed_df["is_supplementary"] == True].copy()
+        
+        if primary_df.empty or supplementary_df.empty:
+            logger.debug("Need both primary and supplementary alignments")
+            summary_file = os.path.join(work_dir, sample_id, "master_bed_events_summary.csv")
+            pd.DataFrame().to_csv(summary_file, index=False)
+            return
+        
+        # Find reads with both primary and supplementary alignments
+        primary_read_ids = set(primary_df["read_id"].unique())
+        supplementary_read_ids = set(supplementary_df["read_id"].unique())
+        reads_with_both = primary_read_ids & supplementary_read_ids
+        
+        if not reads_with_both:
+            logger.debug("No reads have both primary and supplementary alignments")
+            summary_file = os.path.join(work_dir, sample_id, "master_bed_events_summary.csv")
+            pd.DataFrame().to_csv(summary_file, index=False)
+            return
+        
+        # Filter to only reads with both
+        primary_filtered = primary_df[primary_df["read_id"].isin(reads_with_both)].copy()
+        supplementary_filtered = supplementary_df[supplementary_df["read_id"].isin(reads_with_both)].copy()
+        
+        # Build breakpoint pairs
+        breakpoint_pairs = []
+        primary_by_read = primary_filtered.groupby("read_id", observed=True)
+        supplementary_by_read = supplementary_filtered.groupby("read_id", observed=True)
+        
+        for read_id in reads_with_both:
+            read_primaries = primary_by_read.get_group(read_id) if read_id in primary_by_read.groups else pd.DataFrame()
+            read_supplementaries = supplementary_by_read.get_group(read_id) if read_id in supplementary_by_read.groups else pd.DataFrame()
+            
+            if read_primaries.empty or read_supplementaries.empty:
+                continue
+            
+            # Get columns that exist
+            primary_cols = ["reference_id", "reference_start", "reference_end"]
+            supp_cols = ["reference_id", "reference_start", "reference_end"]
+            if "mapping_quality" in read_primaries.columns:
+                primary_cols.append("mapping_quality")
+            if "mapping_span" in read_primaries.columns:
+                primary_cols.append("mapping_span")
+            if "mapping_quality" in read_supplementaries.columns:
+                supp_cols.append("mapping_quality")
+            if "mapping_span" in read_supplementaries.columns:
+                supp_cols.append("mapping_span")
+            
+            primaries_list = read_primaries[primary_cols].to_dict("records")
+            supplementaries_list = read_supplementaries[supp_cols].to_dict("records")
+            
+            # Create all combinations
+            for primary_row in primaries_list:
+                for supp_row in supplementaries_list:
+                    breakpoint_pairs.append({
+                        "read_id": read_id,
+                        "primary_chrom": primary_row["reference_id"],
+                        "primary_start": int(primary_row["reference_start"]),
+                        "primary_end": int(primary_row["reference_end"]),
+                        "primary_mapq": primary_row.get("mapping_quality", 0) if "mapping_quality" in primary_row else 0,
+                        "primary_span": primary_row.get("mapping_span", 0) if "mapping_span" in primary_row else 0,
+                        "supp_chrom": supp_row["reference_id"],
+                        "supp_start": int(supp_row["reference_start"]),
+                        "supp_end": int(supp_row["reference_end"]),
+                        "supp_mapq": supp_row.get("mapping_quality", 0) if "mapping_quality" in supp_row else 0,
+                        "supp_span": supp_row.get("mapping_span", 0) if "mapping_span" in supp_row else 0,
+                    })
+        
+        if not breakpoint_pairs:
+            logger.debug("No breakpoint pairs created")
+            summary_file = os.path.join(work_dir, sample_id, "master_bed_events_summary.csv")
+            pd.DataFrame().to_csv(summary_file, index=False)
+            return
+        
+        # Cluster similar breakpoint pairs (same optimized algorithm as GUI version)
+        clustered_pairs = []
+        used_indices = set()
+        
+        # Group pairs by chromosome combination for faster clustering
+        pairs_by_chrom = {}
+        for i, pair in enumerate(breakpoint_pairs):
+            chrom_key = (pair["primary_chrom"], pair["supp_chrom"])
+            if chrom_key not in pairs_by_chrom:
+                pairs_by_chrom[chrom_key] = []
+            pairs_by_chrom[chrom_key].append((i, pair))
+        
+        # Cluster within each chromosome combination
+        for chrom_key, chrom_pairs in pairs_by_chrom.items():
+            if len(chrom_pairs) == 0:
+                continue
+            
+            sorted_chrom_pairs = sorted(chrom_pairs, key=lambda x: (
+                x[1]["primary_start"], x[1]["supp_start"]
+            ))
+            
+            for idx, (orig_i, pair) in enumerate(sorted_chrom_pairs):
+                if orig_i in used_indices:
+                    continue
+                
+                cluster_read_ids = {pair["read_id"]}
+                cluster_primary_chrom = pair["primary_chrom"]
+                cluster_primary_starts = [pair["primary_start"]]
+                cluster_primary_ends = [pair["primary_end"]]
+                cluster_primary_mapqs = [pair["primary_mapq"]]
+                cluster_primary_spans = [pair["primary_span"]]
+                cluster_supp_chrom = pair["supp_chrom"]
+                cluster_supp_starts = [pair["supp_start"]]
+                cluster_supp_ends = [pair["supp_end"]]
+                cluster_supp_mapqs = [pair["supp_mapq"]]
+                cluster_supp_spans = [pair["supp_span"]]
+                used_indices.add(orig_i)
+                
+                cluster_primary_min = min(cluster_primary_starts)
+                cluster_primary_max = max(cluster_primary_ends)
+                cluster_supp_min = min(cluster_supp_starts)
+                cluster_supp_max = max(cluster_supp_ends)
+                
+                changed = True
+                while changed:
+                    changed = False
+                    for j, (other_orig_i, other_pair) in enumerate(sorted_chrom_pairs):
+                        if other_orig_i in used_indices:
+                            continue
+                        
+                        primary_similar = (
+                            other_pair["primary_start"] <= cluster_primary_max + cluster_distance and
+                            other_pair["primary_end"] >= cluster_primary_min - cluster_distance
+                        )
+                        
+                        supp_similar = (
+                            other_pair["supp_start"] <= cluster_supp_max + cluster_distance and
+                            other_pair["supp_end"] >= cluster_supp_min - cluster_distance
+                        )
+                        
+                        if primary_similar and supp_similar:
+                            cluster_read_ids.add(other_pair["read_id"])
+                            cluster_primary_starts.append(other_pair["primary_start"])
+                            cluster_primary_ends.append(other_pair["primary_end"])
+                            cluster_primary_mapqs.append(other_pair["primary_mapq"])
+                            cluster_primary_spans.append(other_pair["primary_span"])
+                            cluster_supp_starts.append(other_pair["supp_start"])
+                            cluster_supp_ends.append(other_pair["supp_end"])
+                            cluster_supp_mapqs.append(other_pair["supp_mapq"])
+                            cluster_supp_spans.append(other_pair["supp_span"])
+                            used_indices.add(other_orig_i)
+                            changed = True
+                            cluster_primary_min = min(cluster_primary_starts)
+                            cluster_primary_max = max(cluster_primary_ends)
+                            cluster_supp_min = min(cluster_supp_starts)
+                            cluster_supp_max = max(cluster_supp_ends)
+                
+                clustered_pairs.append({
+                    "primary_chrom": cluster_primary_chrom,
+                    "primary_start": min(cluster_primary_starts),
+                    "primary_end": max(cluster_primary_ends),
+                    "primary_avg_mapq": sum(cluster_primary_mapqs) / len(cluster_primary_mapqs) if cluster_primary_mapqs else 0,
+                    "primary_avg_span": sum(cluster_primary_spans) / len(cluster_primary_spans) if cluster_primary_spans else 0,
+                    "supp_chrom": cluster_supp_chrom,
+                    "supp_start": min(cluster_supp_starts),
+                    "supp_end": max(cluster_supp_ends),
+                    "supp_avg_mapq": sum(cluster_supp_mapqs) / len(cluster_supp_mapqs) if cluster_supp_mapqs else 0,
+                    "supp_avg_span": sum(cluster_supp_spans) / len(cluster_supp_spans) if cluster_supp_spans else 0,
+                    "read_count": len(cluster_read_ids),
+                })
+        
+        # Filter for breakpoint pairs with sufficient read support
+        supported_pairs = [
+            p for p in clustered_pairs 
+            if p["read_count"] >= min_read_support
+        ]
+        
+        if not supported_pairs:
+            logger.debug(f"No breakpoint pairs found with >= {min_read_support} read support")
+            summary_file = os.path.join(work_dir, sample_id, "master_bed_events_summary.csv")
+            pd.DataFrame().to_csv(summary_file, index=False)
+            return
+        
+        # Convert to DataFrame format - include both primary and supplementary regions
+        events = []
+        for pair in supported_pairs:
+            if pair["primary_start"] > 0 and pair["primary_end"] > pair["primary_start"]:
+                events.append({
+                    "chromosome": pair["primary_chrom"],
+                    "start": pair["primary_start"],
+                    "end": pair["primary_end"],
+                    "event_type": "breakpoint_pair_primary",
+                    "read_count": pair["read_count"],
+                    "avg_mapping_quality": round(pair["primary_avg_mapq"], 1),
+                    "avg_mapping_span": round(pair["primary_avg_span"], 0),
+                })
+            
+            if pair["supp_start"] > 0 and pair["supp_end"] > pair["supp_start"]:
+                events.append({
+                    "chromosome": pair["supp_chrom"],
+                    "start": pair["supp_start"],
+                    "end": pair["supp_end"],
+                    "event_type": "breakpoint_pair_supplementary",
+                    "read_count": pair["read_count"],
+                    "avg_mapping_quality": round(pair["supp_avg_mapq"], 1),
+                    "avg_mapping_span": round(pair["supp_avg_span"], 0),
+                })
+        
+        if not events:
+            summary_file = os.path.join(work_dir, sample_id, "master_bed_events_summary.csv")
+            pd.DataFrame().to_csv(summary_file, index=False)
+            return
+        
+        result_df = pd.DataFrame(events)
+        result_df = result_df.sort_values(
+            ["read_count", "chromosome", "start"],
+            ascending=[False, True, True]
+        )
+        
+        # Write summary CSV file
+        summary_file = os.path.join(work_dir, sample_id, "master_bed_events_summary.csv")
+        result_df.to_csv(summary_file, index=False)
+        logger.info(f"Generated master BED events summary: {summary_file} with {len(result_df)} events")
+        
+    except Exception as e:
+        logger.warning(f"Error generating master BED events summary: {e}")
+        import traceback
+        logger.debug(f"Traceback: {traceback.format_exc()}")
 
 
 def _generate_fusion_breakpoint_bed(
@@ -1637,11 +3016,543 @@ def find_and_process_bam_files(root_dir):
 # =============================================================================
 
 
+def _get_parquet_paths(work_dir: str, sample_id: str) -> Dict[str, str]:
+    """
+    Get file paths for Parquet storage of fusion candidates.
+    
+    Args:
+        work_dir: Working directory
+        sample_id: Sample identifier
+        
+    Returns:
+        Dictionary mapping candidate type to file path
+    """
+    sample_dir = os.path.join(work_dir, sample_id)
+    os.makedirs(sample_dir, exist_ok=True)
+    
+    return {
+        "target_candidates": os.path.join(sample_dir, f"{sample_id}_target_candidates.parquet"),
+        "genome_wide_candidates": os.path.join(sample_dir, f"{sample_id}_genome_wide_candidates.parquet"),
+        "master_bed_candidates": os.path.join(sample_dir, f"{sample_id}_master_bed_candidates.parquet"),
+    }
+
+
+def _save_fusion_candidates_parquet(
+    candidates_df: pd.DataFrame,
+    candidate_type: str,
+    work_dir: str,
+    sample_id: str,
+) -> None:
+    """
+    Save fusion candidates DataFrame to Parquet file.
+    
+    Args:
+        candidates_df: DataFrame to save
+        candidate_type: Type of candidates ('target_candidates', 'genome_wide_candidates', 'master_bed_candidates')
+        work_dir: Working directory
+        sample_id: Sample identifier
+    """
+    if candidates_df is None or candidates_df.empty:
+        return
+    
+    try:
+        parquet_paths = _get_parquet_paths(work_dir, sample_id)
+        parquet_path = parquet_paths.get(candidate_type)
+        
+        if parquet_path:
+            candidates_df.to_parquet(parquet_path, index=False, engine='pyarrow')
+            logger.debug(f"Saved {len(candidates_df)} {candidate_type} to {parquet_path}")
+    except Exception as e:
+        logger.error(f"Error saving {candidate_type} to Parquet: {e}")
+
+
+def _load_fusion_candidates_parquet(
+    candidate_type: str,
+    work_dir: str,
+    sample_id: str,
+) -> Optional[pd.DataFrame]:
+    """
+    Load fusion candidates from Parquet file.
+    
+    Args:
+        candidate_type: Type of candidates ('target_candidates', 'genome_wide_candidates', 'master_bed_candidates')
+        work_dir: Working directory
+        sample_id: Sample identifier
+        
+    Returns:
+        DataFrame if file exists and is readable, None otherwise
+    """
+    try:
+        parquet_paths = _get_parquet_paths(work_dir, sample_id)
+        parquet_path = parquet_paths.get(candidate_type)
+        
+        if parquet_path and os.path.exists(parquet_path):
+            df = pd.read_parquet(parquet_path, engine='pyarrow')
+            if df.empty:
+                logger.debug(f"Parquet file {parquet_path} exists but is empty")
+                return None  # Treat empty file same as missing file
+            logger.debug(f"Loaded {len(df)} {candidate_type} from {parquet_path}")
+            return df
+    except Exception as e:
+        logger.warning(f"Error loading {candidate_type} from Parquet: {e}")
+    
+    return None
+
+
+def search_fusion_candidates_by_read_id(
+    work_dir: str,
+    sample_id: str,
+    read_ids: Union[str, List[str]],
+    candidate_types: Optional[List[str]] = None,
+    report_totals: bool = True,
+) -> Dict[str, pd.DataFrame]:
+    """
+    Search for one or more read IDs across all fusion candidate Parquet files.
+    
+    Args:
+        work_dir: Working directory
+        sample_id: Sample identifier
+        read_ids: Single read ID (str) or list of read IDs to search for
+        candidate_types: Optional list of candidate types to search. If None, searches all types.
+                        Valid types: 'target_candidates', 'genome_wide_candidates', 'master_bed_candidates'
+        report_totals: If True, print summary of total unique reads in each candidate type (default: True)
+        
+    Returns:
+        Dictionary mapping candidate_type to DataFrame containing matching rows (empty DataFrame if no matches)
+    """
+    # Normalize input: convert single string to list
+    if isinstance(read_ids, str):
+        read_ids = [read_ids]
+    elif not isinstance(read_ids, list):
+        raise ValueError(f"read_ids must be a string or list of strings, got {type(read_ids)}")
+    
+    # Convert to set for efficient lookup
+    read_ids_set = set(read_ids)
+    
+    if candidate_types is None:
+        candidate_types = ["target_candidates", "genome_wide_candidates", "master_bed_candidates"]
+    
+    results = {}
+    totals_summary = {}
+    
+    for candidate_type in candidate_types:
+        try:
+            # Load the Parquet file
+            df = _load_fusion_candidates_parquet(candidate_type, work_dir, sample_id)
+            
+            if df is not None and not df.empty:
+                if "read_id" not in df.columns:
+                    logger.warning(f"read_id column not found in {candidate_type} DataFrame. Columns: {list(df.columns)}")
+                    results[candidate_type] = pd.DataFrame()
+                    totals_summary[candidate_type] = {"total_entries": len(df), "unique_reads": 0, "file_exists": True}
+                    continue
+                
+                # Count unique reads
+                unique_read_count = df["read_id"].nunique()
+                total_entries = len(df)
+                totals_summary[candidate_type] = {
+                    "total_entries": total_entries,
+                    "unique_reads": unique_read_count,
+                    "file_exists": True
+                }
+                
+                # Filter for any of the read IDs in the list
+                matches = df[df["read_id"].isin(read_ids_set)]
+                if not matches.empty:
+                    results[candidate_type] = matches
+                    found_reads = matches["read_id"].unique()
+                    logger.info(
+                        f"Found {len(matches)} entries for {len(found_reads)} read_id(s) in {candidate_type}: "
+                        f"{', '.join(found_reads[:5])}{'...' if len(found_reads) > 5 else ''}"
+                    )
+                else:
+                    # Check if any read IDs are similar (case/whitespace differences)
+                    df_read_ids_set = set(df["read_id"].unique())
+                    read_ids_lower = {rid.lower().strip() for rid in read_ids_set}
+                    df_read_ids_lower = {rid.lower().strip() for rid in df_read_ids_set}
+                    if read_ids_lower & df_read_ids_lower:
+                        logger.warning(
+                            f"Found similar read IDs in {candidate_type} (case/whitespace differences). "
+                            f"Searching for: {read_ids_set}, found similar: {read_ids_lower & df_read_ids_lower}"
+                        )
+                    results[candidate_type] = pd.DataFrame()  # Empty DataFrame to indicate searched but no matches
+            else:
+                results[candidate_type] = pd.DataFrame()  # Empty DataFrame if file doesn't exist or is empty
+                totals_summary[candidate_type] = {"total_entries": 0, "unique_reads": 0, "file_exists": False}
+        except Exception as e:
+            logger.warning(f"Error searching {candidate_type} for read_ids {read_ids}: {e}")
+            import traceback
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+            results[candidate_type] = pd.DataFrame()
+            totals_summary[candidate_type] = {"total_entries": 0, "unique_reads": 0, "file_exists": False, "error": str(e)}
+    
+    # Log summary of totals if requested
+    if report_totals:
+        logger.info("Total unique reads in each candidate type:")
+        for candidate_type, stats in totals_summary.items():
+            if stats.get("file_exists", False):
+                logger.info(
+                    f"  {candidate_type}: {stats['unique_reads']:,} unique reads "
+                    f"({stats['total_entries']:,} total entries)"
+                )
+            elif stats.get("error"):
+                logger.warning(f"  {candidate_type}: Error - {stats['error']}")
+            else:
+                logger.debug(f"  {candidate_type}: File empty or doesn't exist")
+    
+    return results
+
+
+def diagnose_master_bed_breakpoint_extraction(
+    work_dir: str,
+    sample_id: str,
+    read_ids: Optional[List[str]] = None,
+    min_read_support: int = 3,
+    cluster_distance: int = 5000,
+) -> None:
+    """
+    Diagnostic function to debug why master BED breakpoints aren't being detected.
+    
+    This function loads the master_bed_candidates data and traces through the entire
+    breakpoint extraction logic to identify where the process fails.
+    
+    Args:
+        work_dir: Working directory
+        sample_id: Sample identifier
+        read_ids: Optional list of specific read IDs to focus on (if None, analyzes all reads)
+        min_read_support: Minimum read support threshold (default: 3)
+        cluster_distance: Clustering distance threshold in bp (default: 5000)
+    """
+    logger.debug("\n" + "="*80)
+    logger.debug(f"DIAGNOSTIC: Master BED Breakpoint Extraction")
+    logger.debug(f"Sample: {sample_id}")
+    logger.debug(f"Work dir: {work_dir}")
+    logger.debug("="*80 + "\n")
+    
+    # Load master_bed_candidates
+    logger.debug("[STEP 1] Loading master_bed_candidates from Parquet...")
+    master_bed_df = _load_fusion_candidates_parquet("master_bed_candidates", work_dir, sample_id)
+    
+    if master_bed_df is None or master_bed_df.empty:
+        logger.debug(f"  ERROR: No master_bed_candidates found or file is empty")
+        logger.debug(f"  Parquet path: {_get_parquet_paths(work_dir, sample_id).get('master_bed_candidates', 'N/A')}")
+        return
+    
+    logger.debug(f"  Loaded {len(master_bed_df)} total entries")
+    logger.debug(f"  Columns: {list(master_bed_df.columns)}")
+    
+    # Filter to specific read IDs if provided
+    if read_ids:
+        read_ids_set = set(read_ids)
+        master_bed_df = master_bed_df[master_bed_df["read_id"].isin(read_ids_set)].copy()
+        logger.debug(f"\n[FILTER] Filtered to {len(master_bed_df)} entries for {len(read_ids)} read IDs")
+        if master_bed_df.empty:
+            logger.debug(f"  ERROR: None of the specified read IDs found in master_bed_candidates")
+            logger.debug(f"  Looking for: {read_ids}")
+            all_read_ids = _load_fusion_candidates_parquet("master_bed_candidates", work_dir, sample_id)
+            if all_read_ids is not None and not all_read_ids.empty:
+                unique_reads = all_read_ids["read_id"].unique()[:10]
+                logger.debug(f"  Example read IDs in file: {list(unique_reads)}")
+            return
+    
+    # Check required columns
+    logger.debug("\n[STEP 2] Checking required columns...")
+    required_cols = ["read_id", "reference_id", "reference_start", "reference_end"]
+    missing_cols = [col for col in required_cols if col not in master_bed_df.columns]
+    if missing_cols:
+        logger.debug(f"  ERROR: Missing required columns: {missing_cols}")
+        return
+    logger.debug(f"  All required columns present")
+    
+    # Check classification columns
+    logger.debug("\n[STEP 3] Checking alignment classification...")
+    has_col4 = "col4" in master_bed_df.columns
+    has_is_supp = "is_supplementary" in master_bed_df.columns
+    
+    if has_col4:
+        logger.debug(f"  col4 column found")
+        col4_values = master_bed_df["col4"].value_counts()
+        logger.debug(f"  col4 value counts:\n{col4_values}")
+    else:
+        logger.debug(f"  WARNING: col4 column not found")
+    
+    if has_is_supp:
+        logger.debug(f"  is_supplementary column found")
+        is_supp_counts = master_bed_df["is_supplementary"].value_counts()
+        logger.debug(f"  is_supplementary value counts:\n{is_supp_counts}")
+    else:
+        logger.debug(f"  WARNING: is_supplementary column not found")
+    
+    if not has_col4 and not has_is_supp:
+        logger.debug(f"  ERROR: Neither col4 nor is_supplementary column found - cannot classify alignments")
+        return
+    
+    # Separate primary and supplementary
+    logger.debug("\n[STEP 4] Separating primary and supplementary alignments...")
+    if has_col4:
+        primary_df = master_bed_df[master_bed_df["col4"] == "master_bed_region"].copy()
+        supplementary_df = master_bed_df[master_bed_df["col4"] == "master_bed_supplementary"].copy()
+        logger.debug(f"  Using col4 for classification")
+    else:
+        primary_df = master_bed_df[master_bed_df["is_supplementary"] == False].copy()
+        supplementary_df = master_bed_df[master_bed_df["is_supplementary"] == True].copy()
+        logger.debug(f"  Using is_supplementary for classification (fallback)")
+    
+    logger.debug(f"  Primary alignments: {len(primary_df)}")
+    logger.debug(f"  Supplementary alignments: {len(supplementary_df)}")
+    
+    if primary_df.empty:
+        logger.debug(f"  ERROR: No primary alignments found")
+        return
+    
+    if supplementary_df.empty:
+        logger.debug(f"  ERROR: No supplementary alignments found")
+        return
+    
+    # Check for reads with both
+    logger.debug("\n[STEP 5] Finding reads with both primary and supplementary alignments...")
+    primary_read_ids = set(primary_df["read_id"].unique())
+    supplementary_read_ids = set(supplementary_df["read_id"].unique())
+    reads_with_both = primary_read_ids & supplementary_read_ids
+    
+    logger.debug(f"  Reads with primary only: {len(primary_read_ids - supplementary_read_ids)}")
+    logger.debug(f"  Reads with supplementary only: {len(supplementary_read_ids - primary_read_ids)}")
+    logger.debug(f"  Reads with both: {len(reads_with_both)}")
+    
+    if not reads_with_both:
+        logger.debug(f"  ERROR: No reads have both primary and supplementary alignments")
+        if read_ids:
+            logger.debug(f"\n  Checking specific read IDs:")
+            for rid in read_ids:
+                has_primary = rid in primary_read_ids
+                has_supp = rid in supplementary_read_ids
+                logger.debug(f"    {rid}: primary={has_primary}, supplementary={has_supp}")
+        return
+    
+    # Show example reads
+    if read_ids:
+        logger.debug(f"\n  Checking specific read IDs:")
+        for rid in read_ids:
+            if rid in reads_with_both:
+                primaries = primary_df[primary_df["read_id"] == rid]
+                supplementaries = supplementary_df[supplementary_df["read_id"] == rid]
+                logger.debug(f"    {rid}:")
+                logger.debug(f"      Primary: {len(primaries)} alignment(s)")
+                for _, row in primaries.iterrows():
+                    logger.debug(f"        {row['reference_id']}:{row['reference_start']}-{row['reference_end']} (col4={row.get('col4', 'N/A')}, is_supp={row.get('is_supplementary', 'N/A')})")
+                logger.debug(f"      Supplementary: {len(supplementaries)} alignment(s)")
+                for _, row in supplementaries.iterrows():
+                    logger.debug(f"        {row['reference_id']}:{row['reference_start']}-{row['reference_end']} (col4={row.get('col4', 'N/A')}, is_supp={row.get('is_supplementary', 'N/A')})")
+    
+    # Create breakpoint pairs
+    logger.debug("\n[STEP 6] Creating breakpoint pairs...")
+    primary_filtered = primary_df[primary_df["read_id"].isin(reads_with_both)].copy()
+    supplementary_filtered = supplementary_df[supplementary_df["read_id"].isin(reads_with_both)].copy()
+    
+    breakpoint_pairs = []
+    primary_by_read = primary_filtered.groupby("read_id", observed=True)
+    supplementary_by_read = supplementary_filtered.groupby("read_id", observed=True)
+    
+    for read_id in reads_with_both:
+        read_primaries = primary_by_read.get_group(read_id) if read_id in primary_by_read.groups else pd.DataFrame()
+        read_supplementaries = supplementary_by_read.get_group(read_id) if read_id in supplementary_by_read.groups else pd.DataFrame()
+        
+        if read_primaries.empty or read_supplementaries.empty:
+            continue
+        
+        primaries_list = read_primaries[["reference_id", "reference_start", "reference_end"]].to_dict("records")
+        supplementaries_list = read_supplementaries[["reference_id", "reference_start", "reference_end"]].to_dict("records")
+        
+        for primary_row in primaries_list:
+            for supp_row in supplementaries_list:
+                breakpoint_pairs.append({
+                    "read_id": read_id,
+                    "primary_chrom": primary_row["reference_id"],
+                    "primary_start": int(primary_row["reference_start"]),
+                    "primary_end": int(primary_row["reference_end"]),
+                    "supp_chrom": supp_row["reference_id"],
+                    "supp_start": int(supp_row["reference_start"]),
+                    "supp_end": int(supp_row["reference_end"]),
+                })
+    
+    logger.debug(f"  Created {len(breakpoint_pairs)} breakpoint pairs from {len(reads_with_both)} reads")
+    
+    if not breakpoint_pairs:
+        logger.debug(f"  ERROR: No breakpoint pairs created")
+        return
+    
+    # Show example pairs
+    if read_ids:
+        logger.debug(f"\n  Breakpoint pairs for specified read IDs:")
+        for pair in breakpoint_pairs[:20]:  # Show first 20
+            if pair["read_id"] in read_ids:
+                logger.debug(f"    {pair['read_id']}: primary={pair['primary_chrom']}:{pair['primary_start']}-{pair['primary_end']}, "
+                      f"supp={pair['supp_chrom']}:{pair['supp_start']}-{pair['supp_end']}")
+    
+    # Cluster pairs
+    logger.debug(f"\n[STEP 7] Clustering breakpoint pairs (distance={cluster_distance}bp)...")
+    
+    # Group by chromosome combination
+    pairs_by_chrom = {}
+    for i, pair in enumerate(breakpoint_pairs):
+        chrom_key = (pair["primary_chrom"], pair["supp_chrom"])
+        if chrom_key not in pairs_by_chrom:
+            pairs_by_chrom[chrom_key] = []
+        pairs_by_chrom[chrom_key].append((i, pair))
+    
+    logger.debug(f"  Grouped into {len(pairs_by_chrom)} chromosome combinations")
+    for chrom_key, pairs in pairs_by_chrom.items():
+        logger.debug(f"    {chrom_key[0]} -> {chrom_key[1]}: {len(pairs)} pairs")
+    
+    # Cluster within each chromosome combination
+    clustered_pairs = []
+    used_indices = set()
+    
+    for chrom_key, chrom_pairs in pairs_by_chrom.items():
+        if len(chrom_pairs) == 0:
+            continue
+        
+        sorted_chrom_pairs = sorted(chrom_pairs, key=lambda x: (
+            x[1]["primary_start"], x[1]["supp_start"]
+        ))
+        
+        for idx, (orig_i, pair) in enumerate(sorted_chrom_pairs):
+            if orig_i in used_indices:
+                continue
+            
+            cluster_read_ids = {pair["read_id"]}
+            cluster_primary_chrom = pair["primary_chrom"]
+            cluster_primary_starts = [pair["primary_start"]]
+            cluster_primary_ends = [pair["primary_end"]]
+            cluster_supp_chrom = pair["supp_chrom"]
+            cluster_supp_starts = [pair["supp_start"]]
+            cluster_supp_ends = [pair["supp_end"]]
+            used_indices.add(orig_i)
+            
+            cluster_primary_min = min(cluster_primary_starts)
+            cluster_primary_max = max(cluster_primary_ends)
+            cluster_supp_min = min(cluster_supp_starts)
+            cluster_supp_max = max(cluster_supp_ends)
+            
+            changed = True
+            while changed:
+                changed = False
+                for j, (other_orig_i, other_pair) in enumerate(sorted_chrom_pairs):
+                    if other_orig_i in used_indices:
+                        continue
+                    
+                    primary_similar = (
+                        other_pair["primary_start"] <= cluster_primary_max + cluster_distance and
+                        other_pair["primary_end"] >= cluster_primary_min - cluster_distance
+                    )
+                    
+                    supp_similar = (
+                        other_pair["supp_start"] <= cluster_supp_max + cluster_distance and
+                        other_pair["supp_end"] >= cluster_supp_min - cluster_distance
+                    )
+                    
+                    if primary_similar and supp_similar:
+                        cluster_read_ids.add(other_pair["read_id"])
+                        cluster_primary_starts.append(other_pair["primary_start"])
+                        cluster_primary_ends.append(other_pair["primary_end"])
+                        cluster_supp_starts.append(other_pair["supp_start"])
+                        cluster_supp_ends.append(other_pair["supp_end"])
+                        used_indices.add(other_orig_i)
+                        changed = True
+                        cluster_primary_min = min(cluster_primary_starts)
+                        cluster_primary_max = max(cluster_primary_ends)
+                        cluster_supp_min = min(cluster_supp_starts)
+                        cluster_supp_max = max(cluster_supp_ends)
+            
+            clustered_pairs.append({
+                "primary_chrom": cluster_primary_chrom,
+                "primary_start": min(cluster_primary_starts),
+                "primary_end": max(cluster_primary_ends),
+                "supp_chrom": cluster_supp_chrom,
+                "supp_start": min(cluster_supp_starts),
+                "supp_end": max(cluster_supp_ends),
+                "read_count": len(cluster_read_ids),
+                "read_ids": cluster_read_ids,
+            })
+    
+    logger.debug(f"  Clustered into {len(clustered_pairs)} clusters")
+    
+    # Show cluster details
+    if clustered_pairs:
+        logger.debug(f"\n  Cluster details:")
+        sorted_clusters = sorted(clustered_pairs, key=lambda p: p["read_count"], reverse=True)
+        for i, cluster in enumerate(sorted_clusters[:10]):  # Show top 10
+            logger.debug(f"    Cluster {i+1}: {cluster['read_count']} reads")
+            logger.debug(f"      Primary: {cluster['primary_chrom']}:{cluster['primary_start']}-{cluster['primary_end']}")
+            logger.debug(f"      Supplementary: {cluster['supp_chrom']}:{cluster['supp_start']}-{cluster['supp_end']}")
+            if read_ids:
+                cluster_read_ids_list = list(cluster['read_ids'])
+                matching_reads = [rid for rid in read_ids if rid in cluster_read_ids_list]
+                if matching_reads:
+                    logger.debug(f"      Matching specified reads: {matching_reads}")
+    
+    # Filter by min_read_support
+    logger.debug(f"\n[STEP 8] Filtering by min_read_support (>= {min_read_support})...")
+    supported_pairs = [
+        p for p in clustered_pairs 
+        if p["read_count"] >= min_read_support
+    ]
+    
+    logger.debug(f"  Clusters with >= {min_read_support} reads: {len(supported_pairs)} (out of {len(clustered_pairs)} total)")
+    
+    if supported_pairs:
+        logger.debug(f"\n  SUCCESS: Found {len(supported_pairs)} supported breakpoint pairs")
+        for i, pair in enumerate(supported_pairs):
+            logger.debug(f"    {i+1}. {pair['read_count']} reads: "
+                  f"primary={pair['primary_chrom']}:{pair['primary_start']}-{pair['primary_end']}, "
+                  f"supp={pair['supp_chrom']}:{pair['supp_start']}-{pair['supp_end']}")
+    else:
+        logger.debug(f"  ERROR: No clusters meet the min_read_support threshold of {min_read_support}")
+        if clustered_pairs:
+            max_read_count = max(p["read_count"] for p in clustered_pairs)
+            logger.debug(f"  Maximum read count in any cluster: {max_read_count}")
+            logger.debug(f"  Top clusters by read count:")
+            sorted_clusters = sorted(clustered_pairs, key=lambda p: p["read_count"], reverse=True)
+            for i, cluster in enumerate(sorted_clusters[:5]):
+                logger.debug(f"    {i+1}. {cluster['read_count']} reads: "
+                      f"primary={cluster['primary_chrom']}:{cluster['primary_start']}-{cluster['primary_end']}, "
+                      f"supp={cluster['supp_chrom']}:{cluster['supp_start']}-{cluster['supp_end']}")
+    
+    logger.debug("\n" + "="*80)
+    logger.debug("DIAGNOSTIC COMPLETE")
+    logger.debug("="*80 + "\n")
+
+
+def _migrate_json_to_parquet(work_dir: str, sample_id: str, fusion_data: Dict[str, Any]) -> None:
+    """
+    Migrate fusion candidates from JSON lists to Parquet files.
+    This is called when loading old JSON-based metadata.
+    
+    Args:
+        work_dir: Working directory
+        sample_id: Sample identifier
+        fusion_data: Dictionary containing lists of candidate dicts
+    """
+    for candidate_type in ["target_candidates", "genome_wide_candidates", "master_bed_candidates"]:
+        candidates_list = fusion_data.get(candidate_type, [])
+        if candidates_list and isinstance(candidates_list, list) and len(candidates_list) > 0:
+            try:
+                # Convert list of dicts to DataFrame
+                df = pd.DataFrame(candidates_list)
+                if not df.empty:
+                    # Save to Parquet
+                    _save_fusion_candidates_parquet(df, candidate_type, work_dir, sample_id)
+                    logger.info(f"Migrated {len(candidates_list)} {candidate_type} from JSON to Parquet")
+            except Exception as e:
+                logger.warning(f"Error migrating {candidate_type} to Parquet: {e}")
+
+
 def _save_fusion_metadata(
     fusion_metadata: FusionMetadata, work_dir: str, sample_id: str
 ) -> None:
     """
     Save fusion metadata to disk for persistence between BAM file processing.
+    Now uses Parquet files for candidate data storage (much faster than JSON).
 
     Args:
         fusion_metadata: FusionMetadata object to save
@@ -1653,15 +3564,47 @@ def _save_fusion_metadata(
         sample_dir = os.path.join(work_dir, sample_id)
         os.makedirs(sample_dir, exist_ok=True)
 
-        # Create metadata file path
+        # Save fusion candidates to Parquet files (fast storage)
+        if fusion_metadata.fusion_data:
+            for candidate_type in ["target_candidates", "genome_wide_candidates", "master_bed_candidates"]:
+                candidates = fusion_metadata.fusion_data.get(candidate_type)
+                
+                # Handle both DataFrame and list of dicts (for backward compatibility)
+                if candidates is not None:
+                    if isinstance(candidates, pd.DataFrame):
+                        # Already a DataFrame - save directly
+                        _save_fusion_candidates_parquet(candidates, candidate_type, work_dir, sample_id)
+                    elif isinstance(candidates, list) and len(candidates) > 0:
+                        # List of dicts - convert to DataFrame first
+                        df = pd.DataFrame(candidates)
+                        _save_fusion_candidates_parquet(df, candidate_type, work_dir, sample_id)
+                    # Empty lists are skipped (no file created)
+
+        # Create metadata file path (for non-candidate metadata only)
         metadata_path = os.path.join(sample_dir, f"{sample_id}_fusion_metadata.json")
 
         # Convert dataclass to dictionary for JSON serialization
         metadata_dict = asdict(fusion_metadata)
+        
+        # Remove large candidate lists from JSON (they're now in Parquet files)
+        # Keep empty lists or None to indicate structure
+        if "fusion_data" in metadata_dict and metadata_dict["fusion_data"]:
+            # Replace large lists with empty lists or file indicators
+            for key in ["target_candidates", "genome_wide_candidates", "master_bed_candidates"]:
+                if key in metadata_dict["fusion_data"]:
+                    candidates = metadata_dict["fusion_data"][key]
+                    # Only store in JSON if it's a small list (for backward compatibility)
+                    # Large lists are stored in Parquet
+                    if isinstance(candidates, list) and len(candidates) > 1000:
+                        # Store empty list in JSON, data is in Parquet
+                        metadata_dict["fusion_data"][key] = []
+                    elif isinstance(candidates, pd.DataFrame):
+                        # DataFrame - don't store in JSON
+                        metadata_dict["fusion_data"][key] = []
 
-        # Save to JSON file
+        # Save to JSON file (metadata only, candidates are in Parquet)
         with open(metadata_path, "w") as f:
-            json.dump(metadata_dict, f, indent=2)
+            json.dump(metadata_dict, f, indent=2, default=str)  # default=str handles any non-serializable types
 
         logger.debug(f"Saved fusion metadata to {metadata_path}")
 
@@ -1875,6 +3818,7 @@ def _create_metadata_from_csv_files(work_dir: str, sample_id: str) -> Optional[F
 def _load_fusion_metadata(work_dir: str, sample_id: str) -> Optional[FusionMetadata]:
     """
     Load existing fusion metadata from disk with backward compatibility.
+    Now loads candidate data from Parquet files (much faster than JSON).
 
     Args:
         work_dir: Working directory
@@ -1899,6 +3843,29 @@ def _load_fusion_metadata(work_dir: str, sample_id: str) -> Optional[FusionMetad
         # Migrate old format to new format if needed
         metadata_dict = _migrate_old_fusion_metadata(metadata_dict)
 
+        # Check if we have Parquet files (new format) or JSON lists (old format)
+        # Try loading from Parquet first (fast path)
+        fusion_data = metadata_dict.get("fusion_data", {})
+        parquet_loaded = False
+        
+        for candidate_type in ["target_candidates", "genome_wide_candidates", "master_bed_candidates"]:
+            parquet_df = _load_fusion_candidates_parquet(candidate_type, work_dir, sample_id)
+            if parquet_df is not None and not parquet_df.empty:
+                # Parquet file exists - use it (convert to list for compatibility)
+                fusion_data[candidate_type] = parquet_df.to_dict("records")
+                parquet_loaded = True
+            elif candidate_type in fusion_data:
+                # Check if JSON has data (old format)
+                candidates_list = fusion_data.get(candidate_type, [])
+                if isinstance(candidates_list, list) and len(candidates_list) > 0:
+                    # Migrate from JSON to Parquet
+                    _migrate_json_to_parquet(work_dir, sample_id, fusion_data)
+                    parquet_loaded = True
+                    # Keep the list for now (will be replaced by Parquet on next save)
+        
+        # Update metadata_dict with loaded/migrated fusion_data
+        metadata_dict["fusion_data"] = fusion_data
+
         # Convert dictionary back to FusionMetadata object
         try:
             fusion_metadata = FusionMetadata(**metadata_dict)
@@ -1918,23 +3885,25 @@ def _load_fusion_metadata(work_dir: str, sample_id: str) -> Optional[FusionMetad
         ):
             fusion_metadata.fusion_data = {}
 
-        # Ensure required keys exist
+        # Ensure required keys exist (as empty lists if not loaded)
         if "target_candidates" not in fusion_metadata.fusion_data:
             fusion_metadata.fusion_data["target_candidates"] = []
         if "genome_wide_candidates" not in fusion_metadata.fusion_data:
             fusion_metadata.fusion_data["genome_wide_candidates"] = []
+        if "master_bed_candidates" not in fusion_metadata.fusion_data:
+            fusion_metadata.fusion_data["master_bed_candidates"] = []
 
         # Save migrated metadata back to disk if migration occurred
-        if "migrated_from_csv" in fusion_metadata.processing_steps:
+        if "migrated_from_csv" in fusion_metadata.processing_steps or parquet_loaded:
             try:
                 _save_fusion_metadata(fusion_metadata, work_dir, sample_id)
-                logger.info(f"Saved migrated fusion metadata for {sample_id}")
+                logger.info(f"Saved migrated/updated fusion metadata for {sample_id}")
             except Exception as e:
                 logger.warning(f"Could not save migrated metadata: {e}")
 
         logger.debug(f"Loaded fusion metadata from {metadata_path}")
         logger.debug(
-            f"Existing data: {len(fusion_metadata.fusion_data.get('target_candidates', []))} target, {len(fusion_metadata.fusion_data.get('genome_wide_candidates', []))} genome-wide"
+            f"Existing data: {len(fusion_metadata.fusion_data.get('target_candidates', []))} target, {len(fusion_metadata.fusion_data.get('genome_wide_candidates', []))} genome-wide, {len(fusion_metadata.fusion_data.get('master_bed_candidates', []))} master BED"
         )
 
         return fusion_metadata
@@ -2133,13 +4102,11 @@ def _get_reads(reads: pd.DataFrame) -> pd.DataFrame:
         df["start"] = df["start"].astype(int)
         df["end"] = df["end"].astype(int)
     except ValueError as e:
-        print(f"Error converting start/end to int: {str(e)}")
-        print(
-            f"Problematic values in start: {df[df['start'].apply(lambda x: not str(x).isdigit())]['start'].tolist()}"
-        )
-        print(
-            f"Problematic values in end: {df[df['end'].apply(lambda x: not str(x).isdigit())]['end'].tolist()}"
-        )
+        logger.error(f"Error converting start/end to int: {str(e)}")
+        problematic_start = df[df['start'].apply(lambda x: not str(x).isdigit())]['start'].tolist()
+        problematic_end = df[df['end'].apply(lambda x: not str(x).isdigit())]['end'].tolist()
+        logger.debug(f"Problematic values in start: {problematic_start}")
+        logger.debug(f"Problematic values in end: {problematic_end}")
         raise
 
     # Sort the DataFrame by chromosome, start, and end positions
@@ -2245,7 +4212,7 @@ def _generate_fusion_summary_files(output_file: str, processed_data: dict) -> No
         logger.info(f"[Fusion] Updated summary file: target={target_count}, genome={genome_count}")
         
     except Exception as e:
-        print(f"Warning: Failed to generate fusion summary files: {e}")
+        logger.warning(f"Failed to generate fusion summary files: {e}")
 
 
 def preprocess_fusion_data_standalone(
@@ -2352,9 +4319,9 @@ def preprocess_fusion_data_standalone(
         del processed_data
 
     except Exception as e:
-        print(f"Error pre-processing fusion data: {str(e)}")
+        logger.error(f"Error pre-processing fusion data: {str(e)}")
         import traceback
-        print(f"Exception details: {traceback.format_exc()}")
+        logger.debug(f"Exception details: {traceback.format_exc()}")
 
 
 # =============================================================================
@@ -2443,10 +4410,11 @@ def preprocess_structural_variants_standalone(output_dir: str) -> None:
 
 
 def finalize_fusion_accumulation_for_sample(
-    sample_id: str, work_dir: str, target_panel: str
+    sample_id: str, work_dir: str, target_panel: str, reference: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Force final accumulation of any remaining staged fusion files for a sample.
+    This will also generate the final master BED file once all files are processed.
     
     This should be called when:
     - All files for a sample have been processed
@@ -2457,6 +4425,7 @@ def finalize_fusion_accumulation_for_sample(
         sample_id: Sample identifier
         work_dir: Working directory containing sample data
         target_panel: Target panel type
+        reference: Optional reference genome path
     
     Returns:
         Dictionary with accumulation results
@@ -2468,15 +4437,43 @@ def finalize_fusion_accumulation_for_sample(
         pending_count = _get_pending_count(work_dir, sample_id)
         
         if pending_count == 0:
-            logger.info(f"No pending fusion files for {sample_id} - accumulation not needed")
-            return {"status": "no_pending_files", "sample_id": sample_id}
-        
-        logger.info(f"Found {pending_count} pending fusion files for {sample_id} - forcing accumulation")
+            logger.info(f"No pending fusion files for {sample_id} - checking if final master BED generation is needed")
+            # Even if no pending files, we should generate master BED if it hasn't been generated yet
+            # This handles the case where all files were accumulated but master BED wasn't generated
+        else:
+            logger.info(f"Found {pending_count} pending fusion files for {sample_id} - forcing accumulation")
         
         # Force accumulation of remaining files (batch_size=1 ensures accumulation runs)
+        # force=True will trigger master BED generation in _generate_output_files
         result = accumulate_fusion_candidates(
-            work_dir, sample_id, target_panel, force=True, batch_size=1
+            work_dir, sample_id, target_panel, force=True, batch_size=1, reference=reference
         )
+        
+        # If accumulation succeeded but master BED wasn't generated (e.g., no pending files),
+        # generate it now as a final step
+        if result.get("status") == "success" or pending_count == 0:
+            try:
+                from robin.analysis.master_bed_generator import generate_master_bed
+                
+                # Get analysis counter
+                analysis_counter = _load_analysis_counter(sample_id, work_dir)
+                
+                # Generate master BED file (final generation after all files processed)
+                logger.info(f"Generating final master BED file for sample {sample_id} (counter: {analysis_counter})")
+                master_bed_path = generate_master_bed(
+                    sample_id=sample_id,
+                    work_dir=work_dir,
+                    analysis_counter=analysis_counter,
+                    target_panel=target_panel,
+                    logger_instance=logger,
+                    reference=reference,
+                )
+                if master_bed_path:
+                    logger.info(f"Final master BED file generated: {master_bed_path}")
+                    result["master_bed_generated"] = True
+                    result["master_bed_path"] = master_bed_path
+            except Exception as e:
+                logger.warning(f"Could not generate final master BED file: {e}")
         
         logger.info(f"Final fusion accumulation complete for {sample_id}: {result}")
         return result

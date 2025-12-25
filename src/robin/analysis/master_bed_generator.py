@@ -18,7 +18,8 @@ import glob
 import fcntl
 import time
 import argparse
-from typing import List, Tuple, Dict, Optional
+import json
+from typing import List, Tuple, Dict, Optional, Any
 from pathlib import Path
 
 import pandas as pd
@@ -540,7 +541,7 @@ def _calculate_genome_coverage(
             continue
         
         # Calculate total covered bases for this strand
-        # Regions are already merged, so we can sum their lengths
+        # IMPORTANT: Regions must be merged before calling this function to avoid double-counting overlaps
         covered_bases = 0
         skipped_regions = 0
         for _, row in strand_df.iterrows():
@@ -634,6 +635,263 @@ def _sort_bed_regions(df: pd.DataFrame) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+def _get_reference_path() -> Optional[str]:
+    """
+    Get the reference genome path from config or environment variable.
+    
+    Returns:
+        Path to reference FASTA file (expanded), or None if not found
+    """
+    # Try to load from config file first
+    try:
+        import yaml  # type: ignore
+        config_paths = [
+            os.path.join(os.getcwd(), "config.yaml"),
+            os.path.expanduser("~/.robin/config.yaml"),
+            "/etc/robin/config.yaml",
+        ]
+        for config_path in config_paths:
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    config = yaml.safe_load(f)
+                    if config and isinstance(config, dict):
+                        reference = config.get("reference")
+                        if reference:
+                            # Expand user home directory if present
+                            reference = os.path.expanduser(reference)
+                            if os.path.exists(reference):
+                                return reference
+    except (ImportError, Exception):
+        pass
+    
+    # Check environment variable
+    reference_env = os.environ.get("robin_REFERENCE")
+    if reference_env:
+        # Expand user home directory if present
+        reference_env = os.path.expanduser(reference_env)
+        if os.path.exists(reference_env):
+            return reference_env
+    
+    return None
+
+
+def _find_fai_file(reference: Optional[str] = None) -> Optional[str]:
+    """
+    Find the FAI (FASTA index) file path from reference genome or environment variable.
+    If reference exists but FAI doesn't, attempts to create it using samtools faidx.
+    
+    Args:
+        reference: Optional path to reference FASTA file
+        
+    Returns:
+        Path to FAI file, or None if not found
+    """
+    # Get reference if not provided
+    if not reference:
+        reference = _get_reference_path()
+    
+    # If reference is provided, expand user home directory and check for corresponding .fai file
+    if reference:
+        # Expand user home directory if present (handles ~/path)
+        reference = os.path.expanduser(reference)
+        fai_path = f"{reference}.fai"
+        if os.path.exists(fai_path):
+            return fai_path
+        
+        # If reference exists but FAI doesn't, try to create it
+        if os.path.exists(reference):
+            try:
+                import subprocess
+                logger.debug(f"FAI file not found for {reference}, attempting to create it with samtools faidx")
+                result = subprocess.run(
+                    ["samtools", "faidx", reference],
+                    capture_output=True,
+                    text=True,
+                    timeout=300
+                )
+                if result.returncode == 0 and os.path.exists(fai_path):
+                    logger.info(f"Successfully created FAI index: {fai_path}")
+                    return fai_path
+                else:
+                    logger.warning(f"Failed to create FAI index for {reference}: {result.stderr}")
+            except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+                logger.debug(f"Could not create FAI index for {reference}: {e}")
+        else:
+            logger.debug(f"Reference file does not exist: {reference}")
+    
+    # Check environment variable directly (fallback)
+    reference_env = os.environ.get("robin_REFERENCE")
+    if reference_env:
+        # Expand user home directory if present
+        reference_env = os.path.expanduser(reference_env)
+        fai_path = f"{reference_env}.fai"
+        if os.path.exists(fai_path):
+            return fai_path
+    
+    # Common locations to check
+    common_paths = [
+        "/data/reference/genome.fa.fai",
+        "/usr/local/share/reference/genome.fa.fai",
+        os.path.expanduser("~/reference/genome.fa.fai"),
+    ]
+    
+    for path in common_paths:
+        if os.path.exists(path):
+            return path
+    
+    return None
+
+
+def _log_bed_coverage_data(
+    sample_id: str,
+    work_dir: str,
+    analysis_counter: int,
+    coverage_data: Dict[str, Dict[str, float]],
+    log_file: str = "bed_coverage_log.json"
+) -> None:
+    """
+    Log genome coverage data for each BED file type to a JSON file.
+    Appends to existing log if it exists.
+    
+    Args:
+        sample_id: Sample ID
+        work_dir: Working directory
+        analysis_counter: Analysis counter
+        coverage_data: Dictionary mapping BED file type to coverage statistics
+        log_file: Name of the log file (default: bed_coverage_log.json)
+    """
+    try:
+        sample_dir = os.path.join(work_dir, sample_id)
+        log_path = os.path.join(sample_dir, log_file)
+        
+        # Load existing log if it exists
+        existing_data = []
+        if os.path.exists(log_path):
+            try:
+                with open(log_path, 'r') as f:
+                    existing_data = json.load(f)
+                if not isinstance(existing_data, list):
+                    # If file is corrupted or in wrong format, start fresh
+                    existing_data = []
+            except (json.JSONDecodeError, IOError) as e:
+                logger.warning(f"Could not read existing coverage log: {e}")
+                existing_data = []
+        
+        # Create new log entry
+        log_entry = {
+            "timestamp": time.time(),
+            "analysis_counter": analysis_counter,
+            "coverage": coverage_data
+        }
+        
+        # Append new entry
+        existing_data.append(log_entry)
+        
+        # Write updated log
+        with open(log_path, 'w') as f:
+            json.dump(existing_data, f, indent=2)
+        
+        logger.debug(f"Logged BED coverage data to {log_path}")
+        
+        # Generate pre-processed visualization data
+        _generate_visualization_data(sample_dir, existing_data)
+        
+    except Exception as e:
+        logger.warning(f"Could not log BED coverage data: {e}")
+
+
+def _generate_visualization_data(sample_dir: str, log_entries: List[Dict[str, Any]]) -> None:
+    """
+    Generate pre-processed visualization data for the GUI.
+    This avoids doing heavy DataFrame operations in the GUI for each viewer.
+    
+    Args:
+        sample_dir: Sample directory path
+        log_entries: List of log entry dictionaries
+    """
+    try:
+        # pandas is already imported at module level
+        
+        if not log_entries:
+            return
+        
+        # Color map for different BED types
+        colors = {
+            "cnv_regions": "#1f77b4",
+            "cnv_breakpoints": "#ff7f0e",
+            "fusion_breakpoints": "#2ca02c",
+            "master_bed_breakpoints": "#d62728",
+            "target_panel": "#9467bd",
+            "master_bed": "#8c564b",
+        }
+        
+        # Prepare DataFrame from log entries
+        rows = []
+        for entry in log_entries:
+            timestamp = entry.get("timestamp", 0)
+            counter = entry.get("analysis_counter", 0)
+            coverage = entry.get("coverage", {})
+            
+            # Extract coverage for each BED file type
+            for bed_type, bed_data in coverage.items():
+                if isinstance(bed_data, dict):
+                    total_prop = bed_data.get("total_proportion") if "total_proportion" in bed_data else None
+                    rows.append({
+                        "timestamp": timestamp,
+                        "analysis_counter": counter,
+                        "bed_type": bed_type,
+                        "total_proportion": total_prop,
+                    })
+        
+        if not rows:
+            return
+        
+        df = pd.DataFrame(rows)
+        
+        # Format data for ECharts
+        series = []
+        for bed_type in sorted(df["bed_type"].unique()):
+            bed_df = df[df["bed_type"] == bed_type].sort_values("timestamp")
+            if bed_df.empty:
+                continue
+            
+            # Format data for ECharts time series: [[timestamp_ms, value], ...]
+            data = []
+            for _, row in bed_df.iterrows():
+                total_prop = row["total_proportion"]
+                # Only include if value is not None and not NaN
+                if total_prop is not None and not pd.isna(total_prop):
+                    timestamp_ms = int(row["timestamp"] * 1000)  # Convert to milliseconds
+                    value = float(total_prop * 100)  # Convert to percentage
+                    data.append([timestamp_ms, value])
+            
+            # Only add series if we have data points to plot
+            if not data:
+                continue
+            
+            color = colors.get(bed_type, "#7f7f7f")
+            series.append({
+                "name": bed_type.replace("_", " ").title(),
+                "type": "line",
+                "smooth": True,
+                "symbol": "circle",
+                "symbolSize": 6,
+                "data": data,
+                "itemStyle": {"color": color},
+                "lineStyle": {"width": 2, "color": color},
+            })
+        
+        # Write pre-processed visualization data
+        viz_path = os.path.join(sample_dir, "bed_coverage_viz.json")
+        with open(viz_path, 'w') as f:
+            json.dump({"series": series}, f, indent=2)
+        
+        logger.debug(f"Generated visualization data with {len(series)} series to {viz_path}")
+        
+    except Exception as e:
+        logger.warning(f"Could not generate visualization data: {e}")
+
+
 def _get_target_bed_path(target_panel: Optional[str] = None) -> Optional[str]:
     """
     Get the path to the target gene BED file.
@@ -712,6 +970,7 @@ def generate_master_bed(
     analysis_counter: int,
     target_panel: Optional[str] = None,
     logger_instance: Optional[logging.Logger] = None,
+    reference: Optional[str] = None,
 ) -> Optional[str]:
     """
     Generate master BED file from all available BED file types.
@@ -752,44 +1011,144 @@ def generate_master_bed(
         with FileLock(lock_file, timeout=60.0):
             log.debug(f"Generating master BED file for sample {sample_id} (counter: {analysis_counter})")
             
+            # Get reference if not provided
+            if not reference:
+                reference = _get_reference_path()
+                if reference:
+                    # Expand user home directory if present
+                    reference = os.path.expanduser(reference)
+                    log.debug(f"Using reference genome from config/environment: {reference}")
+            elif reference:
+                # Expand user home directory if present (in case it was passed with ~)
+                original_reference = reference
+                reference = os.path.expanduser(reference)
+                if original_reference != reference:
+                    log.debug(f"Expanded reference path: {original_reference} -> {reference}")
+            
+            # Find FAI file for coverage calculations
+            # This will also attempt to create FAI if reference exists but FAI doesn't
+            fai_path = _find_fai_file(reference)
+            if fai_path:
+                log.debug(f"Using FAI file for coverage calculations: {fai_path}")
+            else:
+                log.debug("FAI file not found - coverage proportions will not be calculated")
+            coverage_data = {}
+            
             all_regions = []
             
             # 1. Load and convert CNV regions (new_file_{counter}.bed) to breakpoints
             cnv_bed = _get_latest_bed_file(bed_dir, "new_file_*.bed")
+            cnv_expanded_df = None
             if cnv_bed:
                 log.debug(f"Loading CNV regions from: {cnv_bed}")
                 cnv_df = _load_bed_file(cnv_bed)
                 if not cnv_df.empty:
                     # Convert each region to start/end breakpoints, padded by +/- 10kb
-                    expanded_df = _expand_cnv_regions(cnv_df, expand_size=10000)
-                    all_regions.append(expanded_df)
-                    log.debug(f"Loaded {len(cnv_df)} CNV regions (converted to {len(expanded_df)} breakpoint regions)")
+                    cnv_expanded_df = _expand_cnv_regions(cnv_df, expand_size=10000)
+                    all_regions.append(cnv_expanded_df)
+                    log.debug(f"Loaded {len(cnv_df)} CNV regions (converted to {len(cnv_expanded_df)} breakpoint regions)")
+                    
+                    # Merge overlapping regions before calculating coverage to avoid double-counting
+                    cnv_df_merged = _merge_overlapping_regions(cnv_df)
+                    
+                    # Always record region count (from original), calculate coverage if FAI is available (on merged)
+                    cnv_entry = {"region_count": len(cnv_df)}
+                    if fai_path:
+                        cnv_coverage = _calculate_genome_coverage(cnv_df_merged, fai_path)
+                        if cnv_coverage:
+                            cnv_entry.update({
+                                "total_proportion": cnv_coverage.get("total_proportion", 0.0),
+                                "plus_strand_proportion": cnv_coverage.get("plus_strand_proportion", 0.0),
+                                "minus_strand_proportion": cnv_coverage.get("minus_strand_proportion", 0.0),
+                            })
+                    coverage_data["cnv_regions"] = cnv_entry
             
             # 2. Load CNV breakpoints (breakpoints_{counter}.bed)
             # CNV breakpoints should have both + and - strands
             breakpoints_bed = _get_latest_bed_file(bed_dir, "breakpoints_*.bed")
+            bp_df_processed = None
             if breakpoints_bed:
                 log.debug(f"Loading CNV breakpoints from: {breakpoints_bed}")
                 bp_df = _load_bed_file(breakpoints_bed)
                 if not bp_df.empty:
                     # Ensure CNV breakpoints have both strands
                     # Duplicate unstranded breakpoints for both strands
-                    bp_df = _duplicate_unstranded_regions(bp_df)
-                    all_regions.append(bp_df)
-                    log.debug(f"Loaded {len(bp_df)} CNV breakpoints (with both strands)")
+                    bp_df_processed = _duplicate_unstranded_regions(bp_df)
+                    all_regions.append(bp_df_processed)
+                    log.debug(f"Loaded {len(bp_df_processed)} CNV breakpoints (with both strands)")
+                    
+                    # Merge overlapping regions before calculating coverage to avoid double-counting
+                    bp_df_merged = _merge_overlapping_regions(bp_df_processed)
+                    
+                    # Always record region count (from original), calculate coverage if FAI is available (on merged)
+                    bp_entry = {"region_count": len(bp_df_processed)}
+                    if fai_path:
+                        bp_coverage = _calculate_genome_coverage(bp_df_merged, fai_path)
+                        if bp_coverage:
+                            bp_entry.update({
+                                "total_proportion": bp_coverage.get("total_proportion", 0.0),
+                                "plus_strand_proportion": bp_coverage.get("plus_strand_proportion", 0.0),
+                                "minus_strand_proportion": bp_coverage.get("minus_strand_proportion", 0.0),
+                            })
+                    coverage_data["cnv_breakpoints"] = bp_entry
             
             # 3. Load fusion breakpoints (fusion_breakpoints_{counter}.bed)
             # Fusion breakpoints preserve their strand information
             fusion_bed = _get_latest_bed_file(bed_dir, "fusion_breakpoints_*.bed")
+            fusion_df_processed = None
             if fusion_bed:
                 log.debug(f"Loading fusion breakpoints from: {fusion_bed}")
                 fusion_df = _load_bed_file(fusion_bed)
                 if not fusion_df.empty:
                     # Fusion breakpoints should preserve their strand
                     # If unstranded, duplicate for both strands
-                    fusion_df = _duplicate_unstranded_regions(fusion_df)
-                    all_regions.append(fusion_df)
-                    log.debug(f"Loaded {len(fusion_df)} fusion breakpoints (preserving strand)")
+                    fusion_df_processed = _duplicate_unstranded_regions(fusion_df)
+                    all_regions.append(fusion_df_processed)
+                    log.debug(f"Loaded {len(fusion_df_processed)} fusion breakpoints (preserving strand)")
+                    
+                    # Merge overlapping regions before calculating coverage to avoid double-counting
+                    fusion_df_merged = _merge_overlapping_regions(fusion_df_processed)
+                    
+                    # Always record region count (from original), calculate coverage if FAI is available (on merged)
+                    fusion_entry = {"region_count": len(fusion_df_processed)}
+                    if fai_path:
+                        fusion_coverage = _calculate_genome_coverage(fusion_df_merged, fai_path)
+                        if fusion_coverage:
+                            fusion_entry.update({
+                                "total_proportion": fusion_coverage.get("total_proportion", 0.0),
+                                "plus_strand_proportion": fusion_coverage.get("plus_strand_proportion", 0.0),
+                                "minus_strand_proportion": fusion_coverage.get("minus_strand_proportion", 0.0),
+                            })
+                    coverage_data["fusion_breakpoints"] = fusion_entry
+            
+            # 4. Load master BED breakpoints (master_bed_breakpoints_{counter}.bed)
+            # These are new target regions identified from supplementary alignments
+            master_bed_bp = _get_latest_bed_file(bed_dir, "master_bed_breakpoints_*.bed")
+            master_bed_bp_df_processed = None
+            if master_bed_bp:
+                log.debug(f"Loading master BED breakpoints from: {master_bed_bp}")
+                master_bed_bp_df = _load_bed_file(master_bed_bp)
+                if not master_bed_bp_df.empty:
+                    # Master BED breakpoints should have both strands (breaks can occur on either strand)
+                    # Duplicate unstranded breakpoints for both strands
+                    master_bed_bp_df_processed = _duplicate_unstranded_regions(master_bed_bp_df)
+                    all_regions.append(master_bed_bp_df_processed)
+                    log.debug(f"Loaded {len(master_bed_bp_df_processed)} master BED breakpoints (with both strands)")
+                    
+                    # Merge overlapping regions before calculating coverage to avoid double-counting
+                    master_bed_bp_df_merged = _merge_overlapping_regions(master_bed_bp_df_processed)
+                    
+                    # Always record region count (from original), calculate coverage if FAI is available (on merged)
+                    master_bed_bp_entry = {"region_count": len(master_bed_bp_df_processed)}
+                    if fai_path:
+                        master_bed_bp_coverage = _calculate_genome_coverage(master_bed_bp_df_merged, fai_path)
+                        if master_bed_bp_coverage:
+                            master_bed_bp_entry.update({
+                                "total_proportion": master_bed_bp_coverage.get("total_proportion", 0.0),
+                                "plus_strand_proportion": master_bed_bp_coverage.get("plus_strand_proportion", 0.0),
+                                "minus_strand_proportion": master_bed_bp_coverage.get("minus_strand_proportion", 0.0),
+                            })
+                    coverage_data["master_bed_breakpoints"] = master_bed_bp_entry
             
             if not all_regions:
                 log.debug("No BED regions found to merge")
@@ -804,6 +1163,7 @@ def generate_master_bed(
             log.debug(f"Merged to {len(merged_df)} regions")
             
             # Add target gene panel regions if available
+            target_df_processed = None
             if target_panel:
                 target_bed_path = _get_target_bed_path(target_panel)
                 if target_bed_path:
@@ -811,15 +1171,30 @@ def generate_master_bed(
                     target_df = _load_bed_file(target_bed_path, require_bed6=True)
                     if not target_df.empty:
                         # Duplicate unstranded target regions for both strands
-                        target_df = _duplicate_unstranded_regions(target_df)
+                        target_df_processed = _duplicate_unstranded_regions(target_df)
+                        
+                        # Merge overlapping regions before calculating coverage to avoid double-counting
+                        target_df_merged = _merge_overlapping_regions(target_df_processed)
+                        
+                        # Always record region count (from original), calculate coverage if FAI is available (on merged)
+                        target_entry = {"region_count": len(target_df_processed)}
+                        if fai_path:
+                            target_coverage = _calculate_genome_coverage(target_df_merged, fai_path)
+                            if target_coverage:
+                                target_entry.update({
+                                    "total_proportion": target_coverage.get("total_proportion", 0.0),
+                                    "plus_strand_proportion": target_coverage.get("plus_strand_proportion", 0.0),
+                                    "minus_strand_proportion": target_coverage.get("minus_strand_proportion", 0.0),
+                                })
+                        coverage_data["target_panel"] = target_entry
                         
                         # Keep all breakpoint regions and add target gene regions
-                        log.debug(f"Keeping all {len(merged_df)} breakpoint regions and adding {len(target_df)} target gene regions")
+                        log.debug(f"Keeping all {len(merged_df)} breakpoint regions and adding {len(target_df_processed)} target gene regions")
                         
                         # Combine all breakpoints with target gene regions
-                        all_regions_with_target = pd.concat([merged_df, target_df], ignore_index=True)
+                        all_regions_with_target = pd.concat([merged_df, target_df_processed], ignore_index=True)
                         
-                        log.debug(f"Combined {len(merged_df)} breakpoints with {len(target_df)} target gene regions")
+                        log.debug(f"Combined {len(merged_df)} breakpoints with {len(target_df_processed)} target gene regions")
                         
                         # Merge overlapping regions (target genes may overlap with breakpoints)
                         # Merging preserves strand information
@@ -859,6 +1234,31 @@ def generate_master_bed(
                 index=False,
             )
             
+            # Always record region count for final master BED, calculate coverage if FAI is available
+            master_entry = {"region_count": len(sorted_df)}
+            if fai_path:
+                master_coverage = _calculate_genome_coverage(sorted_df, fai_path)
+                if master_coverage:
+                    master_entry.update({
+                        "total_proportion": master_coverage.get("total_proportion", 0.0),
+                        "plus_strand_proportion": master_coverage.get("plus_strand_proportion", 0.0),
+                        "minus_strand_proportion": master_coverage.get("minus_strand_proportion", 0.0),
+                    })
+            coverage_data["master_bed"] = master_entry
+            
+            # Log coverage data for all BED file types (always log, even without FAI)
+            if coverage_data:
+                _log_bed_coverage_data(
+                    sample_id=sample_id,
+                    work_dir=work_dir,
+                    analysis_counter=analysis_counter,
+                    coverage_data=coverage_data
+                )
+                if fai_path:
+                    log.debug(f"Logged coverage data for {len(coverage_data)} BED file types")
+                else:
+                    log.debug(f"Logged region counts for {len(coverage_data)} BED file types (FAI file not found - coverage proportions not calculated)")
+            
             log.info(f"Generated master BED file: {master_bed_path} with {len(sorted_df)} regions")
             return master_bed_path
             
@@ -876,6 +1276,7 @@ def generate_master_bed_from_files(
     cnv_regions_file: Optional[str] = None,
     cnv_breakpoints_file: Optional[str] = None,
     fusion_breakpoints_file: Optional[str] = None,
+    master_bed_breakpoints_file: Optional[str] = None,
     target_bed_file: Optional[str] = None,
     output_file: str = "master.bed",
     expand_cnv_size: int = 10000,
@@ -932,6 +1333,18 @@ def generate_master_bed_from_files(
                 fusion_df = _duplicate_unstranded_regions(fusion_df)
                 all_regions.append(fusion_df)
                 log.debug(f"Loaded {len(fusion_df)} fusion breakpoints (preserving strand)")
+        
+        # 4. Load master BED breakpoints (if provided as argument)
+        # Note: In the main generate_master_bed function, these are loaded automatically
+        # This parameter is for the CLI/testing function
+        if master_bed_breakpoints_file and os.path.exists(master_bed_breakpoints_file):
+            log.debug(f"Loading master BED breakpoints from: {master_bed_breakpoints_file}")
+            master_bed_bp_df = _load_bed_file(master_bed_breakpoints_file)
+            if not master_bed_bp_df.empty:
+                # Master BED breakpoints should have both strands
+                master_bed_bp_df = _duplicate_unstranded_regions(master_bed_bp_df)
+                all_regions.append(master_bed_bp_df)
+                log.debug(f"Loaded {len(master_bed_bp_df)} master BED breakpoints (with both strands)")
         
         if not all_regions:
             log.error("No BED regions found to merge")
@@ -1020,6 +1433,13 @@ Examples:
                                   --target-panel rCNS2_panel_name_uniq.bed \\
                                   --output master.bed
 
+  # Include master BED breakpoints (new target regions from supplementary alignments):
+  python master_bed_generator.py --cnv-regions new_file_001.bed \\
+                                  --cnv-breakpoints breakpoints_001.bed \\
+                                  --fusion-breakpoints fusion_breakpoints_001.bed \\
+                                  --master-bed-breakpoints master_bed_breakpoints_001.bed \\
+                                  --output master.bed
+
   # Custom CNV expansion size:
   python master_bed_generator.py --cnv-regions new_file_001.bed \\
                                   --expand-size 5000 \\
@@ -1054,6 +1474,17 @@ Examples:
             "Path to fusion breakpoints BED file (fusion_breakpoints_*.bed). "
             "Processing: Regions preserve their original strand information. "
             "If regions have unstranded ('.') strand, they are duplicated for both + and - strands. "
+            "Regions are merged if they overlap (separately by strand)."
+        )
+    )
+    parser.add_argument(
+        "--master-bed-breakpoints",
+        type=str,
+        help=(
+            "Path to master BED breakpoints BED file (master_bed_breakpoints_*.bed). "
+            "These are new target regions identified from supplementary alignments of reads mapping to master BED regions. "
+            "Processing: Regions are loaded as-is. If regions have unstranded ('.') strand, "
+            "they are duplicated for both + and - strands (breaks can occur on either strand). "
             "Regions are merged if they overlap (separately by strand)."
         )
     )
@@ -1106,14 +1537,18 @@ Examples:
     )
     
     # Check that at least one input file is provided
-    if not any([args.cnv_regions, args.cnv_breakpoints, args.fusion_breakpoints]):
-        parser.error("At least one input BED file must be provided (--cnv-regions, --cnv-breakpoints, or --fusion-breakpoints)")
+    if not any([args.cnv_regions, args.cnv_breakpoints, args.fusion_breakpoints, args.master_bed_breakpoints]):
+        parser.error(
+            "At least one input BED file must be provided "
+            "(--cnv-regions, --cnv-breakpoints, --fusion-breakpoints, or --master-bed-breakpoints)"
+        )
     
     # Generate master BED file
     result = generate_master_bed_from_files(
         cnv_regions_file=args.cnv_regions,
         cnv_breakpoints_file=args.cnv_breakpoints,
         fusion_breakpoints_file=args.fusion_breakpoints,
+        master_bed_breakpoints_file=args.master_bed_breakpoints,
         target_bed_file=args.target_panel,
         output_file=args.output,
         expand_cnv_size=args.expand_size,

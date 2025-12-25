@@ -281,9 +281,24 @@ def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
                 is_supplementary = read.is_supplementary
                 query_name = read.query_name
 
-                # Track supplementary reads with size limit
+                # Track supplementary reads
+                # A read has supplementary alignments if:
+                # 1. This alignment itself is supplementary (is_supplementary=True), OR
+                # 2. ANY alignment (primary or secondary) has an SA tag (indicating supplementary alignments exist)
+                # 
+                # We check ALL reads (not just primaries) to ensure we catch every read with supplementary mappings,
+                # even if the SA tag is only present on certain alignment records
+                has_supplementary_alignments = False
                 if is_supplementary:
                     supplementary_reads += 1
+                    has_supplementary_alignments = True
+                
+                # Also check SA tag on ALL reads (primary, secondary, supplementary) to catch any we might miss
+                # Some BAM files may have SA tag on different records than expected
+                if read.has_tag("SA"):
+                    has_supplementary_alignments = True
+                
+                if has_supplementary_alignments:
                     reads_with_supplementary.add(query_name)
 
                 if not is_secondary:  # Only process primary alignments

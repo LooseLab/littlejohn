@@ -933,6 +933,8 @@ def save_cnv_files(
     sex_estimate,
     copy_numbers,
     logger,
+    reference: Optional[str] = None,
+    generate_master_bed: bool = False,
 ):
     """
     Save CNV data files in the specified format from the documentation.
@@ -1011,30 +1013,32 @@ def save_cnv_files(
         # Generate BED files for CNV regions and breakpoints
         generate_bed_files(bed_dir, analysis_counter, breakpoints, result3_cnv, bin_width, logger)
 
-        # Generate master BED file
-        try:
-            from robin.analysis.master_bed_generator import (
-                generate_master_bed,
-                _try_get_target_panel_from_fusion_metadata,
-            )
-            
-            # Extract sample_id from sample_dir
-            sample_id = os.path.basename(sample_dir)
-            # work_dir is the parent of sample_dir
-            work_dir = os.path.dirname(sample_dir)
-            
-            # Try to get target_panel from fusion metadata if available
-            target_panel = _try_get_target_panel_from_fusion_metadata(sample_id, work_dir)
-            
-            generate_master_bed(
-                sample_id=sample_id,
-                work_dir=work_dir,
-                analysis_counter=analysis_counter,
-                target_panel=target_panel,
-                logger_instance=logger,
-            )
-        except Exception as e:
-            logger.warning(f"Could not generate master BED file: {e}")
+        # Generate master BED file only if requested (should only be done once per batch at the end)
+        if generate_master_bed:
+            try:
+                from robin.analysis.master_bed_generator import (
+                    generate_master_bed,
+                    _try_get_target_panel_from_fusion_metadata,
+                )
+                
+                # Extract sample_id from sample_dir
+                sample_id = os.path.basename(sample_dir)
+                # work_dir is the parent of sample_dir
+                work_dir = os.path.dirname(sample_dir)
+                
+                # Try to get target_panel from fusion metadata if available
+                target_panel = _try_get_target_panel_from_fusion_metadata(sample_id, work_dir)
+                
+                generate_master_bed(
+                    sample_id=sample_id,
+                    work_dir=work_dir,
+                    analysis_counter=analysis_counter,
+                    target_panel=target_panel,
+                    logger_instance=logger,
+                    reference=reference,
+                )
+            except Exception as e:
+                logger.warning(f"Could not generate master BED file: {e}")
 
         logger.debug(f"Saved all CNV files to {sample_dir}")
 
@@ -1044,7 +1048,7 @@ def save_cnv_files(
 
 
 
-def process_single_bam(bam_path, metadata, work_dir, logger, threads=2):
+def process_single_bam(bam_path, metadata, work_dir, logger, threads=2, reference: Optional[str] = None):
     """
     Process a single BAM file for CNV analysis using the complete pipeline.
 
@@ -1294,6 +1298,7 @@ def process_single_bam(bam_path, metadata, work_dir, logger, threads=2):
         analysis_counter += 1
 
         # Save CNV data files as specified in the documentation
+        # Don't generate master BED here - it should only be generated once per batch
         save_cnv_files(
             sample_output_dir,
             analysis_counter,
@@ -1306,6 +1311,8 @@ def process_single_bam(bam_path, metadata, work_dir, logger, threads=2):
             sex_estimate,
             updated_copy_numbers,  # Pass updated copy_numbers (already saved to per-sample file above)
             logger,
+            reference=reference,
+            generate_master_bed=False,  # Single BAM - master BED should be generated at batch end
         )
 
         analysis_result["cnv_data_path"] = os.path.join(
@@ -1338,7 +1345,7 @@ def process_single_bam(bam_path, metadata, work_dir, logger, threads=2):
         return analysis_result
 
 
-def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, threads=2):
+def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, threads=2, reference: Optional[str] = None):
     """
     Process multiple BAM files for CNV analysis using aggregated CNV data.
     
@@ -1665,6 +1672,7 @@ def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, threads=2)
         analysis_counter += 1
 
         # Save CNV data files as specified in the documentation
+        # Generate master BED here since this is batch processing (all BAMs processed)
         save_cnv_files(
             sample_output_dir,
             analysis_counter,
@@ -1677,6 +1685,8 @@ def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, threads=2)
             sex_estimate,
             final_copy_numbers,  # Pass final aggregated copy_numbers
             logger,
+            reference=reference,
+            generate_master_bed=True,  # Batch processing - generate master BED once at the end
         )
 
         analysis_result["cnv_data_path"] = os.path.join(
@@ -1781,14 +1791,23 @@ def cnv_handler(job, work_dir=None, target_panel=None, threads=2):
             batch_work_dir = work_dir
             logger.debug(f"Using specified work directory: {batch_work_dir}")
         
+        # Get reference from job metadata
+        reference = job.context.metadata.get("reference")
+        if reference:
+            # Expand user home directory if present
+            reference = os.path.expanduser(reference)
+            logger.debug(f"Using reference genome from job metadata: {reference}")
+        
         # Process all BAM files in the batch using the new aggregated function
         logger.info(f"Processing {batch_size} BAM files as aggregated batch for sample '{sample_id}'")
+        
         batch_result = process_multiple_bams(
             bam_paths=filepaths,
             metadata_list=metadata_list,
             work_dir=batch_work_dir,
             logger=logger,
-            threads=threads
+            threads=threads,
+            reference=reference,
         )
         
         # Store batch results in job context (maintain compatibility with existing structure)
