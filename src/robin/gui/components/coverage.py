@@ -1412,6 +1412,298 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 }
             ).classes("w-full h-64")
 
+        # Target Coverage Over Time Analysis
+        with ui.card().classes("w-full mt-4"):
+            ui.label("📈 Target Coverage Over Time Analysis").classes("text-lg font-semibold mb-2")
+            ui.label(
+                "Analyze mean target coverage over time and identify significant outliers. "
+                "Outliers are detected using standard deviation method: values more than 2 SD above or below the mean for each gene."
+            ).classes("text-sm text-gray-600 mb-4")
+            
+            # Chart container
+            target_coverage_time_chart_state = {"container": None, "chart": None}
+            
+            def _plot_target_coverage_over_time():
+                """Load target_coverage_time.csv and plot mean coverage with outlier detection"""
+                try:
+                    time_coverage_file = sample_dir / "target_coverage_time.csv"
+                    if not time_coverage_file.exists():
+                        if target_coverage_time_chart_state["container"]:
+                            with target_coverage_time_chart_state["container"]:
+                                ui.label("No target_coverage_time.csv file found.").classes("text-gray-600")
+                        return
+                    
+                    # Load data
+                    df = pd.read_csv(time_coverage_file)
+                    if df.empty:
+                        if target_coverage_time_chart_state["container"]:
+                            with target_coverage_time_chart_state["container"]:
+                                ui.label("No data available in target_coverage_time.csv").classes("text-gray-600")
+                        return
+                    
+                    # Convert timestamp to datetime (milliseconds to datetime)
+                    df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+                    
+                    # Calculate mean coverage per timepoint
+                    mean_coverage = df.groupby('timestamp')['coverage'].mean().reset_index()
+                    mean_coverage['datetime'] = pd.to_datetime(mean_coverage['timestamp'], unit='ms')
+                    
+                    # Calculate mean reads_per_length per timepoint
+                    mean_reads_per_length = df.groupby('timestamp')['reads_per_length'].mean().reset_index()
+                    mean_reads_per_length['datetime'] = pd.to_datetime(mean_reads_per_length['timestamp'], unit='ms')
+                    
+                    # Detect outliers using standard deviation method (Z-score)
+                    def detect_outliers_sd(series, num_sd=2.0):
+                        """Detect outliers using standard deviation method (Z-score)
+                        
+                        Args:
+                            series: Pandas Series of values
+                            num_sd: Number of standard deviations from mean (default: 2.0)
+                        
+                        Returns:
+                            Boolean Series indicating which values are outliers
+                        """
+                        mean = series.mean()
+                        std = series.std()
+                        
+                        # Handle case where std is 0 (all values are the same)
+                        if std == 0:
+                            return pd.Series([False] * len(series), index=series.index)
+                        
+                        lower_bound = mean - num_sd * std
+                        upper_bound = mean + num_sd * std
+                        return (series < lower_bound) | (series > upper_bound)
+                    
+                    # Detect outliers: compare each gene's coverage to the distribution of ALL genes
+                    # This detects genes that are outliers compared to other genes, not just timepoints
+                    outliers = []
+                    
+                    # Calculate global statistics across all genes at each timepoint
+                    # This allows us to detect genes that are outliers relative to the population
+                    for timestamp in df['timestamp'].unique():
+                        timepoint_data = df[df['timestamp'] == timestamp].copy()
+                        if len(timepoint_data) < 3:  # Need at least 3 genes to calculate SD
+                            continue
+                        
+                        # Calculate mean and SD across all genes at this timepoint
+                        global_mean = timepoint_data['coverage'].mean()
+                        global_std = timepoint_data['coverage'].std()
+                        
+                        if global_std == 0:  # All genes have same coverage
+                            continue
+                        
+                        # Detect outliers: genes > 2 SD from global mean at this timepoint
+                        lower_bound = global_mean - 2.0 * global_std
+                        upper_bound = global_mean + 2.0 * global_std
+                        
+                        outlier_mask = (timepoint_data['coverage'] < lower_bound) | (timepoint_data['coverage'] > upper_bound)
+                        outlier_points = timepoint_data[outlier_mask]
+                        
+                        for _, row in outlier_points.iterrows():
+                            outliers.append({
+                                'gene': row['name'],
+                                'timestamp': row['timestamp'],
+                                'datetime': row['datetime'],
+                                'coverage': row['coverage'],
+                                'reads': row['reads'],
+                                'reads_per_length': row['reads_per_length'],
+                                'type': 'high' if row['coverage'] > global_mean else 'low',
+                                'global_mean': global_mean,
+                                'global_std': global_std
+                            })
+                    
+                    outliers_df = pd.DataFrame(outliers) if outliers else pd.DataFrame()
+                    
+                    # Identify unique outlier genes (genes that are outliers at any timepoint)
+                    outlier_genes = set()
+                    if not outliers_df.empty:
+                        outlier_genes = set(outliers_df['gene'].unique())
+                    
+                    # Prepare data for ECharts
+                    # Mean coverage series
+                    mean_coverage_data = [
+                        [int(ts), float(cov)] 
+                        for ts, cov in zip(mean_coverage['timestamp'], mean_coverage['coverage'])
+                    ]
+                    
+                    # Mean reads_per_length series
+                    mean_reads_data = [
+                        [int(ts), float(rpl)] 
+                        for ts, rpl in zip(mean_reads_per_length['timestamp'], mean_reads_per_length['reads_per_length'])
+                    ]
+                    
+                    # Plot full time series profiles for outlier genes
+                    outlier_gene_series = []
+                    sorted_outlier_genes = []  # Initialize for use in legend
+                    if outlier_genes:
+                        # Get color palette for outlier genes
+                        import colorsys
+                        num_outliers = len(outlier_genes)
+                        colors = []
+                        for i in range(num_outliers):
+                            hue = i / max(num_outliers, 1)
+                            rgb = colorsys.hsv_to_rgb(hue, 0.8, 0.9)
+                            colors.append(f"rgb({int(rgb[0]*255)},{int(rgb[1]*255)},{int(rgb[2]*255)})")
+                        
+                        # Sort outlier genes by maximum coverage (to prioritize high outliers)
+                        outlier_gene_max_coverage = df[df['name'].isin(outlier_genes)].groupby('name')['coverage'].max().sort_values(ascending=False)
+                        sorted_outlier_genes = outlier_gene_max_coverage.index.tolist()
+                        
+                        # Limit to top 20 outlier genes to avoid clutter
+                        genes_to_plot = sorted_outlier_genes[:20]
+                        
+                        for idx, gene in enumerate(genes_to_plot):
+                            gene_data = df[df['name'] == gene].copy()
+                            if len(gene_data) < 2:  # Need at least 2 points for a line
+                                continue
+                            
+                            # Sort by timestamp
+                            gene_data = gene_data.sort_values('timestamp')
+                            
+                            # Prepare time series data
+                            gene_series_data = [
+                                [int(ts), float(cov)] 
+                                for ts, cov in zip(gene_data['timestamp'], gene_data['coverage'])
+                            ]
+                            
+                            # Determine if this is primarily a high or low outlier
+                            is_high_outlier = outliers_df[outliers_df['gene'] == gene]['type'].value_counts().get('high', 0) > \
+                                             outliers_df[outliers_df['gene'] == gene]['type'].value_counts().get('low', 0)
+                            
+                            outlier_gene_series.append({
+                                "name": gene,
+                                "type": "line",
+                                "smooth": True,
+                                "data": gene_series_data,
+                                "yAxisIndex": 0,
+                                "itemStyle": {"color": colors[idx % len(colors)]},
+                                "lineStyle": {"width": 2, "type": "dashed" if not is_high_outlier else "solid"},
+                                "label": {
+                                    "show": True,
+                                    "position": "right",
+                                    "formatter": gene,
+                                    "fontSize": 10,
+                                    "color": colors[idx % len(colors)]
+                                },
+                                "labelLayout": {
+                                    "hideOverlap": True
+                                },
+                                "emphasis": {
+                                    "focus": "series"
+                                }
+                            })
+                    
+                    # Create/update chart
+                    if target_coverage_time_chart_state["container"] is None:
+                        target_coverage_time_chart_state["container"] = ui.column().classes("w-full")
+                    
+                    with target_coverage_time_chart_state["container"]:
+                        # Clear existing content
+                        target_coverage_time_chart_state["container"].clear()
+                        
+                        # Summary statistics
+                        with ui.row().classes("w-full mb-4 gap-4"):
+                            ui.label(f"Total timepoints: {len(mean_coverage)}").classes("text-sm")
+                            ui.label(f"Total targets: {len(df['name'].unique())}").classes("text-sm")
+                            ui.label(f"Outliers detected: {len(outliers_df)}").classes("text-sm")
+                        
+                        # Chart
+                        chart_config = {
+                            "backgroundColor": "transparent",
+                            "title": {
+                                "text": "Mean Target Coverage Over Time with Outliers",
+                                "left": "center",
+                                "top": 10,
+                                "textStyle": {"fontSize": 16, "color": "#000"},
+                            },
+                            "tooltip": {
+                                "trigger": "axis",
+                                "axisPointer": {"type": "cross"},
+                            },
+                            "legend": {
+                                "data": ["Mean Coverage", "Mean Reads per Length"] + (sorted_outlier_genes[:20] if outlier_genes else []),
+                                "left": 10,
+                                "top": 40,
+                                "orient": "vertical",
+                                "itemGap": 5,
+                                "type": "scroll",
+                                "textStyle": {"fontSize": 10}
+                            },
+                            "grid": {
+                                "left": "15%",
+                                "right": "5%",
+                                "bottom": "10%",
+                                "top": "20%",
+                                "containLabel": True,
+                            },
+                            "xAxis": {
+                                "type": "time",
+                                "name": "Time",
+                                "nameGap": 30,
+                            },
+                            "yAxis": [
+                                {
+                                    "type": "value",
+                                    "name": "Mean Coverage",
+                                    "nameGap": 50,
+                                    "position": "left",
+                                },
+                                {
+                                    "type": "value",
+                                    "name": "Mean Reads per Length",
+                                    "nameGap": 50,
+                                    "position": "right",
+                                }
+                            ],
+                            "series": [
+                                {
+                                    "name": "Mean Coverage",
+                                    "type": "line",
+                                    "smooth": True,
+                                    "data": mean_coverage_data,
+                                    "yAxisIndex": 0,
+                                    "itemStyle": {"color": "#5470c6"},
+                                    "lineStyle": {"width": 2},
+                                },
+                                {
+                                    "name": "Mean Reads per Length",
+                                    "type": "line",
+                                    "smooth": True,
+                                    "data": mean_reads_data,
+                                    "yAxisIndex": 1,
+                                    "itemStyle": {"color": "#91cc75"},
+                                    "lineStyle": {"width": 2},
+                                },
+                            ] + outlier_gene_series,
+                        }
+                        
+                        target_coverage_time_chart_state["chart"] = ui.echart(chart_config).classes("w-full h-96")
+                        
+                        # Show summary of outlier genes
+                        if outlier_genes:
+                            outlier_count = len(outlier_genes)
+                            ui.label(f"Showing profiles for {min(outlier_count, 20)} outlier genes (out of {outlier_count} total)").classes("text-sm text-gray-600 mt-2")
+                        else:
+                            ui.label("No significant outliers detected.").classes("text-gray-600 mt-2")
+                
+                except Exception as e:
+                    logging.error(f"Error plotting target coverage over time: {e}")
+                    import traceback
+                    logging.error(traceback.format_exc())
+                    if target_coverage_time_chart_state["container"]:
+                        with target_coverage_time_chart_state["container"]:
+                            ui.label(f"Error: {str(e)}").classes("text-red-600")
+            
+            # Auto-plot on load
+            _plot_target_coverage_over_time()
+            
+            # Refresh button
+            with ui.row().classes("w-full mt-4"):
+                ui.button(
+                    "Refresh Analysis",
+                    on_click=_plot_target_coverage_over_time
+                ).classes("ml-2")
+
         with ui.card().classes("w-full"):
             with ui.row().classes("w-full items-center justify-between mb-2"):
                 ui.label("Target Coverage").classes("text-lg font-semibold")

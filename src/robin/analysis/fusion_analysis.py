@@ -392,6 +392,16 @@ def process_multiple_files(bam_paths, metadata_list, work_dir, logger, target_pa
         analysis_result["files_processed"] = len(valid_bam_paths)
         analysis_result["processing_steps"].append("supplementary_reads_found")
 
+        # Pre-initialize batch-level resources (done once per batch, not per file)
+        # 1. Ensure gene regions are loaded (cached, but ensure it's done once)
+        from robin.analysis.fusion_work import _ensure_gene_regions_loaded
+        _ensure_gene_regions_loaded(target_panel)
+        
+        # 2. Pre-create staging directory (avoids repeated os.makedirs calls)
+        from robin.analysis.fusion_work import _get_staging_dir
+        staging_dir = _get_staging_dir(work_dir, sample_id)
+        logger.debug(f"Pre-created staging directory: {staging_dir}")
+        
         # Process each BAM file individually using staging
         logger.info("Processing files with fusion staging (fast path)")
         processed_files = 0

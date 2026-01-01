@@ -2723,7 +2723,22 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             master_bed_df = None
             if master_bed_file.exists():
                 try:
-                    master_bed_df = pd.read_csv(master_bed_file)
+                    # Specify dtypes to avoid DtypeWarning for mixed-type columns
+                    # Columns 12 and 13 are is_secondary and is_supplementary (boolean, but may have mixed types)
+                    master_bed_df = pd.read_csv(
+                        master_bed_file,
+                        dtype={
+                            'is_secondary': 'object',  # Allow mixed types (True/False/1/0/NaN)
+                            'is_supplementary': 'object',  # Allow mixed types (True/False/1/0/NaN)
+                            'mapping_quality': 'float64',  # May have NaN values
+                            'reference_start': 'int64',
+                            'reference_end': 'int64',
+                            'read_start': 'float64',  # May have NaN values
+                            'read_end': 'float64',  # May have NaN values
+                            'mapping_span': 'float64',  # May have NaN values
+                        },
+                        low_memory=False
+                    )
                     logging.info(f"[Fusion] Loaded {len(master_bed_df)} master BED candidates")
                 except Exception as e:
                     logging.warning(f"[Fusion] Failed to load master BED file: {e}")
@@ -3323,7 +3338,21 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     master_bed_count0 = 0
                     if master_bed_file0.exists():
                         try:
-                            master_bed_df0 = pd.read_csv(master_bed_file0)
+                            # Specify dtypes to avoid DtypeWarning for mixed-type columns
+                            master_bed_df0 = pd.read_csv(
+                                master_bed_file0,
+                                dtype={
+                                    'is_secondary': 'object',  # Allow mixed types (True/False/1/0/NaN)
+                                    'is_supplementary': 'object',  # Allow mixed types (True/False/1/0/NaN)
+                                    'mapping_quality': 'float64',  # May have NaN values
+                                    'reference_start': 'int64',
+                                    'reference_end': 'int64',
+                                    'read_start': 'float64',  # May have NaN values
+                                    'read_end': 'float64',  # May have NaN values
+                                    'mapping_span': 'float64',  # May have NaN values
+                                },
+                                low_memory=False
+                            )
                             if not master_bed_df0.empty:
                                 # Try to load pre-computed summary file for accurate count
                                 summary_file0 = sample_dir / "master_bed_events_summary.csv"
