@@ -1663,15 +1663,99 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                     ui_changed = True
             except Exception:
                 pass
+            # Check if this is a fresh page visit
+            is_fresh_visit = "last_visit_time" not in state
+            if is_fresh_visit:
+                state["last_visit_time"] = time.time()
+            
             cnv_npy = sample_dir / "CNV.npy"
             cnv3_npy = sample_dir / "CNV3.npy"
             cnv_dict_npy = sample_dir / "CNV_dict.npy"
             data_array_npy = sample_dir / "cnv_data_array.npy"
             xy_pkl = sample_dir / "XYestimate.pkl"
+            
+            # Check modification times for all files
+            cnv_npy_mtime = cnv_npy.stat().st_mtime if cnv_npy.exists() else 0
+            cnv3_npy_mtime = cnv3_npy.stat().st_mtime if cnv3_npy.exists() else 0
+            cnv_dict_npy_mtime = cnv_dict_npy.stat().st_mtime if cnv_dict_npy.exists() else 0
+            data_array_npy_mtime = data_array_npy.stat().st_mtime if data_array_npy.exists() else 0
+            xy_pkl_mtime = xy_pkl.stat().st_mtime if xy_pkl.exists() else 0
+            
+            # Get previous state values (use sentinel values if not present)
+            prev_cnv_npy_mtime = state.get("cnv_m", 0)
+            prev_cnv3_npy_mtime = state.get("cnv3_m", 0)
+            prev_cnv_dict_npy_mtime = state.get("dict_m", 0)
+            prev_data_array_npy_mtime = state.get("bp_array_mtime", 0)
+            prev_xy_pkl_mtime = state.get("xy_m", 0)
+            
+            # Check if any file has changed
+            cnv_npy_changed = prev_cnv_npy_mtime != cnv_npy_mtime
+            cnv3_npy_changed = prev_cnv3_npy_mtime != cnv3_npy_mtime
+            cnv_dict_npy_changed = prev_cnv_dict_npy_mtime != cnv_dict_npy_mtime
+            data_array_npy_changed = prev_data_array_npy_mtime != data_array_npy_mtime
+            xy_pkl_changed = prev_xy_pkl_mtime != xy_pkl_mtime
+            
+            # Check for forced refreshes
+            force_color_refresh = state.get("_force_color_refresh", False)
+            force_gene_refresh = state.get("_force_gene_refresh", False)
+            force_chrom_refresh = state.get("_force_chrom_refresh", False)
+            
+            # Determine if any update is needed
+            files_changed = (
+                cnv_npy_changed
+                or cnv3_npy_changed
+                or cnv_dict_npy_changed
+                or data_array_npy_changed
+                or xy_pkl_changed
+            )
+            
+            needs_update = (
+                is_fresh_visit
+                or files_changed
+                or ui_changed
+                or force_color_refresh
+                or force_gene_refresh
+                or force_chrom_refresh
+                or not state.get("_rendered_once")
+            )
+            
+            # Early exit if nothing has changed (except for forced refreshes or UI changes)
+            if not needs_update:
+                logging.debug(f"[CNV] ⏭ Skipping CNV update - no changes detected")
+                # Still update state timestamp
+                launcher._cnv_state[key] = state
+                return
+            else:
+                # Log what changed
+                reasons = []
+                if is_fresh_visit:
+                    reasons.append("fresh_visit")
+                if cnv_npy_changed:
+                    reasons.append("CNV.npy")
+                if cnv3_npy_changed:
+                    reasons.append("CNV3.npy")
+                if cnv_dict_npy_changed:
+                    reasons.append("CNV_dict.npy")
+                if data_array_npy_changed:
+                    reasons.append("cnv_data_array.npy")
+                if xy_pkl_changed:
+                    reasons.append("XYestimate.pkl")
+                if ui_changed:
+                    reasons.append("ui_changed")
+                if force_color_refresh:
+                    reasons.append("force_color_refresh")
+                if force_gene_refresh:
+                    reasons.append("force_gene_refresh")
+                if force_chrom_refresh:
+                    reasons.append("force_chrom_refresh")
+                if not state.get("_rendered_once"):
+                    reasons.append("first_render")
+                logging.debug(f"[CNV] Update needed. Reasons: {', '.join(reasons)}")
+            
             changed = False
             if cnv_dict_npy.exists():
-                m = cnv_dict_npy.stat().st_mtime
-                if state.get("dict_m") != m:
+                m = cnv_dict_npy_mtime
+                if cnv_dict_npy_changed:
                     state["cnv_dict"] = np.load(cnv_dict_npy, allow_pickle=True).item()
                     cnv_bin.set_text(
                         f"Bin Width: {state['cnv_dict'].get('bin_width', '--'):,}"
@@ -1683,8 +1767,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                     )
                     state["dict_m"] = m
             if xy_pkl.exists():
-                m = xy_pkl.stat().st_mtime
-                if state.get("xy_m") != m:
+                m = xy_pkl_mtime
+                if xy_pkl_changed:
                     try:
                         import pickle
 
@@ -1696,20 +1780,19 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                         pass
                     state["xy_m"] = m
 
-            def _load_npy(path_key, file_path):
-                m = file_path.stat().st_mtime
-                if state.get(path_key + "_m") != m:
+            def _load_npy(path_key, file_path, file_mtime, file_changed):
+                if file_changed:
                     try:
                         state[path_key] = np.load(file_path, allow_pickle=True).item()
                     except Exception:
                         state[path_key] = None
-                    state[path_key + "_m"] = m
+                    state[path_key + "_m"] = file_mtime
                     return True
                 return False
 
-            if cnv_npy.exists() and _load_npy("cnv", cnv_npy):
+            if cnv_npy.exists() and _load_npy("cnv", cnv_npy, cnv_npy_mtime, cnv_npy_changed):
                 changed = True
-            if cnv3_npy.exists() and _load_npy("cnv3", cnv3_npy):
+            if cnv3_npy.exists() and _load_npy("cnv3", cnv3_npy, cnv3_npy_mtime, cnv3_npy_changed):
                 changed = True
             if state.get("cnv"):
                 if changed:
@@ -1759,8 +1842,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 
                 # Update CNV events analysis
                 _update_cnv_events_analysis(state)
-            # Breakpoint density overlay
-            if data_array_npy.exists():
+            # Breakpoint density overlay - only reload if file changed
+            if data_array_npy.exists() and (data_array_npy_changed or is_fresh_visit):
                 try:
                     arr = np.load(data_array_npy, allow_pickle=True)
                     if hasattr(arr, "dtype") and "name" in arr.dtype.names:
@@ -1807,8 +1890,60 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                 current_series[0].pop("markLine", None)
                         cnv_diff.options["series"] = current_series
                         cnv_diff.update()
+                    # Update modification time after successful load
+                    state["bp_array_mtime"] = data_array_npy_mtime
                 except Exception as e:
                     pass
+            elif data_array_npy.exists() and not data_array_npy_changed:
+                # File exists but hasn't changed - just update breakpoint visibility
+                # Use existing array from state if available
+                if state.get("bp_array") is not None:
+                    try:
+                        selected = launcher._cnv_state.setdefault(
+                            str(sample_dir), {}
+                        ).get("selected_chrom", "All")
+                        current_series = [
+                            s
+                            for s in cnv_diff.options["series"]
+                            if not s.get("name", "").startswith("Breakpoint")
+                        ]
+                        if selected != "All" and state.get("show_bp", True):
+                            arr = state["bp_array"]
+                            breakpoint_lines = []
+                            for r in arr:
+                                if selected == "All" or r["name"] == selected:
+                                    start_pos = int(r["start"])
+                                    end_pos = int(r["end"])
+                                    midpoint = (start_pos + end_pos) // 2
+                                    breakpoint_lines.append(midpoint)
+                            if current_series:
+                                main_series = current_series[0]
+                                markLine_data = []
+                                for bp_pos in breakpoint_lines:
+                                    markLine_data.append({
+                                        "xAxis": bp_pos,
+                                        "lineStyle": {"type": "dashed", "color": "#ff6b6b", "width": 3}
+                                    })
+                                main_series["markLine"] = {
+                                    "data": markLine_data,
+                                    "symbol": "none",
+                                    "lineStyle": {"type": "dashed", "color": "#ff6b6b", "width": 3}
+                                }
+                        else:
+                            if current_series:
+                                current_series[0].pop("markLine", None)
+                        cnv_diff.options["series"] = current_series
+                        cnv_diff.update()
+                    except Exception:
+                        pass
+            
+            # Update state with current modification times
+            state["cnv_m"] = cnv_npy_mtime
+            state["cnv3_m"] = cnv3_npy_mtime
+            state["dict_m"] = cnv_dict_npy_mtime
+            state["xy_m"] = xy_pkl_mtime
+            state["last_visit_time"] = state.get("last_visit_time", time.time())
+            
             launcher._cnv_state[key] = state
             # Update breakpoints visibility after state is updated
             _update_breakpoints_visibility()

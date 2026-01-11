@@ -525,7 +525,12 @@ class GUILauncher:
         reload: bool = False,
         center: str = None,
     ) -> bool:
-        """Launch the GUI in a completely isolated background thread."""
+        """Launch the GUI in a completely isolated background thread.
+        
+        Note: When reload=True, the GUI must run in the main thread because
+        signal handlers can only be set in the main thread. In this case,
+        this method will block until the GUI is stopped.
+        """
         if ui is None:
             logging.error("NiceGUI is not available")
             return False
@@ -550,7 +555,31 @@ class GUILauncher:
                 logging.info("Loaded samples from cache - table will populate immediately")
 
         try:
-            # Start GUI in completely isolated background thread
+            # When reload is requested, we must run in the main thread
+            # because signal handlers can only be set in the main thread
+            if self.reload:
+                # Check if we're in the main thread
+                if threading.current_thread() is threading.main_thread():
+                    # Run directly in main thread (blocking)
+                    logging.info("Running GUI with reload in main thread")
+                    self.is_running = True
+                    try:
+                        self._run_gui_worker()
+                    except KeyboardInterrupt:
+                        logging.info("GUI stopped by user")
+                    finally:
+                        self.is_running = False
+                    return True
+                else:
+                    # Not in main thread - can't use reload
+                    logging.warning(
+                        "Reload requested but not in main thread. "
+                        "Disabling reload functionality. "
+                        "Run from main thread to enable reload."
+                    )
+                    self.reload = False
+            
+            # Start GUI in completely isolated background thread (when reload is False)
             self.gui_thread = threading.Thread(
                 target=self._run_gui_worker, daemon=True, name="robin-GUI-Thread"
             )
@@ -2982,7 +3011,7 @@ class GUILauncher:
                                     ui.notify(f"Coverage section failed: {e}", type="warning")
                                 except Exception:
                                     pass
-
+                        
                         # MGMT section (refactored component) - create UI immediately
                         if not workflow_steps or is_section_enabled("mgmt", workflow_steps):
                             try:
@@ -3000,7 +3029,7 @@ class GUILauncher:
                                     ui.notify(f"MGMT section failed: {e}", type="warning")
                                 except Exception:
                                     pass
-
+                        
                         # CNV section (refactored component) - create UI immediately
                         if not workflow_steps or is_section_enabled("cnv", workflow_steps):
                             try:
@@ -5307,7 +5336,7 @@ def send_gui_update(update_type: UpdateType, data: Dict[str, Any], priority: int
 _current_gui_launcher = None
 
 
-if __name__ == "__main__":
+if __name__ in {"__main__", "__mp_main__"}:
     """
     Command-line interface for direct GUI launching.
 
@@ -5326,6 +5355,9 @@ if __name__ == "__main__":
 
         # Launch GUI on different host
         python gui_launcher.py test_out_priority_ray4 --host 0.0.0.0
+
+        # Launch GUI with auto-reload for development
+        python gui_launcher.py test_out_priority_ray4 --reload
     """
     import argparse
     import sys
@@ -5339,6 +5371,7 @@ if __name__ == "__main__":
         python gui_launcher.py test_out_priority_ray4            # Monitor specific directory
         python gui_launcher.py test_out_priority_ray4 --port 8081 # Use different port
         python gui_launcher.py test_out_priority_ray4 --no-show   # Don't open browser
+        python gui_launcher.py test_out_priority_ray4 --reload    # Enable auto-reload for development
                 """,
     )
 
@@ -5363,6 +5396,12 @@ if __name__ == "__main__":
         "--no-show", action="store_true", help="Don't automatically open the browser"
     )
 
+    parser.add_argument(
+        "--reload",
+        action="store_true",
+        help="Enable auto-reload for development (watches for file changes)",
+    )
+
     args = parser.parse_args()
 
     # Validate monitored directory if provided
@@ -5384,7 +5423,7 @@ if __name__ == "__main__":
         launcher = GUILauncher(
             host=args.host,
             port=args.port,
-            reload=False,
+            reload=args.reload,
         )
 
         # Set monitored directory if provided

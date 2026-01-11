@@ -5676,165 +5676,233 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             bed_cov = sample_dir / "bed_coverage_main.csv"
             target_cov = sample_dir / "target_coverage.csv"
             cov_time = sample_dir / "coverage_time_chart.npy"
-            if cov_main.exists():
-                m = cov_main.stat().st_mtime
-                # Force update on fresh page visit or if mtime changed or data not in state
-                if is_fresh_visit or state.get("cov_main_mtime") != m or "cov_df" not in state:
-                    try:
-                        cov_df = pd.read_csv(cov_main)
-                        # Backfill meandepth if missing
-                        if "meandepth" not in cov_df.columns and {
-                            "covbases",
-                            "endpos",
-                        }.issubset(set(cov_df.columns)):
-                            cov_df = cov_df.copy()
-                            with np.errstate(divide="ignore", invalid="ignore"):
-                                cov_df["meandepth"] = (
-                                    cov_df["covbases"]
-                                    / cov_df["endpos"].replace(0, np.nan)
-                                ).fillna(0)
-                        state["cov_df"] = cov_df
-                        state["cov_main_mtime"] = m  # only set on success
-                    except Exception as e:
-                        _log_notify(
-                            f"Failed to read coverage_main.csv: {e}",
-                            level="error",
-                            notify=True,
-                        )
+            
+            # Check modification times for all files
+            cov_main_mtime = cov_main.stat().st_mtime if cov_main.exists() else 0
+            bed_cov_mtime = bed_cov.stat().st_mtime if bed_cov.exists() else 0
+            target_cov_mtime = target_cov.stat().st_mtime if target_cov.exists() else 0
+            cov_time_mtime = cov_time.stat().st_mtime if cov_time.exists() else 0
+            
+            # Get previous state values (use sentinel values if not present)
+            prev_cov_main_mtime = state.get("cov_main_mtime", 0)
+            prev_bed_cov_mtime = state.get("bed_cov_mtime", 0)
+            prev_target_cov_mtime = state.get("target_cov_mtime", 0)
+            prev_cov_time_mtime = state.get("cov_time_mtime", 0)
+            
+            # Check if any file has changed
+            cov_main_changed = prev_cov_main_mtime != cov_main_mtime
+            bed_cov_changed = prev_bed_cov_mtime != bed_cov_mtime
+            target_cov_changed = prev_target_cov_mtime != target_cov_mtime
+            cov_time_changed = prev_cov_time_mtime != cov_time_mtime
+            
+            # Also check if data is missing from state (needs initial load)
+            data_missing = (
+                (cov_main.exists() and "cov_df" not in state) or
+                (bed_cov.exists() and "bed_df" not in state)
+            )
+            
+            # Determine if any update is needed
+            needs_update = (
+                is_fresh_visit
+                or cov_main_changed
+                or bed_cov_changed
+                or target_cov_changed
+                or cov_time_changed
+                or data_missing
+            )
+            
+            # Early exit if nothing has changed (except for periodic checks that run less frequently)
+            if not needs_update:
+                # Still check for SNP/LGA/IGV status updates (these have their own throttling)
+                # But skip all file reading and UI updates
+                logging.debug(f"[Coverage] ⏭ Skipping coverage update - no file changes detected")
+                # Continue to SNP/LGA/IGV checks below (they have their own throttling)
+                # But we'll skip the file processing section
             else:
-                _log_notify("coverage_main.csv not found", level="debug", notify=False)
-            if bed_cov.exists():
-                m = bed_cov.stat().st_mtime
-                # Force update on fresh page visit or if mtime changed or data not in state
-                if is_fresh_visit or state.get("bed_cov_mtime") != m or "bed_df" not in state:
-                    try:
-                        bed_df = pd.read_csv(bed_cov)
-                        state["bed_df"] = bed_df
-                        panel_display_name = state.get("panel_display_name", "Target Coverage")
-                        _update_boxplot(bed_df, panel_display_name)
-                        if state.get("cov_df") is not None:
-                            _update_target_cov(state["cov_df"], bed_df)
-                        state["bed_cov_mtime"] = m  # only set on success
-                    except Exception as e:
-                        _log_notify(
-                            f"Failed to read bed_coverage_main.csv: {e}",
-                            level="error",
-                            notify=True,
-                        )
-            else:
-                _log_notify(
-                    "bed_coverage_main.csv not found", level="debug", notify=False
-                )
-            if target_cov.exists():
-                m = target_cov.stat().st_mtime
-                # Force update on fresh page visit or if mtime changed
-                if is_fresh_visit or state.get("target_cov_mtime") != m:
-                    try:
-                        tdf = pd.read_csv(target_cov)
-                        _update_target_table(tdf)
-                        state["target_cov_mtime"] = m  # only set on success
-                    except Exception as e:
-                        _log_notify(
-                            f"Failed to read target_coverage.csv: {e}",
-                            level="error",
-                            notify=True,
-                        )
-            else:
-                _log_notify(
-                    "target_coverage.csv not found", level="debug", notify=False
-                )
-            if cov_time.exists():
-                m = cov_time.stat().st_mtime
-                # Force update on fresh page visit or if mtime changed
-                if is_fresh_visit or state.get("cov_time_mtime") != m:
-                    try:
-                        _update_time(cov_time)
-                        state["cov_time_mtime"] = m
-                    except Exception as e:
-                        _log_notify(
-                            f"Failed to load coverage_time_chart.npy: {e}",
-                            level="warning",
-                            notify=False,
-                        )
-            # Summary
-            try:
-                global_cov = None
-                target_cov_v = None
-                enrich_v = None
-                if state.get("cov_df") is not None:
-                    cdf = state["cov_df"]
+                # Log what changed
+                reasons = []
+                if is_fresh_visit:
+                    reasons.append("fresh_visit")
+                if cov_main_changed:
+                    reasons.append("coverage_main.csv")
+                if bed_cov_changed:
+                    reasons.append("bed_coverage_main.csv")
+                if target_cov_changed:
+                    reasons.append("target_coverage.csv")
+                if cov_time_changed:
+                    reasons.append("coverage_time_chart.npy")
+                if data_missing:
+                    reasons.append("data_missing")
+                logging.debug(f"[Coverage] Update needed. Reasons: {', '.join(reasons)}")
+            # Only process files if update is needed
+            if needs_update:
+                if cov_main.exists():
+                    m = cov_main_mtime
+                    # Force update on fresh page visit or if mtime changed or data not in state
+                    if is_fresh_visit or cov_main_changed or "cov_df" not in state:
+                        try:
+                            cov_df = pd.read_csv(cov_main)
+                            # Backfill meandepth if missing
+                            if "meandepth" not in cov_df.columns and {
+                                "covbases",
+                                "endpos",
+                            }.issubset(set(cov_df.columns)):
+                                cov_df = cov_df.copy()
+                                with np.errstate(divide="ignore", invalid="ignore"):
+                                    cov_df["meandepth"] = (
+                                        cov_df["covbases"]
+                                        / cov_df["endpos"].replace(0, np.nan)
+                                    ).fillna(0)
+                            state["cov_df"] = cov_df
+                            state["cov_main_mtime"] = m  # only set on success
+                        except Exception as e:
+                            _log_notify(
+                                f"Failed to read coverage_main.csv: {e}",
+                                level="error",
+                                notify=True,
+                            )
+                else:
+                    _log_notify("coverage_main.csv not found", level="debug", notify=False)
+                if bed_cov.exists():
+                    m = bed_cov_mtime
+                    # Force update on fresh page visit or if mtime changed or data not in state
+                    if is_fresh_visit or bed_cov_changed or "bed_df" not in state:
+                        try:
+                            bed_df = pd.read_csv(bed_cov)
+                            state["bed_df"] = bed_df
+                            panel_display_name = state.get("panel_display_name", "Target Coverage")
+                            _update_boxplot(bed_df, panel_display_name)
+                            if state.get("cov_df") is not None:
+                                _update_target_cov(state["cov_df"], bed_df)
+                            state["bed_cov_mtime"] = m  # only set on success
+                        except Exception as e:
+                            _log_notify(
+                                f"Failed to read bed_coverage_main.csv: {e}",
+                                level="error",
+                                notify=True,
+                            )
+                else:
+                    _log_notify(
+                        "bed_coverage_main.csv not found", level="debug", notify=False
+                    )
+                if target_cov.exists():
+                    m = target_cov_mtime
+                    # Force update on fresh page visit or if mtime changed
+                    if is_fresh_visit or target_cov_changed:
+                        try:
+                            tdf = pd.read_csv(target_cov)
+                            _update_target_table(tdf)
+                            state["target_cov_mtime"] = m  # only set on success
+                        except Exception as e:
+                            _log_notify(
+                                f"Failed to read target_coverage.csv: {e}",
+                                level="error",
+                                notify=True,
+                            )
+                else:
+                    _log_notify(
+                        "target_coverage.csv not found", level="debug", notify=False
+                    )
+                if cov_time.exists():
+                    m = cov_time_mtime
+                    # Force update on fresh page visit or if mtime changed
+                    if is_fresh_visit or cov_time_changed:
+                        try:
+                            _update_time(cov_time)
+                            state["cov_time_mtime"] = m
+                        except Exception as e:
+                            _log_notify(
+                                f"Failed to load coverage_time_chart.npy: {e}",
+                                level="warning",
+                                notify=False,
+                            )
+                # Summary - only recalculate if data changed
+                try:
+                    global_cov = None
+                    target_cov_v = None
+                    enrich_v = None
+                    if state.get("cov_df") is not None:
+                        cdf = state["cov_df"]
+                        if (
+                            "covbases" in cdf.columns
+                            and "endpos" in cdf.columns
+                            and cdf["endpos"].sum() > 0
+                        ):
+                            global_cov = float(cdf["covbases"].sum()) / float(
+                                cdf["endpos"].sum()
+                            )
+                    if state.get("bed_df") is not None:
+                        bdf = state["bed_df"].copy()
+                        if "length" not in bdf.columns:
+                            bdf["length"] = (bdf["endpos"] - bdf["startpos"] + 1).astype(
+                                float
+                            )
+                        if bdf["length"].sum() > 0:
+                            target_cov_v = float(bdf["bases"].sum()) / float(
+                                bdf["length"].sum()
+                            )
                     if (
-                        "covbases" in cdf.columns
-                        and "endpos" in cdf.columns
-                        and cdf["endpos"].sum() > 0
+                        global_cov is not None
+                        and target_cov_v is not None
+                        and global_cov > 0
                     ):
-                        global_cov = float(cdf["covbases"].sum()) / float(
-                            cdf["endpos"].sum()
+                        enrich_v = target_cov_v / global_cov
+                    if target_cov_v is not None:
+                        if target_cov_v >= 30:
+                            q_text, q_cls, q_bg = (
+                                "Excellent",
+                                "text-green-600",
+                                "bg-green-100",
+                            )
+                        elif target_cov_v >= 20:
+                            q_text, q_cls, q_bg = "Good", "text-blue-600", "bg-blue-100"
+                        elif target_cov_v >= 10:
+                            q_text, q_cls, q_bg = (
+                                "Moderate",
+                                "text-yellow-600",
+                                "bg-yellow-100",
+                            )
+                        else:
+                            q_text, q_cls, q_bg = (
+                                "Insufficient",
+                                "text-red-600",
+                                "bg-red-100",
+                            )
+                        cov_quality_label.set_text(f"Quality: {q_text}")
+                        try:
+                            cov_quality_label.classes(
+                                replace=f"text-sm font-medium {q_cls}"
+                            )
+                            cov_quality_badge.classes(
+                                replace=f"px-2 py-1 rounded {q_bg} {q_cls}"
+                            )
+                        except Exception:
+                            pass
+                        cov_quality_badge.set_text(f"{target_cov_v:.2f}x")
+                    if global_cov is not None:
+                        cov_global_lbl.set_text(
+                            f"Global Estimated Coverage: {global_cov:.2f}x"
                         )
-                if state.get("bed_df") is not None:
-                    bdf = state["bed_df"].copy()
-                    if "length" not in bdf.columns:
-                        bdf["length"] = (bdf["endpos"] - bdf["startpos"] + 1).astype(
-                            float
+                    if target_cov_v is not None:
+                        cov_target_lbl.set_text(
+                            f"Targets Estimated Coverage: {target_cov_v:.2f}x"
                         )
-                    if bdf["length"].sum() > 0:
-                        target_cov_v = float(bdf["bases"].sum()) / float(
-                            bdf["length"].sum()
-                        )
-                if (
-                    global_cov is not None
-                    and target_cov_v is not None
-                    and global_cov > 0
-                ):
-                    enrich_v = target_cov_v / global_cov
-                if target_cov_v is not None:
-                    if target_cov_v >= 30:
-                        q_text, q_cls, q_bg = (
-                            "Excellent",
-                            "text-green-600",
-                            "bg-green-100",
-                        )
-                    elif target_cov_v >= 20:
-                        q_text, q_cls, q_bg = "Good", "text-blue-600", "bg-blue-100"
-                    elif target_cov_v >= 10:
-                        q_text, q_cls, q_bg = (
-                            "Moderate",
-                            "text-yellow-600",
-                            "bg-yellow-100",
-                        )
-                    else:
-                        q_text, q_cls, q_bg = (
-                            "Insufficient",
-                            "text-red-600",
-                            "bg-red-100",
-                        )
-                    cov_quality_label.set_text(f"Quality: {q_text}")
-                    try:
-                        cov_quality_label.classes(
-                            replace=f"text-sm font-medium {q_cls}"
-                        )
-                        cov_quality_badge.classes(
-                            replace=f"px-2 py-1 rounded {q_bg} {q_cls}"
-                        )
-                    except Exception:
-                        pass
-                    cov_quality_badge.set_text(f"{target_cov_v:.2f}x")
-                if global_cov is not None:
-                    cov_global_lbl.set_text(
-                        f"Global Estimated Coverage: {global_cov:.2f}x"
+                    if enrich_v is not None:
+                        cov_enrich_lbl.set_text(f"Estimated enrichment: {enrich_v:.2f}x")
+                except Exception as e:
+                    _log_notify(
+                        f"Coverage summary update failed: {e}",
+                        level="warning",
+                        notify=False,
                     )
-                if target_cov_v is not None:
-                    cov_target_lbl.set_text(
-                        f"Targets Estimated Coverage: {target_cov_v:.2f}x"
-                    )
-                if enrich_v is not None:
-                    cov_enrich_lbl.set_text(f"Estimated enrichment: {enrich_v:.2f}x")
-            except Exception as e:
-                _log_notify(
-                    f"Coverage summary update failed: {e}",
-                    level="warning",
-                    notify=False,
-                )
+            # Update state with current modification times
+            if needs_update:
+                state["cov_main_mtime"] = cov_main_mtime
+                state["bed_cov_mtime"] = bed_cov_mtime
+                state["target_cov_mtime"] = target_cov_mtime
+                state["cov_time_mtime"] = cov_time_mtime
+                state["last_visit_time"] = state.get("last_visit_time", time.time())
+            
             launcher._coverage_state[key] = state
 
             # SNP Analysis results check - only update if necessary

@@ -392,32 +392,120 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                         pass
 
             bam_path = sample_dir / "mgmt_sorted.bam"
-            if bam_path.exists():
+            
+            # Determine pickle file path based on CSV file type
+            if is_final_file:
+                pickle_path = sample_dir / "final_mgmt.pkl"
+            else:
+                pickle_path = sample_dir / f"{current_count}_mgmt.pkl"
+            
+            # Check if figure needs to be updated (only if pickle or BAM changed)
+            pickle_mtime = pickle_path.stat().st_mtime if pickle_path.exists() else 0
+            bam_mtime = bam_path.stat().st_mtime if bam_path.exists() else 0
+            
+            # Check if pickle or BAM file has changed since last update
+            current_bam_path_str = str(bam_path) if bam_path.exists() else ""
+            current_pickle_path_str = str(pickle_path) if pickle_path.exists() else ""
+            
+            # Get previous state values (use sentinel values if not present)
+            prev_pickle_path = state.get("pickle_path", "")
+            prev_pickle_mtime = state.get("pickle_mtime", 0)
+            prev_bam_path = state.get("bam_path", "")
+            prev_bam_mtime = state.get("bam_mtime", 0)
+            
+            # Debug: log state comparison
+            pickle_changed = prev_pickle_path != current_pickle_path_str
+            pickle_mtime_changed = prev_pickle_mtime != pickle_mtime
+            bam_changed = prev_bam_path != current_bam_path_str
+            bam_mtime_changed = prev_bam_mtime != bam_mtime
+            
+            logging.debug(f"[MGMT] State comparison - pickle_path: {pickle_changed} (prev='{prev_pickle_path}' vs curr='{current_pickle_path_str}'), "
+                        f"pickle_mtime: {pickle_mtime_changed} (prev={prev_pickle_mtime} vs curr={pickle_mtime}), "
+                        f"bam_path: {bam_changed} (prev='{prev_bam_path}' vs curr='{current_bam_path_str}'), "
+                        f"bam_mtime: {bam_mtime_changed} (prev={prev_bam_mtime} vs curr={bam_mtime}), fresh={is_fresh_visit}")
+            
+            figure_needs_update = (
+                is_fresh_visit
+                or pickle_changed
+                or pickle_mtime_changed
+                or bam_changed
+                or bam_mtime_changed
+            )
+            
+            if figure_needs_update:
+                reasons = []
+                if is_fresh_visit:
+                    reasons.append("fresh_visit")
+                if pickle_changed:
+                    reasons.append("pickle_path_changed")
+                if pickle_mtime_changed:
+                    reasons.append("pickle_mtime_changed")
+                if bam_changed:
+                    reasons.append("bam_path_changed")
+                if bam_mtime_changed:
+                    reasons.append("bam_mtime_changed")
+                logging.debug(f"[MGMT] Figure update needed. Reasons: {', '.join(reasons)}")
+            
+            if not figure_needs_update and bam_path.exists():
+                logging.debug(f"[MGMT] Skipping figure update - no changes detected (pickle: {pickle_path.name if pickle_path.exists() else 'N/A'}, BAM: {bam_path.name})")
+            
+            if bam_path.exists() and figure_needs_update:
                 try:
+                    import matplotlib.pyplot as plt
+                    import warnings
                     from robin.analysis.methylation_wrapper import (
                         locus_figure,
+                        load_figure_pickle,
                     )
-
-                    logging.debug(f"[MGMT] Creating locus figure for {bam_path}")
-                    fig = locus_figure(
-                        interval="chr10:129466536-129467536",
-                        bam_path=str(bam_path),
-                        motif="CG",
-                        mods="m",
-                        extra_cli=[
-                            # Set figure size to match our UI element (width 2x height)
-                            "--width", "18",
-                            "--height", "8",
-                            # "--minqual","20", "--reads","2000"
-                        ],
-                        site_rows=site_rows,
-                    )
-                    logging.debug(f"[MGMT] Locus figure created successfully, figure number: {fig.number}")
+                    
+                    # Check if pickle file exists and is newer than BAM file
+                    fig = None
+                    use_pickle = False
+                    if pickle_path.exists():
+                        try:
+                            # Use pickle if it's newer than or equal to BAM modification time
+                            if pickle_mtime >= bam_mtime:
+                                logging.debug(f"[MGMT] Loading figure from pickle: {pickle_path}")
+                                fig = load_figure_pickle(str(pickle_path))
+                                use_pickle = True
+                                logging.debug(f"[MGMT] Successfully loaded figure from pickle")
+                            else:
+                                logging.debug(f"[MGMT] Pickle file is older than BAM, regenerating figure")
+                        except Exception as e:
+                            logging.warning(f"[MGMT] Failed to load pickle file {pickle_path}: {e}")
+                            # Continue to generate new figure
+                    
+                    # If pickle doesn't exist or failed to load, generate new figure
+                    if fig is None:
+                        logging.debug(f"[MGMT] Creating locus figure for {bam_path}")
+                        fig = locus_figure(
+                            interval="chr10:129466536-129467536",
+                            bam_path=str(bam_path),
+                            motif="CG",
+                            mods="m",
+                            extra_cli=[
+                                # Set figure size to match our UI element (width 2x height)
+                                "--width", "18",
+                                "--height", "8",
+                                # "--minqual","20", "--reads","2000"
+                            ],
+                            site_rows=site_rows,
+                        )
+                        logging.debug(f"[MGMT] Locus figure created successfully, figure number: {fig.number}")
+                        
+                        # Save pickle for future use (if not already saved by analysis)
+                        if not use_pickle:
+                            try:
+                                from robin.analysis.methylation_wrapper import save_figure_pickle
+                                save_figure_pickle(fig, str(pickle_path))
+                                logging.debug(f"[MGMT] Saved figure to pickle for future use: {pickle_path}")
+                                # Update pickle_mtime after saving
+                                pickle_mtime = pickle_path.stat().st_mtime
+                            except Exception as e:
+                                logging.debug(f"[MGMT] Failed to save pickle file (non-fatal): {e}")
                     
                     # Update matplotlib element with the figure
                     # Suppress GridSpec warnings when updating figure
-                    import warnings
-                    import matplotlib.pyplot as plt
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore", UserWarning)
                         # Close previous figure if it exists before assigning new one
@@ -454,34 +542,45 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                     
                     mgmt_mpl.figure = fig
                     mgmt_mpl.update()
-            else:
-                logging.warning(f"[MGMT] BAM file not found: {bam_path}")
-                # Create a placeholder plot indicating BAM file is missing
-                import matplotlib.pyplot as plt
-                if hasattr(mgmt_mpl, 'figure') and mgmt_mpl.figure is not None:
-                    try:
-                        plt.close(mgmt_mpl.figure)
-                    except Exception:
-                        pass
-                fig, ax = plt.subplots(figsize=(24, 12))
-                ax.text(0.5, 0.5, "MGMT BAM file not found\n(mgmt_sorted.bam)", 
-                       ha='center', va='center', transform=ax.transAxes,
-                       fontsize=10, color='orange')
-                ax.set_xlim(0, 1)
-                ax.set_ylim(0, 1)
-                ax.axis('off')
-                ax.set_title("MGMT Methylation Plot")
-                mgmt_mpl.figure = fig
-                mgmt_mpl.update()
+            elif not bam_path.exists():
+                # Only show warning/placeholder if BAM doesn't exist AND we haven't shown it before
+                if is_fresh_visit or state.get("bam_path") != str(bam_path):
+                    logging.warning(f"[MGMT] BAM file not found: {bam_path}")
+                    # Create a placeholder plot indicating BAM file is missing
+                    import matplotlib.pyplot as plt
+                    if hasattr(mgmt_mpl, 'figure') and mgmt_mpl.figure is not None:
+                        try:
+                            plt.close(mgmt_mpl.figure)
+                        except Exception:
+                            pass
+                    fig, ax = plt.subplots(figsize=(24, 12))
+                    ax.text(0.5, 0.5, "MGMT BAM file not found\n(mgmt_sorted.bam)", 
+                           ha='center', va='center', transform=ax.transAxes,
+                           fontsize=10, color='orange')
+                    ax.set_xlim(0, 1)
+                    ax.set_ylim(0, 1)
+                    ax.axis('off')
+                    ax.set_title("MGMT Methylation Plot")
+                    mgmt_mpl.figure = fig
+                    mgmt_mpl.update()
 
+            # Update state with current values
             launcher._mgmt_state[key] = {
                 "last_count": current_count,
                 "csv_path": str(latest_csv),
                 "csv_mtime": csv_mtime,
-                #'png_path': str(img_path) if img_path.exists() else '', 'png_mtime': img_path.stat().st_mtime if img_path.exists() else 0,
                 "bed_path": str(bed_path) if bed_path.exists() else "",
                 "bed_mtime": bed_path.stat().st_mtime if bed_path.exists() else 0,
+                "pickle_path": current_pickle_path_str,
+                "pickle_mtime": pickle_mtime,
+                "bam_path": current_bam_path_str,
+                "bam_mtime": bam_mtime,
+                "last_visit_time": state.get("last_visit_time", time.time()),  # Preserve visit time
             }
+            
+            # Debug: log state after update
+            logging.debug(f"[MGMT] State saved - pickle_path='{current_pickle_path_str}', pickle_mtime={pickle_mtime}, "
+                        f"bam_path='{current_bam_path_str}', bam_mtime={bam_mtime}")
         except Exception as e:
             raise Exception(f"Failed to refresh MGMT section: {e}")
 
