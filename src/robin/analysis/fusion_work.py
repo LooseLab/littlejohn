@@ -1917,16 +1917,21 @@ def accumulate_fusion_candidates(
             # Save metadata (without large candidate lists - they're in Parquet)
             _save_fusion_metadata(fusion_metadata, work_dir, sample_id)
             
-            # Generate output files with accumulated data (includes fusion breakpoint BED)
-            # Only generate master BED if this is a forced accumulation (final batch)
-            _generate_output_files(
-                sample_id, 
-                fusion_metadata.analysis_results, 
-                fusion_metadata, 
-                work_dir, 
-                reference=reference,
-                generate_master_bed=force  # Only generate master BED on final accumulation
-            )
+            # Generate output files only on final accumulation (force=True)
+            # This avoids expensive groupby operations and CSV generation during intermediate accumulations
+            # Output files are only needed at the end, not after every batch
+            if force:
+                logger.info("Final accumulation detected - generating output files (CSV, BED, etc.)")
+                _generate_output_files(
+                    sample_id, 
+                    fusion_metadata.analysis_results, 
+                    fusion_metadata, 
+                    work_dir, 
+                    reference=reference,
+                    generate_master_bed=True  # Generate master BED on final accumulation
+                )
+            else:
+                logger.debug("Intermediate accumulation - skipping output file generation (will be generated on final accumulation)")
             
             # Clean up staging files
             logger.info("Cleaning up fusion staging files...")

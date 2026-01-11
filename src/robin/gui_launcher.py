@@ -90,6 +90,8 @@ class SampleRecord:
     _last_seen_raw: float = 0.0  # Raw timestamp for sorting
     _dirty: bool = False  # Flag to indicate record needs UI update
     _file_mtime: float = 0.0  # master.csv modification time
+    files_seen: int = 0  # Total files seen/processed
+    files_processed: int = 0  # Files completely processed through all analysis steps
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for table rows."""
@@ -105,6 +107,9 @@ class SampleRecord:
             "failed_jobs": self.failed_jobs,
             "job_types": self.job_types,
             "last_seen": self.last_seen,
+            "files_seen": self.files_seen,
+            "files_processed": self.files_processed,
+            "file_progress": self.files_processed / self.files_seen if self.files_seen > 0 else 0.0,
             "actions": "View",
             "_last_seen_raw": self._last_seen_raw,
         }
@@ -470,6 +475,10 @@ class GUILauncher:
                     record.total_jobs = s.get("total_jobs", 0)
                     record.completed_jobs = s.get("completed_jobs", 0)
                     record.failed_jobs = s.get("failed_jobs", 0)
+                    
+                    # Update file progress from job counts (same data source as other columns)
+                    record.files_seen = record.total_jobs
+                    record.files_processed = record.completed_jobs
                     
                     # Update job types
                     job_types = s.get("job_types", [])
@@ -1094,6 +1103,73 @@ class GUILauncher:
         except Exception as e:
             logging.debug(f"Error updating progress: {e}")
 
+    def _update_file_progress(self):
+        """Update file progress display in workflow monitor from current samples data."""
+        try:
+            if not hasattr(self, "sample_files_progress_container") or not hasattr(self, "_last_samples_rows"):
+                return
+            
+            rows = self._last_samples_rows or []
+            total_files_seen = 0
+            total_files_processed = 0
+            sample_progress_data = []
+            
+            # Calculate totals and collect per-sample data
+            for row in rows:
+                files_seen = row.get("files_seen", 0) or 0
+                files_processed = row.get("files_processed", 0) or 0
+                sample_id = row.get("sample_id", "")
+                
+                if files_seen > 0:
+                    total_files_seen += files_seen
+                    total_files_processed += files_processed
+                    sample_progress_data.append({
+                        "sample_id": sample_id,
+                        "files_seen": files_seen,
+                        "files_processed": files_processed,
+                        "progress": files_processed / files_seen if files_seen > 0 else 0.0
+                    })
+            
+            # Update overall progress
+            if hasattr(self, "overall_files_progress") and hasattr(self, "overall_files_label"):
+                overall_progress = total_files_processed / total_files_seen if total_files_seen > 0 else 0.0
+                self.overall_files_progress.set_value(round(overall_progress, 2))
+                self.overall_files_label.set_text(f"{total_files_processed}/{total_files_seen} files processed")
+            
+            # Update per-sample progress bars (limit to first 20 to avoid UI overload)
+            if hasattr(self, "sample_files_progress_container"):
+                try:
+                    # Clear existing content
+                    self.sample_files_progress_container.clear()
+                    
+                    if sample_progress_data:
+                        # Sort by progress (lowest first) to show samples needing attention
+                        sample_progress_data.sort(key=lambda x: x["progress"])
+                        
+                        # Show up to 20 samples with most activity
+                        for sample_info in sample_progress_data[:20]:
+                            sample_id = sample_info["sample_id"]
+                            progress = sample_info["progress"]
+                            files_seen = sample_info["files_seen"]
+                            files_processed = sample_info["files_processed"]
+                            
+                            with self.sample_files_progress_container:
+                                with ui.row().classes("w-full items-center gap-2 mb-1"):
+                                    ui.label(sample_id).classes("text-xs font-medium min-w-[120px]")
+                                    progress_bar = ui.linear_progress(progress).classes("flex-1")
+                                    if progress >= 1.0:
+                                        progress_bar.props("color=positive")
+                                    ui.label(f"{files_processed}/{files_seen}").classes("text-xs text-gray-600 min-w-[60px]")
+                    else:
+                        # Show placeholder when no data
+                        with self.sample_files_progress_container:
+                            ui.label("No file progress data available yet").classes("text-xs text-gray-500 italic")
+                except Exception as e:
+                    logging.debug(f"Error updating per-sample file progress: {e}")
+                            
+        except Exception as e:
+            logging.debug(f"Error updating file progress: {e}")
+
     def _update_errors(self, data: Dict[str, Any]):
         """Update error information in the GUI."""
         try:
@@ -1550,6 +1626,12 @@ class GUILauncher:
                                 "sortable": True,
                             },
                             {
+                                "name": "file_progress",
+                                "label": "File Progress",
+                                "field": "file_progress",
+                                "sortable": True,
+                            },
+                            {
                                 "name": "active_jobs",
                                 "label": "Active",
                                 "field": "active_jobs",
@@ -1636,6 +1718,29 @@ class GUILauncher:
            color=\"secondary\" size=\"sm\" label=\"Finalize\" icon=\"merge_type\"
            @click=\"$parent.$emit('finalize-target', props.row.sample_id)\" />
   </q-btn-group>
+</q-td>
+""",
+                        )
+                    except Exception:
+                        pass
+                    
+                    # Add file progress column with linear progress bar
+                    try:
+                        self.samples_table.add_slot(
+                            "body-cell-file_progress",
+                            """
+<q-td key=\"file_progress\" :props=\"props\">
+  <div style=\"min-width: 120px;\">
+    <q-linear-progress 
+      :value=\"props.row.file_progress || 0\" 
+      :color=\"props.row.file_progress >= 1 ? 'positive' : 'primary'\" 
+      size=\"12px\" 
+      rounded
+      class=\"q-mb-xs\" />
+    <div style=\"font-size: 10px; color: #666; text-align: center;\">
+      {{ props.row.files_processed || 0 }}/{{ props.row.files_seen || 0 }} files
+    </div>
+  </div>
 </q-td>
 """,
                         )
@@ -2145,6 +2250,15 @@ class GUILauncher:
                             # If there are active jobs, keep as Live even if timeout passed
                     except Exception:
                         pass
+                    # Get job counts
+                    total_jobs = s.get("total_jobs", 0)
+                    completed_jobs = s.get("completed_jobs", 0)
+                    
+                    # Set file progress directly from job counts (same data source as other columns)
+                    files_seen = total_jobs
+                    files_processed = completed_jobs
+                    file_progress = completed_jobs / total_jobs if total_jobs > 0 else 0.0
+                    
                     by_id[sid] = {
                         "sample_id": sid,
                         "origin": origin_value,
@@ -2153,8 +2267,8 @@ class GUILauncher:
                         "device": "",
                         "flowcell": "",
                         "active_jobs": s.get("active_jobs", 0),
-                        "total_jobs": s.get("total_jobs", 0),
-                        "completed_jobs": s.get("completed_jobs", 0),
+                        "total_jobs": total_jobs,
+                        "completed_jobs": completed_jobs,
                         "failed_jobs": s.get("failed_jobs", 0),
                         "job_types": (
                             ",".join(sorted(set(s.get("job_types", []))))
@@ -2164,6 +2278,9 @@ class GUILauncher:
                         "last_seen": time.strftime(
                             "%Y-%m-%d %H:%M:%S", time.localtime(last_seen)
                         ),
+                        "files_seen": files_seen,
+                        "files_processed": files_processed,
+                        "file_progress": file_progress,
                         "actions": "View",
                         "_last_seen_raw": last_seen,
                     }
@@ -2193,7 +2310,7 @@ class GUILauncher:
                         }
                         manager.update_sample_overview(sid, persist_payload)
 
-                    # Read run info from master.csv to display in table
+                    # Read run info and file progress from master.csv to display in table
                     if base is not None:
                         csv_path = base / sid / "master.csv"
                         if csv_path.exists():
@@ -2224,6 +2341,8 @@ class GUILauncher:
             # Update UI on main thread
             if rows and hasattr(self, "samples_table"):
                 self._apply_samples_table_filters()
+                # Also update file progress display in workflow monitor
+                self._update_file_progress()
 
         except Exception as e:
             logging.error(f"Error in samples table update: {e}")
@@ -4316,6 +4435,26 @@ class GUILauncher:
                                 "text-xs font-semibold"
                             )
 
+                # File Processing Progress (Per-Run)
+                with ui.card().classes("w-full bg-gradient-to-r from-green-50 to-emerald-50"):
+                    ui.label("File Processing Progress (Per Run)").classes(
+                        "text-lg font-semibold mb-4 text-green-800"
+                    )
+                    with ui.column().classes("w-full gap-3"):
+                        # Overall file progress summary
+                        with ui.row().classes("w-full items-center gap-4"):
+                            ui.label("Overall Files:").classes("text-sm font-medium text-gray-700")
+                            self.overall_files_progress = ui.linear_progress(0.0).classes("flex-1")
+                            self.overall_files_label = ui.label("0/0 files processed").classes(
+                                "text-sm text-gray-600 min-w-[120px]"
+                            )
+                        
+                        # Per-sample file progress will be shown in a scrollable container
+                        ui.label("Per-Sample Progress:").classes("text-sm font-medium text-gray-700 mt-2")
+                        with ui.scroll_area().classes("w-full").style("max-height: 300px;"):
+                            self.sample_files_progress_container = ui.column().classes("w-full gap-2 p-2")
+                            # Individual sample progress bars will be added here dynamically
+
                 # Queue Status
                 with ui.card().classes("w-full"):
                     ui.label("Queue Status").classes("text-lg font-semibold mb-4")
@@ -4978,24 +5117,33 @@ class GUILauncher:
                 except Exception:
                     pass
                     
-                rows.append(
-                    {
-                        "sample_id": sid,
-                        "origin": origin_value,
-                        "run_start": self._format_timestamp_for_display(run_start),
-                        "device": device,
-                        "flowcell": flowcell,
-                        "active_jobs": ov_active,
-                        "total_jobs": ov_total,
-                        "completed_jobs": ov_completed,
-                        "failed_jobs": ov_failed,
-                        "job_types": ov_job_types,
-                        "last_seen": time.strftime(
-                            "%Y-%m-%d %H:%M:%S", time.localtime(last_seen)
-                        ),
-                        "_last_seen_raw": last_seen,
-                    }
-                )
+                # File progress - use the same job counts that drive other columns
+                # This ensures consistency with the Active, Total, Completed columns
+                files_seen = ov_total  # Use total_jobs as files_seen
+                files_processed = ov_completed  # Use completed_jobs as files_processed
+                file_progress = files_processed / files_seen if files_seen > 0 else 0.0
+                
+                row_data = {
+                    "sample_id": sid,
+                    "origin": origin_value,
+                    "run_start": self._format_timestamp_for_display(run_start),
+                    "device": device,
+                    "flowcell": flowcell,
+                    "active_jobs": ov_active,
+                    "total_jobs": ov_total,
+                    "completed_jobs": ov_completed,
+                    "failed_jobs": ov_failed,
+                    "job_types": ov_job_types,
+                    "files_seen": files_seen,
+                    "files_processed": files_processed,
+                    "file_progress": file_progress,
+                    "last_seen": time.strftime(
+                        "%Y-%m-%d %H:%M:%S", time.localtime(last_seen)
+                    ),
+                    "_last_seen_raw": last_seen,
+                }
+                
+                rows.append(row_data)
         
         return rows
 
