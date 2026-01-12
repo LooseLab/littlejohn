@@ -23,6 +23,7 @@ import glob
 import fcntl
 import time
 import bisect
+from datetime import datetime
 from pathlib import Path
 from collections import defaultdict
 from typing import Dict, Any, Optional, List, Tuple, Set, Union
@@ -48,6 +49,11 @@ from robin.classification_config import (
 
 # Module-level logger
 logger = logging.getLogger("robin.analysis.fusion_work")
+
+
+def _debug_timestamp() -> str:
+    """Get formatted timestamp for debug messages."""
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 class FileLock:
@@ -1240,7 +1246,7 @@ def process_bam_single_pass(
     Returns:
         Tuple of (target_panel_candidates, genome_wide_candidates, master_bed_candidates) DataFrames
     """
-    print(f"[FUSION DEBUG] 📖 Starting process_bam_single_pass: {os.path.basename(bamfile)}")
+    print(f"[{_debug_timestamp()}] [FUSION DEBUG] 📖 Starting process_bam_single_pass: {os.path.basename(bamfile)}")
     try:
         logger.debug(f"Processing BAM file in single pass: {bamfile}")
         
@@ -1604,7 +1610,7 @@ def process_bam_with_staging(
         Tuple of (results_dict, should_accumulate)
     """
     sample_id = fusion_metadata.sample_id
-    print(f"[FUSION DEBUG] START process_bam_with_staging: {os.path.basename(file_path)} (sample: {sample_id})")
+    print(f"[{_debug_timestamp()}] [FUSION DEBUG] START process_bam_with_staging: {os.path.basename(file_path)} (sample: {sample_id})")
     
     if not has_supplementary:
         return {
@@ -1625,22 +1631,22 @@ def process_bam_with_staging(
     
     try:
         # Get atomic counter (thread-safe)
-        print(f"[FUSION DEBUG] Getting counter for {os.path.basename(file_path)}")
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Getting counter for {os.path.basename(file_path)}")
         counter = _atomic_counter_increment(work_dir, sample_id)
         logger.debug(f"Assigned fusion file counter: {counter}")
-        print(f"[FUSION DEBUG] Counter assigned: {counter} for {os.path.basename(file_path)}")
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Counter assigned: {counter} for {os.path.basename(file_path)}")
         
         # Process BAM file in single pass (combines all three operations)
-        print(f"[FUSION DEBUG] Starting BAM processing: {os.path.basename(file_path)}")
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Starting BAM processing: {os.path.basename(file_path)}")
         bam_start = time.time()
         target_candidates, genome_wide_candidates, master_bed_candidates = process_bam_single_pass(
             file_path, target_panel, work_dir, sample_id, supplementary_read_ids
         )
         bam_elapsed = time.time() - bam_start
-        print(f"[FUSION DEBUG] BAM processing complete: {os.path.basename(file_path)} ({bam_elapsed:.2f}s)")
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] BAM processing complete: {os.path.basename(file_path)} ({bam_elapsed:.2f}s)")
         
         # Apply fusion candidate filtering
-        print(f"[FUSION DEBUG] Filtering candidates for {os.path.basename(file_path)}")
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Filtering candidates for {os.path.basename(file_path)}")
         if target_candidates is not None and not target_candidates.empty:
             target_candidates = _filter_fusion_candidates(target_candidates)
             
@@ -1649,7 +1655,7 @@ def process_bam_with_staging(
         
         # Save to staging (Parquet is ~5-10x faster than JSON)
         # Note: staging_dir is pre-created at batch level, but this ensures it exists
-        print(f"[FUSION DEBUG] Saving to staging for {os.path.basename(file_path)}")
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Saving to staging for {os.path.basename(file_path)}")
         staging_dir = _get_staging_dir(work_dir, sample_id)
         
         target_staging = os.path.join(staging_dir, f"target_{counter:06d}.parquet")
@@ -1680,7 +1686,7 @@ def process_bam_with_staging(
             # Save empty marker file
             pd.DataFrame().to_parquet(master_bed_staging, index=False)
         save_elapsed = time.time() - save_start
-        print(f"[FUSION DEBUG] Staging save complete: {os.path.basename(file_path)} ({save_elapsed:.2f}s)")
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Staging save complete: {os.path.basename(file_path)} ({save_elapsed:.2f}s)")
         
         # Check if accumulation should run
         # Note: This check is not atomic - multiple workers might see threshold reached
@@ -1693,12 +1699,12 @@ def process_bam_with_staging(
         )
         
         if should_accumulate:
-            print(f"[FUSION DEBUG] ⚠️  ACCUMULATION THRESHOLD REACHED: {pending_count} >= {batch_size} for {sample_id}")
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] ⚠️  ACCUMULATION THRESHOLD REACHED: {pending_count} >= {batch_size} for {sample_id}")
             logger.info(
                 f"Accumulation threshold reached ({pending_count} >= {batch_size}) - will attempt accumulation"
             )
         else:
-            print(f"[FUSION DEBUG] Staging complete: {os.path.basename(file_path)} (pending: {pending_count}/{batch_size})")
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Staging complete: {os.path.basename(file_path)} (pending: {pending_count}/{batch_size})")
         
         results = {
             "has_supplementary": True,
@@ -1716,7 +1722,7 @@ def process_bam_with_staging(
             "master_bed_candidates": master_bed_candidates,
         }
         
-        print(f"[FUSION DEBUG] END process_bam_with_staging: {os.path.basename(file_path)} (should_accumulate={should_accumulate})")
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] END process_bam_with_staging: {os.path.basename(file_path)} (should_accumulate={should_accumulate})")
         return results, should_accumulate
         
     except Exception as e:
@@ -1761,14 +1767,14 @@ def accumulate_fusion_candidates(
     """
     lock_file = _get_lock_file(work_dir, sample_id, "accumulation")
     
-    print(f"[FUSION DEBUG] 🔒 Attempting to acquire accumulation lock for {sample_id} (force={force})")
+    print(f"[{_debug_timestamp()}] [FUSION DEBUG] 🔒 Attempting to acquire accumulation lock for {sample_id} (force={force})")
     lock_acquire_start = time.time()
     try:
         # Use shorter timeout to avoid workers blocking each other
         # If lock can't be acquired quickly, another worker is likely already accumulating
         with FileLock(lock_file, timeout=5.0):
             lock_acquire_elapsed = time.time() - lock_acquire_start
-            print(f"[FUSION DEBUG] ✅ Lock acquired for {sample_id} (waited {lock_acquire_elapsed:.2f}s)")
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] ✅ Lock acquired for {sample_id} (waited {lock_acquire_elapsed:.2f}s)")
             logger.info(f"Starting fusion batch accumulation for {sample_id} (force={force})")
             start_time = time.time()
             
@@ -1776,27 +1782,27 @@ def accumulate_fusion_candidates(
             
             # Find all staging files (re-check inside lock to avoid race conditions)
             # Multiple workers might have triggered accumulation, but only one should proceed
-            print(f"[FUSION DEBUG] Finding staging files for {sample_id}")
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Finding staging files for {sample_id}")
             target_files = sorted(glob.glob(os.path.join(staging_dir, "target_*.parquet")))
             genome_files = sorted(glob.glob(os.path.join(staging_dir, "genome_*.parquet")))
             master_bed_files = sorted(glob.glob(os.path.join(staging_dir, "master_bed_*.parquet")))
             
             if not target_files:
-                print(f"[FUSION DEBUG] No staging files found for {sample_id}")
+                print(f"[{_debug_timestamp()}] [FUSION DEBUG] No staging files found for {sample_id}")
                 logger.info(f"No staged fusion files to accumulate for {sample_id}")
                 return {"status": "no_files", "files_processed": 0}
             
             # Re-check if we should accumulate based on count (inside lock to prevent race conditions)
             # This prevents multiple workers from all trying to accumulate when threshold is reached
             if not force and len(target_files) < batch_size:
-                print(f"[FUSION DEBUG] ⏭️  Skipping accumulation for {sample_id}: {len(target_files)} < {batch_size} (another worker may have accumulated)")
+                print(f"[{_debug_timestamp()}] [FUSION DEBUG] ⏭️  Skipping accumulation for {sample_id}: {len(target_files)} < {batch_size} (another worker may have accumulated)")
                 logger.info(
                     f"Skipping fusion accumulation - only {len(target_files)} files staged "
                     f"(threshold: {batch_size}, force={force}). Another worker may have already accumulated."
                 )
                 return {"status": "below_threshold", "files_pending": len(target_files)}
             
-            print(f"[FUSION DEBUG] 📦 ACCUMULATING {len(target_files)} staged files for {sample_id}")
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] 📦 ACCUMULATING {len(target_files)} staged files for {sample_id}")
             logger.info(
                 f"Accumulating {len(target_files)} staged fusion files for {sample_id}"
             )
@@ -1835,13 +1841,13 @@ def accumulate_fusion_candidates(
                 return dfs
             
             # Load all files of each type in parallel (no need to match by index - just load all available)
-            print(f"[FUSION DEBUG] Loading {len(target_files)} staging files for {sample_id}")
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Loading {len(target_files)} staging files for {sample_id}")
             load_start = time.time()
             target_dfs = load_parquet_files(target_files, "target")
             genome_dfs = load_parquet_files(genome_files, "genome")
             master_bed_dfs = load_parquet_files(master_bed_files, "master_bed")
             load_elapsed = time.time() - load_start
-            print(f"[FUSION DEBUG] Loaded staging files: {len(target_dfs)} target, {len(genome_dfs)} genome, {len(master_bed_dfs)} master_bed ({load_elapsed:.2f}s)")
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Loaded staging files: {len(target_dfs)} target, {len(genome_dfs)} genome, {len(master_bed_dfs)} master_bed ({load_elapsed:.2f}s)")
             logger.info(
                 f"Loaded {len(target_dfs)} target, {len(genome_dfs)} genome-wide, "
                 f"and {len(master_bed_dfs)} master BED staging files"
@@ -1876,13 +1882,13 @@ def accumulate_fusion_candidates(
             
             # Load existing accumulated data directly from Parquet files (fast path)
             # This avoids expensive JSON loading and DataFrame conversion
-            print(f"[FUSION DEBUG] Loading existing accumulated data for {sample_id}")
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Loading existing accumulated data for {sample_id}")
             existing_load_start = time.time()
             existing_target_df = _load_fusion_candidates_parquet("target_candidates", work_dir, sample_id)
             existing_genome_df = _load_fusion_candidates_parquet("genome_wide_candidates", work_dir, sample_id)
             existing_master_bed_df = _load_fusion_candidates_parquet("master_bed_candidates", work_dir, sample_id)
             existing_load_elapsed = time.time() - existing_load_start
-            print(f"[FUSION DEBUG] Loaded existing data: target={existing_target_df.shape[0] if existing_target_df is not None and not existing_target_df.empty else 0}, "
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Loaded existing data: target={existing_target_df.shape[0] if existing_target_df is not None and not existing_target_df.empty else 0}, "
                   f"genome={existing_genome_df.shape[0] if existing_genome_df is not None and not existing_genome_df.empty else 0} ({existing_load_elapsed:.2f}s)")
             
             # Merge with existing DataFrames (much faster than converting from lists)
@@ -1921,7 +1927,7 @@ def accumulate_fusion_candidates(
                 f"Final accumulated: {len(batch_target)} target, {len(batch_genome)} genome-wide, "
                 f"{len(batch_master_bed)} master BED candidates"
             )
-            print(f"[FUSION DEBUG] Merged data: {len(batch_target)} target, {len(batch_genome)} genome, {len(batch_master_bed)} master_bed")
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Merged data: {len(batch_target)} target, {len(batch_genome)} genome, {len(batch_master_bed)} master_bed")
             
             # Additional debug info for master BED
             if batch_master_bed.empty:
@@ -1930,13 +1936,13 @@ def accumulate_fusion_candidates(
                 logger.debug(f"Final batch_master_bed has {len(batch_master_bed)} rows, columns: {list(batch_master_bed.columns)}")
             
             # Save directly to Parquet files (fast storage, no expensive to_dict conversion)
-            print(f"[FUSION DEBUG] Saving accumulated data to Parquet for {sample_id}")
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Saving accumulated data to Parquet for {sample_id}")
             save_start = time.time()
             _save_fusion_candidates_parquet(batch_target, "target_candidates", work_dir, sample_id)
             _save_fusion_candidates_parquet(batch_genome, "genome_wide_candidates", work_dir, sample_id)
             _save_fusion_candidates_parquet(batch_master_bed, "master_bed_candidates", work_dir, sample_id)
             save_elapsed = time.time() - save_start
-            print(f"[FUSION DEBUG] Saved accumulated data ({save_elapsed:.2f}s)")
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Saved accumulated data ({save_elapsed:.2f}s)")
             
             # Create updated metadata (with empty lists - data is in Parquet files)
             # This keeps the metadata structure but avoids storing large lists in JSON
@@ -1965,7 +1971,7 @@ def accumulate_fusion_candidates(
             # This avoids expensive groupby operations and CSV generation during intermediate accumulations
             # Output files are only needed at the end, not after every batch
             if force:
-                print(f"[FUSION DEBUG] 🎯 FINAL ACCUMULATION - Generating output files for {sample_id}")
+                print(f"[{_debug_timestamp()}] [FUSION DEBUG] 🎯 FINAL ACCUMULATION - Generating output files for {sample_id}")
                 logger.info("Final accumulation detected - generating output files (CSV, BED, etc.)")
                 output_start = time.time()
                 _generate_output_files(
@@ -1977,9 +1983,9 @@ def accumulate_fusion_candidates(
                     generate_master_bed=True  # Generate master BED on final accumulation
                 )
                 output_elapsed = time.time() - output_start
-                print(f"[FUSION DEBUG] Output files generated ({output_elapsed:.2f}s)")
+                print(f"[{_debug_timestamp()}] [FUSION DEBUG] Output files generated ({output_elapsed:.2f}s)")
             else:
-                print(f"[FUSION DEBUG] Intermediate accumulation - skipping output files for {sample_id}")
+                print(f"[{_debug_timestamp()}] [FUSION DEBUG] Intermediate accumulation - skipping output files for {sample_id}")
                 logger.debug("Intermediate accumulation - skipping output file generation (will be generated on final accumulation)")
             
             # Clean up staging files
@@ -1996,7 +2002,7 @@ def accumulate_fusion_candidates(
                 f"{len(target_files)} files in {elapsed:.2f}s "
                 f"({elapsed/len(target_files):.3f}s per file)"
             )
-            print(f"[FUSION DEBUG] ✅ Accumulation complete for {sample_id}: {len(target_files)} files in {elapsed:.2f}s")
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] ✅ Accumulation complete for {sample_id}: {len(target_files)} files in {elapsed:.2f}s")
             
             return {
                 "status": "success",
@@ -2008,7 +2014,7 @@ def accumulate_fusion_candidates(
             }
     
     except TimeoutError as e:
-        print(f"[FUSION DEBUG] ⏱️  Lock timeout for {sample_id} - another worker is accumulating")
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] ⏱️  Lock timeout for {sample_id} - another worker is accumulating")
         logger.error(f"Could not acquire fusion accumulation lock for {sample_id}: {e}")
         return {"status": "lock_timeout", "error": str(e)}
     except Exception as e:
@@ -2162,7 +2168,7 @@ def _generate_output_files(
     Returns:
             Dictionary mapping file type to file path
     """
-    print(f"[FUSION DEBUG] 📝 _generate_output_files START for {sample_id} (generate_master_bed={generate_master_bed})")
+    print(f"[{_debug_timestamp()}] [FUSION DEBUG] 📝 _generate_output_files START for {sample_id} (generate_master_bed={generate_master_bed})")
     output_start = time.time()
     # Use accumulated data from fusion_metadata instead of just current analysis_results
     # Load from Parquet files if available (fast path), otherwise use in-memory data
@@ -2184,29 +2190,40 @@ def _generate_output_files(
                     target_candidates = pd.DataFrame(target_candidates_data)
     
     if target_candidates is not None and not target_candidates.empty:
-
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Processing target candidates: {len(target_candidates)} rows for {sample_id}")
             # Filter for fusion candidates using the corrected logic
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Grouping target candidates by read_id for {sample_id}")
+            groupby_start = time.time()
             gene_counts = target_candidates.groupby("read_id", observed=True)["col4"].nunique()
             fusion_read_ids = gene_counts[gene_counts > 1].index
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Target groupby complete ({time.time() - groupby_start:.2f}s): {len(fusion_read_ids)} fusion reads")
             
             if len(fusion_read_ids) > 0:
                 result = target_candidates[target_candidates["read_id"].isin(fusion_read_ids)]
                 
                 # Apply minimum read support threshold (3 or more supporting reads per gene pair)
                 if not result.empty:
+                    print(f"[{_debug_timestamp()}] [FUSION DEBUG] Creating tags for target candidates: {len(result)} rows")
+                    tag_start = time.time()
                     # Create tag column by grouping genes per read_id (same logic as _annotate_results)
                     lookup = result.groupby("read_id", observed=True)["col4"].agg(
                         lambda x: ",".join(sorted(set(x)))
                     )
                     result["tag"] = result["read_id"].map(lookup)
+                    print(f"[{_debug_timestamp()}] [FUSION DEBUG] Tags created ({time.time() - tag_start:.2f}s)")
                     
                     # Group by gene pair (tag) and count supporting reads
+                    print(f"[{_debug_timestamp()}] [FUSION DEBUG] Counting gene pairs for target candidates")
+                    pair_count_start = time.time()
                     gene_pair_read_counts = result.groupby("tag", observed=True)["read_id"].nunique()
                     min_support = get_fusion_threshold("read_support")
                     valid_gene_pairs = gene_pair_read_counts[gene_pair_read_counts >= min_support].index
                     result = result[result["tag"].isin(valid_gene_pairs)]
+                    print(f"[{_debug_timestamp()}] [FUSION DEBUG] Gene pair counting complete ({time.time() - pair_count_start:.2f}s): {len(valid_gene_pairs)} valid pairs")
 
                 if not result.empty:
+                    print(f"[{_debug_timestamp()}] [FUSION DEBUG] Saving target candidates CSV: {len(result)} rows")
+                    csv_start = time.time()
                     # Save the filtered fusion candidates to CSV
                     result.to_csv(
                         os.path.join(
@@ -2214,8 +2231,11 @@ def _generate_output_files(
                         ),
                         index=False,
                     )
+                    print(f"[{_debug_timestamp()}] [FUSION DEBUG] Target CSV saved ({time.time() - csv_start:.2f}s)")
 
                     # Preprocess for visualization
+                    print(f"[{_debug_timestamp()}] [FUSION DEBUG] Preprocessing target candidates for visualization")
+                    preprocess_start = time.time()
                     preprocess_fusion_data_standalone(
                         result,
                         os.path.join(
@@ -2224,6 +2244,7 @@ def _generate_output_files(
                             "fusion_candidates_master_processed.pkl",
                         ),
                     )
+                    print(f"[{_debug_timestamp()}] [FUSION DEBUG] Target preprocessing complete ({time.time() - preprocess_start:.2f}s)")
 
     # Use accumulated data from fusion_metadata for genome-wide candidates
     # Load from Parquet files if available (fast path), otherwise use in-memory data
@@ -2247,30 +2268,39 @@ def _generate_output_files(
                     logger.info(f"Found {len(genome_wide_data)} genome-wide candidate records")
     
     if genome_wide_candidates is not None and not genome_wide_candidates.empty:
-
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Processing genome-wide candidates: {len(genome_wide_candidates)} rows for {sample_id}")
             # Filter for fusion candidates using the corrected logic
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Grouping genome-wide candidates by read_id")
+            groupby_start = time.time()
             gene_counts_all = genome_wide_candidates.groupby("read_id", observed=True)["col4"].nunique()
             fusion_read_ids_all = gene_counts_all[gene_counts_all > 1].index
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Genome-wide groupby complete ({time.time() - groupby_start:.2f}s): {len(fusion_read_ids_all)} fusion reads")
             
             if len(fusion_read_ids_all) > 0:
                 result_all = genome_wide_candidates[genome_wide_candidates["read_id"].isin(fusion_read_ids_all)]
                 logger.info(f"Genome-wide fusion candidates after basic filtering: {len(result_all)} records")
 
                 if not result_all.empty:
+                    print(f"[{_debug_timestamp()}] [FUSION DEBUG] Saving genome-wide candidates CSV: {len(result_all)} rows")
+                    csv_start = time.time()
                     # Save the filtered genome-wide candidates to CSV
                     result_all.to_csv(
                         os.path.join(work_dir, sample_id, "fusion_candidates_all.csv"),
                         index=False,
                     )
+                    print(f"[{_debug_timestamp()}] [FUSION DEBUG] Genome-wide CSV saved ({time.time() - csv_start:.2f}s)")
 
                     # Use the same preprocessing pipeline as target candidates
                     # This ensures proper annotation with tags, colors, and gene group detection
+                    print(f"[{_debug_timestamp()}] [FUSION DEBUG] Preprocessing genome-wide candidates for visualization")
+                    preprocess_start = time.time()
                     preprocess_fusion_data_standalone(
                         result_all,
                         os.path.join(
                             work_dir, sample_id, "fusion_candidates_all_processed.pkl"
                         ),
                     )
+                    print(f"[{_debug_timestamp()}] [FUSION DEBUG] Genome-wide preprocessing complete ({time.time() - preprocess_start:.2f}s)")
 
     # Save master BED fusion candidates (no gene overlap filtering needed)
     # Load from Parquet files if available (fast path), otherwise use in-memory data
@@ -2328,16 +2358,24 @@ def _generate_output_files(
             f.write("0")
 
     # Generate fusion breakpoint BED file
+    print(f"[{_debug_timestamp()}] [FUSION DEBUG] Generating fusion breakpoint BED for {sample_id}")
+    bed_start = time.time()
     _generate_fusion_breakpoint_bed(sample_id, fusion_metadata, work_dir)
+    print(f"[{_debug_timestamp()}] [FUSION DEBUG] Fusion breakpoint BED complete ({time.time() - bed_start:.2f}s)")
     
     # Generate master BED breakpoint BED file (new target regions from supplementary alignments)
     # Only generate this once per batch (when generate_master_bed=True) to avoid expensive processing
     # This extraction is computationally expensive and should only run on final accumulated data
     if generate_master_bed:
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Generating master BED breakpoint BED for {sample_id}")
+        master_bed_bp_start = time.time()
         _generate_master_bed_breakpoint_bed(sample_id, fusion_metadata, work_dir)
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Master BED breakpoint BED complete ({time.time() - master_bed_bp_start:.2f}s)")
     
     # Generate master BED file only if requested (should only be done once per batch at the end)
     if generate_master_bed:
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Generating master BED file for {sample_id}")
+        master_bed_start = time.time()
         try:
             from robin.analysis.master_bed_generator import generate_master_bed
             
@@ -2355,7 +2393,9 @@ def _generate_output_files(
                 logger_instance=logger,
                 reference=reference,
             )
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Master BED file generation complete ({time.time() - master_bed_start:.2f}s)")
         except Exception as e:
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] ❌ Error generating master BED file: {e}")
             logger.warning(f"Could not generate master BED file: {e}")
 
     output_paths = {
@@ -2373,7 +2413,7 @@ def _generate_output_files(
         output_paths["master_bed_candidates_path"] = master_bed_path
     
     output_elapsed = time.time() - output_start
-    print(f"[FUSION DEBUG] 📝 _generate_output_files END for {sample_id} ({output_elapsed:.2f}s)")
+    print(f"[{_debug_timestamp()}] [FUSION DEBUG] 📝 _generate_output_files END for {sample_id} ({output_elapsed:.2f}s)")
     return output_paths
 
 
