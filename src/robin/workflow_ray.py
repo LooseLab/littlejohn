@@ -366,14 +366,22 @@ class SampleJobBatcher:
         self.pending_jobs: Dict[str, Dict[str, List[Job]]] = {}
         # sample_id -> job_type -> timestamp
         self.last_job_time: Dict[str, Dict[str, float]] = {}
-        self.lock = asyncio.Lock() if asyncio else None
+        # Lock created lazily to avoid serialization issues in Ray actors
+        self._lock: Optional[asyncio.Lock] = None
+    
+    def _get_lock(self) -> Optional[asyncio.Lock]:
+        """Get or create the asyncio lock lazily."""
+        if self._lock is None and asyncio:
+            self._lock = asyncio.Lock()
+        return self._lock
     
     async def add_job(self, job: Job) -> List[BatchedJob]:
         """Add a job and return any completed batches"""
         sample_id = job.context.get_sample_id()
         job_type = job.job_type
         
-        async with self.lock if self.lock else nullcontext():
+        lock = self._get_lock()
+        async with lock if lock else nullcontext():
             # Initialize if needed
             if sample_id not in self.pending_jobs:
                 self.pending_jobs[sample_id] = {}
@@ -418,7 +426,8 @@ class SampleJobBatcher:
         current_time = time.time()
         timed_out_batches = []
         
-        async with self.lock if self.lock else nullcontext():
+        lock = self._get_lock()
+        async with lock if lock else nullcontext():
             for sample_id in list(self.pending_jobs.keys()):
                 for job_type in list(self.pending_jobs[sample_id].keys()):
                     jobs = self.pending_jobs[sample_id][job_type]
@@ -861,7 +870,8 @@ class Coordinator:
         self._csv_buffer: List[Dict[str, Any]] = []
         self._csv_buffer_size: int = 100  # Flush every 100 jobs
         self._csv_buffer_max_size: int = 500  # Maximum buffer size before forced flush
-        self._csv_buffer_lock = asyncio.Lock() if asyncio else None
+        # Lock created lazily to avoid serialization issues in Ray actors
+        self._csv_buffer_lock: Optional[asyncio.Lock] = None
         
         # Stats caching for performance (avoid recomputing stats on every GUI update)
         self._stats_cache: Optional[Dict[str, Any]] = None
@@ -871,6 +881,12 @@ class Coordinator:
         # Batching support
         self.enable_batching = enable_batching
         self.sample_batcher = SampleJobBatcher() if enable_batching else None
+    
+    def _get_csv_buffer_lock(self) -> Optional[asyncio.Lock]:
+        """Get or create the CSV buffer lock lazily."""
+        if self._csv_buffer_lock is None and asyncio:
+            self._csv_buffer_lock = asyncio.Lock()
+        return self._csv_buffer_lock
 
     def get_reference(self) -> Optional[str]:
         """Get the reference genome path."""
@@ -1509,8 +1525,9 @@ class Coordinator:
             return
         
         # Use lock to prevent concurrent flushes
-        if self._csv_buffer_lock:
-            async with self._csv_buffer_lock:
+        lock = self._get_csv_buffer_lock()
+        if lock:
+            async with lock:
                 buffer_to_write = self._csv_buffer[:]
                 self._csv_buffer.clear()
         else:
