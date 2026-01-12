@@ -775,19 +775,30 @@ def fusion_handler(job, work_dir=None, target_panel=None):
                     job.context.add_result("fusion_analysis", result)
                     
                     # Trigger accumulation if threshold reached
+                    # Note: Multiple workers might see threshold reached, but only one will actually accumulate
+                    # (the lock ensures atomicity, and re-check inside lock prevents duplicate work)
                     if should_accumulate:
-                        logger.info("Fusion accumulation threshold reached - running batch accumulation")
+                        logger.info("Fusion accumulation threshold reached - attempting batch accumulation")
                         # Get reference from job metadata if available
                         reference = job.context.metadata.get("reference")
                         if reference:
                             reference = os.path.expanduser(reference)
                             logger.debug(f"Using reference genome from job metadata: {reference}")
                         
-                        accumulation_result = accumulate_fusion_candidates(
-                            work_dir, sample_id, target_panel, force=False, batch_size=10, reference=reference
-                        )
-                        logger.info(f"Fusion accumulation result: {accumulation_result}")
-                        job.context.add_metadata("fusion_accumulation_result", accumulation_result)
+                        try:
+                            accumulation_result = accumulate_fusion_candidates(
+                                work_dir, sample_id, target_panel, force=False, batch_size=10, reference=reference
+                            )
+                            # If another worker already accumulated, this is fine - just log it
+                            if accumulation_result.get("status") == "below_threshold":
+                                logger.debug(f"Accumulation skipped - another worker likely already processed it")
+                            else:
+                                logger.info(f"Fusion accumulation result: {accumulation_result}")
+                            job.context.add_metadata("fusion_accumulation_result", accumulation_result)
+                        except TimeoutError as e:
+                            # Lock timeout - another worker is likely accumulating, skip this attempt
+                            logger.debug(f"Could not acquire accumulation lock (another worker likely accumulating): {e}")
+                            job.context.add_metadata("fusion_accumulation_result", {"status": "lock_timeout", "skipped": True})
                     
                     # Store flag for potential end-of-queue accumulation
                     job.context.add_metadata("needs_final_fusion_accumulation", True)

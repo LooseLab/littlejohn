@@ -1670,6 +1670,8 @@ def process_bam_with_staging(
             pd.DataFrame().to_parquet(master_bed_staging, index=False)
         
         # Check if accumulation should run
+        # Note: This check is not atomic - multiple workers might see threshold reached
+        # The actual accumulation function will re-check inside the lock to prevent duplicate work
         pending_count = _get_pending_count(work_dir, sample_id)
         should_accumulate = pending_count >= batch_size
         
@@ -1679,7 +1681,7 @@ def process_bam_with_staging(
         
         if should_accumulate:
             logger.info(
-                f"Accumulation threshold reached ({pending_count} >= {batch_size})"
+                f"Accumulation threshold reached ({pending_count} >= {batch_size}) - will attempt accumulation"
             )
         
         results = {
@@ -1743,13 +1745,16 @@ def accumulate_fusion_candidates(
     lock_file = _get_lock_file(work_dir, sample_id, "accumulation")
     
     try:
-        with FileLock(lock_file, timeout=60.0):
+        # Use shorter timeout to avoid workers blocking each other
+        # If lock can't be acquired quickly, another worker is likely already accumulating
+        with FileLock(lock_file, timeout=5.0):
             logger.info(f"Starting fusion batch accumulation for {sample_id} (force={force})")
             start_time = time.time()
             
             staging_dir = _get_staging_dir(work_dir, sample_id)
             
-            # Find all staging files
+            # Find all staging files (re-check inside lock to avoid race conditions)
+            # Multiple workers might have triggered accumulation, but only one should proceed
             target_files = sorted(glob.glob(os.path.join(staging_dir, "target_*.parquet")))
             genome_files = sorted(glob.glob(os.path.join(staging_dir, "genome_*.parquet")))
             master_bed_files = sorted(glob.glob(os.path.join(staging_dir, "master_bed_*.parquet")))
@@ -1758,11 +1763,12 @@ def accumulate_fusion_candidates(
                 logger.info(f"No staged fusion files to accumulate for {sample_id}")
                 return {"status": "no_files", "files_processed": 0}
             
-            # Check if we should accumulate based on count
+            # Re-check if we should accumulate based on count (inside lock to prevent race conditions)
+            # This prevents multiple workers from all trying to accumulate when threshold is reached
             if not force and len(target_files) < batch_size:
                 logger.info(
                     f"Skipping fusion accumulation - only {len(target_files)} files staged "
-                    f"(threshold: {batch_size}, force={force})"
+                    f"(threshold: {batch_size}, force={force}). Another worker may have already accumulated."
                 )
                 return {"status": "below_threshold", "files_pending": len(target_files)}
             
