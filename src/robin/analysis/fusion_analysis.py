@@ -778,6 +778,7 @@ def fusion_handler(job, work_dir=None, target_panel=None):
                     # Note: Multiple workers might see threshold reached, but only one will actually accumulate
                     # (the lock ensures atomicity, and re-check inside lock prevents duplicate work)
                     if should_accumulate:
+                        print(f"[FUSION DEBUG] 🚀 Triggering accumulation attempt for {sample_id}")
                         logger.info("Fusion accumulation threshold reached - attempting batch accumulation")
                         # Get reference from job metadata if available
                         reference = job.context.metadata.get("reference")
@@ -791,12 +792,15 @@ def fusion_handler(job, work_dir=None, target_panel=None):
                             )
                             # If another worker already accumulated, this is fine - just log it
                             if accumulation_result.get("status") == "below_threshold":
+                                print(f"[FUSION DEBUG] ⏭️  Accumulation skipped for {sample_id} - another worker processed it")
                                 logger.debug(f"Accumulation skipped - another worker likely already processed it")
                             else:
+                                print(f"[FUSION DEBUG] ✅ Accumulation result for {sample_id}: {accumulation_result.get('status')}")
                                 logger.info(f"Fusion accumulation result: {accumulation_result}")
                             job.context.add_metadata("fusion_accumulation_result", accumulation_result)
                         except TimeoutError as e:
                             # Lock timeout - another worker is likely accumulating, skip this attempt
+                            print(f"[FUSION DEBUG] ⏱️  Accumulation lock timeout for {sample_id} - another worker is accumulating")
                             logger.debug(f"Could not acquire accumulation lock (another worker likely accumulating): {e}")
                             job.context.add_metadata("fusion_accumulation_result", {"status": "lock_timeout", "skipped": True})
                     
