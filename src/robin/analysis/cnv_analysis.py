@@ -1014,10 +1014,11 @@ def save_cnv_files(
         generate_bed_files(bed_dir, analysis_counter, breakpoints, result3_cnv, bin_width, logger)
 
         # Generate master BED file only if requested (should only be done once per batch at the end)
+        # Use async (non-blocking) generation to avoid blocking the analysis pipeline
         if generate_master_bed:
             try:
                 from robin.analysis.master_bed_generator import (
-                    generate_master_bed,
+                    generate_master_bed_async,
                     _try_get_target_panel_from_fusion_metadata,
                 )
                 
@@ -1029,7 +1030,8 @@ def save_cnv_files(
                 # Try to get target_panel from fusion metadata if available
                 target_panel = _try_get_target_panel_from_fusion_metadata(sample_id, work_dir)
                 
-                generate_master_bed(
+                # Generate asynchronously (non-blocking)
+                generate_master_bed_async(
                     sample_id=sample_id,
                     work_dir=work_dir,
                     analysis_counter=analysis_counter,
@@ -1038,7 +1040,7 @@ def save_cnv_files(
                     reference=reference,
                 )
             except Exception as e:
-                logger.warning(f"Could not generate master BED file: {e}")
+                logger.warning(f"Could not start async master BED generation: {e}")
 
         logger.debug(f"Saved all CNV files to {sample_dir}")
 

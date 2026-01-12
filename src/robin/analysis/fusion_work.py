@@ -1246,7 +1246,6 @@ def process_bam_single_pass(
     Returns:
         Tuple of (target_panel_candidates, genome_wide_candidates, master_bed_candidates) DataFrames
     """
-    print(f"[{_debug_timestamp()}] [FUSION DEBUG] 📖 Starting process_bam_single_pass: {os.path.basename(bamfile)}")
     try:
         logger.debug(f"Processing BAM file in single pass: {bamfile}")
         
@@ -1610,7 +1609,6 @@ def process_bam_with_staging(
         Tuple of (results_dict, should_accumulate)
     """
     sample_id = fusion_metadata.sample_id
-    print(f"[{_debug_timestamp()}] [FUSION DEBUG] START process_bam_with_staging: {os.path.basename(file_path)} (sample: {sample_id})")
     
     if not has_supplementary:
         return {
@@ -1631,22 +1629,15 @@ def process_bam_with_staging(
     
     try:
         # Get atomic counter (thread-safe)
-        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Getting counter for {os.path.basename(file_path)}")
         counter = _atomic_counter_increment(work_dir, sample_id)
         logger.debug(f"Assigned fusion file counter: {counter}")
-        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Counter assigned: {counter} for {os.path.basename(file_path)}")
         
         # Process BAM file in single pass (combines all three operations)
-        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Starting BAM processing: {os.path.basename(file_path)}")
-        bam_start = time.time()
         target_candidates, genome_wide_candidates, master_bed_candidates = process_bam_single_pass(
             file_path, target_panel, work_dir, sample_id, supplementary_read_ids
         )
-        bam_elapsed = time.time() - bam_start
-        print(f"[{_debug_timestamp()}] [FUSION DEBUG] BAM processing complete: {os.path.basename(file_path)} ({bam_elapsed:.2f}s)")
         
         # Apply fusion candidate filtering
-        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Filtering candidates for {os.path.basename(file_path)}")
         if target_candidates is not None and not target_candidates.empty:
             target_candidates = _filter_fusion_candidates(target_candidates)
             
@@ -1655,7 +1646,6 @@ def process_bam_with_staging(
         
         # Save to staging (Parquet is ~5-10x faster than JSON)
         # Note: staging_dir is pre-created at batch level, but this ensures it exists
-        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Saving to staging for {os.path.basename(file_path)}")
         staging_dir = _get_staging_dir(work_dir, sample_id)
         
         target_staging = os.path.join(staging_dir, f"target_{counter:06d}.parquet")
@@ -1663,7 +1653,6 @@ def process_bam_with_staging(
         master_bed_staging = os.path.join(staging_dir, f"master_bed_{counter:06d}.parquet")
         
         # Save candidates to staging
-        save_start = time.time()
         if target_candidates is not None and not target_candidates.empty:
             target_candidates.to_parquet(target_staging, index=False)
             logger.info(f"Saved {len(target_candidates)} target candidates to staging")
@@ -1685,8 +1674,6 @@ def process_bam_with_staging(
         else:
             # Save empty marker file
             pd.DataFrame().to_parquet(master_bed_staging, index=False)
-        save_elapsed = time.time() - save_start
-        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Staging save complete: {os.path.basename(file_path)} ({save_elapsed:.2f}s)")
         
         # Check if accumulation should run
         # Note: This check is not atomic - multiple workers might see threshold reached
@@ -1699,12 +1686,9 @@ def process_bam_with_staging(
         )
         
         if should_accumulate:
-            print(f"[{_debug_timestamp()}] [FUSION DEBUG] ⚠️  ACCUMULATION THRESHOLD REACHED: {pending_count} >= {batch_size} for {sample_id}")
             logger.info(
                 f"Accumulation threshold reached ({pending_count} >= {batch_size}) - will attempt accumulation"
             )
-        else:
-            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Staging complete: {os.path.basename(file_path)} (pending: {pending_count}/{batch_size})")
         
         results = {
             "has_supplementary": True,
@@ -1722,7 +1706,6 @@ def process_bam_with_staging(
             "master_bed_candidates": master_bed_candidates,
         }
         
-        print(f"[{_debug_timestamp()}] [FUSION DEBUG] END process_bam_with_staging: {os.path.basename(file_path)} (should_accumulate={should_accumulate})")
         return results, should_accumulate
         
     except Exception as e:
@@ -2315,13 +2298,19 @@ def _generate_output_files(
 
     # Save master BED fusion candidates (no gene overlap filtering needed)
     # Load from Parquet files if available (fast path), otherwise use in-memory data
+    master_bed_section_start = time.time()
+    print(f"[{_debug_timestamp()}] [FUSION DEBUG] Starting master BED candidates processing for {sample_id}")
     master_bed_candidates = None
     if (
         hasattr(fusion_metadata, "fusion_data")
         and fusion_metadata.fusion_data
     ):
         # Try loading from Parquet first (fast path)
+        load_master_start = time.time()
         master_bed_candidates = _load_fusion_candidates_parquet("master_bed_candidates", work_dir, sample_id)
+        load_master_elapsed = time.time() - load_master_start
+        if master_bed_candidates is not None and not master_bed_candidates.empty:
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Loaded master BED candidates from Parquet: {len(master_bed_candidates):,} rows ({load_master_elapsed:.2f}s)")
         
         # Fallback to in-memory data if Parquet not available
         if master_bed_candidates is None or master_bed_candidates.empty:
@@ -2334,39 +2323,66 @@ def _generate_output_files(
                     logger.info(f"Found {len(master_bed_data)} master BED candidate records")
     
     if master_bed_candidates is not None and not master_bed_candidates.empty:
+            master_bed_size = len(master_bed_candidates)
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Processing {master_bed_size:,} master BED candidates for {sample_id}")
 
             # For master BED candidates, we track reads mapping to multiple locations
             # Group by read_id and count unique regions (chrom:start-end)
+            region_key_start = time.time()
             master_bed_candidates["region_key"] = (
                 master_bed_candidates["reference_id"].astype(str) + ":" +
                 master_bed_candidates["reference_start"].astype(str) + "-" +
                 master_bed_candidates["reference_end"].astype(str)
             )
+            region_key_elapsed = time.time() - region_key_start
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Created region_key column ({region_key_elapsed:.2f}s)")
+            
+            groupby_start = time.time()
             region_counts = master_bed_candidates.groupby("read_id", observed=True)["region_key"].nunique()
             multi_region_read_ids = region_counts[region_counts > 1].index
+            groupby_elapsed = time.time() - groupby_start
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Groupby operation complete: {len(multi_region_read_ids):,} multi-region reads ({groupby_elapsed:.2f}s)")
 
             if len(multi_region_read_ids) > 0:
+                filter_start = time.time()
                 result_master_bed = master_bed_candidates[
                     master_bed_candidates["read_id"].isin(multi_region_read_ids)
                 ]
+                filter_elapsed = time.time() - filter_start
                 logger.info(f"Master BED fusion candidates after filtering: {len(result_master_bed)} records")
+                print(f"[{_debug_timestamp()}] [FUSION DEBUG] Filtering complete: {len(result_master_bed):,} rows ({filter_elapsed:.2f}s)")
 
                 if not result_master_bed.empty:
                     # Drop the temporary region_key column before saving
+                    drop_start = time.time()
                     result_master_bed = result_master_bed.drop(columns=["region_key"])
+                    drop_elapsed = time.time() - drop_start
+                    print(f"[{_debug_timestamp()}] [FUSION DEBUG] Dropped region_key column ({drop_elapsed:.2f}s)")
                     
                     # Save the filtered master BED candidates to CSV
+                    csv_start = time.time()
                     result_master_bed.to_csv(
                         os.path.join(work_dir, sample_id, "fusion_candidates_master_bed.csv"),
                         index=False,
                     )
+                    csv_elapsed = time.time() - csv_start
                     logger.info(f"Saved {len(result_master_bed)} master BED fusion candidates to CSV")
+                    print(f"[{_debug_timestamp()}] [FUSION DEBUG] Master BED CSV saved: {len(result_master_bed):,} rows ({csv_elapsed:.2f}s)")
+    else:
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] No master BED candidates to process")
+    
+    master_bed_section_elapsed = time.time() - master_bed_section_start
+    print(f"[{_debug_timestamp()}] [FUSION DEBUG] Master BED candidates processing complete ({master_bed_section_elapsed:.2f}s)")
 
     # Create sv_count.txt file with content "0" if it doesn't exist
+    sv_count_start = time.time()
     sv_count_file = os.path.join(work_dir, sample_id, "sv_count.txt")
     if not os.path.exists(sv_count_file):
         with open(sv_count_file, "w") as f:
             f.write("0")
+    sv_count_elapsed = time.time() - sv_count_start
+    if sv_count_elapsed > 0.01:  # Only log if it takes meaningful time
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Created sv_count.txt ({sv_count_elapsed:.2f}s)")
 
     # Generate fusion breakpoint BED file
     print(f"[{_debug_timestamp()}] [FUSION DEBUG] Generating fusion breakpoint BED for {sample_id}")
@@ -2394,11 +2410,10 @@ def _generate_output_files(
             print(f"[{_debug_timestamp()}] [FUSION DEBUG] No master BED candidates - skipping breakpoint extraction")
     
     # Generate master BED file only if requested (should only be done once per batch at the end)
+    # Use async (non-blocking) generation to avoid blocking the analysis pipeline
     if generate_master_bed:
-        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Generating master BED file for {sample_id}")
-        master_bed_start = time.time()
         try:
-            from robin.analysis.master_bed_generator import generate_master_bed
+            from robin.analysis.master_bed_generator import generate_master_bed_async
             
             # Get analysis counter
             analysis_counter = _load_analysis_counter(sample_id, work_dir)
@@ -2406,7 +2421,9 @@ def _generate_output_files(
             # Get target_panel from fusion_metadata
             target_panel = fusion_metadata.target_panel if hasattr(fusion_metadata, 'target_panel') else None
             
-            generate_master_bed(
+            # Generate asynchronously (non-blocking)
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Starting async master BED file generation for {sample_id}")
+            generate_master_bed_async(
                 sample_id=sample_id,
                 work_dir=work_dir,
                 analysis_counter=analysis_counter,
@@ -2414,10 +2431,9 @@ def _generate_output_files(
                 logger_instance=logger,
                 reference=reference,
             )
-            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Master BED file generation complete ({time.time() - master_bed_start:.2f}s)")
         except Exception as e:
-            print(f"[{_debug_timestamp()}] [FUSION DEBUG] ❌ Error generating master BED file: {e}")
-            logger.warning(f"Could not generate master BED file: {e}")
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] ❌ Error starting async master BED generation: {e}")
+            logger.warning(f"Could not start async master BED generation: {e}")
 
     output_paths = {
         "target_candidates_path": os.path.join(
@@ -3065,6 +3081,7 @@ def _extract_master_bed_breakpoints(fusion_metadata: FusionMetadata, work_dir: O
         
         print(f"[{_debug_timestamp()}] [FUSION DEBUG] Creating breakpoint pairs for {len(reads_with_both)} reads")
         pair_creation_start = time.time()
+        print (reads_with_both.head())
         for read_id in reads_with_both:
             # Get all primary and supplementary alignments for this read
             read_primaries = primary_by_read.get_group(read_id) if read_id in primary_by_read.groups else pd.DataFrame()
