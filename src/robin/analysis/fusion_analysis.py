@@ -452,7 +452,7 @@ def process_multiple_files(bam_paths, metadata_list, work_dir, logger, target_pa
                         has_supplementary=has_supplementary,
                         supplementary_read_ids=supplementary_read_ids,
                         work_dir=work_dir,
-                        batch_size=1,  # Force accumulation after each batch
+                        batch_size=10,  # Accumulate every 10 files (reduces expensive operations)
                     )
                     
                     if analysis_results.get("error_message"):

@@ -1787,6 +1787,10 @@ def accumulate_fusion_candidates(
             genome_files = sorted(glob.glob(os.path.join(staging_dir, "genome_*.parquet")))
             master_bed_files = sorted(glob.glob(os.path.join(staging_dir, "master_bed_*.parquet")))
             
+            # Track which master_bed staging files are new (for incremental processing)
+            # These are the files being accumulated in this batch - all of them are "new" for this accumulation
+            new_master_bed_files = set(master_bed_files)
+            
             if not target_files:
                 print(f"[{_debug_timestamp()}] [FUSION DEBUG] No staging files found for {sample_id}")
                 logger.info(f"No staged fusion files to accumulate for {sample_id}")
@@ -1848,6 +1852,10 @@ def accumulate_fusion_candidates(
             master_bed_dfs = load_parquet_files(master_bed_files, "master_bed")
             load_elapsed = time.time() - load_start
             print(f"[{_debug_timestamp()}] [FUSION DEBUG] Loaded staging files: {len(target_dfs)} target, {len(genome_dfs)} genome, {len(master_bed_dfs)} master_bed ({load_elapsed:.2f}s)")
+            
+            # Track which master_bed files are new (for incremental processing)
+            # These are the files being accumulated in this batch - all of them are "new" for this accumulation
+            new_master_bed_files = set(master_bed_files)
             logger.info(
                 f"Loaded {len(target_dfs)} target, {len(genome_dfs)} genome-wide, "
                 f"and {len(master_bed_dfs)} master BED staging files"
@@ -1970,6 +1978,7 @@ def accumulate_fusion_candidates(
             # Generate output files only on final accumulation (force=True)
             # This avoids expensive groupby operations and CSV generation during intermediate accumulations
             # Output files are only needed at the end, not after every batch
+            # However, master BED breakpoint extraction should still run incrementally to build up the BED file
             if force:
                 print(f"[{_debug_timestamp()}] [FUSION DEBUG] 🎯 FINAL ACCUMULATION - Generating output files for {sample_id}")
                 logger.info("Final accumulation detected - generating output files (CSV, BED, etc.)")
@@ -1980,7 +1989,8 @@ def accumulate_fusion_candidates(
                     fusion_metadata, 
                     work_dir, 
                     reference=reference,
-                    generate_master_bed=True  # Generate master BED on final accumulation
+                    generate_master_bed=True,  # Generate master BED on final accumulation
+                    new_master_bed_files=new_master_bed_files,  # Pass new files for incremental processing
                 )
                 output_elapsed = time.time() - output_start
                 print(f"[{_debug_timestamp()}] [FUSION DEBUG] Output files generated ({output_elapsed:.2f}s)")
@@ -2153,6 +2163,7 @@ def _generate_output_files(
     work_dir: str,
     reference: Optional[str] = None,
     generate_master_bed: bool = False,
+    new_master_bed_files: Optional[Set[str]] = None,
 ) -> Dict[str, str]:
     """
     Generate output files for the analysis, including visualization preprocessing.
@@ -2364,13 +2375,23 @@ def _generate_output_files(
     print(f"[{_debug_timestamp()}] [FUSION DEBUG] Fusion breakpoint BED complete ({time.time() - bed_start:.2f}s)")
     
     # Generate master BED breakpoint BED file (new target regions from supplementary alignments)
-    # Only generate this once per batch (when generate_master_bed=True) to avoid expensive processing
-    # This extraction is computationally expensive and should only run on final accumulated data
+    # This is called incrementally as data accumulates. For large datasets, we use an incremental
+    # approach: only process NEW staging files and merge with existing breakpoints.
     if generate_master_bed:
-        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Generating master BED breakpoint BED for {sample_id}")
-        master_bed_bp_start = time.time()
-        _generate_master_bed_breakpoint_bed(sample_id, fusion_metadata, work_dir)
-        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Master BED breakpoint BED complete ({time.time() - master_bed_bp_start:.2f}s)")
+        master_bed_candidates = _load_fusion_candidates_parquet("master_bed_candidates", work_dir, sample_id)
+        if master_bed_candidates is not None and not master_bed_candidates.empty:
+            master_bed_size = len(master_bed_candidates)
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Generating master BED breakpoint BED for {sample_id} ({master_bed_size:,} rows)")
+            master_bed_bp_start = time.time()
+            _generate_master_bed_breakpoint_bed(
+                sample_id, 
+                fusion_metadata, 
+                work_dir,
+                new_master_bed_files=new_master_bed_files,  # Pass new files for incremental processing
+            )
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Master BED breakpoint BED complete ({time.time() - master_bed_bp_start:.2f}s)")
+        else:
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] No master BED candidates - skipping breakpoint extraction")
     
     # Generate master BED file only if requested (should only be done once per batch at the end)
     if generate_master_bed:
@@ -2953,6 +2974,8 @@ def _extract_master_bed_breakpoints(fusion_metadata: FusionMetadata, work_dir: O
         return breakpoints
     
     if master_bed_df is not None and not master_bed_df.empty:
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] _extract_master_bed_breakpoints: Processing {len(master_bed_df):,} master BED candidate rows")
+        extract_start = time.time()
         # Group reads by their breakpoint pairs (primary + supplementary alignments)
         # Each read with supplementary alignments represents a potential rearrangement
         if "read_id" not in master_bed_df.columns:
@@ -2963,6 +2986,8 @@ def _extract_master_bed_breakpoints(fusion_metadata: FusionMetadata, work_dir: O
         # col4 is more reliable: "master_bed_region" = primary alignment, "master_bed_supplementary" = supplementary
         # The is_supplementary flag can be inconsistent (some primary alignments may have is_supplementary=True
         # if they're part of a chimeric read set in the BAM file)
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Separating primary and supplementary alignments")
+        filter_start = time.time()
         if "col4" in master_bed_df.columns:
             primary_df = master_bed_df[master_bed_df["col4"] == "master_bed_region"].copy()
             supplementary_df = master_bed_df[master_bed_df["col4"] == "master_bed_supplementary"].copy()
@@ -2974,6 +2999,7 @@ def _extract_master_bed_breakpoints(fusion_metadata: FusionMetadata, work_dir: O
                 return breakpoints
             primary_df = master_bed_df[master_bed_df["is_supplementary"] == False].copy()
             supplementary_df = master_bed_df[master_bed_df["is_supplementary"] == True].copy()
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Filter complete ({time.time() - filter_start:.2f}s): {len(primary_df)} primary, {len(supplementary_df)} supplementary")
         
         # Debug: check for any misclassified alignments
         if "is_supplementary" in master_bed_df.columns and "col4" in master_bed_df.columns:
@@ -2988,9 +3014,12 @@ def _extract_master_bed_breakpoints(fusion_metadata: FusionMetadata, work_dir: O
             return breakpoints
         
         # Find reads that have both primary and supplementary alignments
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Finding reads with both primary and supplementary alignments")
+        read_id_start = time.time()
         primary_read_ids = set(primary_df["read_id"].unique())
         supplementary_read_ids = set(supplementary_df["read_id"].unique())
         reads_with_both = primary_read_ids & supplementary_read_ids
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Read ID intersection complete ({time.time() - read_id_start:.2f}s): {len(reads_with_both)} reads with both")
         
         logger.debug(
             f"Found {len(reads_with_both)} reads with both primary and supplementary alignments "
@@ -3013,8 +3042,11 @@ def _extract_master_bed_breakpoints(fusion_metadata: FusionMetadata, work_dir: O
             return breakpoints
         
         # Filter to only reads with both primary and supplementary alignments
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Filtering to reads with both alignments")
+        filter_both_start = time.time()
         primary_filtered = primary_df[primary_df["read_id"].isin(reads_with_both)].copy()
         supplementary_filtered = supplementary_df[supplementary_df["read_id"].isin(reads_with_both)].copy()
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Filter complete ({time.time() - filter_both_start:.2f}s): {len(primary_filtered)} primary, {len(supplementary_filtered)} supplementary")
         
         # For each read, create breakpoint pairs (primary + supplementary)
         # A breakpoint pair represents a potential rearrangement event
@@ -3025,9 +3057,14 @@ def _extract_master_bed_breakpoints(fusion_metadata: FusionMetadata, work_dir: O
         breakpoint_pairs = []
         
         # Group by read_id for efficient lookup
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Grouping master BED data by read_id ({len(primary_filtered)} primary, {len(supplementary_filtered)} supplementary rows)")
+        groupby_start = time.time()
         primary_by_read = primary_filtered.groupby("read_id", observed=True)
         supplementary_by_read = supplementary_filtered.groupby("read_id", observed=True)
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Groupby complete ({time.time() - groupby_start:.2f}s): {len(reads_with_both)} reads with both alignments")
         
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Creating breakpoint pairs for {len(reads_with_both)} reads")
+        pair_creation_start = time.time()
         for read_id in reads_with_both:
             # Get all primary and supplementary alignments for this read
             read_primaries = primary_by_read.get_group(read_id) if read_id in primary_by_read.groups else pd.DataFrame()
@@ -3040,14 +3077,19 @@ def _extract_master_bed_breakpoints(fusion_metadata: FusionMetadata, work_dir: O
             pairs = _create_breakpoint_pairs_vectorized(read_primaries, read_supplementaries, read_id)
             breakpoint_pairs.extend(pairs)
         
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Created {len(breakpoint_pairs)} breakpoint pairs ({time.time() - pair_creation_start:.2f}s)")
+        
         if not breakpoint_pairs:
             logger.debug("No breakpoint pairs created")
             return breakpoints
         
         # Cluster similar breakpoint pairs using DBSCAN (much faster than O(n²) nested loops)
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Clustering {len(breakpoint_pairs)} breakpoint pairs using DBSCAN")
+        clustering_start = time.time()
         clustered_pairs = _cluster_breakpoint_pairs_dbscan(
             breakpoint_pairs, cluster_distance=5000, min_read_support=min_read_support
         )
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Clustering complete ({time.time() - clustering_start:.2f}s): {len(clustered_pairs)} clustered pairs")
         
         # Filter for breakpoint pairs with sufficient read support (already filtered in DBSCAN, but keep for safety)
         supported_pairs = [
@@ -3055,6 +3097,7 @@ def _extract_master_bed_breakpoints(fusion_metadata: FusionMetadata, work_dir: O
             if p["read_count"] >= min_read_support
         ]
         
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Total extraction time: {time.time() - extract_start:.2f}s")
         if len(supported_pairs) > 0:
             logger.info(
                 f"Found {len(supported_pairs)} master BED breakpoint pairs "
@@ -3063,6 +3106,8 @@ def _extract_master_bed_breakpoints(fusion_metadata: FusionMetadata, work_dir: O
             )
             
             # Extract breakpoint coordinates for both primary and supplementary regions
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Extracting breakpoint coordinates for {len(supported_pairs)} supported pairs")
+            coord_extract_start = time.time()
             for pair in supported_pairs:
                 # Add primary region breakpoint
                 if pair["primary_start"] > 0 and pair["primary_end"] > pair["primary_start"]:
@@ -3083,6 +3128,7 @@ def _extract_master_bed_breakpoints(fusion_metadata: FusionMetadata, work_dir: O
                         "read_count": pair["read_count"],
                         "source": "master_bed"
                     })
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Coordinate extraction complete ({time.time() - coord_extract_start:.2f}s): {len(breakpoints)} breakpoints")
         else:
             # Log details for debugging if no supported pairs found
             if clustered_pairs:
@@ -3100,10 +3146,118 @@ def _extract_master_bed_breakpoints(fusion_metadata: FusionMetadata, work_dir: O
     return breakpoints
 
 
+def _extract_master_bed_breakpoints_incremental(
+    fusion_metadata: FusionMetadata,
+    work_dir: str,
+    sample_id: str,
+    new_master_bed_files: Set[str],
+    min_read_support: int = 3,
+) -> List[Dict[str, Any]]:
+    """
+    Incrementally extract master BED breakpoints by processing only NEW staging files
+    and merging with existing breakpoints from the previous BED file.
+    
+    This avoids reprocessing the entire accumulated dataset (which can be 1M+ rows)
+    by only processing the new data and merging results.
+    
+    Args:
+        fusion_metadata: FusionMetadata object
+        work_dir: Working directory
+        sample_id: Sample ID
+        new_master_bed_files: Set of new staging file paths to process
+        min_read_support: Minimum read support threshold
+        
+    Returns:
+        List of all breakpoint dictionaries (existing + new)
+    """
+    print(f"[{_debug_timestamp()}] [FUSION DEBUG] Starting incremental master BED breakpoint extraction")
+    incremental_start = time.time()
+    
+    # Load existing breakpoints from the previous BED file (if it exists)
+    existing_breakpoints = []
+    analysis_counter = _load_analysis_counter(sample_id, work_dir)
+    sample_dir = os.path.join(work_dir, sample_id)
+    bed_dir = os.path.join(sample_dir, "bed_files")
+    previous_bed_file = os.path.join(bed_dir, f"master_bed_breakpoints_{analysis_counter:03d}.bed")
+    
+    if os.path.exists(previous_bed_file):
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] Loading existing breakpoints from {os.path.basename(previous_bed_file)}")
+        # Parse existing BED file to get breakpoint coordinates
+        # BED format: chrom, start, end, name, score, strand
+        try:
+            with open(previous_bed_file, "r") as f:
+                for line in f:
+                    if line.strip():
+                        parts = line.strip().split("\t")
+                        if len(parts) >= 3:
+                            # Extract coordinates (BED file has expanded regions, need to get midpoint)
+                            chrom = parts[0]
+                            bed_start = int(parts[1])
+                            bed_end = int(parts[2])
+                            # Calculate midpoint (original breakpoint location)
+                            midpoint = (bed_start + bed_end) // 2
+                            # Estimate original breakpoint (region is +/- bin_width around breakpoint)
+                            bin_width = _get_cnv_bin_width(work_dir, sample_id)
+                            original_start = max(0, midpoint - bin_width)
+                            original_end = midpoint + bin_width
+                            existing_breakpoints.append({
+                                "chromosome": chrom,
+                                "start": original_start,
+                                "end": original_end,
+                                "read_count": 1,  # Unknown from BED file, use minimum
+                                "source": "master_bed"
+                            })
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Loaded {len(existing_breakpoints)} existing breakpoints")
+        except Exception as e:
+            logger.warning(f"Could not load existing breakpoints from {previous_bed_file}: {e}")
+    
+    # Process only NEW staging files
+    print(f"[{_debug_timestamp()}] [FUSION DEBUG] Processing {len(new_master_bed_files)} new staging files")
+    new_data_start = time.time()
+    new_master_bed_dfs = []
+    for staging_file in new_master_bed_files:
+        try:
+            df = pd.read_parquet(staging_file)
+            if not df.empty:
+                new_master_bed_dfs.append(df)
+        except Exception as e:
+            logger.warning(f"Error loading staging file {os.path.basename(staging_file)}: {e}")
+    
+    if not new_master_bed_dfs:
+        print(f"[{_debug_timestamp()}] [FUSION DEBUG] No new data to process - returning existing breakpoints")
+        return existing_breakpoints
+    
+    # Combine new staging files
+    new_master_bed_df = pd.concat(new_master_bed_dfs, ignore_index=True) if len(new_master_bed_dfs) > 1 else new_master_bed_dfs[0]
+    print(f"[{_debug_timestamp()}] [FUSION DEBUG] Combined new data: {len(new_master_bed_df)} rows ({time.time() - new_data_start:.2f}s)")
+    
+    # Create temporary FusionMetadata with only new data for extraction
+    temp_metadata = FusionMetadata(
+        sample_id=sample_id,
+        file_path="incremental",
+        analysis_timestamp=time.time(),
+        target_panel=fusion_metadata.target_panel,
+        fusion_data={"master_bed_candidates": new_master_bed_df},
+    )
+    
+    # Extract breakpoints from new data only
+    print(f"[{_debug_timestamp()}] [FUSION DEBUG] Extracting breakpoints from new data")
+    new_breakpoints = _extract_master_bed_breakpoints(temp_metadata, work_dir=work_dir, min_read_support=min_read_support)
+    print(f"[{_debug_timestamp()}] [FUSION DEBUG] Extracted {len(new_breakpoints)} new breakpoints")
+    
+    # Merge new breakpoints with existing ones
+    # For now, simple merge (could be optimized to cluster nearby breakpoints)
+    all_breakpoints = existing_breakpoints + new_breakpoints
+    print(f"[{_debug_timestamp()}] [FUSION DEBUG] Incremental extraction complete ({time.time() - incremental_start:.2f}s): {len(existing_breakpoints)} existing + {len(new_breakpoints)} new = {len(all_breakpoints)} total")
+    
+    return all_breakpoints
+
+
 def _generate_master_bed_breakpoint_bed(
     sample_id: str,
     fusion_metadata: FusionMetadata,
     work_dir: str,
+    new_master_bed_files: Optional[Set[str]] = None,
 ) -> None:
     """
     Generate BED file for master BED breakpoints (new target regions from supplementary alignments).
@@ -3116,8 +3270,23 @@ def _generate_master_bed_breakpoint_bed(
         work_dir: Working directory
     """
     try:
-        # Extract master BED breakpoints (load from Parquet files)
-        master_bed_breakpoints = _extract_master_bed_breakpoints(fusion_metadata, work_dir=work_dir)
+        # Extract master BED breakpoints
+        # For large datasets, use incremental approach: only process new staging files
+        # and merge with existing breakpoints from previous BED file
+        master_bed_candidates = _load_fusion_candidates_parquet("master_bed_candidates", work_dir, sample_id)
+        master_bed_size = len(master_bed_candidates) if master_bed_candidates is not None and not master_bed_candidates.empty else 0
+        
+        # For large datasets (>200k rows), use incremental extraction to avoid 2+ minute delays
+        # Only process NEW staging files and merge with existing breakpoints
+        if master_bed_size > 200000 and new_master_bed_files:
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Using incremental master BED breakpoint extraction ({len(new_master_bed_files)} new files)")
+            master_bed_breakpoints = _extract_master_bed_breakpoints_incremental(
+                fusion_metadata, work_dir, sample_id, new_master_bed_files
+            )
+        else:
+            # For smaller datasets, process all data (faster for small datasets)
+            print(f"[{_debug_timestamp()}] [FUSION DEBUG] Using full master BED breakpoint extraction ({master_bed_size:,} rows)")
+            master_bed_breakpoints = _extract_master_bed_breakpoints(fusion_metadata, work_dir=work_dir)
         
         if not master_bed_breakpoints:
             logger.debug("No master BED breakpoints found - skipping BED file generation")
