@@ -13,6 +13,7 @@ Key functions:
 """
 
 import os
+import sys
 import tempfile
 import logging
 import time
@@ -778,8 +779,6 @@ def fusion_handler(job, work_dir=None, target_panel=None):
                     # Note: Multiple workers might see threshold reached, but only one will actually accumulate
                     # (the lock ensures atomicity, and re-check inside lock prevents duplicate work)
                     if should_accumulate:
-                        from datetime import datetime
-                        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [FUSION DEBUG] 🚀 Triggering accumulation attempt for {sample_id}")
                         logger.info("Fusion accumulation threshold reached - attempting batch accumulation")
                         # Get reference from job metadata if available
                         reference = job.context.metadata.get("reference")
@@ -793,18 +792,12 @@ def fusion_handler(job, work_dir=None, target_panel=None):
                             )
                             # If another worker already accumulated, this is fine - just log it
                             if accumulation_result.get("status") == "below_threshold":
-                                from datetime import datetime
-                                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [FUSION DEBUG] ⏭️  Accumulation skipped for {sample_id} - another worker processed it")
                                 logger.debug(f"Accumulation skipped - another worker likely already processed it")
                             else:
-                                from datetime import datetime
-                                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [FUSION DEBUG] ✅ Accumulation result for {sample_id}: {accumulation_result.get('status')}")
                                 logger.info(f"Fusion accumulation result: {accumulation_result}")
                             job.context.add_metadata("fusion_accumulation_result", accumulation_result)
                         except TimeoutError as e:
                             # Lock timeout - another worker is likely accumulating, skip this attempt
-                            from datetime import datetime
-                            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [FUSION DEBUG] ⏱️  Accumulation lock timeout for {sample_id} - another worker is accumulating")
                             logger.debug(f"Could not acquire accumulation lock (another worker likely accumulating): {e}")
                             job.context.add_metadata("fusion_accumulation_result", {"status": "lock_timeout", "skipped": True})
                     
@@ -856,3 +849,234 @@ def fusion_handler(job, work_dir=None, target_panel=None):
             print(f"TRACEBACK: {traceback.format_exc()}", file=sys.stderr)
 
         job.context.add_error("fusion_analysis", error_msg)
+
+
+def _get_available_panels() -> List[str]:
+    """Get list of available panels from resources directory."""
+    panels = ["rCNS2", "AML", "PanCan"]  # Built-in panels
+    
+    try:
+        from pathlib import Path
+        # Look for the resources directory relative to this file
+        current_file = Path(__file__)
+        resources_dir = current_file.parent.parent.parent / "robin" / "resources"
+        
+        if resources_dir.exists():
+            # Look for custom panels (files ending with _panel_name_uniq.bed)
+            for bed_file in resources_dir.glob("*_panel_name_uniq.bed"):
+                panel_name = bed_file.stem.replace("_panel_name_uniq", "")
+                if panel_name not in panels:
+                    panels.append(panel_name)
+            
+            panels.sort()
+        
+    except Exception:
+        # Fallback to built-in panels only
+        pass
+    
+    return panels
+
+
+if __name__ == "__main__":
+    """
+    Standalone CLI for fusion analysis testing.
+    
+    Usage:
+        # Analyze a single BAM file
+        python -m robin.analysis.fusion_analysis file.bam --target-panel rCNS2 --work-dir output/
+        
+        # Analyze all BAM files in a folder
+        python -m robin.analysis.fusion_analysis /path/to/bam/folder --target-panel rCNS2 --work-dir output/
+        
+        # Analyze specific BAM files
+        python -m robin.analysis.fusion_analysis file1.bam file2.bam --target-panel rCNS2 --work-dir output/
+    """
+    import argparse
+    import glob
+    from pathlib import Path
+    
+    parser = argparse.ArgumentParser(
+        description="Standalone fusion analysis for BAM files",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Analyze a single BAM file
+  python -m robin.analysis.fusion_analysis sample.bam --target-panel rCNS2 --work-dir output/
+  
+  # Analyze all BAM files in a folder
+  python -m robin.analysis.fusion_analysis /path/to/bam/folder --target-panel rCNS2 --work-dir output/
+  
+  # Analyze multiple specific BAM files
+  python -m robin.analysis.fusion_analysis file1.bam file2.bam file3.bam --target-panel AML --work-dir output/
+  
+  # With reference genome
+  python -m robin.analysis.fusion_analysis folder/ --target-panel rCNS2 --work-dir output/ --reference /path/to/reference.fa
+        """
+    )
+    
+    parser.add_argument(
+        "input",
+        nargs="+",
+        help="BAM file(s) or folder containing BAM files to analyze"
+    )
+    
+    parser.add_argument(
+        "--target-panel",
+        type=str,
+        choices=_get_available_panels(),
+        required=True,
+        help=f"Target gene panel for fusion analysis. Available: {', '.join(_get_available_panels())}"
+    )
+    
+    parser.add_argument(
+        "--work-dir",
+        type=str,
+        default="fusion_output",
+        help="Working directory for output files (default: fusion_output)"
+    )
+    
+    parser.add_argument(
+        "--reference",
+        type=str,
+        help="Path to reference genome FASTA file (optional, for master BED generation)"
+    )
+    
+    parser.add_argument(
+        "--sample-id",
+        type=str,
+        help="Sample ID to use (default: auto-detect from first BAM file name)"
+    )
+    
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Enable verbose logging"
+    )
+    
+    args = parser.parse_args()
+    
+    # Set up logging
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    logger = logging.getLogger("fusion_analysis_standalone")
+    
+    # Collect BAM files
+    bam_files = []
+    for input_path in args.input:
+        path = Path(input_path)
+        if path.is_file():
+            if path.suffix.lower() == ".bam":
+                bam_files.append(str(path))
+            else:
+                logger.warning(f"Skipping non-BAM file: {input_path}")
+        elif path.is_dir():
+            # Find all BAM files in directory
+            bam_files.extend(glob.glob(str(path / "*.bam")))
+        else:
+            logger.warning(f"Path does not exist: {input_path}")
+    
+    if not bam_files:
+        logger.error("No BAM files found to process!")
+        sys.exit(1)
+    
+    logger.info(f"Found {len(bam_files)} BAM file(s) to process")
+    
+    # Expand reference path if provided
+    reference = None
+    if args.reference:
+        reference = os.path.expanduser(args.reference)
+        if not os.path.exists(reference):
+            logger.error(f"Reference genome file not found: {reference}")
+            sys.exit(1)
+    
+    # Create work directory
+    work_dir = os.path.expanduser(args.work_dir)
+    os.makedirs(work_dir, exist_ok=True)
+    logger.info(f"Using work directory: {work_dir}")
+    
+    # Prepare metadata for each BAM file
+    metadata_list = []
+    sample_id = args.sample_id
+    
+    for bam_path in bam_files:
+        # Check for supplementary reads
+        logger.info(f"Checking {os.path.basename(bam_path)} for supplementary reads...")
+        has_supplementary = has_supplementary_alignments(bam_path)
+        
+        if not has_supplementary:
+            logger.warning(f"No supplementary reads found in {os.path.basename(bam_path)} - will be skipped")
+        
+        # Get supplementary read IDs
+        supplementary_read_ids = []
+        if has_supplementary:
+            try:
+                supplementary_read_ids = list(find_reads_with_supplementary(bam_path))
+                logger.info(f"Found {len(supplementary_read_ids)} reads with supplementary alignments")
+            except Exception as e:
+                logger.warning(f"Error finding supplementary reads: {e}")
+                has_supplementary = False
+        
+        # Auto-detect sample ID from first file if not provided
+        if sample_id is None:
+            # Extract sample ID from filename (remove .bam extension and common prefixes)
+            filename = os.path.basename(bam_path)
+            sample_id = filename.replace(".bam", "").replace(".BAM", "")
+            # Remove common prefixes
+            for prefix in ["sample_", "Sample_", "SAMPLE_"]:
+                if sample_id.startswith(prefix):
+                    sample_id = sample_id[len(prefix):]
+            logger.info(f"Auto-detected sample ID: {sample_id}")
+        
+        metadata = {
+            "sample_id": sample_id,
+            "has_supplementary_reads": has_supplementary,
+            "supplementary_read_ids": supplementary_read_ids,
+            "file_path": bam_path,
+        }
+        metadata_list.append(metadata)
+    
+    # Process all files
+    logger.info(f"Starting fusion analysis for sample: {sample_id}")
+    logger.info(f"Target panel: {args.target_panel}")
+    
+    try:
+        result = process_multiple_files(
+            bam_paths=bam_files,
+            metadata_list=metadata_list,
+            work_dir=work_dir,
+            logger=logger,
+            target_panel=args.target_panel,
+            reference=reference
+        )
+        
+        if result.get("error_message"):
+            logger.error(f"Analysis failed: {result['error_message']}")
+            sys.exit(1)
+        
+        # Print summary
+        print("\n" + "="*60)
+        print("FUSION ANALYSIS COMPLETE")
+        print("="*60)
+        print(f"Sample ID: {result.get('sample_id', 'unknown')}")
+        print(f"Files processed: {result.get('files_processed', 0)}/{result.get('total_files', 0)}")
+        print(f"Files with supplementary reads: {result.get('files_with_supplementary', 0)}")
+        print(f"Target fusion candidates: {result.get('fusion_data', {}).get('target_candidates_count', 0)}")
+        print(f"Genome-wide fusion candidates: {result.get('fusion_data', {}).get('genome_wide_candidates_count', 0)}")
+        print(f"\nOutput files:")
+        if result.get('target_fusion_path'):
+            print(f"  - Target fusions: {result['target_fusion_path']}")
+        if result.get('genome_wide_fusion_path'):
+            print(f"  - Genome-wide fusions: {result['genome_wide_fusion_path']}")
+        print("="*60)
+        
+    except KeyboardInterrupt:
+        logger.info("Analysis interrupted by user")
+        sys.exit(130)
+    except Exception as e:
+        logger.error(f"Error during analysis: {e}", exc_info=True)
+        sys.exit(1)

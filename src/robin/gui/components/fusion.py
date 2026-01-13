@@ -2710,39 +2710,17 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             # Load target panel processed
             target_file = sample_dir / "fusion_candidates_master_processed.pkl"
             genome_file = sample_dir / "fusion_candidates_all_processed.pkl"
-            master_bed_file = sample_dir / "fusion_candidates_master_bed.csv"
+            # Master BED CSV file loading has been deprecated
             
             logging.info(f"[Fusion] Target file: {target_file}")
             logging.info(f"[Fusion] Genome file: {genome_file}")
-            logging.info(f"[Fusion] Master BED file: {master_bed_file}")
 
             t = _load_processed_pickle(target_file)
             g = _load_processed_pickle(genome_file)
             
-            # Load master BED candidates (CSV format)
+            # Master BED CSV loading has been deprecated - the table is no longer displayed in the GUI
+            # The Parquet file (master_bed_candidates.parquet) is still used for BED generation
             master_bed_df = None
-            if master_bed_file.exists():
-                try:
-                    # Specify dtypes to avoid DtypeWarning for mixed-type columns
-                    # Columns 12 and 13 are is_secondary and is_supplementary (boolean, but may have mixed types)
-                    master_bed_df = pd.read_csv(
-                        master_bed_file,
-                        dtype={
-                            'is_secondary': 'object',  # Allow mixed types (True/False/1/0/NaN)
-                            'is_supplementary': 'object',  # Allow mixed types (True/False/1/0/NaN)
-                            'mapping_quality': 'float64',  # May have NaN values
-                            'reference_start': 'int64',
-                            'reference_end': 'int64',
-                            'read_start': 'float64',  # May have NaN values
-                            'read_end': 'float64',  # May have NaN values
-                            'mapping_span': 'float64',  # May have NaN values
-                        },
-                        low_memory=False
-                    )
-                    logging.info(f"[Fusion] Loaded {len(master_bed_df)} master BED candidates")
-                except Exception as e:
-                    logging.warning(f"[Fusion] Failed to load master BED file: {e}")
-                    master_bed_df = None
             
             # Apply breakpoint validation if enabled
             if USE_BREAKPOINT_VALIDATION:
@@ -2844,7 +2822,8 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             # Get file modification times
             target_mtime = target_file.stat().st_mtime if target_file.exists() else None
             genome_mtime = genome_file.stat().st_mtime if genome_file.exists() else None
-            master_bed_mtime = master_bed_file.stat().st_mtime if master_bed_file.exists() else None
+            # Master BED CSV file has been deprecated - no longer track mtime
+            master_bed_mtime = None
             
             # Create data hashes
             target_data_hash = _create_data_hash(t) if t is not None else None
@@ -3214,48 +3193,22 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 state["master_bed"]["data"] = master_bed_df
                 state["master_bed"]["mtime"] = master_bed_mtime
                 
-                # Update summary label (quick estimate to avoid blocking)
+                # Master BED summary label has been deprecated
                 try:
                     if "summary" in state and state["summary"].get("master_bed_lbl"):
-                        # Try to load pre-computed summary file for accurate count
-                        summary_file = sample_dir / "master_bed_events_summary.csv"
-                        event_count = 0
-                        if summary_file.exists():
-                            try:
-                                summary_df = pd.read_csv(summary_file)
-                                event_count = len(summary_df) if not summary_df.empty else 0
-                            except Exception:
-                                # Fallback to estimate if file can't be read
-                                if master_bed_df is not None and not master_bed_df.empty:
-                                    unique_reads = master_bed_df["read_id"].nunique() if "read_id" in master_bed_df.columns else 0
-                                    event_count = min(unique_reads // 2, len(master_bed_df) // 10) if unique_reads > 0 else 0
-                        elif master_bed_df is not None and not master_bed_df.empty:
-                            # Fallback to estimate if summary file doesn't exist
-                            unique_reads = master_bed_df["read_id"].nunique() if "read_id" in master_bed_df.columns else 0
-                            event_count = min(unique_reads // 2, len(master_bed_df) // 10) if unique_reads > 0 else 0
-                        
-                        state["summary"]["master_bed_lbl"].text = f"Master BED: {event_count} events"
+                        state["summary"]["master_bed_lbl"].text = "Master BED: (deprecated)"
                 except Exception:
                     pass
                 
-                # Update table
+                # Master BED table display has been deprecated
                 try:
                     state["master_bed"]["table_container"].clear()
                     state["master_bed"]["status_container"].clear()
+                    with state["master_bed"]["status_container"].classes("w-full"):
+                        ui.label("Master BED table display has been deprecated").classes("text-gray-500 text-sm")
+                        ui.label("(Data is still processed and used for BED generation)").classes("text-gray-400 text-xs")
                 except Exception:
                     pass
-                
-                if master_bed_df is not None and not master_bed_df.empty:
-                    # Pass sample_dir for loading pre-computed summary file
-                    state["master_bed"]["table"] = _make_master_bed_summary_table(
-                        state["master_bed"]["table_container"],
-                        master_bed_df,
-                        sample_dir=sample_dir,
-                    )
-                else:
-                    with state["master_bed"]["status_container"].classes("w-full"):
-                        ui.label("No master BED fusion candidates found").classes("text-gray-600")
-                        ui.label("(Master BED file not found or empty)").classes("text-gray-500 text-xs")
         except Exception as e:
             logging.exception(f"[Fusion] Refresh failed: {e}")
 
@@ -3274,9 +3227,8 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 state["summary"]["genome_lbl"] = ui.label(
                     "Genome-wide: -- pairs, -- groups"
                 ).classes("text-sm text-gray-600")
-                state["summary"]["master_bed_lbl"] = ui.label(
-                    "Master BED: -- candidates"
-                ).classes("text-sm text-gray-600")
+                # Master BED label has been deprecated - hide it
+                state["summary"]["master_bed_lbl"] = ui.label("Master BED: (deprecated)").classes("hidden")
 
         # Target Panel
         ui.label("Target Panel").classes("text-base font-medium mt-1 mb-1")
@@ -3295,16 +3247,22 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
         state["genome"]["table_container"] = ui.column().classes("w-full mt-2")
         state["genome"]["status_container"] = ui.column().classes("w-full mt-2")
 
-        # Master BED Targets
-        ui.separator()
-        ui.label("Master BED Targets").classes("text-base font-medium mt-2 mb-1")
-        ui.label(
-            "Detected breakpoint events from high-quality supplementary mappings (MapQ ≥ 50). "
-            "Each event represents a genomic region supported by multiple reads (minimum 3 reads). "
-            "Events are grouped by chromosome and position."
-        ).classes("text-xs text-gray-600 mb-2")
-        state["master_bed"]["table_container"] = ui.column().classes("w-full")
-        state["master_bed"]["status_container"] = ui.column().classes("w-full mt-2")
+        # Master BED Targets section has been deprecated
+        # The table display has been removed, but data is still processed for BED generation
+        # Uncomment the section below if you need to re-enable it:
+        # ui.separator()
+        # ui.label("Master BED Targets").classes("text-base font-medium mt-2 mb-1")
+        # ui.label(
+        #     "Detected breakpoint events from high-quality supplementary mappings (MapQ ≥ 50). "
+        #     "Each event represents a genomic region supported by multiple reads (minimum 3 reads). "
+        #     "Events are grouped by chromosome and position."
+        # ).classes("text-xs text-gray-600 mb-2")
+        # state["master_bed"]["table_container"] = ui.column().classes("w-full")
+        # state["master_bed"]["status_container"] = ui.column().classes("w-full mt-2")
+        
+        # Keep containers initialized for backward compatibility (in case code references them)
+        state["master_bed"]["table_container"] = ui.column().classes("w-full hidden")
+        state["master_bed"]["status_container"] = ui.column().classes("w-full mt-2 hidden")
 
     # Initial refresh and timer
     try:
@@ -3333,45 +3291,9 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                         "genome_lbl"
                     ].text = f"Genome-wide: {g_pairs0} pairs, {g_groups0} groups"
                     
-                    # Load master BED data for summary
-                    master_bed_file0 = sample_dir / "fusion_candidates_master_bed.csv"
-                    master_bed_count0 = 0
-                    if master_bed_file0.exists():
-                        try:
-                            # Specify dtypes to avoid DtypeWarning for mixed-type columns
-                            master_bed_df0 = pd.read_csv(
-                                master_bed_file0,
-                                dtype={
-                                    'is_secondary': 'object',  # Allow mixed types (True/False/1/0/NaN)
-                                    'is_supplementary': 'object',  # Allow mixed types (True/False/1/0/NaN)
-                                    'mapping_quality': 'float64',  # May have NaN values
-                                    'reference_start': 'int64',
-                                    'reference_end': 'int64',
-                                    'read_start': 'float64',  # May have NaN values
-                                    'read_end': 'float64',  # May have NaN values
-                                    'mapping_span': 'float64',  # May have NaN values
-                                },
-                                low_memory=False
-                            )
-                            if not master_bed_df0.empty:
-                                # Try to load pre-computed summary file for accurate count
-                                summary_file0 = sample_dir / "master_bed_events_summary.csv"
-                                if summary_file0.exists():
-                                    try:
-                                        summary_df0 = pd.read_csv(summary_file0)
-                                        master_bed_count0 = len(summary_df0) if not summary_df0.empty else 0
-                                    except Exception:
-                                        # Fallback to estimate if file can't be read
-                                        unique_reads = master_bed_df0["read_id"].nunique() if "read_id" in master_bed_df0.columns else 0
-                                        master_bed_count0 = min(unique_reads // 2, len(master_bed_df0) // 10) if unique_reads > 0 else 0
-                                else:
-                                    # Fallback to estimate if summary file doesn't exist
-                                    unique_reads = master_bed_df0["read_id"].nunique() if "read_id" in master_bed_df0.columns else 0
-                                    master_bed_count0 = min(unique_reads // 2, len(master_bed_df0) // 10) if unique_reads > 0 else 0
-                        except Exception:
-                            pass
+                    # Master BED summary has been deprecated
                     try:
-                        state["summary"]["master_bed_lbl"].text = f"Master BED: {master_bed_count0} events"
+                        state["summary"]["master_bed_lbl"].text = "Master BED: (deprecated)"
                     except Exception:
                         pass
                 except Exception:
