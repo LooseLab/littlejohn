@@ -36,6 +36,8 @@ import pandas as pd
 import pysam
 import networkx as nx
 from sklearn.cluster import DBSCAN
+import pyarrow.parquet as pq
+import shutil
 
 # Local imports
 from robin.classification_config import (
@@ -1538,10 +1540,41 @@ def _get_lock_file(work_dir: str, sample_id: str, lock_type: str = "counter") ->
 
 
 def _get_pending_count(work_dir: str, sample_id: str) -> int:
-    """Get count of files pending accumulation (thread-safe)"""
+    """Get count of files pending accumulation (thread-safe)."""
     staging_dir = _get_staging_dir(work_dir, sample_id)
+    count_file = os.path.join(staging_dir, "pending_count.txt")
+    try:
+        if os.path.exists(count_file):
+            with open(count_file, "r") as f:
+                return int(f.read().strip())
+    except (ValueError, IOError) as e:
+        logger.debug(f"Could not read pending_count for {sample_id}: {e}")
+    # Fallback to filesystem scan if counter missing/corrupt
     staging_files = glob.glob(os.path.join(staging_dir, "target_*.parquet"))
     return len(staging_files)
+
+
+def _set_pending_count(work_dir: str, sample_id: str, count: int) -> None:
+    """Set the pending staging file count (thread-safe)."""
+    lock_file = _get_lock_file(work_dir, sample_id, "pending")
+    staging_dir = _get_staging_dir(work_dir, sample_id)
+    count_file = os.path.join(staging_dir, "pending_count.txt")
+    with FileLock(lock_file, timeout=30.0):
+        with open(count_file, "w") as f:
+            f.write(str(max(0, int(count))))
+
+
+def _increment_pending_count(work_dir: str, sample_id: str, delta: int = 1) -> int:
+    """Increment the pending staging count and return the new value."""
+    lock_file = _get_lock_file(work_dir, sample_id, "pending")
+    staging_dir = _get_staging_dir(work_dir, sample_id)
+    count_file = os.path.join(staging_dir, "pending_count.txt")
+    with FileLock(lock_file, timeout=30.0):
+        current = _get_pending_count(work_dir, sample_id)
+        new_count = max(0, current + int(delta))
+        with open(count_file, "w") as f:
+            f.write(str(new_count))
+    return new_count
 
 
 def _atomic_counter_increment(work_dir: str, sample_id: str) -> int:
@@ -1673,7 +1706,7 @@ def process_bam_with_staging(
         # Check if accumulation should run
         # Note: This check is not atomic - multiple workers might see threshold reached
         # The actual accumulation function will re-check inside the lock to prevent duplicate work
-        pending_count = _get_pending_count(work_dir, sample_id)
+        pending_count = _increment_pending_count(work_dir, sample_id, delta=1)
         should_accumulate = pending_count >= batch_size
         
         logger.info(
@@ -1760,6 +1793,7 @@ def accumulate_fusion_candidates(
             target_files = sorted(glob.glob(os.path.join(staging_dir, "target_*.parquet")))
             genome_files = sorted(glob.glob(os.path.join(staging_dir, "genome_*.parquet")))
             master_bed_files = sorted(glob.glob(os.path.join(staging_dir, "master_bed_*.parquet")))
+            _set_pending_count(work_dir, sample_id, len(target_files))
             
             # Track which master_bed staging files are new (for incremental processing)
             # These are the files being accumulated in this batch - all of them are "new" for this accumulation
@@ -1856,61 +1890,23 @@ def accumulate_fusion_candidates(
             else:
                 logger.debug("No master BED staging files found")
             
-            # Load existing accumulated data directly from Parquet files (fast path)
-            # This avoids expensive JSON loading and DataFrame conversion
-            existing_load_start = time.time()
-            existing_target_df = _load_fusion_candidates_parquet("target_candidates", work_dir, sample_id)
-            existing_genome_df = _load_fusion_candidates_parquet("genome_wide_candidates", work_dir, sample_id)
-            existing_master_bed_df = _load_fusion_candidates_parquet("master_bed_candidates", work_dir, sample_id)
-            
-            # Merge with existing DataFrames (much faster than converting from lists)
-            # Handle case where batch is empty - just use existing data directly
-            if existing_target_df is not None and not existing_target_df.empty:
-                logger.info(f"Existing target data: {len(existing_target_df)} candidates")
-                if batch_target.empty:
-                    batch_target = existing_target_df.copy()
-                else:
-                    batch_target = pd.concat([existing_target_df, batch_target], ignore_index=True)
-            elif existing_target_df is not None and existing_target_df.empty:
-                # Existing file exists but is empty - keep batch data (if any)
-                logger.debug("Existing target Parquet file is empty")
-            
-            if existing_genome_df is not None and not existing_genome_df.empty:
-                logger.info(f"Existing genome-wide data: {len(existing_genome_df)} candidates")
-                if batch_genome.empty:
-                    batch_genome = existing_genome_df.copy()
-                else:
-                    batch_genome = pd.concat([existing_genome_df, batch_genome], ignore_index=True)
-            elif existing_genome_df is not None and existing_genome_df.empty:
-                # Existing file exists but is empty - keep batch data (if any)
-                logger.debug("Existing genome-wide Parquet file is empty")
-            
-            if existing_master_bed_df is not None and not existing_master_bed_df.empty:
-                logger.info(f"Existing master BED data: {len(existing_master_bed_df)} candidates")
-                if batch_master_bed.empty:
-                    batch_master_bed = existing_master_bed_df.copy()
-                else:
-                    batch_master_bed = pd.concat([existing_master_bed_df, batch_master_bed], ignore_index=True)
-            elif existing_master_bed_df is not None and existing_master_bed_df.empty:
-                # Existing file exists but is empty - keep batch data (if any)
-                logger.debug("Existing master BED Parquet file is empty")
-            
+            counts = _load_fusion_counts(work_dir, sample_id)
+            # Append batch to dataset (append-only, avoids re-reading full history)
+            batch_id = _extract_staging_batch_id(target_files)
+            _append_fusion_candidates_parquet(batch_target, "target_candidates", work_dir, sample_id, batch_id)
+            _append_fusion_candidates_parquet(batch_genome, "genome_wide_candidates", work_dir, sample_id, batch_id)
+            _append_fusion_candidates_parquet(batch_master_bed, "master_bed_candidates", work_dir, sample_id, batch_id)
+
+            counts["target_candidates"] = counts.get("target_candidates", 0) + len(batch_target)
+            counts["genome_wide_candidates"] = counts.get("genome_wide_candidates", 0) + len(batch_genome)
+            counts["master_bed_candidates"] = counts.get("master_bed_candidates", 0) + len(batch_master_bed)
+            _save_fusion_counts(work_dir, sample_id, counts)
+
             logger.info(
-                f"Final accumulated: {len(batch_target)} target, {len(batch_genome)} genome-wide, "
-                f"{len(batch_master_bed)} master BED candidates"
+                f"Final accumulated: {counts.get('target_candidates', 0)} target, "
+                f"{counts.get('genome_wide_candidates', 0)} genome-wide, "
+                f"{counts.get('master_bed_candidates', 0)} master BED candidates"
             )
-            
-            # Additional debug info for master BED
-            if batch_master_bed.empty:
-                logger.debug("Final batch_master_bed is empty - no master BED candidates to save")
-            else:
-                logger.debug(f"Final batch_master_bed has {len(batch_master_bed)} rows, columns: {list(batch_master_bed.columns)}")
-            
-            # Save directly to Parquet files (fast storage, no expensive to_dict conversion)
-            save_start = time.time()
-            _save_fusion_candidates_parquet(batch_target, "target_candidates", work_dir, sample_id)
-            _save_fusion_candidates_parquet(batch_genome, "genome_wide_candidates", work_dir, sample_id)
-            _save_fusion_candidates_parquet(batch_master_bed, "master_bed_candidates", work_dir, sample_id)
             
             # Create updated metadata (with empty lists - data is in Parquet files)
             # This keeps the metadata structure but avoids storing large lists in JSON
@@ -1925,9 +1921,9 @@ def accumulate_fusion_candidates(
                     "master_bed_candidates": [],  # Data stored in Parquet, not JSON
                 },
                 analysis_results={
-                    "target_candidates_count": len(batch_target),
-                    "genome_wide_candidates_count": len(batch_genome),
-                    "master_bed_candidates_count": len(batch_master_bed),
+                    "target_candidates_count": counts.get("target_candidates", 0),
+                    "genome_wide_candidates_count": counts.get("genome_wide_candidates", 0),
+                    "master_bed_candidates_count": counts.get("master_bed_candidates", 0),
                 },
                 processing_steps=["accumulated"],
             )
@@ -1961,6 +1957,7 @@ def accumulate_fusion_candidates(
                     os.remove(f)
                 except OSError as e:
                     logger.warning(f"Could not remove staging file {f}: {e}")
+            _set_pending_count(work_dir, sample_id, 0)
             
             elapsed = time.time() - start_time
             logger.info(
@@ -1972,9 +1969,9 @@ def accumulate_fusion_candidates(
             return {
                 "status": "success",
                 "files_processed": len(target_files),
-                "target_candidates": len(batch_target),
-                "genome_wide_candidates": len(batch_genome),
-                "master_bed_candidates": len(batch_master_bed),
+                "target_candidates": counts.get("target_candidates", 0),
+                "genome_wide_candidates": counts.get("genome_wide_candidates", 0),
+                "master_bed_candidates": counts.get("master_bed_candidates", 0),
                 "elapsed_time": elapsed,
             }
     
@@ -2056,39 +2053,30 @@ def process_bam_file(
             "master_bed_candidates": master_bed_candidates,
         }
 
-        # Store fusion data in metadata - APPEND to existing data, don't replace
-        if (
-            not hasattr(fusion_metadata, "fusion_data")
-            or fusion_metadata.fusion_data is None
-        ):
-            fusion_metadata.fusion_data = {}
-
-        # Ensure required keys exist
-        if "target_candidates" not in fusion_metadata.fusion_data:
-            fusion_metadata.fusion_data["target_candidates"] = []
-        if "genome_wide_candidates" not in fusion_metadata.fusion_data:
-            fusion_metadata.fusion_data["genome_wide_candidates"] = []
-
-        # Append new target candidates to existing ones
-        if target_candidates is not None:
-            new_target_records = target_candidates.to_dict("records")
-            fusion_metadata.fusion_data["target_candidates"].extend(new_target_records)
-
-        # Append new genome-wide candidates to existing ones
-        if genome_wide_candidates is not None:
-            new_genome_records = genome_wide_candidates.to_dict("records")
-            fusion_metadata.fusion_data["genome_wide_candidates"].extend(
-                new_genome_records
+        # Persist candidates to append-only datasets (avoid JSON bloat)
+        if work_dir and sample_id:
+            counts = _load_fusion_counts(work_dir, sample_id)
+            batch_id = _atomic_counter_increment(work_dir, sample_id)
+            _append_fusion_candidates_parquet(
+                target_candidates, "target_candidates", work_dir, sample_id, batch_id
             )
-        
-        # Store master BED candidates in metadata
-        if master_bed_candidates is not None:
-            if "master_bed_candidates" not in fusion_metadata.fusion_data:
-                fusion_metadata.fusion_data["master_bed_candidates"] = []
-            new_master_bed_records = master_bed_candidates.to_dict("records")
-            fusion_metadata.fusion_data["master_bed_candidates"].extend(
-                new_master_bed_records
+            _append_fusion_candidates_parquet(
+                genome_wide_candidates, "genome_wide_candidates", work_dir, sample_id, batch_id
             )
+            _append_fusion_candidates_parquet(
+                master_bed_candidates, "master_bed_candidates", work_dir, sample_id, batch_id
+            )
+            counts["target_candidates"] = counts.get("target_candidates", 0) + results["target_candidates_count"]
+            counts["genome_wide_candidates"] = counts.get("genome_wide_candidates", 0) + results["genome_wide_candidates_count"]
+            counts["master_bed_candidates"] = counts.get("master_bed_candidates", 0) + results["master_bed_candidates_count"]
+            _save_fusion_counts(work_dir, sample_id, counts)
+
+        # Keep metadata structure without embedding large candidate lists
+        fusion_metadata.fusion_data = {
+            "target_candidates": [],
+            "genome_wide_candidates": [],
+            "master_bed_candidates": [],
+        }
 
         # Save updated fusion metadata to disk
         if work_dir and sample_id:
@@ -3558,6 +3546,121 @@ def _get_parquet_paths(work_dir: str, sample_id: str) -> Dict[str, str]:
     }
 
 
+def _get_parquet_dataset_dir(work_dir: str, sample_id: str, candidate_type: str) -> str:
+    """Get directory for append-only Parquet dataset storage."""
+    sample_dir = os.path.join(work_dir, sample_id)
+    os.makedirs(sample_dir, exist_ok=True)
+    return os.path.join(sample_dir, f"{candidate_type}_dataset")
+
+
+def _migrate_legacy_parquet_to_dataset(work_dir: str, sample_id: str) -> None:
+    """Migrate legacy single-file Parquet into append-only dataset layout."""
+    for candidate_type in ["target_candidates", "genome_wide_candidates", "master_bed_candidates"]:
+        dataset_dir = _get_parquet_dataset_dir(work_dir, sample_id, candidate_type)
+        dataset_files = glob.glob(os.path.join(dataset_dir, "*.parquet"))
+        if dataset_files:
+            continue
+
+        legacy_path = _get_parquet_paths(work_dir, sample_id).get(candidate_type)
+        if not legacy_path or not os.path.exists(legacy_path):
+            continue
+
+        os.makedirs(dataset_dir, exist_ok=True)
+        part_path = os.path.join(dataset_dir, "part_legacy.parquet")
+        if not os.path.exists(part_path):
+            try:
+                shutil.copy2(legacy_path, part_path)
+                logger.info(
+                    f"Migrated legacy {candidate_type} parquet to dataset: {part_path}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Could not migrate legacy {candidate_type} parquet: {e}"
+                )
+
+
+def _extract_staging_batch_id(staging_files: List[str]) -> int:
+    """Extract a reasonable batch id from staging filenames."""
+    counters = []
+    for path in staging_files:
+        name = os.path.basename(path)
+        try:
+            counter_str = name.split("_", 1)[1].split(".", 1)[0]
+            counters.append(int(counter_str))
+        except (IndexError, ValueError):
+            continue
+    if counters:
+        return max(counters)
+    return int(time.time())
+
+
+def _append_fusion_candidates_parquet(
+    candidates_df: pd.DataFrame,
+    candidate_type: str,
+    work_dir: str,
+    sample_id: str,
+    batch_id: int,
+) -> None:
+    """Append candidates to an append-only Parquet dataset."""
+    if candidates_df is None or candidates_df.empty:
+        return
+    dataset_dir = _get_parquet_dataset_dir(work_dir, sample_id, candidate_type)
+    os.makedirs(dataset_dir, exist_ok=True)
+    part_path = os.path.join(dataset_dir, f"part_{batch_id:06d}.parquet")
+    if os.path.exists(part_path):
+        part_path = os.path.join(dataset_dir, f"part_{batch_id:06d}_{int(time.time())}.parquet")
+    candidates_df.to_parquet(part_path, index=False, engine="pyarrow")
+    logger.debug(f"Appended {len(candidates_df)} {candidate_type} to {part_path}")
+
+
+def _get_counts_path(work_dir: str, sample_id: str) -> str:
+    sample_dir = os.path.join(work_dir, sample_id)
+    os.makedirs(sample_dir, exist_ok=True)
+    return os.path.join(sample_dir, "fusion_counts.json")
+
+
+def _count_parquet_rows(paths: List[str]) -> int:
+    total = 0
+    for path in paths:
+        try:
+            total += pq.ParquetFile(path).metadata.num_rows
+        except Exception as e:
+            logger.debug(f"Could not count rows in {path}: {e}")
+    return total
+
+
+def _load_fusion_counts(work_dir: str, sample_id: str) -> Dict[str, int]:
+    counts_path = _get_counts_path(work_dir, sample_id)
+    if os.path.exists(counts_path):
+        try:
+            with open(counts_path, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.debug(f"Could not read fusion_counts for {sample_id}: {e}")
+    counts = {}
+    for candidate_type in ["target_candidates", "genome_wide_candidates", "master_bed_candidates"]:
+        dataset_dir = _get_parquet_dataset_dir(work_dir, sample_id, candidate_type)
+        dataset_files = sorted(glob.glob(os.path.join(dataset_dir, "*.parquet")))
+        if dataset_files:
+            counts[candidate_type] = _count_parquet_rows(dataset_files)
+            continue
+        legacy_path = _get_parquet_paths(work_dir, sample_id).get(candidate_type)
+        if legacy_path and os.path.exists(legacy_path):
+            counts[candidate_type] = _count_parquet_rows([legacy_path])
+        else:
+            counts[candidate_type] = 0
+    return counts
+
+
+def _save_fusion_counts(work_dir: str, sample_id: str, counts: Dict[str, int]) -> None:
+    counts_path = _get_counts_path(work_dir, sample_id)
+    try:
+        with open(counts_path, "w") as f:
+            json.dump(counts, f, indent=2)
+    except Exception as e:
+        logger.debug(f"Could not write fusion_counts for {sample_id}: {e}")
+
+
 def _save_fusion_candidates_parquet(
     candidates_df: pd.DataFrame,
     candidate_type: str,
@@ -3604,11 +3707,21 @@ def _load_fusion_candidates_parquet(
         DataFrame if file exists and is readable, None otherwise
     """
     try:
+        _migrate_legacy_parquet_to_dataset(work_dir, sample_id)
+        dataset_dir = _get_parquet_dataset_dir(work_dir, sample_id, candidate_type)
+        dataset_files = glob.glob(os.path.join(dataset_dir, "*.parquet"))
+        if dataset_files:
+            df = pd.read_parquet(dataset_dir, engine="pyarrow")
+            if df.empty:
+                logger.debug(f"Parquet dataset {dataset_dir} exists but is empty")
+                return None
+            logger.debug(f"Loaded {len(df)} {candidate_type} from dataset {dataset_dir}")
+            return df
+
         parquet_paths = _get_parquet_paths(work_dir, sample_id)
         parquet_path = parquet_paths.get(candidate_type)
-        
         if parquet_path and os.path.exists(parquet_path):
-            df = pd.read_parquet(parquet_path, engine='pyarrow')
+            df = pd.read_parquet(parquet_path, engine="pyarrow")
             if df.empty:
                 logger.debug(f"Parquet file {parquet_path} exists but is empty")
                 return None  # Treat empty file same as missing file

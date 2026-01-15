@@ -244,7 +244,7 @@ def is_resolution_sufficient(bin_width: int) -> bool:
 # Fusion Detection Configuration
 FUSION_DETECTION_THRESHOLDS = {
     "mapping_quality": {
-        "min_threshold": 39,  # Minimum mapping quality score
+        "min_threshold": 49,  # Minimum mapping quality score
         "description": "Minimum mapping quality to consider read alignment reliable"
     },
     "mapping_span": {
