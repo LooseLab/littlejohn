@@ -68,6 +68,19 @@ def json_serializable(obj):
         return obj
 
 
+def _get_fusion_batch_size(default: int = 10) -> int:
+    """
+    Get the workflow batch size for fusion jobs.
+    Falls back to a reasonable default if workflow config is unavailable.
+    """
+    try:
+        from robin.workflow_ray import BATCH_CONFIG
+
+        return int(BATCH_CONFIG.get("fusion", {}).get("max_batch_size", default))
+    except Exception:
+        return default
+
+
 def _merge_fusion_metadata(
     new_metadata: FusionMetadata, existing_metadata: Optional[Dict]
 ) -> FusionMetadata:
@@ -408,6 +421,7 @@ def process_multiple_files(bam_paths, metadata_list, work_dir, logger, target_pa
         processed_files = 0
         # Collect all supplementary read IDs across all BAM files for consolidated output
         all_supplementary_read_ids = set()
+        staging_batch_size = _get_fusion_batch_size()
         
         for i, (bam_path, metadata) in enumerate(zip(valid_bam_paths, valid_metadata_list)):
             logger.info(f"Processing BAM file {i+1}/{len(valid_bam_paths)}: {os.path.basename(bam_path)}")
@@ -453,7 +467,7 @@ def process_multiple_files(bam_paths, metadata_list, work_dir, logger, target_pa
                         has_supplementary=has_supplementary,
                         supplementary_read_ids=supplementary_read_ids,
                         work_dir=work_dir,
-                        batch_size=10,  # Accumulate every 10 files (reduces expensive operations)
+                        batch_size=staging_batch_size,
                     )
                     
                     if analysis_results.get("error_message"):
@@ -735,6 +749,7 @@ def fusion_handler(job, work_dir=None, target_panel=None):
 
                 # Use staging-based processing for performance
                 logger.info("Using fusion staging-based processing (fast path)")
+                staging_batch_size = _get_fusion_batch_size()
                 
                 # Create fusion metadata
                 sample_id = metadata.get("sample_id", "unknown")
@@ -758,7 +773,7 @@ def fusion_handler(job, work_dir=None, target_panel=None):
                         has_supplementary=has_supplementary,
                         supplementary_read_ids=supplementary_read_ids,
                         work_dir=work_dir,
-                        batch_size=10,
+                        batch_size=staging_batch_size,
                     )
                     
                     # Convert to result format
@@ -788,7 +803,7 @@ def fusion_handler(job, work_dir=None, target_panel=None):
                         
                         try:
                             accumulation_result = accumulate_fusion_candidates(
-                                work_dir, sample_id, target_panel, force=False, batch_size=10, reference=reference
+                                work_dir, sample_id, target_panel, force=False, batch_size=staging_batch_size, reference=reference
                             )
                             # If another worker already accumulated, this is fine - just log it
                             if accumulation_result.get("status") == "below_threshold":

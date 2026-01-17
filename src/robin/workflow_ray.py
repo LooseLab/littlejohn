@@ -188,7 +188,7 @@ BATCH_CONFIG: Dict[str, Dict[str, Any]] = {
     "mgmt": {"max_batch_size": 20, "timeout_seconds": 2},
     "cnv": {"max_batch_size": 50, "timeout_seconds": 2},
     "target": {"max_batch_size": 100, "timeout_seconds": 10},
-    "fusion": {"max_batch_size": 20, "timeout_seconds": 2},
+    "fusion": {"max_batch_size": 50, "timeout_seconds": 2},
     "sturgeon": {"max_batch_size": 20, "timeout_seconds": 2},
     "nanodx": {"max_batch_size": 20, "timeout_seconds": 2},
     "pannanodx": {"max_batch_size": 20, "timeout_seconds": 2},
