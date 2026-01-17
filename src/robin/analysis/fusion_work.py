@@ -2544,6 +2544,8 @@ def _create_breakpoint_pairs_vectorized(
         primary_cols.append("mapping_quality")
     if "mapping_span" in primary_df.columns:
         primary_cols.append("mapping_span")
+    if "strand" in primary_df.columns:
+        primary_cols.append("strand")
     
     # Prepare supplementary alignments
     supp_cols = ["reference_id", "reference_start", "reference_end"]
@@ -2551,6 +2553,8 @@ def _create_breakpoint_pairs_vectorized(
         supp_cols.append("mapping_quality")
     if "mapping_span" in supplementary_df.columns:
         supp_cols.append("mapping_span")
+    if "strand" in supplementary_df.columns:
+        supp_cols.append("strand")
     
     # Select only the columns we need
     primaries = primary_df[primary_cols].copy()
@@ -2589,6 +2593,10 @@ def _create_breakpoint_pairs_vectorized(
             pair["supp_mapq"] = row["mapping_quality_supplementary"] if pd.notna(row["mapping_quality_supplementary"]) else 0
         if "mapping_span_supplementary" in row:
             pair["supp_span"] = row["mapping_span_supplementary"] if pd.notna(row["mapping_span_supplementary"]) else 0
+        if "strand_primary" in row:
+            pair["primary_strand"] = row["strand_primary"] if pd.notna(row["strand_primary"]) else "."
+        if "strand_supplementary" in row:
+            pair["supp_strand"] = row["strand_supplementary"] if pd.notna(row["strand_supplementary"]) else "."
         
         breakpoint_pairs.append(pair)
     
@@ -2821,6 +2829,72 @@ def _cluster_breakpoint_pairs_dbscan(
     return clustered_pairs
 
 
+def _cluster_breakpoint_pairs_canonical(
+    breakpoint_pairs: List[Dict[str, Any]],
+    bin_size: int = 5000,
+    min_read_support: int = 3,
+) -> List[Dict[str, Any]]:
+    """
+    Cluster breakpoint pairs by canonicalized (chrom, position, strand) endpoints.
+
+    This avoids spatial clustering and instead bins positions, then counts
+    read support per ordered endpoint pair.
+    """
+    if not breakpoint_pairs:
+        return []
+
+    def _endpoint_key(chrom: str, pos: int, strand: str) -> Tuple[str, int, str]:
+        if bin_size > 0:
+            pos = (int(pos) // int(bin_size)) * int(bin_size)
+        return (str(chrom), int(pos), str(strand) if strand else ".")
+
+    pair_support: Dict[Tuple[Tuple[str, int, str], Tuple[str, int, str]], Set[str]] = {}
+    for pair in breakpoint_pairs:
+        primary_mid = (pair["primary_start"] + pair["primary_end"]) // 2
+        supp_mid = (pair["supp_start"] + pair["supp_end"]) // 2
+        primary_strand = pair.get("primary_strand", ".")
+        supp_strand = pair.get("supp_strand", ".")
+
+        a = _endpoint_key(pair["primary_chrom"], primary_mid, primary_strand)
+        b = _endpoint_key(pair["supp_chrom"], supp_mid, supp_strand)
+
+        if a <= b:
+            key = (a, b)
+        else:
+            key = (b, a)
+
+        if key not in pair_support:
+            pair_support[key] = set()
+        pair_support[key].add(pair["read_id"])
+
+    clustered_pairs = []
+    for (a, b), read_ids in pair_support.items():
+        if len(read_ids) < min_read_support:
+            continue
+
+        a_start = a[1]
+        b_start = b[1]
+        a_end = a_start + int(bin_size)
+        b_end = b_start + int(bin_size)
+
+        clustered_pairs.append(
+            {
+                "primary_chrom": a[0],
+                "primary_start": a_start,
+                "primary_end": a_end,
+                "supp_chrom": b[0],
+                "supp_start": b_start,
+                "supp_end": b_end,
+                "read_count": len(read_ids),
+                "read_ids": read_ids,
+                "primary_strand": a[2],
+                "supp_strand": b[2],
+            }
+        )
+
+    return clustered_pairs
+
+
 def _extract_master_bed_breakpoints(fusion_metadata: FusionMetadata, work_dir: Optional[str] = None, min_read_support: int = 3) -> List[Dict[str, Any]]:
     """
     Extract breakpoint coordinates from master BED fusion candidates.
@@ -2976,10 +3050,10 @@ def _extract_master_bed_breakpoints(fusion_metadata: FusionMetadata, work_dir: O
             logger.debug("No breakpoint pairs created")
             return breakpoints
         
-        # Cluster similar breakpoint pairs using DBSCAN (much faster than O(n²) nested loops)
+        # Cluster breakpoint pairs using canonicalized endpoint keys
         clustering_start = time.time()
-        clustered_pairs = _cluster_breakpoint_pairs_dbscan(
-            breakpoint_pairs, cluster_distance=5000, min_read_support=min_read_support
+        clustered_pairs = _cluster_breakpoint_pairs_canonical(
+            breakpoint_pairs, bin_size=500, min_read_support=min_read_support
         )
         
         # Filter for breakpoint pairs with sufficient read support (already filtered in DBSCAN, but keep for safety)
