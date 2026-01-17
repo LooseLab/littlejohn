@@ -1420,8 +1420,26 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 "Outliers are detected using standard deviation method: values more than 2 SD above or below the mean for each gene."
             ).classes("text-sm text-gray-600 mb-4")
             
+            def _get_coverage_state():
+                key = str(sample_dir)
+                if hasattr(launcher, "_coverage_state"):
+                    if key not in launcher._coverage_state:
+                        launcher._coverage_state[key] = {}
+                    return launcher._coverage_state[key]
+                launcher._coverage_state = {}
+                launcher._coverage_state[key] = {}
+                return launcher._coverage_state[key]
+            
+            coverage_state = _get_coverage_state()
+            stored_outlier_limit = coverage_state.get("target_cov_outlier_limit", 10)
+            try:
+                stored_outlier_limit = int(stored_outlier_limit)
+            except (TypeError, ValueError):
+                stored_outlier_limit = 10
+
             # Chart container
             target_coverage_time_chart_state = {"container": None, "chart": None}
+            outlier_limit_state = {"value": max(1, stored_outlier_limit)}
             
             def _plot_target_coverage_over_time():
                 """Load target_coverage_time.csv and plot mean coverage with outlier detection"""
@@ -1519,6 +1537,12 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     if not outliers_df.empty:
                         outlier_genes = set(outliers_df['gene'].unique())
                     
+                    try:
+                        outlier_limit = int(outlier_limit_state["value"])
+                    except (TypeError, ValueError):
+                        outlier_limit = 10
+                    outlier_limit = max(1, outlier_limit)
+                    
                     # Prepare data for ECharts
                     # Mean coverage series
                     mean_coverage_data = [
@@ -1549,8 +1573,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         outlier_gene_max_coverage = df[df['name'].isin(outlier_genes)].groupby('name')['coverage'].max().sort_values(ascending=False)
                         sorted_outlier_genes = outlier_gene_max_coverage.index.tolist()
                         
-                        # Limit to top 20 outlier genes to avoid clutter
-                        genes_to_plot = sorted_outlier_genes[:20]
+                        # Limit outlier genes to avoid clutter
+                        genes_to_plot = sorted_outlier_genes[:outlier_limit]
                         
                         for idx, gene in enumerate(genes_to_plot):
                             gene_data = df[df['name'] == gene].copy()
@@ -1576,14 +1600,11 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 "smooth": True,
                                 "data": gene_series_data,
                                 "yAxisIndex": 0,
+                                "symbol": "none",
                                 "itemStyle": {"color": colors[idx % len(colors)]},
                                 "lineStyle": {"width": 2, "type": "dashed" if not is_high_outlier else "solid"},
                                 "label": {
-                                    "show": True,
-                                    "position": "right",
-                                    "formatter": gene,
-                                    "fontSize": 10,
-                                    "color": colors[idx % len(colors)]
+                                    "show": False
                                 },
                                 "labelLayout": {
                                     "hideOverlap": True
@@ -1621,7 +1642,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 "axisPointer": {"type": "cross"},
                             },
                             "legend": {
-                                "data": ["Mean Coverage", "Mean Reads per Length"] + (sorted_outlier_genes[:20] if outlier_genes else []),
+                                "data": ["Mean Coverage", "Mean Reads per Length"] + (sorted_outlier_genes[:outlier_limit] if outlier_genes else []),
                                 "left": 10,
                                 "top": 40,
                                 "orient": "vertical",
@@ -1662,6 +1683,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                     "smooth": True,
                                     "data": mean_coverage_data,
                                     "yAxisIndex": 0,
+                                    "symbol": "none",
                                     "itemStyle": {"color": "#5470c6"},
                                     "lineStyle": {"width": 2},
                                 },
@@ -1671,6 +1693,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                     "smooth": True,
                                     "data": mean_reads_data,
                                     "yAxisIndex": 1,
+                                    "symbol": "none",
                                     "itemStyle": {"color": "#91cc75"},
                                     "lineStyle": {"width": 2},
                                 },
@@ -1682,7 +1705,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         # Show summary of outlier genes
                         if outlier_genes:
                             outlier_count = len(outlier_genes)
-                            ui.label(f"Showing profiles for {min(outlier_count, 20)} outlier genes (out of {outlier_count} total)").classes("text-sm text-gray-600 mt-2")
+                            ui.label(f"Showing profiles for {min(outlier_count, outlier_limit)} outlier genes (out of {outlier_count} total)").classes("text-sm text-gray-600 mt-2")
                         else:
                             ui.label("No significant outliers detected.").classes("text-gray-600 mt-2")
                 
@@ -1697,8 +1720,26 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             # Auto-plot on load
             _plot_target_coverage_over_time()
             
-            # Refresh button
-            with ui.row().classes("w-full mt-4"):
+            def _set_outlier_limit(e) -> None:
+                try:
+                    outlier_limit_state["value"] = int(e.value)
+                except (TypeError, ValueError):
+                    outlier_limit_state["value"] = 10
+                outlier_limit_state["value"] = max(1, outlier_limit_state["value"])
+                coverage_state["target_cov_outlier_limit"] = outlier_limit_state["value"]
+                _plot_target_coverage_over_time()
+            
+            # Refresh button + outlier limit control
+            with ui.row().classes("w-full mt-4 items-center gap-3"):
+                ui.label("Outliers to show").classes("text-sm text-gray-600")
+                ui.number(
+                    value=outlier_limit_state["value"],
+                    min=1,
+                    max=50,
+                    step=1,
+                    format="%.0f",
+                    on_change=_set_outlier_limit,
+                ).props("dense").classes("w-24")
                 ui.button(
                     "Refresh Analysis",
                     on_click=_plot_target_coverage_over_time

@@ -2122,119 +2122,134 @@ def _generate_output_files(
             Dictionary mapping file type to file path
     """
     output_start = time.time()
-    # Use accumulated data from fusion_metadata instead of just current analysis_results
-    # Load from Parquet files if available (fast path), otherwise use in-memory data
-    target_candidates = None
-    if (
-        hasattr(fusion_metadata, "fusion_data")
-        and fusion_metadata.fusion_data
-    ):
-        # Try loading from Parquet first (fast path)
-        target_candidates = _load_fusion_candidates_parquet("target_candidates", work_dir, sample_id)
-        
-        # Fallback to in-memory data if Parquet not available
-        if target_candidates is None or target_candidates.empty:
-            target_candidates_data = fusion_metadata.fusion_data.get("target_candidates")
-            if target_candidates_data:
-                if isinstance(target_candidates_data, pd.DataFrame):
-                    target_candidates = target_candidates_data
-                elif isinstance(target_candidates_data, list):
-                    target_candidates = pd.DataFrame(target_candidates_data)
-    
-    if target_candidates is not None and not target_candidates.empty:
-            # Filter for fusion candidates using the corrected logic
-            groupby_start = time.time()
-            gene_counts = target_candidates.groupby("read_id", observed=True)["col4"].nunique()
-            fusion_read_ids = gene_counts[gene_counts > 1].index
-            
-            if len(fusion_read_ids) > 0:
-                result = target_candidates[target_candidates["read_id"].isin(fusion_read_ids)]
-                
-                # Apply minimum read support threshold (3 or more supporting reads per gene pair)
-                if not result.empty:
-                    tag_start = time.time()
-                    # Create tag column by grouping genes per read_id (same logic as _annotate_results)
+    def _build_filtered_candidates(
+        candidate_type: str,
+        output_csv_name: str,
+        output_pickle_name: str,
+    ) -> None:
+        dataset_dir = _get_parquet_dataset_dir(work_dir, sample_id, candidate_type)
+        dataset_files = glob.glob(os.path.join(dataset_dir, "*.parquet"))
+        legacy_path = _get_parquet_paths(work_dir, sample_id).get(candidate_type)
+        has_parquet = bool(dataset_files) or (legacy_path and os.path.exists(legacy_path))
+
+        # Fallback to in-memory fusion_metadata when Parquet isn't available
+        if not has_parquet and getattr(fusion_metadata, "fusion_data", None):
+            candidate_data = fusion_metadata.fusion_data.get(candidate_type)
+            if candidate_data is not None:
+                if isinstance(candidate_data, pd.DataFrame):
+                    candidate_df = candidate_data
+                elif isinstance(candidate_data, list):
+                    candidate_df = pd.DataFrame(candidate_data)
+                else:
+                    candidate_df = None
+
+                if candidate_df is not None and not candidate_df.empty:
+                    gene_counts = candidate_df.groupby("read_id", observed=True)["col4"].nunique()
+                    fusion_read_ids = gene_counts[gene_counts > 1].index
+                    if len(fusion_read_ids) == 0:
+                        return
+
+                    result = candidate_df[candidate_df["read_id"].isin(fusion_read_ids)].copy()
                     lookup = result.groupby("read_id", observed=True)["col4"].agg(
                         lambda x: ",".join(sorted(set(x)))
                     )
                     result["tag"] = result["read_id"].map(lookup)
-                    
-                    # Group by gene pair (tag) and count supporting reads
-                    pair_count_start = time.time()
-                    gene_pair_read_counts = result.groupby("tag", observed=True)["read_id"].nunique()
+
                     min_support = get_fusion_threshold("read_support")
+                    gene_pair_read_counts = result.groupby("tag", observed=True)["read_id"].nunique()
                     valid_gene_pairs = gene_pair_read_counts[gene_pair_read_counts >= min_support].index
                     result = result[result["tag"].isin(valid_gene_pairs)]
 
-                if not result.empty:
-                    csv_start = time.time()
-                    # Save the filtered fusion candidates to CSV
-                    result.to_csv(
-                        os.path.join(
-                            work_dir, sample_id, "fusion_candidates_master.csv"
-                        ),
-                        index=False,
-                    )
+                    if result.empty:
+                        return
 
-                    # Preprocess for visualization
-                    preprocess_start = time.time()
+                    output_csv_path = os.path.join(work_dir, sample_id, output_csv_name)
+                    result.to_csv(output_csv_path, index=False)
                     preprocess_fusion_data_standalone(
                         result,
-                        os.path.join(
-                            work_dir,
-                            sample_id,
-                            "fusion_candidates_master_processed.pkl",
-                        ),
+                        os.path.join(work_dir, sample_id, output_pickle_name),
                     )
+            return
 
-    # Use accumulated data from fusion_metadata for genome-wide candidates
-    # Load from Parquet files if available (fast path), otherwise use in-memory data
-    genome_wide_candidates = None
-    logger.info(f"Checking genome-wide candidates in fusion_metadata: has_fusion_data={hasattr(fusion_metadata, 'fusion_data')}, fusion_data_exists={fusion_metadata.fusion_data is not None if hasattr(fusion_metadata, 'fusion_data') else False}")
-    if (
-        hasattr(fusion_metadata, "fusion_data")
-        and fusion_metadata.fusion_data
-    ):
-        # Try loading from Parquet first (fast path)
-        genome_wide_candidates = _load_fusion_candidates_parquet("genome_wide_candidates", work_dir, sample_id)
-        
-        # Fallback to in-memory data if Parquet not available
-        if genome_wide_candidates is None or genome_wide_candidates.empty:
-            genome_wide_data = fusion_metadata.fusion_data.get("genome_wide_candidates")
-            if genome_wide_data:
-                if isinstance(genome_wide_data, pd.DataFrame):
-                    genome_wide_candidates = genome_wide_data
-                elif isinstance(genome_wide_data, list):
-                    genome_wide_candidates = pd.DataFrame(genome_wide_data)
-                    logger.info(f"Found {len(genome_wide_data)} genome-wide candidate records")
-    
-    if genome_wide_candidates is not None and not genome_wide_candidates.empty:
-            # Filter for fusion candidates using the corrected logic
-            groupby_start = time.time()
-            gene_counts_all = genome_wide_candidates.groupby("read_id", observed=True)["col4"].nunique()
-            fusion_read_ids_all = gene_counts_all[gene_counts_all > 1].index
-            
-            if len(fusion_read_ids_all) > 0:
-                result_all = genome_wide_candidates[genome_wide_candidates["read_id"].isin(fusion_read_ids_all)]
-                logger.info(f"Genome-wide fusion candidates after basic filtering: {len(result_all)} records")
+        # First pass: build read_id -> gene set, then tags and valid read_ids
+        read_to_genes: Dict[str, Set[str]] = {}
+        for batch in _iter_fusion_candidates_parquet_batches(
+            candidate_type, work_dir, sample_id, columns=["read_id", "col4"]
+        ):
+            if batch.empty:
+                continue
+            grouped = batch.groupby("read_id", observed=True)["col4"].unique()
+            for read_id, genes in grouped.items():
+                if pd.isna(read_id):
+                    continue
+                gene_set = read_to_genes.setdefault(read_id, set())
+                for gene in genes:
+                    if pd.isna(gene):
+                        continue
+                    gene_set.add(str(gene))
 
-                if not result_all.empty:
-                    csv_start = time.time()
-                    # Save the filtered genome-wide candidates to CSV
-                    result_all.to_csv(
-                        os.path.join(work_dir, sample_id, "fusion_candidates_all.csv"),
-                        index=False,
-                    )
+        if not read_to_genes:
+            return
 
-                    # Use the same preprocessing pipeline as target candidates
-                    # This ensures proper annotation with tags, colors, and gene group detection
-                    preprocess_start = time.time()
-                    preprocess_fusion_data_standalone(
-                        result_all,
-                        os.path.join(
-                            work_dir, sample_id, "fusion_candidates_all_processed.pkl"
-                        ),
-                    )
+        read_to_tag: Dict[str, str] = {}
+        tag_counts: Dict[str, int] = defaultdict(int)
+        for read_id, genes in read_to_genes.items():
+            if len(genes) > 1:
+                tag = ",".join(sorted(genes))
+                read_to_tag[read_id] = tag
+                tag_counts[tag] += 1
+
+        min_support = get_fusion_threshold("read_support")
+        valid_tags = {tag for tag, count in tag_counts.items() if count >= min_support}
+        if not valid_tags:
+            return
+
+        valid_read_ids = {rid for rid, tag in read_to_tag.items() if tag in valid_tags}
+        if not valid_read_ids:
+            return
+
+        output_csv_path = os.path.join(work_dir, sample_id, output_csv_name)
+        if os.path.exists(output_csv_path):
+            try:
+                os.remove(output_csv_path)
+            except OSError:
+                pass
+
+        filtered_batches = []
+        write_header = True
+        for batch in _iter_fusion_candidates_parquet_batches(
+            candidate_type, work_dir, sample_id, columns=None
+        ):
+            if "read_id" not in batch.columns:
+                continue
+            subset = batch[batch["read_id"].isin(valid_read_ids)]
+            if subset.empty:
+                continue
+            subset = subset.copy()
+            subset["tag"] = subset["read_id"].map(read_to_tag)
+            subset.to_csv(output_csv_path, mode="a", header=write_header, index=False)
+            write_header = False
+            filtered_batches.append(subset)
+
+        if not filtered_batches:
+            return
+
+        filtered_df = pd.concat(filtered_batches, ignore_index=True)
+        preprocess_fusion_data_standalone(
+            filtered_df,
+            os.path.join(work_dir, sample_id, output_pickle_name),
+        )
+
+    _build_filtered_candidates(
+        "target_candidates",
+        "fusion_candidates_master.csv",
+        "fusion_candidates_master_processed.pkl",
+    )
+    _build_filtered_candidates(
+        "genome_wide_candidates",
+        "fusion_candidates_all.csv",
+        "fusion_candidates_all_processed.pkl",
+    )
 
     # Save master BED fusion candidates (no gene overlap filtering needed)
     # Load from Parquet files if available (fast path), otherwise use in-memory data
@@ -3731,6 +3746,43 @@ def _load_fusion_candidates_parquet(
         logger.warning(f"Error loading {candidate_type} from Parquet: {e}")
     
     return None
+
+
+def _iter_fusion_candidates_parquet_batches(
+    candidate_type: str,
+    work_dir: str,
+    sample_id: str,
+    columns: Optional[List[str]] = None,
+    batch_size: int = 200000,
+) -> Any:
+    """
+    Iterate over Parquet candidates in batches to avoid full-table loads.
+    Returns a generator of pandas DataFrames.
+    """
+    _migrate_legacy_parquet_to_dataset(work_dir, sample_id)
+    dataset_dir = _get_parquet_dataset_dir(work_dir, sample_id, candidate_type)
+    dataset_files = sorted(glob.glob(os.path.join(dataset_dir, "*.parquet")))
+
+    if dataset_files:
+        paths = dataset_files
+    else:
+        legacy_path = _get_parquet_paths(work_dir, sample_id).get(candidate_type)
+        if not legacy_path or not os.path.exists(legacy_path):
+            return iter(())
+        paths = [legacy_path]
+
+    def _iter_batches():
+        for path in paths:
+            try:
+                parquet_file = pq.ParquetFile(path)
+                for batch in parquet_file.iter_batches(columns=columns, batch_size=batch_size):
+                    df = batch.to_pandas()
+                    if not df.empty:
+                        yield df
+            except Exception as e:
+                logger.warning(f"Error iterating {candidate_type} from {path}: {e}")
+
+    return _iter_batches()
 
 
 def search_fusion_candidates_by_read_id(
