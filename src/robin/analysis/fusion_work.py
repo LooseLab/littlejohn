@@ -52,6 +52,9 @@ from robin.classification_config import (
 # Module-level logger
 logger = logging.getLogger("robin.analysis.fusion_work")
 
+# TEMP: Disable master BED interactions for performance testing
+ENABLE_MASTER_BED = False
+
 
 class FileLock:
     """
@@ -1334,78 +1337,79 @@ def process_bam_single_pass(
                                 genome_read_alignments[read_id] = []
                             genome_read_alignments[read_id].extend(genome_rows)
                     
-                    # 3. Process for master BED fusions
-                    # Add primary alignment
-                    master_bed_rows.append(
-                        {
-                            "col1": ref_name,
-                            "col2": ref_start,
-                            "col3": ref_end,
-                            "col4": "master_bed_region",
-                            "reference_id": ref_name,
-                            "reference_start": ref_start,
-                            "reference_end": ref_end,
-                            "read_id": read_id,
-                            "mapping_quality": read.mapping_quality,
-                            "strand": "-" if read.is_reverse else "+",
-                            "read_start": read.query_alignment_start,
-                            "read_end": read.query_alignment_end,
-                            "is_secondary": read.is_secondary,
-                            "is_supplementary": read.is_supplementary,
-                            "mapping_span": ref_end - ref_start,
-                        }
-                    )
-                    
-                    # Parse SA tag to get all supplementary alignments
-                    if read.has_tag("SA"):
-                        try:
-                            sa_tag = read.get_tag("SA")
-                            # SA tag format: "chr,pos,strand,CIGAR,mapQ,NM;chr,pos,strand,CIGAR,mapQ,NM;..."
-                            sa_entries = sa_tag.split(";")
-                            for sa_entry in sa_entries:
-                                if not sa_entry:
-                                    continue
-                                sa_parts = sa_entry.split(",")
-                                if len(sa_parts) >= 3:
-                                    sa_chrom = sa_parts[0]
-                                    sa_pos = int(sa_parts[1])
-                                    sa_strand = sa_parts[2]
-                                    sa_mapq = int(sa_parts[4]) if len(sa_parts) > 4 else 0
-                                    
-                                    # Estimate end position from CIGAR if available
-                                    if len(sa_parts) > 3:
-                                        # Simple estimate: use read length as span
-                                        sa_end = sa_pos + read.query_length
-                                    else:
-                                        sa_end = sa_pos + 100  # Default small span
-                                    
-                                    # Skip mitochondrial chromosomes
-                                    if sa_chrom == "chrM" or sa_chrom == "M":
+                    # 3. Process for master BED fusions (disabled for performance testing)
+                    if ENABLE_MASTER_BED:
+                        # Add primary alignment
+                        master_bed_rows.append(
+                            {
+                                "col1": ref_name,
+                                "col2": ref_start,
+                                "col3": ref_end,
+                                "col4": "master_bed_region",
+                                "reference_id": ref_name,
+                                "reference_start": ref_start,
+                                "reference_end": ref_end,
+                                "read_id": read_id,
+                                "mapping_quality": read.mapping_quality,
+                                "strand": "-" if read.is_reverse else "+",
+                                "read_start": read.query_alignment_start,
+                                "read_end": read.query_alignment_end,
+                                "is_secondary": read.is_secondary,
+                                "is_supplementary": read.is_supplementary,
+                                "mapping_span": ref_end - ref_start,
+                            }
+                        )
+                        
+                        # Parse SA tag to get all supplementary alignments
+                        if read.has_tag("SA"):
+                            try:
+                                sa_tag = read.get_tag("SA")
+                                # SA tag format: "chr,pos,strand,CIGAR,mapQ,NM;chr,pos,strand,CIGAR,mapQ,NM;..."
+                                sa_entries = sa_tag.split(";")
+                                for sa_entry in sa_entries:
+                                    if not sa_entry:
                                         continue
-                                    
-                                    # Add supplementary alignment as a row
-                                    master_bed_rows.append(
-                                        {
-                                            "col1": sa_chrom,
-                                            "col2": sa_pos,
-                                            "col3": sa_end,
-                                            "col4": "master_bed_supplementary",
-                                            "reference_id": sa_chrom,
-                                            "reference_start": sa_pos,
-                                            "reference_end": sa_end,
-                                            "read_id": read_id,
-                                            "mapping_quality": sa_mapq,
-                                            "strand": sa_strand,
-                                            "read_start": 0,
-                                            "read_end": read.query_length,
-                                            "is_secondary": False,
-                                            "is_supplementary": True,
-                                            "mapping_span": sa_end - sa_pos,
-                                        }
-                                    )
-                        except (ValueError, KeyError) as e:
-                            logger.debug(f"Could not parse SA tag for read {read.query_name}: {e}")
-                            continue
+                                    sa_parts = sa_entry.split(",")
+                                    if len(sa_parts) >= 3:
+                                        sa_chrom = sa_parts[0]
+                                        sa_pos = int(sa_parts[1])
+                                        sa_strand = sa_parts[2]
+                                        sa_mapq = int(sa_parts[4]) if len(sa_parts) > 4 else 0
+                                        
+                                        # Estimate end position from CIGAR if available
+                                        if len(sa_parts) > 3:
+                                            # Simple estimate: use read length as span
+                                            sa_end = sa_pos + read.query_length
+                                        else:
+                                            sa_end = sa_pos + 100  # Default small span
+                                        
+                                        # Skip mitochondrial chromosomes
+                                        if sa_chrom == "chrM" or sa_chrom == "M":
+                                            continue
+                                        
+                                        # Add supplementary alignment as a row
+                                        master_bed_rows.append(
+                                            {
+                                                "col1": sa_chrom,
+                                                "col2": sa_pos,
+                                                "col3": sa_end,
+                                                "col4": "master_bed_supplementary",
+                                                "reference_id": sa_chrom,
+                                                "reference_start": sa_pos,
+                                                "reference_end": sa_end,
+                                                "read_id": read_id,
+                                                "mapping_quality": sa_mapq,
+                                                "strand": sa_strand,
+                                                "read_start": 0,
+                                                "read_end": read.query_length,
+                                                "is_secondary": False,
+                                                "is_supplementary": True,
+                                                "mapping_span": sa_end - sa_pos,
+                                            }
+                                        )
+                            except (ValueError, KeyError) as e:
+                                logger.debug(f"Could not parse SA tag for read {read.query_name}: {e}")
+                                continue
         
         except Exception as e:
             logger.error(f"Error reading BAM file: {e}")
@@ -1456,7 +1460,7 @@ def process_bam_single_pass(
         
         # Process master BED candidates
         master_bed_candidates = None
-        if master_bed_rows:
+        if ENABLE_MASTER_BED and master_bed_rows:
             # Apply quality filters early (before DataFrame creation) to reduce memory
             min_mq = get_fusion_threshold("mapping_quality")
             min_span = get_fusion_threshold("mapping_span")
@@ -1696,7 +1700,7 @@ def process_bam_with_staging(
             pd.DataFrame().to_parquet(genome_staging, index=False)
         
         # Save master BED candidates to staging
-        if master_bed_candidates is not None and not master_bed_candidates.empty:
+        if ENABLE_MASTER_BED and master_bed_candidates is not None and not master_bed_candidates.empty:
             master_bed_candidates.to_parquet(master_bed_staging, index=False)
             logger.info(f"Saved {len(master_bed_candidates)} master BED candidates to staging")
         else:
@@ -1727,11 +1731,11 @@ def process_bam_with_staging(
                 len(genome_wide_candidates) if genome_wide_candidates is not None else 0
             ),
             "master_bed_candidates_count": (
-                len(master_bed_candidates) if master_bed_candidates is not None else 0
+                len(master_bed_candidates) if (ENABLE_MASTER_BED and master_bed_candidates is not None) else 0
             ),
             "target_candidates": target_candidates,
             "genome_wide_candidates": genome_wide_candidates,
-            "master_bed_candidates": master_bed_candidates,
+            "master_bed_candidates": master_bed_candidates if ENABLE_MASTER_BED else None,
         }
         
         return results, should_accumulate
@@ -2251,33 +2255,8 @@ def _generate_output_files(
         "fusion_candidates_all_processed.pkl",
     )
 
-    # Save master BED fusion candidates (no gene overlap filtering needed)
-    # Load from Parquet files if available (fast path), otherwise use in-memory data
+    # Master BED candidate handling temporarily disabled for performance testing
     master_bed_candidates = None
-    if (
-        hasattr(fusion_metadata, "fusion_data")
-        and fusion_metadata.fusion_data
-    ):
-        # Try loading from Parquet first (fast path)
-        master_bed_candidates = _load_fusion_candidates_parquet("master_bed_candidates", work_dir, sample_id)
-        
-        # Fallback to in-memory data if Parquet not available
-        if master_bed_candidates is None or master_bed_candidates.empty:
-            master_bed_data = fusion_metadata.fusion_data.get("master_bed_candidates")
-            if master_bed_data:
-                if isinstance(master_bed_data, pd.DataFrame):
-                    master_bed_candidates = master_bed_data
-                elif isinstance(master_bed_data, list):
-                    master_bed_candidates = pd.DataFrame(master_bed_data)
-                    logger.info(f"Found {len(master_bed_data)} master BED candidate records")
-    
-    if master_bed_candidates is not None and not master_bed_candidates.empty:
-            # For master BED candidates, we track reads mapping to multiple locations
-            # CSV generation for master BED candidates has been deprecated
-            # The Parquet file (master_bed_candidates.parquet) is the source of truth
-            # and is used for all BED generation. The CSV was only used by the GUI,
-            # which has been updated to no longer display the master BED table.
-            pass
     
     # Create sv_count.txt file with content "0" if it doesn't exist
 
@@ -2287,45 +2266,46 @@ def _generate_output_files(
         with open(sv_count_file, "w") as f:
             f.write("0")
 
-    # Generate fusion breakpoint BED file
-    _generate_fusion_breakpoint_bed(sample_id, fusion_metadata, work_dir)
-    
-    # Generate master BED breakpoint BED file (new target regions from supplementary alignments)
-    # This is called incrementally as data accumulates. For large datasets, we use an incremental
-    # approach: only process NEW staging files and merge with existing breakpoints.
-    if generate_master_bed:
-        master_bed_candidates = _load_fusion_candidates_parquet("master_bed_candidates", work_dir, sample_id)
-        if master_bed_candidates is not None and not master_bed_candidates.empty:
-            _generate_master_bed_breakpoint_bed(
-                sample_id, 
-                fusion_metadata, 
-                work_dir,
-                new_master_bed_files=new_master_bed_files,  # Pass new files for incremental processing
-            )
-    
-    # Generate master BED file only if requested (should only be done once per batch at the end)
-    # Use async (non-blocking) generation to avoid blocking the analysis pipeline
-    if generate_master_bed:
-        try:
-            from robin.analysis.master_bed_generator import generate_master_bed_async
-            
-            # Get analysis counter
-            analysis_counter = _load_analysis_counter(sample_id, work_dir)
-            
-            # Get target_panel from fusion_metadata
-            target_panel = fusion_metadata.target_panel if hasattr(fusion_metadata, 'target_panel') else None
-            
-            # Generate asynchronously (non-blocking)
-            generate_master_bed_async(
-                sample_id=sample_id,
-                work_dir=work_dir,
-                analysis_counter=analysis_counter,
-                target_panel=target_panel,
-                logger_instance=logger,
-                reference=reference,
-            )
-        except Exception as e:
-            logger.warning(f"Could not start async master BED generation: {e}")
+    if ENABLE_MASTER_BED:
+        # Generate fusion breakpoint BED file
+        _generate_fusion_breakpoint_bed(sample_id, fusion_metadata, work_dir)
+        
+        # Generate master BED breakpoint BED file (new target regions from supplementary alignments)
+        # This is called incrementally as data accumulates. For large datasets, we use an incremental
+        # approach: only process NEW staging files and merge with existing breakpoints.
+        if generate_master_bed:
+            master_bed_candidates = _load_fusion_candidates_parquet("master_bed_candidates", work_dir, sample_id)
+            if master_bed_candidates is not None and not master_bed_candidates.empty:
+                _generate_master_bed_breakpoint_bed(
+                    sample_id, 
+                    fusion_metadata, 
+                    work_dir,
+                    new_master_bed_files=new_master_bed_files,  # Pass new files for incremental processing
+                )
+        
+        # Generate master BED file only if requested (should only be done once per batch at the end)
+        # Use async (non-blocking) generation to avoid blocking the analysis pipeline
+        if generate_master_bed:
+            try:
+                from robin.analysis.master_bed_generator import generate_master_bed_async
+                
+                # Get analysis counter
+                analysis_counter = _load_analysis_counter(sample_id, work_dir)
+                
+                # Get target_panel from fusion_metadata
+                target_panel = fusion_metadata.target_panel if hasattr(fusion_metadata, 'target_panel') else None
+                
+                # Generate asynchronously (non-blocking)
+                generate_master_bed_async(
+                    sample_id=sample_id,
+                    work_dir=work_dir,
+                    analysis_counter=analysis_counter,
+                    target_panel=target_panel,
+                    logger_instance=logger,
+                    reference=reference,
+                )
+            except Exception as e:
+                logger.warning(f"Could not start async master BED generation: {e}")
 
     output_paths = {
         "target_candidates_path": os.path.join(
