@@ -1703,7 +1703,7 @@ def process_bam_with_staging(
             pd.DataFrame().to_parquet(genome_staging, index=False)
         
         # Save master BED candidates to staging
-        if ENABLE_MASTER_BED and master_bed_candidates is not None and not master_bed_candidates.empty:
+        if master_bed_candidates is not None and not master_bed_candidates.empty:
             master_bed_candidates.to_parquet(master_bed_staging, index=False)
             logger.info(f"Saved {len(master_bed_candidates)} master BED candidates to staging")
         else:
