@@ -1275,6 +1275,8 @@ def process_bam_single_pass(
         reads_with_supplementary_count = 0
         
         # Single pass through BAM file
+        min_mq = get_fusion_threshold("mapping_quality")
+        min_span = get_fusion_threshold("mapping_span")
         try:
             with pysam.AlignmentFile(bamfile, "rb") as bam:
                 for read in bam:
@@ -1314,6 +1316,11 @@ def process_bam_single_pass(
                     read_id = read.query_name
                     ref_start = read.reference_start
                     ref_end = read.reference_end
+                    mapping_span = ref_end - ref_start
+
+                    # Early quality gates to avoid expensive region intersection work
+                    if read.mapping_quality <= min_mq or mapping_span <= min_span:
+                        continue
                     
                     # 1. Process for target panel fusions
                     if ref_name in target_regions:
@@ -1337,85 +1344,90 @@ def process_bam_single_pass(
                                 genome_read_alignments[read_id] = []
                             genome_read_alignments[read_id].extend(genome_rows)
                     
-                    # 3. Process for master BED fusions (disabled for performance testing)
-                    if ENABLE_MASTER_BED:
-                        # Add primary alignment
-                        master_bed_rows.append(
-                            {
-                                "col1": ref_name,
-                                "col2": ref_start,
-                                "col3": ref_end,
-                                "col4": "master_bed_region",
-                                "reference_id": ref_name,
-                                "reference_start": ref_start,
-                                "reference_end": ref_end,
-                                "read_id": read_id,
-                                "mapping_quality": read.mapping_quality,
-                                "strand": "-" if read.is_reverse else "+",
-                                "read_start": read.query_alignment_start,
-                                "read_end": read.query_alignment_end,
-                                "is_secondary": read.is_secondary,
-                                "is_supplementary": read.is_supplementary,
-                                "mapping_span": ref_end - ref_start,
-                            }
-                        )
-                        
-                        # Parse SA tag to get all supplementary alignments
-                        if read.has_tag("SA"):
-                            try:
-                                sa_tag = read.get_tag("SA")
-                                # SA tag format: "chr,pos,strand,CIGAR,mapQ,NM;chr,pos,strand,CIGAR,mapQ,NM;..."
-                                sa_entries = sa_tag.split(";")
-                                for sa_entry in sa_entries:
-                                    if not sa_entry:
+                    # 3. Process for master BED fusions
+                    # Add primary alignment
+                    master_bed_rows.append(
+                        {
+                            "col1": ref_name,
+                            "col2": ref_start,
+                            "col3": ref_end,
+                            "col4": "master_bed_region",
+                            "reference_id": ref_name,
+                            "reference_start": ref_start,
+                            "reference_end": ref_end,
+                            "read_id": read_id,
+                            "mapping_quality": read.mapping_quality,
+                            "strand": "-" if read.is_reverse else "+",
+                            "read_start": read.query_alignment_start,
+                            "read_end": read.query_alignment_end,
+                            "is_secondary": read.is_secondary,
+                            "is_supplementary": read.is_supplementary,
+                            "mapping_span": ref_end - ref_start,
+                        }
+                    )
+                    
+                    # Parse SA tag to get all supplementary alignments
+                    if read.has_tag("SA"):
+                        try:
+                            sa_tag = read.get_tag("SA")
+                            # SA tag format: "chr,pos,strand,CIGAR,mapQ,NM;chr,pos,strand,CIGAR,mapQ,NM;..."
+                            sa_entries = sa_tag.split(";")
+                            for sa_entry in sa_entries:
+                                if not sa_entry:
+                                    continue
+                                sa_parts = sa_entry.split(",")
+                                if len(sa_parts) >= 3:
+                                    sa_chrom = sa_parts[0]
+                                    sa_pos = int(sa_parts[1])
+                                    sa_strand = sa_parts[2]
+                                    sa_mapq = int(sa_parts[4]) if len(sa_parts) > 4 else 0
+                                    
+                                    # Estimate end position from CIGAR if available
+                                    if len(sa_parts) > 3:
+                                        # Simple estimate: use read length as span
+                                        sa_end = sa_pos + read.query_length
+                                    else:
+                                        sa_end = sa_pos + 100  # Default small span
+                                    sa_span = sa_end - sa_pos
+                                    
+                                    # Apply same quality thresholds to supplementary mappings
+                                    if sa_mapq <= min_mq or sa_span <= min_span:
                                         continue
-                                    sa_parts = sa_entry.split(",")
-                                    if len(sa_parts) >= 3:
-                                        sa_chrom = sa_parts[0]
-                                        sa_pos = int(sa_parts[1])
-                                        sa_strand = sa_parts[2]
-                                        sa_mapq = int(sa_parts[4]) if len(sa_parts) > 4 else 0
-                                        
-                                        # Estimate end position from CIGAR if available
-                                        if len(sa_parts) > 3:
-                                            # Simple estimate: use read length as span
-                                            sa_end = sa_pos + read.query_length
-                                        else:
-                                            sa_end = sa_pos + 100  # Default small span
-                                        
-                                        # Skip mitochondrial chromosomes
-                                        if sa_chrom == "chrM" or sa_chrom == "M":
-                                            continue
-                                        
-                                        # Add supplementary alignment as a row
-                                        master_bed_rows.append(
-                                            {
-                                                "col1": sa_chrom,
-                                                "col2": sa_pos,
-                                                "col3": sa_end,
-                                                "col4": "master_bed_supplementary",
-                                                "reference_id": sa_chrom,
-                                                "reference_start": sa_pos,
-                                                "reference_end": sa_end,
-                                                "read_id": read_id,
-                                                "mapping_quality": sa_mapq,
-                                                "strand": sa_strand,
-                                                "read_start": 0,
-                                                "read_end": read.query_length,
-                                                "is_secondary": False,
-                                                "is_supplementary": True,
-                                                "mapping_span": sa_end - sa_pos,
-                                            }
-                                        )
-                            except (ValueError, KeyError) as e:
-                                logger.debug(f"Could not parse SA tag for read {read.query_name}: {e}")
-                                continue
+                                    
+                                    # Skip mitochondrial chromosomes
+                                    if sa_chrom == "chrM" or sa_chrom == "M":
+                                        continue
+                                    
+                                    # Add supplementary alignment as a row
+                                    master_bed_rows.append(
+                                        {
+                                            "col1": sa_chrom,
+                                            "col2": sa_pos,
+                                            "col3": sa_end,
+                                            "col4": "master_bed_supplementary",
+                                            "reference_id": sa_chrom,
+                                            "reference_start": sa_pos,
+                                            "reference_end": sa_end,
+                                            "read_id": read_id,
+                                            "mapping_quality": sa_mapq,
+                                            "strand": sa_strand,
+                                            "read_start": 0,
+                                            "read_end": read.query_length,
+                                            "is_secondary": False,
+                                            "is_supplementary": True,
+                                            "mapping_span": sa_end - sa_pos,
+                                        }
+                                    )
+                        except (ValueError, KeyError) as e:
+                            logger.debug(f"Could not parse SA tag for read {read.query_name}: {e}")
+                            continue
         
         except Exception as e:
             logger.error(f"Error reading BAM file: {e}")
             raise
         
         logger.info(f"Found {reads_with_supplementary_count} reads with supplementary alignments")
+        print(f"Found {reads_with_supplementary_count} reads with supplementary alignments")
         
         # Process target panel candidates
         target_candidates = None
