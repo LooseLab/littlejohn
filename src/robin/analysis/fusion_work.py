@@ -1472,19 +1472,10 @@ def process_bam_single_pass(
         
         # Process master BED candidates
         master_bed_candidates = None
-        if ENABLE_MASTER_BED and master_bed_rows:
-            # Apply quality filters early (before DataFrame creation) to reduce memory
-            min_mq = get_fusion_threshold("mapping_quality")
-            min_span = get_fusion_threshold("mapping_span")
-            filtered_master_bed_rows = [
-                row for row in master_bed_rows
-                if row.get("mapping_quality", 0) > min_mq and row.get("mapping_span", 0) > min_span
-            ]
-            
-            if filtered_master_bed_rows:
-                master_bed_df = pd.DataFrame(filtered_master_bed_rows)
-                master_bed_df = _optimize_fusion_dataframe(master_bed_df)
-                master_bed_candidates = master_bed_df if not master_bed_df.empty else None
+        if master_bed_rows:
+            master_bed_df = pd.DataFrame(master_bed_rows)
+            master_bed_df = _optimize_fusion_dataframe(master_bed_df)
+            master_bed_candidates = master_bed_df if not master_bed_df.empty else None
         
         logger.info(
             f"Single-pass results: {len(target_candidates) if target_candidates is not None else 0} target, "
