@@ -2269,10 +2269,10 @@ def _generate_output_files(
         with open(sv_count_file, "w") as f:
             f.write("0")
 
+    
+    # Generate fusion breakpoint BED file
+    _generate_fusion_breakpoint_bed(sample_id, fusion_metadata, work_dir)
     if ENABLE_MASTER_BED:
-        # Generate fusion breakpoint BED file
-        _generate_fusion_breakpoint_bed(sample_id, fusion_metadata, work_dir)
-        
         # Generate master BED breakpoint BED file (new target regions from supplementary alignments)
         # This is called incrementally as data accumulates. For large datasets, we use an incremental
         # approach: only process NEW staging files and merge with existing breakpoints.
