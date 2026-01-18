@@ -2278,6 +2278,9 @@ def _generate_output_files(
     # approach: only process NEW staging files and merge with existing breakpoints.
     if generate_master_bed:
         master_bed_candidates = _load_fusion_candidates_parquet("master_bed_candidates", work_dir, sample_id)
+    
+    #ToDo: This is the slow code from here.
+    if ENABLE_MASTER_BED:
         if master_bed_candidates is not None and not master_bed_candidates.empty:
             _generate_master_bed_breakpoint_bed(
                 sample_id, 
