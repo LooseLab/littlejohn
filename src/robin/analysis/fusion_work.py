@@ -2272,19 +2272,23 @@ def _generate_output_files(
     
     # Generate fusion breakpoint BED file
     _generate_fusion_breakpoint_bed(sample_id, fusion_metadata, work_dir)
+    
+    # Generate master BED breakpoint BED file (new target regions from supplementary alignments)
+    # This is called incrementally as data accumulates. For large datasets, we use an incremental
+    # approach: only process NEW staging files and merge with existing breakpoints.
+    if generate_master_bed:
+        master_bed_candidates = _load_fusion_candidates_parquet("master_bed_candidates", work_dir, sample_id)
+        if master_bed_candidates is not None and not master_bed_candidates.empty:
+            _generate_master_bed_breakpoint_bed(
+                sample_id, 
+                fusion_metadata, 
+                work_dir,
+                new_master_bed_files=new_master_bed_files,  # Pass new files for incremental processing
+            )
+    
+    
     if ENABLE_MASTER_BED:
-        # Generate master BED breakpoint BED file (new target regions from supplementary alignments)
-        # This is called incrementally as data accumulates. For large datasets, we use an incremental
-        # approach: only process NEW staging files and merge with existing breakpoints.
-        if generate_master_bed:
-            master_bed_candidates = _load_fusion_candidates_parquet("master_bed_candidates", work_dir, sample_id)
-            if master_bed_candidates is not None and not master_bed_candidates.empty:
-                _generate_master_bed_breakpoint_bed(
-                    sample_id, 
-                    fusion_metadata, 
-                    work_dir,
-                    new_master_bed_files=new_master_bed_files,  # Pass new files for incremental processing
-                )
+        
         
         # Generate master BED file only if requested (should only be done once per batch at the end)
         # Use async (non-blocking) generation to avoid blocking the analysis pipeline
