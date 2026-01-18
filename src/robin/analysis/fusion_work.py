@@ -1734,11 +1734,11 @@ def process_bam_with_staging(
                 len(genome_wide_candidates) if genome_wide_candidates is not None else 0
             ),
             "master_bed_candidates_count": (
-                len(master_bed_candidates) if (ENABLE_MASTER_BED and master_bed_candidates is not None) else 0
+                len(master_bed_candidates) if (master_bed_candidates is not None) else 0
             ),
             "target_candidates": target_candidates,
             "genome_wide_candidates": genome_wide_candidates,
-            "master_bed_candidates": master_bed_candidates if ENABLE_MASTER_BED else None,
+            "master_bed_candidates": master_bed_candidates,
         }
         
         return results, should_accumulate
