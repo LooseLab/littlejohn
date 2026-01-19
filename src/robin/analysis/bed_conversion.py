@@ -217,8 +217,6 @@ class BedConversionAnalysis:
             temp_file.close()
 
             try:
-                start_time = time.time()
-                print(f"Running matkit on {bam}")
                 # Run matkit on the BAM file - using the same function as working code
                 if run_matkit_callable is not None:
                     run_matkit_callable(bam, temp_file.name)
@@ -228,8 +226,6 @@ class BedConversionAnalysis:
                         f.write(f"# Dummy output for {bam}\n")
 
                 logger.debug(f"Successfully processed: {temp_file.name}")
-                elapsed = time.time() - start_time
-                print(f"Successfully processed: {temp_file.name} in {elapsed:.2f}s")
                 return temp_file.name
 
             except Exception as e:
