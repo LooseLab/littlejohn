@@ -3217,7 +3217,6 @@ def _generate_master_bed_breakpoint_bed(
         # and merge with existing breakpoints from previous BED file
         master_bed_candidates = _load_fusion_candidates_parquet("master_bed_candidates", work_dir, sample_id)
         master_bed_size = len(master_bed_candidates) if master_bed_candidates is not None and not master_bed_candidates.empty else 0
-        print(f"Master BED size: {master_bed_size}")
         
         
         """

@@ -156,7 +156,24 @@ except ImportError:
     resources = None
 
 
-def run_bedtools(bamfile, bedfile, tempbamfile):
+def _load_bed_regions(bedfile: str) -> List[Tuple[str, int, int]]:
+    """Load BED regions into a list of (chrom, start, end) tuples."""
+    regions: List[Tuple[str, int, int]] = []
+    with open(bedfile, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split('\t')
+            if len(parts) >= 3:
+                chrom = parts[0]
+                start = int(parts[1])
+                end = int(parts[2])
+                regions.append((chrom, start, end))
+    return regions
+
+
+def run_bedtools(bamfile, bedfile, tempbamfile, regions: Optional[List[Tuple[str, int, int]]] = None):
     """
     Extract target regions from BAM file, keeping all mappings (primary, secondary, supplementary)
     for reads that overlap the target regions.
@@ -173,6 +190,8 @@ def run_bedtools(bamfile, bedfile, tempbamfile):
         Path to the BED file defining regions
     tempbamfile : str
         Path where the output BAM file should be written
+    regions : list of tuples, optional
+        Pre-loaded BED regions to avoid repeated parsing
     """
     logger = logging.getLogger("robin.target")
 
@@ -183,19 +202,9 @@ def run_bedtools(bamfile, bedfile, tempbamfile):
         # We use -F 2304 to exclude supplementary and secondary, keeping only primary alignments
         logger.debug(f"Step 1: Extracting read names from primary alignments overlapping {bedfile}")
         
-        # Read BED file to get regions
-        regions = []
-        with open(bedfile, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-                parts = line.split('\t')
-                if len(parts) >= 3:
-                    chrom = parts[0]
-                    start = int(parts[1])
-                    end = int(parts[2])
-                    regions.append((chrom, start, end))
+        # Read BED file to get regions (unless preloaded)
+        if regions is None:
+            regions = _load_bed_regions(bedfile)
         
         if not regions:
             logger.warning(f"No valid regions found in BED file: {bedfile}")
@@ -210,48 +219,24 @@ def run_bedtools(bamfile, bedfile, tempbamfile):
         # Open input BAM and collect read names from primary alignments overlapping regions
         read_names = set()
         with pysam.AlignmentFile(bamfile, "rb") as in_bam:
-            # Check if BAM is indexed by checking for index file
+            # Require BAM index for performance and correctness
             index_file = f"{bamfile}.bai"
-            use_indexed = os.path.exists(index_file)
+            if not os.path.exists(index_file):
+                raise FileNotFoundError(f"BAM index (.bai) not found for {bamfile}")
             
-            if not use_indexed:
-                logger.debug("BAM file is not indexed, using full-scan method")
-            
-            if use_indexed:
-                # Use indexed access (faster)
-                for chrom, start, end in regions:
-                    try:
-                        # Fetch reads overlapping this region
-                        for read in in_bam.fetch(chrom, start, end):
-                            # Only consider primary alignments (not supplementary or secondary)
-                            # Flag checks: not supplementary (0x800) and not secondary (0x100)
-                            if not (read.flag & 0x800) and not (read.flag & 0x100):
-                                read_names.add(read.query_name)
-                    except ValueError:
-                        # Chromosome not found in BAM, skip
-                        logger.debug(f"Chromosome {chrom} not found in BAM file, skipping")
-                        continue
-            else:
-                # BAM is not indexed, iterate through all reads
-                # Create a dictionary of regions for fast lookup
-                region_dict = {}
-                for chrom, start, end in regions:
-                    if chrom not in region_dict:
-                        region_dict[chrom] = []
-                    region_dict[chrom].append((start, end))
-                
-                # Iterate through all reads
-                for read in in_bam.fetch(until_eof=True):
-                    # Only consider primary alignments
-                    if not (read.flag & 0x800) and not (read.flag & 0x100):
-                        if read.reference_name in region_dict:
-                            read_start = read.reference_start
-                            read_end = read.reference_end
-                            # Check if read overlaps any region on this chromosome
-                            for reg_start, reg_end in region_dict[read.reference_name]:
-                                if not (read_end <= reg_start or read_start >= reg_end):
-                                    read_names.add(read.query_name)
-                                    break
+            # Use indexed access (faster)
+            for chrom, start, end in regions:
+                try:
+                    # Fetch reads overlapping this region
+                    for read in in_bam.fetch(chrom, start, end):
+                        # Only consider primary alignments (not supplementary or secondary)
+                        # Flag checks: not supplementary (0x800) and not secondary (0x100)
+                        if not (read.flag & 0x800) and not (read.flag & 0x100):
+                            read_names.add(read.query_name)
+                except ValueError:
+                    # Chromosome not found in BAM, skip
+                    logger.debug(f"Chromosome {chrom} not found in BAM file, skipping")
+                    continue
         
         logger.debug(f"Found {len(read_names)} unique read names overlapping target regions")
         
@@ -1048,12 +1033,6 @@ class TargetAnalysis:
 
                 # Store coverage data in metadata
                 target_result.coverage_data = {
-                    "genome_coverage": (
-                        newcovdf.to_dict("records") if not newcovdf.empty else []
-                    ),
-                    "target_coverage": (
-                        bedcovdf.to_dict("records") if not bedcovdf.empty else []
-                    ),
                     "genome_coverage_shape": newcovdf.shape,
                     "target_coverage_shape": bedcovdf.shape,
                 }
@@ -1732,44 +1711,72 @@ class TargetAnalysis:
                     f"Accumulating {len(coverage_files)} staged files for {sample_id}"
                 )
                 
-                # Load all staged files (they're small and fast to load)
-                staged_covdfs = []
-                staged_bedcovdfs = []
+                # Load staged files incrementally to keep memory bounded
+                batch_covdf = None
+                batch_bedcovdf = None
                 timestamps = []
                 source_bam_paths = []
+                loaded_files = 0
                 
                 for cov_file, bed_file, ts_file, source_bam_file in zip(coverage_files, bedcov_files, timestamp_files, source_bam_files):
                     try:
-                        staged_covdfs.append(pd.read_parquet(cov_file))
-                        staged_bedcovdfs.append(pd.read_parquet(bed_file))
+                        cov_df = pd.read_parquet(cov_file)
+                        bed_df = pd.read_parquet(bed_file)
+                        
+                        # Group within each file (small) then merge into accumulator
+                        cov_df = cov_df.groupby(['#rname', 'startpos', 'endpos'], as_index=False).agg({
+                            'numreads': 'sum',
+                            'covbases': 'sum',
+                            'meandepth': 'sum'
+                        })
+                        bed_df = bed_df.groupby(
+                            ['chrom', 'startpos', 'endpos', 'name'], as_index=False
+                        ).agg({'bases': 'sum'})
+                        
+                        if batch_covdf is None:
+                            batch_covdf = cov_df
+                        else:
+                            batch_covdf = batch_covdf.merge(
+                                cov_df,
+                                on=['#rname', 'startpos', 'endpos'],
+                                how='outer',
+                                suffixes=('_df1', '_df2'),
+                            )
+                            batch_covdf['numreads'] = batch_covdf['numreads_df1'].fillna(0) + batch_covdf['numreads_df2'].fillna(0)
+                            batch_covdf['covbases'] = batch_covdf['covbases_df1'].fillna(0) + batch_covdf['covbases_df2'].fillna(0)
+                            batch_covdf['meandepth'] = batch_covdf['meandepth_df1'].fillna(0) + batch_covdf['meandepth_df2'].fillna(0)
+                            batch_covdf.drop(columns=['numreads_df1', 'numreads_df2', 'covbases_df1', 'covbases_df2', 'meandepth_df1', 'meandepth_df2'], inplace=True)
+                        
+                        if batch_bedcovdf is None:
+                            batch_bedcovdf = bed_df
+                        else:
+                            batch_bedcovdf = batch_bedcovdf.merge(
+                                bed_df,
+                                on=['chrom', 'startpos', 'endpos', 'name'],
+                                how='outer',
+                                suffixes=('_df1', '_df2'),
+                            )
+                            batch_bedcovdf['bases'] = batch_bedcovdf['bases_df1'].fillna(0) + batch_bedcovdf['bases_df2'].fillna(0)
+                            batch_bedcovdf.drop(columns=['bases_df1', 'bases_df2'], inplace=True)
+                        
                         with open(ts_file, "r") as f:
                             timestamps.append(float(f.read().strip()))
                         with open(source_bam_file, "r") as f:
                             source_bam_paths.append(f.read().strip())
+                        
+                        loaded_files += 1
                     except Exception as e:
                         logger.warning(f"Error loading staging file {cov_file}: {e}")
                         continue
                 
-                if not staged_covdfs:
+                if batch_covdf is None or batch_bedcovdf is None:
                     logger.error("No staging files could be loaded successfully")
                     return {"status": "load_failed", "files_attempted": len(coverage_files)}
                 
-                logger.info(f"Loaded {len(staged_covdfs)} staging files successfully")
+                logger.info(f"Loaded {loaded_files} staging files successfully")
                 
-                # Efficient batch merge using concat + groupby (much faster than iterative merge)
                 logger.info("Merging staged coverage data...")
-                batch_covdf = pd.concat(staged_covdfs, ignore_index=True)
-                batch_covdf = batch_covdf.groupby(['#rname', 'startpos', 'endpos'], as_index=False).agg({
-                    'numreads': 'sum',
-                    'covbases': 'sum',
-                    'meandepth': 'sum'
-                })
-                
                 logger.info("Merging staged target coverage data...")
-                batch_bedcovdf = pd.concat(staged_bedcovdfs, ignore_index=True)
-                batch_bedcovdf = batch_bedcovdf.groupby(
-                    ['chrom', 'startpos', 'endpos', 'name'], as_index=False
-                ).agg({'bases': 'sum'})
                 
                 logger.info(
                     f"Batch merged: genome={batch_covdf.shape}, targets={batch_bedcovdf.shape}"
@@ -2036,12 +2043,18 @@ class TargetAnalysis:
                             
                             # Process each source BAM file and save filtered version
                             new_filtered_bams = []
+                            bed_regions_cache = None
+                            try:
+                                bed_regions_cache = _load_bed_regions(targets_bed)
+                            except Exception as e:
+                                logger.warning(f"Could not preload BED regions from {targets_bed}: {e}")
+
                             for i, source_bam in enumerate(original_bam_files):
                                 filtered_bam_name = f"filtered_{i:06d}_{os.path.basename(source_bam)}"
                                 filtered_bam_path = os.path.join(filtered_bams_dir, filtered_bam_name)
                                 
                                 logger.info(f"Filtering BAM {i+1}/{len(original_bam_files)}: {os.path.basename(source_bam)}")
-                                run_bedtools(source_bam, targets_bed, filtered_bam_path)
+                                run_bedtools(source_bam, targets_bed, filtered_bam_path, regions=bed_regions_cache)
                                 
                                 if os.path.exists(filtered_bam_path):
                                     new_filtered_bams.append(filtered_bam_path)

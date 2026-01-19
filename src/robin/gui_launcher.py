@@ -26,7 +26,7 @@ import csv
 from datetime import datetime
 from robin.analysis.master_csv_manager import MasterCSVManager
 
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Set
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from enum import Enum
@@ -41,6 +41,35 @@ from robin.gui.components.news_feed import NewsFeed
 from robin.reporting.report import create_pdf
 from robin.reporting.sections.disclaimer_text import EXTENDED_DISCLAIMER_TEXT
 
+
+# Files that indicate an analysis step is complete.
+COMPLETION_JOB_PATTERNS: Dict[str, List[str]] = {
+    "fusion": [
+        "fusion_candidates_master_processed.pkl",
+        "fusion_candidates_all_processed.pkl",
+        "fusion_summary.csv",
+        "fusion_results.csv",
+        "sv_count.txt",
+    ],
+    "cnv": [
+        "CNV_dict.npy",
+        "XYestimate.pkl",
+        "cnv_results.csv",
+        "cnv_summary.txt",
+        "cnv_analysis_counter.txt",
+        "cnv_analysis_results.pkl",
+    ],
+    "mgmt": ["final_mgmt.csv", "*_mgmt.csv"],
+    "target": ["coverage_main.csv", "bed_coverage_main.csv"],
+    "sturgeon": ["sturgeon_scores.csv", "sturgeon_results.csv", "sturgeon_summary.csv"],
+    "nanodx": ["NanoDX_scores.csv", "nanodx_results.csv", "nanodx_summary.csv"],
+    "pannanodx": ["PanNanoDX_scores.csv", "pannanodx_results.csv", "pannanodx_summary.csv"],
+    "random_forest": [
+        "random_forest_scores.csv",
+        "random_forest_results.csv",
+        "random_forest_summary.csv",
+    ],
+}
 
 try:
     from nicegui import ui, app
@@ -2214,6 +2243,10 @@ class GUILauncher:
             if not hasattr(self, "samples_table"):
                 return
             samples = data.get("samples", [])
+            expected_job_types = self._get_expected_completion_job_types()
+            base = (
+                Path(self.monitored_directory) if self.monitored_directory else None
+            )
 
             # Deduplicate by sample_id taking the newest last_seen
             by_id: Dict[str, Dict[str, Any]] = {}
@@ -2243,10 +2276,17 @@ class GUILauncher:
                         # Only mark as Complete if timeout passed AND no active jobs
                         if origin_value == "Live" and (time.time() - last_seen) >= self.completion_timeout_seconds:
                             if active_jobs_count == 0:
-                                origin_value = "Complete"
-                                # Trigger finalization if transitioning from Live to Complete
-                                if prev_origin == "Live" or prev_origin is None:
-                                    self._trigger_target_bam_finalization(sid)
+                                should_complete = True
+                                if expected_job_types and base is not None:
+                                    sample_dir = base / sid
+                                    should_complete = self._expected_jobs_completed(
+                                        sample_dir, expected_job_types
+                                    )
+                                if should_complete:
+                                    origin_value = "Complete"
+                                    # Trigger finalization if transitioning from Live to Complete
+                                    if prev_origin == "Live" or prev_origin is None:
+                                        self._trigger_target_bam_finalization(sid)
                             # If there are active jobs, keep as Live even if timeout passed
                     except Exception:
                         pass
@@ -2287,9 +2327,6 @@ class GUILauncher:
 
             # Patch from master.csv and persist the new overview values for later reload
             try:
-                base = (
-                    Path(self.monitored_directory) if self.monitored_directory else None
-                )
                 manager = (
                     MasterCSVManager(str(base)) if base and base.exists() else None
                 )
@@ -4918,7 +4955,33 @@ class GUILauncher:
             return self._last_samples_rows
         return None
 
-    def _calculate_job_counts_from_files(self, sample_dir: Path) -> Dict[str, Any]:
+    def _get_expected_completion_job_types(self) -> Set[str]:
+        """Get the set of job types expected to complete for this workflow."""
+        if not self.workflow_steps:
+            return set()
+        expected: Set[str] = set()
+        for step in self.workflow_steps:
+            step_name = step.split(":")[-1] if ":" in step else step
+            if step_name in COMPLETION_JOB_PATTERNS:
+                expected.add(step_name)
+        return expected
+
+    def _expected_jobs_completed(self, sample_dir: Path, expected_job_types: Set[str]) -> bool:
+        """Return True if all expected job types have completion outputs."""
+        if not expected_job_types:
+            return True
+        if not sample_dir.exists():
+            return False
+        counts = self._calculate_job_counts_from_files(
+            sample_dir, expected_job_types=expected_job_types
+        )
+        total_jobs = int(counts.get("total_jobs", 0))
+        completed_jobs = int(counts.get("completed_jobs", 0))
+        return total_jobs > 0 and completed_jobs >= total_jobs
+
+    def _calculate_job_counts_from_files(
+        self, sample_dir: Path, expected_job_types: Optional[Set[str]] = None
+    ) -> Dict[str, Any]:
         """Calculate job counts and types from actual analysis result files in the sample directory."""
         try:
             total_jobs = 0
@@ -4926,23 +4989,14 @@ class GUILauncher:
             failed_jobs = 0
             job_types = set()
             
-            # Define job type patterns and their corresponding files
-            job_patterns = {
-                "fusion": ["fusion_candidates_master_processed.pkl", "fusion_candidates_all_processed.pkl", "fusion_summary.csv"],
-                "cnv": ["cnv_results.csv", "cnv_summary.csv", "copy_numbers.pkl"],
-                "mgmt": ["final_mgmt.csv", "*_mgmt.csv"],
-                "coverage": ["coverage_summary.csv", "coverage_results.csv"],
-                "igv_bam": ["*.bam", "*.bai"],
-                "bed_conversion": ["*.bed", "*.bedmethyl"],
-                "nanodx": ["nanodx_results.csv", "nanodx_summary.csv"],
-                "pannanodx": ["pannanodx_results.csv", "pannanodx_summary.csv"],
-                "random_forest": ["random_forest_results.csv", "random_forest_summary.csv"],
-                "sturgeon": ["sturgeon_results.csv", "sturgeon_summary.csv"],
-                "target": ["target_results.csv", "target_summary.csv"]
-            }
+            job_patterns = COMPLETION_JOB_PATTERNS
+            job_types_to_check = (
+                expected_job_types if expected_job_types else set(job_patterns.keys())
+            )
             
             # Check for each job type
-            for job_type, patterns in job_patterns.items():
+            for job_type in job_types_to_check:
+                patterns = job_patterns.get(job_type, [])
                 job_found = False
                 for pattern in patterns:
                     if "*" in pattern:
@@ -4961,6 +5015,9 @@ class GUILauncher:
                     total_jobs += 1
                     completed_jobs += 1  # Assume completed if files exist
                     job_types.add(job_type)
+
+            if expected_job_types:
+                total_jobs = len(expected_job_types)
             
             return {
                 "total_jobs": total_jobs,
@@ -5035,6 +5092,7 @@ class GUILauncher:
     def _process_sample_batch(self, sample_dirs: List[Path]) -> List[Dict[str, Any]]:
         """Process a batch of sample directories synchronously"""
         rows: List[Dict[str, Any]] = []
+        expected_job_types = self._get_expected_completion_job_types()
         
         for sample_dir in sample_dirs:
             if not sample_dir.is_dir():
@@ -5095,7 +5153,10 @@ class GUILauncher:
                         
                         # If overview data is not available (0 values), calculate from actual analysis files
                         if ov_total == 0 and ov_completed == 0:
-                            calculated_counts = self._calculate_job_counts_from_files(sample_dir)
+                            calculated_counts = self._calculate_job_counts_from_files(
+                                sample_dir,
+                                expected_job_types=expected_job_types or None,
+                            )
                             ov_total = calculated_counts["total_jobs"]
                             ov_completed = calculated_counts["completed_jobs"]
                             ov_failed = calculated_counts["failed_jobs"]
@@ -5112,7 +5173,13 @@ class GUILauncher:
                     # Only mark as Complete if timeout passed AND no active jobs
                     if origin_value == "Live" and (time.time() - last_seen) >= self.completion_timeout_seconds:
                         if ov_active == 0:
-                            origin_value = "Complete"
+                            should_complete = True
+                            if expected_job_types:
+                                should_complete = self._expected_jobs_completed(
+                                    sample_dir, expected_job_types
+                                )
+                            if should_complete:
+                                origin_value = "Complete"
                         # If there are active jobs, keep as Live even if timeout passed
                 except Exception:
                     pass
