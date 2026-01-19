@@ -217,6 +217,7 @@ class BedConversionAnalysis:
             temp_file.close()
 
             try:
+                print(f"Running matkit on {bam}")
                 # Run matkit on the BAM file - using the same function as working code
                 if run_matkit_callable is not None:
                     run_matkit_callable(bam, temp_file.name)
@@ -226,6 +227,7 @@ class BedConversionAnalysis:
                         f.write(f"# Dummy output for {bam}\n")
 
                 logger.debug(f"Successfully processed: {temp_file.name}")
+                print(f"Successfully processed: {temp_file.name}")
                 return temp_file.name
 
             except Exception as e:
@@ -336,10 +338,6 @@ def process_multiple_files(bam_paths, metadata_list, work_dir, logger, threads=4
     logger.info(f"Processing {len(bam_paths)} BAM files for sample {sample_id}")
     logger.info(f"Using {threads} threads for processing")
     
-    # Log essential metadata only
-    for i, (bam_path, metadata) in enumerate(zip(bam_paths, metadata_list)):
-        logger.debug(f"BAM file {i+1}: {os.path.basename(bam_path)}")
-
     analysis_result = {
         "sample_id": sample_id,
         "bam_paths": bam_paths,
@@ -391,8 +389,6 @@ def process_multiple_files(bam_paths, metadata_list, work_dir, logger, threads=4
                 if processed_data:
                     all_processed_data.extend(processed_data)
                     processed_files += 1
-                    logger.debug(f"Successfully processed file {i+1}: {os.path.basename(bam_path)}")
-                    logger.debug(f"Generated {len(processed_data)} temporary files")
                 else:
                     logger.warning(f"No data generated for {os.path.basename(bam_path)}")
                 
