@@ -17,8 +17,8 @@ Features:
 import os
 import time
 import tempfile
-import itertools
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional
 
@@ -196,10 +196,18 @@ class BedConversionAnalysis:
         """Process BAM files using matkit and return list of processed file paths"""
         logger = self.logger
         processed_files: List[str] = []
-        processed_files_append = processed_files.append
         run_matkit_callable = run_matkit  # local binding
+        threads = max(1, int(self.threads or 1))
 
-        for bam in bams:
+        def cleanup_temp_files(files: List[str]) -> None:
+            for file_path in files:
+                try:
+                    os.remove(file_path)
+                    logger.debug(f"Deleted temporary file: {file_path}")
+                except OSError as e:
+                    logger.warning(f"Failed to delete temporary file {file_path}: {e}")
+
+        def process_single_bam(bam: str) -> str:
             logger.debug(f"Processing BAM file: {bam}")
 
             # Create temporary file for matkit output - exactly like the working code
@@ -217,8 +225,8 @@ class BedConversionAnalysis:
                     with open(temp_file.name, "w") as f:
                         f.write(f"# Dummy output for {bam}\n")
 
-                processed_files_append(temp_file.name)
                 logger.debug(f"Successfully processed: {temp_file.name}")
+                return temp_file.name
 
             except Exception as e:
                 logger.error(f"Failed to process {bam}: {e}")
@@ -230,7 +238,20 @@ class BedConversionAnalysis:
                     pass
                 raise
 
-        return processed_files
+        if threads == 1 or len(bams) <= 1:
+            for bam in bams:
+                processed_files.append(process_single_bam(bam))
+            return processed_files
+
+        try:
+            with ThreadPoolExecutor(max_workers=threads) as executor:
+                futures = {executor.submit(process_single_bam, bam): bam for bam in bams}
+                for future in as_completed(futures):
+                    processed_files.append(future.result())
+            return processed_files
+        except Exception:
+            cleanup_temp_files(processed_files)
+            raise
 
     def _update_state(
         self, state: str, data: List[str], sample_id: str, file_number: int
@@ -283,17 +304,6 @@ class BedConversionAnalysis:
                 logger.warning(f"Failed to delete temporary file {file_path}: {e}")
 
         return state
-
-
-def grouper(iterable, n):
-    """Group items from iterable into chunks of size n"""
-    it = iter(iterable)
-    while True:
-        chunk = tuple(itertools.islice(it, n))
-        if not chunk:
-            return
-        yield chunk
-
 
 def process_multiple_files(bam_paths, metadata_list, work_dir, logger, threads=4):
     """
@@ -365,7 +375,9 @@ def process_multiple_files(bam_paths, metadata_list, work_dir, logger, threads=4
         all_processed_data = []
         
         for i, (bam_path, metadata) in enumerate(zip(bam_paths, metadata_list)):
-            logger.info(f"Processing BAM file {i+1}/{len(bam_paths)}: {os.path.basename(bam_path)}")
+            logger.debug(
+                f"Processing BAM file {i+1}/{len(bam_paths)}: {os.path.basename(bam_path)}"
+            )
             
             try:
                 # Check if BAM file exists
