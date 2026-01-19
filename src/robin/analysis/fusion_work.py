@@ -1427,7 +1427,6 @@ def process_bam_single_pass(
             raise
         
         logger.info(f"Found {reads_with_supplementary_count} reads with supplementary alignments")
-        print(f"Found {reads_with_supplementary_count} reads with supplementary alignments")
         
         # Process target panel candidates
         target_candidates = None
@@ -2280,14 +2279,14 @@ def _generate_output_files(
         master_bed_candidates = _load_fusion_candidates_parquet("master_bed_candidates", work_dir, sample_id)
     
     #ToDo: This is the slow code from here.
-    if ENABLE_MASTER_BED:
-        if master_bed_candidates is not None and not master_bed_candidates.empty:
-            _generate_master_bed_breakpoint_bed(
-                sample_id, 
-                fusion_metadata, 
-                work_dir,
-                new_master_bed_files=new_master_bed_files,  # Pass new files for incremental processing
-            )
+    
+    if master_bed_candidates is not None and not master_bed_candidates.empty:
+        _generate_master_bed_breakpoint_bed(
+            sample_id, 
+            fusion_metadata, 
+            work_dir,
+            new_master_bed_files=new_master_bed_files,  # Pass new files for incremental processing
+        )
     
     
     if ENABLE_MASTER_BED:
@@ -3218,7 +3217,10 @@ def _generate_master_bed_breakpoint_bed(
         # and merge with existing breakpoints from previous BED file
         master_bed_candidates = _load_fusion_candidates_parquet("master_bed_candidates", work_dir, sample_id)
         master_bed_size = len(master_bed_candidates) if master_bed_candidates is not None and not master_bed_candidates.empty else 0
+        print(f"Master BED size: {master_bed_size}")
         
+        
+        """
         # For large datasets (>200k rows), use incremental extraction to avoid 2+ minute delays
         # Only process NEW staging files and merge with existing breakpoints
         if master_bed_size > 200000 and new_master_bed_files:
@@ -3232,7 +3234,7 @@ def _generate_master_bed_breakpoint_bed(
         if not master_bed_breakpoints:
             logger.debug("No master BED breakpoints found - skipping BED file generation")
             return
-        
+        """
         # Get bin_width from CNV analysis if available, otherwise use default
         bin_width = _get_cnv_bin_width(work_dir, sample_id)
         
@@ -3243,7 +3245,7 @@ def _generate_master_bed_breakpoint_bed(
         sample_dir = os.path.join(work_dir, sample_id)
         bed_dir = os.path.join(sample_dir, "bed_files")
         os.makedirs(bed_dir, exist_ok=True)
-        
+        """
         # Generate BED file for master BED breakpoints with counter-based naming
         master_bed_bp_file = os.path.join(bed_dir, f"master_bed_breakpoints_{analysis_counter:03d}.bed")
         
@@ -3307,7 +3309,7 @@ def _generate_master_bed_breakpoint_bed(
         
         # Generate master BED events summary CSV for GUI (pre-computed to avoid blocking UI)
         _generate_master_bed_events_summary(sample_id, fusion_metadata, work_dir)
-        
+        """
     except Exception as e:
         logger.warning(f"Error generating master BED breakpoint BED file: {e}")
         import traceback

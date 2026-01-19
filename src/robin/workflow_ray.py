@@ -835,6 +835,19 @@ class Coordinator:
         self.max_inflight_per_type: int = 64
         self.inflight_by_type: Dict[str, int] = {}
         self.waiting_by_type_global: Dict[str, List[Job]] = {}
+        # backpressure: global and per-queue caps to prevent queue explosions
+        queue_count = max(1, len(QUEUE_TO_TYPES))
+        self.max_total_inflight: int = self.max_inflight_per_type * queue_count
+        self.max_total_waiting: int = self.max_total_inflight * 20
+        self.max_inflight_per_queue: Dict[str, int] = {
+            q: self.max_inflight_per_type for q in QUEUE_TO_TYPES
+        }
+        self.max_waiting_per_queue: Dict[str, int] = {
+            q: self.max_inflight_per_type * 20 for q in QUEUE_TO_TYPES
+        }
+        self.inflight_by_queue: Dict[str, int] = {}
+        self.waiting_by_queue: Dict[str, List[Job]] = {}
+        self.waiting_global: List[Job] = []
         # per-sample tracking for GUI
         self.samples_by_id: Dict[str, Dict[str, Any]] = {}
         # Sample cleanup tracking to prevent unbounded memory growth
@@ -1081,6 +1094,161 @@ class Coordinator:
             except Exception:
                 pass
 
+    def _total_inflight(self) -> int:
+        try:
+            return len(self.active)
+        except Exception:
+            return 0
+
+    def _total_waiting(self) -> int:
+        try:
+            waiting_types = sum(len(v) for v in self.waiting_by_type_global.values())
+        except Exception:
+            waiting_types = 0
+        try:
+            waiting_queues = sum(len(v) for v in self.waiting_by_queue.values())
+        except Exception:
+            waiting_queues = 0
+        try:
+            waiting_global = len(self.waiting_global)
+        except Exception:
+            waiting_global = 0
+        return waiting_types + waiting_queues + waiting_global
+
+    def _queue_inflight_cap(self, queue_name: str) -> int:
+        return int(self.max_inflight_per_queue.get(queue_name, self.max_inflight_per_type))
+
+    def _queue_waiting_cap(self, queue_name: str) -> int:
+        return int(self.max_waiting_per_queue.get(queue_name, self.max_inflight_per_type * 20))
+
+    async def _wait_for_global_capacity(self) -> None:
+        while self._total_waiting() >= self.max_total_waiting:
+            await asyncio.sleep(0.05)
+
+    async def _wait_for_queue_capacity(self, queue_name: str) -> None:
+        while len(self.waiting_by_queue.get(queue_name, [])) >= self._queue_waiting_cap(queue_name):
+            await asyncio.sleep(0.05)
+
+    async def can_accept_jobs(self, n: int = 1) -> bool:
+        try:
+            n = int(n or 0)
+        except Exception:
+            n = 0
+        return (self._total_waiting() + n) < self.max_total_waiting
+
+    async def _dispatch_ready_job(self, job: Job, sample_id: str, from_waiting: bool = False) -> None:
+        # Ensure global waiting does not grow without bound for new submissions
+        if not from_waiting:
+            await self._wait_for_global_capacity()
+
+        # Global inflight cap
+        if self._total_inflight() >= self.max_total_inflight:
+            self.waiting_global.append(job)
+            return
+
+        q = job_queue_of(job.job_type)
+        # Per-queue inflight cap
+        if int(self.inflight_by_queue.get(q, 0)) >= self._queue_inflight_cap(q):
+            await self._wait_for_queue_capacity(q)
+            self.waiting_by_queue.setdefault(q, []).append(job)
+            return
+
+        # Per-type inflight cap
+        inflight_for_type = int(self.inflight_by_type.get(job.job_type, 0))
+        if inflight_for_type >= self.max_inflight_per_type:
+            self.waiting_by_type_global.setdefault(job.job_type, []).append(job)
+            return
+
+        # Found processor for job type
+        proc = self.processors.get(job.job_type)
+        if proc is None:
+            return  # Skip jobs without processors
+
+        # Mark submission only when actually dispatching to a processor
+        self.total_enqueued += 1
+        try:
+            self.submitted_by_type[job.job_type] = (
+                self.submitted_by_type.get(job.job_type, 0) + 1
+            )
+        except Exception:
+            pass
+        self.active[job.job_id] = {
+            "job_type": job.job_type,
+            "filepath": job.context.filepath,
+            "queue": q,
+            "start_time": time.time(),
+        }
+        # Update per-sample totals/active only when a real sample_id is known
+        try:
+            sid = sample_id or "unknown"
+            if sid != "unknown":
+                ent = self.samples_by_id.get(sid)
+                if ent is None:
+                    ent = {
+                        "sample_id": sid,
+                        "active_jobs": 0,
+                        "total_jobs": 0,
+                        "completed_jobs": 0,
+                        "failed_jobs": 0,
+                        "job_types": set(),
+                        "last_seen": time.time(),
+                    }
+                    self.samples_by_id[sid] = ent
+                ent["total_jobs"] += 1
+                ent["active_jobs"] += 1
+                try:
+                    ent["job_types"].add(job.job_type)
+                except Exception:
+                    pass
+                ent["last_seen"] = time.time()
+        except Exception:
+            pass
+        if getattr(self, "using_pools", False):
+            try:
+                proc.enqueue.remote(job)
+            except Exception:
+                pass
+        else:
+            ref = proc.process.remote(job)
+            self._inflight[ref] = job
+        self.inflight_by_type[job.job_type] = inflight_for_type + 1
+        self.inflight_by_queue[q] = int(self.inflight_by_queue.get(q, 0)) + 1
+
+    async def _drain_waiting_jobs(self, queue_name: Optional[str], job_type: str) -> None:
+        # Try one global waiting job first to avoid starvation
+        if self.waiting_global and self._total_inflight() < self.max_total_inflight:
+            nxt_global = self.waiting_global.pop(0)
+            try:
+                sid = nxt_global.context.get_sample_id()
+            except Exception:
+                sid = "unknown"
+            await self._dispatch_ready_job(nxt_global, sid, from_waiting=True)
+
+        # Then try one queued-by-queue job
+        if queue_name:
+            queue_jobs = self.waiting_by_queue.get(queue_name, [])
+            if queue_jobs and int(self.inflight_by_queue.get(queue_name, 0)) < self._queue_inflight_cap(queue_name):
+                nxt_queue = queue_jobs.pop(0)
+                if not queue_jobs:
+                    self.waiting_by_queue.pop(queue_name, None)
+                try:
+                    sid = nxt_queue.context.get_sample_id()
+                except Exception:
+                    sid = "unknown"
+                await self._dispatch_ready_job(nxt_queue, sid, from_waiting=True)
+
+        # Finally, release one per-type waiting job
+        queue_global = self.waiting_by_type_global.get(job_type, [])
+        if queue_global and int(self.inflight_by_type.get(job_type, 0)) < self.max_inflight_per_type:
+            nxt_job_g = queue_global.pop(0)
+            if not queue_global:
+                self.waiting_by_type_global.pop(job_type, None)
+            try:
+                sid = nxt_job_g.context.get_sample_id()
+            except Exception:
+                sid = "unknown"
+            await self._dispatch_ready_job(nxt_job_g, sid, from_waiting=True)
+
     # ----- submission & lifecycle -----
     async def submit_jobs(self, jobs: List[Job]) -> None:
         # Check if shutdown has been requested
@@ -1136,66 +1304,7 @@ class Coordinator:
                 else:
                     self.running_by_type_sample[key_ts] = ra + 1
 
-            # submit to dedicated job-type processor
-            proc = self.processors.get(job.job_type)
-            if proc is None:
-                continue  # Skip jobs without processors
-            # Found processor for job type
-            # Backpressure: if too many outstanding for this type, queue locally
-            inflight_for_type = int(self.inflight_by_type.get(job.job_type, 0))
-            if inflight_for_type >= self.max_inflight_per_type:
-                self.waiting_by_type_global.setdefault(job.job_type, []).append(job)
-                # do not count as submitted yet; GUI totals reflect actual submissions
-                continue
-            # Mark submission only when actually dispatching to a processor
-            q = job_queue_of(job.job_type)
-            self.total_enqueued += 1
-            try:
-                self.submitted_by_type[job.job_type] = (
-                    self.submitted_by_type.get(job.job_type, 0) + 1
-                )
-            except Exception:
-                pass
-            self.active[job.job_id] = {
-                "job_type": job.job_type,
-                "filepath": job.context.filepath,
-                "queue": q,
-                "start_time": time.time(),
-            }
-            # Update per-sample totals/active only when a real sample_id is known
-            try:
-                sid = sample_id or "unknown"
-                if sid != "unknown":
-                    ent = self.samples_by_id.get(sid)
-                    if ent is None:
-                        ent = {
-                            "sample_id": sid,
-                            "active_jobs": 0,
-                            "total_jobs": 0,
-                            "completed_jobs": 0,
-                            "failed_jobs": 0,
-                            "job_types": set(),
-                            "last_seen": time.time(),
-                        }
-                        self.samples_by_id[sid] = ent
-                    ent["total_jobs"] += 1
-                    ent["active_jobs"] += 1
-                    try:
-                        ent["job_types"].add(job.job_type)
-                    except Exception:
-                        pass
-                    ent["last_seen"] = time.time()
-            except Exception:
-                pass
-            if getattr(self, "using_pools", False):
-                try:
-                    proc.enqueue.remote(job)
-                except Exception:
-                    pass
-            else:
-                ref = proc.process.remote(job)
-                self._inflight[ref] = job
-            self.inflight_by_type[job.job_type] = inflight_for_type + 1
+            await self._dispatch_ready_job(job, sample_id)
 
     async def submit_sample_job(
         self,
@@ -1940,9 +2049,7 @@ class Coordinator:
                         "start_time": time.time(),
                     }
 
-        # Promote next classification job for this type if any (single global pipeline)
-        # Global backpressure release: for the finished job type, submit one waiting
-        # job if we are below the max_inflight threshold.
+        # Release backpressure queues after a job finishes
         try:
             jt = job.job_type
             # decrement inflight count for this type
@@ -1950,64 +2057,15 @@ class Coordinator:
                 self.inflight_by_type[jt] -= 1
                 if self.inflight_by_type[jt] == 0:
                     self.inflight_by_type.pop(jt, None)
-            queue_global = self.waiting_by_type_global.get(jt, [])
-            if (
-                queue_global
-                and int(self.inflight_by_type.get(jt, 0)) < self.max_inflight_per_type
-            ):
-                nxt_job_g = queue_global.pop(0)
-                if not queue_global:
-                    self.waiting_by_type_global.pop(jt, None)
-                proc_g = self.processors.get(jt)
-                if proc_g is not None:
-                    if getattr(self, "using_pools", False):
-                        try:
-                            proc_g.enqueue.remote(nxt_job_g)
-                        except Exception:
-                            pass
-                    else:
-                        ref_g = proc_g.process.remote(nxt_job_g)
-                        self._inflight[ref_g] = nxt_job_g
-                    self.inflight_by_type[jt] = (
-                        int(self.inflight_by_type.get(jt, 0)) + 1
-                    )
-                    self.submitted_by_type[jt] = self.submitted_by_type.get(jt, 0) + 1
-                    self.total_enqueued += 1
-                    # Update per-sample aggregate for GUI samples view
-                    try:
-                        sid_local_g = (
-                            nxt_job_g.context.get_sample_id()
-                            if hasattr(nxt_job_g.context, "get_sample_id")
-                            else "unknown"
-                        )
-                        if sid_local_g != "unknown":
-                            ent_local_g = self.samples_by_id.get(sid_local_g)
-                            if ent_local_g is None:
-                                ent_local_g = {
-                                    "sample_id": sid_local_g,
-                                    "active_jobs": 0,
-                                    "total_jobs": 0,
-                                    "completed_jobs": 0,
-                                    "failed_jobs": 0,
-                                    "job_types": set(),
-                                    "last_seen": time.time(),
-                                }
-                                self.samples_by_id[sid_local_g] = ent_local_g
-                            ent_local_g["total_jobs"] += 1
-                            ent_local_g["active_jobs"] += 1
-                            try:
-                                ent_local_g["job_types"].add(nxt_job_g.job_type)
-                            except Exception:
-                                pass
-                            ent_local_g["last_seen"] = time.time()
-                    except Exception:
-                        pass
-                    self.active[nxt_job_g.job_id] = {
-                        "job_type": nxt_job_g.job_type,
-                        "filepath": nxt_job_g.context.filepath,
-                        "queue": job_queue_of(nxt_job_g.job_type),
-                        "start_time": time.time(),
-                    }
+            # decrement inflight count for this queue
+            qn = queue_name or job_queue_of(jt)
+            if self.inflight_by_queue.get(qn, 0) > 0:
+                self.inflight_by_queue[qn] -= 1
+                if self.inflight_by_queue[qn] == 0:
+                    self.inflight_by_queue.pop(qn, None)
+            await self._drain_waiting_jobs(qn, jt)
+        except Exception:
+            pass
         except Exception:
             pass
         if job.job_type in CLASSIFICATION_TYPES:
@@ -2224,13 +2282,23 @@ class Coordinator:
             )
         except Exception:
             waiting_serialized = 0
-        # Count global backpressure queues (per-type)
+        # Count global backpressure queues (per-type, per-queue, and global)
         try:
             waiting_global = sum(
                 len(v) for v in getattr(self, "waiting_by_type_global", {}).values()
             )
         except Exception:
             waiting_global = 0
+        try:
+            waiting_global += sum(
+                len(v) for v in getattr(self, "waiting_by_queue", {}).values()
+            )
+        except Exception:
+            pass
+        try:
+            waiting_global += len(getattr(self, "waiting_global", []))
+        except Exception:
+            pass
         # Samples payload for GUI
         samples_payload: List[Dict[str, Any]] = []
         try:
@@ -2630,15 +2698,40 @@ async def submit_existing_paths(
                         j.context.add_metadata("target_panel", coord_target_panel)
                 batch += jobs
                 if len(batch) >= 256:
-                    await coord.submit_jobs.remote(batch)
+                    while True:
+                        try:
+                            can_accept = await coord.can_accept_jobs.remote(len(batch))
+                        except Exception:
+                            can_accept = True
+                        if can_accept:
+                            await coord.submit_jobs.remote(batch)
+                            break
+                        await asyncio.sleep(0.2)
                     batch = []
             if batch:
-                await coord.submit_jobs.remote(batch)
+                while True:
+                    try:
+                        can_accept = await coord.can_accept_jobs.remote(len(batch))
+                    except Exception:
+                        can_accept = True
+                    if can_accept:
+                        await coord.submit_jobs.remote(batch)
+                        break
+                    await asyncio.sleep(0.2)
     if seed_jobs:
         # Submit in bounded batches to avoid flooding the coordinator/actors
         BATCH = 256
         for i in range(0, len(seed_jobs), BATCH):
-            await coord.submit_jobs.remote(seed_jobs[i : i + BATCH])
+            chunk = seed_jobs[i : i + BATCH]
+            while True:
+                try:
+                    can_accept = await coord.can_accept_jobs.remote(len(chunk))
+                except Exception:
+                    can_accept = True
+                if can_accept:
+                    await coord.submit_jobs.remote(chunk)
+                    break
+                await asyncio.sleep(0.2)
 
 
 async def tqdm_monitor(coord, continuous: bool = False) -> None:
