@@ -1355,8 +1355,44 @@ class Coordinator:
             
             # Process other jobs through batcher
             for job in other_jobs:
+                try:
+                    sid_pending = job.context.get_sample_id() if job.context else "unknown"
+                except Exception:
+                    sid_pending = "unknown"
+                try:
+                    if sid_pending != "unknown":
+                        ent_pending = self.samples_by_id.get(sid_pending)
+                        if ent_pending is None:
+                            ent_pending = {
+                                "sample_id": sid_pending,
+                                "active_jobs": 0,
+                                "pending_jobs": 0,
+                                "total_jobs": 0,
+                                "completed_jobs": 0,
+                                "failed_jobs": 0,
+                                "job_types": set(),
+                                "last_seen": time.time(),
+                            }
+                            self.samples_by_id[sid_pending] = ent_pending
+                        ent_pending["pending_jobs"] = ent_pending.get("pending_jobs", 0) + 1
+                        ent_pending["last_seen"] = time.time()
+                except Exception:
+                    pass
                 batches = await self.sample_batcher.add_job(job)
                 if batches:
+                    try:
+                        for batch in batches:
+                            sid_batch = batch.sample_id
+                            if sid_batch != "unknown":
+                                ent_pending = self.samples_by_id.get(sid_batch)
+                                if ent_pending and ent_pending.get("pending_jobs", 0) > 0:
+                                    ent_pending["pending_jobs"] = max(
+                                        0,
+                                        ent_pending.get("pending_jobs", 0) - len(batch.contexts),
+                                    )
+                                    ent_pending["last_seen"] = time.time()
+                    except Exception:
+                        pass
                     # Convert BatchedJob to regular Job for processing
                     regular_jobs = self._convert_batched_jobs(batches)
                     await self._submit_jobs_internal(regular_jobs)
@@ -2016,8 +2052,44 @@ class Coordinator:
                         
                         # For CNV jobs, add them to the batcher
                         for cnv_job in cnv_jobs:
+                            try:
+                                sid_pending = cnv_job.context.get_sample_id() if cnv_job.context else "unknown"
+                            except Exception:
+                                sid_pending = "unknown"
+                            try:
+                                if sid_pending != "unknown":
+                                    ent_pending = self.samples_by_id.get(sid_pending)
+                                    if ent_pending is None:
+                                        ent_pending = {
+                                            "sample_id": sid_pending,
+                                            "active_jobs": 0,
+                                            "pending_jobs": 0,
+                                            "total_jobs": 0,
+                                            "completed_jobs": 0,
+                                            "failed_jobs": 0,
+                                            "job_types": set(),
+                                            "last_seen": time.time(),
+                                        }
+                                        self.samples_by_id[sid_pending] = ent_pending
+                                    ent_pending["pending_jobs"] = ent_pending.get("pending_jobs", 0) + 1
+                                    ent_pending["last_seen"] = time.time()
+                            except Exception:
+                                pass
                             batches = await self.sample_batcher.add_job(cnv_job)
                             if batches:
+                                try:
+                                    for batch in batches:
+                                        sid_batch = batch.sample_id
+                                        if sid_batch != "unknown":
+                                            ent_pending = self.samples_by_id.get(sid_batch)
+                                            if ent_pending and ent_pending.get("pending_jobs", 0) > 0:
+                                                ent_pending["pending_jobs"] = max(
+                                                    0,
+                                                    ent_pending.get("pending_jobs", 0) - len(batch.contexts),
+                                                )
+                                                ent_pending["last_seen"] = time.time()
+                                except Exception:
+                                    pass
                                 # Convert BatchedJob to regular Job for processing
                                 regular_jobs = self._convert_batched_jobs(batches)
                                 await self._submit_jobs_internal(regular_jobs)
@@ -2278,6 +2350,19 @@ class Coordinator:
                 
                 # Submit timed-out batches
                 if timed_out_batches:
+                    try:
+                        for batch in timed_out_batches:
+                            sid_batch = batch.sample_id
+                            if sid_batch != "unknown":
+                                ent_pending = self.samples_by_id.get(sid_batch)
+                                if ent_pending and ent_pending.get("pending_jobs", 0) > 0:
+                                    ent_pending["pending_jobs"] = max(
+                                        0,
+                                        ent_pending.get("pending_jobs", 0) - len(batch.contexts),
+                                    )
+                                    ent_pending["last_seen"] = time.time()
+                    except Exception:
+                        pass
                     regular_jobs = self._convert_batched_jobs(timed_out_batches)
                     await self._submit_jobs_internal(regular_jobs)
                 
