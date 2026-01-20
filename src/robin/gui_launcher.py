@@ -111,6 +111,7 @@ class SampleRecord:
     device: str = ""
     flowcell: str = ""
     active_jobs: int = 0
+    pending_jobs: int = 0
     total_jobs: int = 0
     completed_jobs: int = 0
     failed_jobs: int = 0
@@ -131,6 +132,7 @@ class SampleRecord:
             "device": self.device,
             "flowcell": self.flowcell,
             "active_jobs": self.active_jobs,
+            "pending_jobs": self.pending_jobs,
             "total_jobs": self.total_jobs,
             "completed_jobs": self.completed_jobs,
             "failed_jobs": self.failed_jobs,
@@ -369,6 +371,9 @@ class GUILauncher:
                                 record.active_jobs = int(
                                     first_row.get("samples_overview_active_jobs", 0) or 0
                                 )
+                                record.pending_jobs = int(
+                                    first_row.get("samples_overview_pending_jobs", 0) or 0
+                                )
                                 record.total_jobs = int(
                                     first_row.get("samples_overview_total_jobs", 0) or 0
                                 )
@@ -393,7 +398,7 @@ class GUILauncher:
                         prev_origin = record.origin
                         # Only mark as Complete if timeout passed AND no active jobs
                         if record.origin == "Live" and (now_ts - record._last_seen_raw) >= self.completion_timeout_seconds:
-                            if record.active_jobs == 0:
+                            if record.active_jobs == 0 and record.pending_jobs == 0:
                                 record.origin = "Complete"
                                 record._dirty = True
                                 # Trigger finalization if transitioning from Live to Complete
@@ -406,7 +411,7 @@ class GUILauncher:
                             pass
                         elif record.origin == "Complete":
                             # Reactivate if file was modified recently OR if there are active jobs
-                            if (now_ts - record._last_seen_raw) < self.completion_timeout_seconds or record.active_jobs > 0:
+                            if (now_ts - record._last_seen_raw) < self.completion_timeout_seconds or record.active_jobs > 0 or record.pending_jobs > 0:
                                 record.origin = "Live"
                                 record._dirty = True
                         
@@ -418,6 +423,7 @@ class GUILauncher:
                             manager = MasterCSVManager(str(base))
                             persist_payload = {
                                 "active_jobs": int(record.active_jobs),
+                                "pending_jobs": int(record.pending_jobs),
                                 "total_jobs": int(record.total_jobs),
                                 "completed_jobs": int(record.completed_jobs),
                                 "failed_jobs": int(record.failed_jobs),
@@ -501,6 +507,7 @@ class GUILauncher:
                     
                     # Update job counts from workflow data (these are more current than file scans)
                     record.active_jobs = s.get("active_jobs", 0)
+                    record.pending_jobs = s.get("pending_jobs", 0)
                     record.total_jobs = s.get("total_jobs", 0)
                     record.completed_jobs = s.get("completed_jobs", 0)
                     record.failed_jobs = s.get("failed_jobs", 0)
@@ -537,6 +544,7 @@ class GUILauncher:
                             if record._dirty:
                                 persist_payload = {
                                     "active_jobs": int(record.active_jobs),
+                                    "pending_jobs": int(record.pending_jobs),
                                     "total_jobs": int(record.total_jobs),
                                     "completed_jobs": int(record.completed_jobs),
                                     "failed_jobs": int(record.failed_jobs),
@@ -1667,6 +1675,12 @@ class GUILauncher:
                                 "sortable": True,
                             },
                             {
+                                "name": "pending_jobs",
+                                "label": "Pending",
+                                "field": "pending_jobs",
+                                "sortable": True,
+                            },
+                            {
                                 "name": "total_jobs",
                                 "label": "Total",
                                 "field": "total_jobs",
@@ -2273,9 +2287,10 @@ class GUILauncher:
                                 break
                     try:
                         active_jobs_count = s.get("active_jobs", 0)
+                        pending_jobs_count = s.get("pending_jobs", 0)
                         # Only mark as Complete if timeout passed AND no active jobs
                         if origin_value == "Live" and (time.time() - last_seen) >= self.completion_timeout_seconds:
-                            if active_jobs_count == 0:
+                            if active_jobs_count == 0 and pending_jobs_count == 0:
                                 should_complete = True
                                 if expected_job_types and base is not None:
                                     sample_dir = base / sid
@@ -2307,6 +2322,7 @@ class GUILauncher:
                         "device": "",
                         "flowcell": "",
                         "active_jobs": s.get("active_jobs", 0),
+                        "pending_jobs": s.get("pending_jobs", 0),
                         "total_jobs": total_jobs,
                         "completed_jobs": completed_jobs,
                         "failed_jobs": s.get("failed_jobs", 0),
@@ -2339,6 +2355,7 @@ class GUILauncher:
                     if manager is not None:
                         persist_payload = {
                             "active_jobs": int(row.get("active_jobs", 0)),
+                            "pending_jobs": int(row.get("pending_jobs", 0)),
                             "total_jobs": int(row.get("total_jobs", 0)),
                             "completed_jobs": int(row.get("completed_jobs", 0)),
                             "failed_jobs": int(row.get("failed_jobs", 0)),
@@ -2495,9 +2512,10 @@ class GUILauncher:
                         if r.get("origin") == "Live":
                             last_raw = float(r.get("_last_seen_raw", 0))
                             active_jobs_count = r.get("active_jobs", 0)
+                            pending_jobs_count = r.get("pending_jobs", 0)
                             # Only mark as Complete if timeout passed AND no active jobs
                             if last_raw and (now_ts - last_raw) >= self.completion_timeout_seconds:
-                                if active_jobs_count == 0:
+                                if active_jobs_count == 0 and pending_jobs_count == 0:
                                     r["origin"] = "Complete"
                                 # If there are active jobs, keep as Live even if timeout passed
                     except Exception:
@@ -4841,6 +4859,7 @@ class GUILauncher:
                     device = ""
                     flowcell = ""
                     ov_active = 0
+                    ov_pending = 0
                     ov_total = 0
                     ov_completed = 0
                     ov_failed = 0
@@ -4865,6 +4884,9 @@ class GUILauncher:
                             ov_active = int(
                                 first_row.get("samples_overview_active_jobs", 0) or 0
                             )
+                            ov_pending = int(
+                                first_row.get("samples_overview_pending_jobs", 0) or 0
+                            )
                             ov_total = int(
                                 first_row.get("samples_overview_total_jobs", 0) or 0
                             )
@@ -4887,7 +4909,7 @@ class GUILauncher:
                     try:
                         # Only mark as Complete if timeout passed AND no active jobs
                         if origin_value == "Live" and (time.time() - last_seen) >= self.completion_timeout_seconds:
-                            if ov_active == 0:
+                            if ov_active == 0 and ov_pending == 0:
                                 origin_value = "Complete"
                                 # Check if this is a transition from Live to Complete
                                 existing = self._last_samples_rows or []
@@ -4910,6 +4932,7 @@ class GUILauncher:
                             "device": device,
                             "flowcell": flowcell,
                             "active_jobs": ov_active,
+                            "pending_jobs": ov_pending,
                             "total_jobs": ov_total,
                             "completed_jobs": ov_completed,
                             "failed_jobs": ov_failed,
@@ -5110,6 +5133,7 @@ class GUILauncher:
                 device = ""
                 flowcell = ""
                 ov_active = 0
+                ov_pending = 0
                 ov_total = 0
                 ov_completed = 0
                 ov_failed = 0
@@ -5137,6 +5161,9 @@ class GUILauncher:
                         # Try to get overview data from master.csv first
                         ov_active = int(
                             first_row.get("samples_overview_active_jobs", 0) or 0
+                        )
+                        ov_pending = int(
+                            first_row.get("samples_overview_pending_jobs", 0) or 0
                         )
                         ov_total = int(
                             first_row.get("samples_overview_total_jobs", 0) or 0
@@ -5197,6 +5224,7 @@ class GUILauncher:
                     "device": device,
                     "flowcell": flowcell,
                     "active_jobs": ov_active,
+                    "pending_jobs": ov_pending,
                     "total_jobs": ov_total,
                     "completed_jobs": ov_completed,
                     "failed_jobs": ov_failed,
@@ -5304,6 +5332,7 @@ class GUILauncher:
                         device = ""
                         flowcell = ""
                         ov_active = 0
+                        ov_pending = 0
                         ov_total = 0
                         ov_completed = 0
                         ov_failed = 0
@@ -5325,6 +5354,9 @@ class GUILauncher:
                                 pass
                             ov_active = int(
                                 first_row.get("samples_overview_active_jobs", 0) or 0
+                            )
+                            ov_pending = int(
+                                first_row.get("samples_overview_pending_jobs", 0) or 0
                             )
                             ov_total = int(
                                 first_row.get("samples_overview_total_jobs", 0) or 0
@@ -5385,6 +5417,7 @@ class GUILauncher:
                             if ov_job_types:
                                 updated["job_types"] = ov_job_types
                             updated["active_jobs"] = ov_active
+                            updated["pending_jobs"] = ov_pending
                             updated["total_jobs"] = ov_total
                             updated["completed_jobs"] = ov_completed
                             updated["failed_jobs"] = ov_failed
@@ -5397,7 +5430,7 @@ class GUILauncher:
                             try:
                                 # Only mark as Complete if timeout passed AND no active jobs
                                 if (time.time() - last_seen) >= self.completion_timeout_seconds:
-                                    if ov_active == 0:
+                                    if ov_active == 0 and ov_pending == 0:
                                         updated["origin"] = "Complete"
                                         # Trigger finalization if transitioning from Live to Complete
                                         if prev_origin == "Live":

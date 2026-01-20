@@ -1144,6 +1144,26 @@ class Coordinator:
         # Global inflight cap
         if self._total_inflight() >= self.max_total_inflight:
             self.waiting_global.append(job)
+            try:
+                sid_pending = sample_id or "unknown"
+                if sid_pending != "unknown":
+                    ent_pending = self.samples_by_id.get(sid_pending)
+                    if ent_pending is None:
+                        ent_pending = {
+                            "sample_id": sid_pending,
+                            "active_jobs": 0,
+                            "pending_jobs": 0,
+                            "total_jobs": 0,
+                            "completed_jobs": 0,
+                            "failed_jobs": 0,
+                            "job_types": set(),
+                            "last_seen": time.time(),
+                        }
+                        self.samples_by_id[sid_pending] = ent_pending
+                    ent_pending["pending_jobs"] = ent_pending.get("pending_jobs", 0) + 1
+                    ent_pending["last_seen"] = time.time()
+            except Exception:
+                pass
             return
 
         q = job_queue_of(job.job_type)
@@ -1151,12 +1171,52 @@ class Coordinator:
         if int(self.inflight_by_queue.get(q, 0)) >= self._queue_inflight_cap(q):
             await self._wait_for_queue_capacity(q)
             self.waiting_by_queue.setdefault(q, []).append(job)
+            try:
+                sid_pending = sample_id or "unknown"
+                if sid_pending != "unknown":
+                    ent_pending = self.samples_by_id.get(sid_pending)
+                    if ent_pending is None:
+                        ent_pending = {
+                            "sample_id": sid_pending,
+                            "active_jobs": 0,
+                            "pending_jobs": 0,
+                            "total_jobs": 0,
+                            "completed_jobs": 0,
+                            "failed_jobs": 0,
+                            "job_types": set(),
+                            "last_seen": time.time(),
+                        }
+                        self.samples_by_id[sid_pending] = ent_pending
+                    ent_pending["pending_jobs"] = ent_pending.get("pending_jobs", 0) + 1
+                    ent_pending["last_seen"] = time.time()
+            except Exception:
+                pass
             return
 
         # Per-type inflight cap
         inflight_for_type = int(self.inflight_by_type.get(job.job_type, 0))
         if inflight_for_type >= self.max_inflight_per_type:
             self.waiting_by_type_global.setdefault(job.job_type, []).append(job)
+            try:
+                sid_pending = sample_id or "unknown"
+                if sid_pending != "unknown":
+                    ent_pending = self.samples_by_id.get(sid_pending)
+                    if ent_pending is None:
+                        ent_pending = {
+                            "sample_id": sid_pending,
+                            "active_jobs": 0,
+                            "pending_jobs": 0,
+                            "total_jobs": 0,
+                            "completed_jobs": 0,
+                            "failed_jobs": 0,
+                            "job_types": set(),
+                            "last_seen": time.time(),
+                        }
+                        self.samples_by_id[sid_pending] = ent_pending
+                    ent_pending["pending_jobs"] = ent_pending.get("pending_jobs", 0) + 1
+                    ent_pending["last_seen"] = time.time()
+            except Exception:
+                pass
             return
 
         # Found processor for job type
@@ -1187,6 +1247,7 @@ class Coordinator:
                     ent = {
                         "sample_id": sid,
                         "active_jobs": 0,
+                        "pending_jobs": 0,
                         "total_jobs": 0,
                         "completed_jobs": 0,
                         "failed_jobs": 0,
@@ -1222,6 +1283,14 @@ class Coordinator:
                 sid = nxt_global.context.get_sample_id()
             except Exception:
                 sid = "unknown"
+            try:
+                if sid != "unknown":
+                    ent_pending = self.samples_by_id.get(sid)
+                    if ent_pending and ent_pending.get("pending_jobs", 0) > 0:
+                        ent_pending["pending_jobs"] -= 1
+                        ent_pending["last_seen"] = time.time()
+            except Exception:
+                pass
             await self._dispatch_ready_job(nxt_global, sid, from_waiting=True)
 
         # Then try one queued-by-queue job
@@ -1235,6 +1304,14 @@ class Coordinator:
                     sid = nxt_queue.context.get_sample_id()
                 except Exception:
                     sid = "unknown"
+                try:
+                    if sid != "unknown":
+                        ent_pending = self.samples_by_id.get(sid)
+                        if ent_pending and ent_pending.get("pending_jobs", 0) > 0:
+                            ent_pending["pending_jobs"] -= 1
+                            ent_pending["last_seen"] = time.time()
+                except Exception:
+                    pass
                 await self._dispatch_ready_job(nxt_queue, sid, from_waiting=True)
 
         # Finally, release one per-type waiting job
@@ -1247,6 +1324,14 @@ class Coordinator:
                 sid = nxt_job_g.context.get_sample_id()
             except Exception:
                 sid = "unknown"
+            try:
+                if sid != "unknown":
+                    ent_pending = self.samples_by_id.get(sid)
+                    if ent_pending and ent_pending.get("pending_jobs", 0) > 0:
+                        ent_pending["pending_jobs"] -= 1
+                        ent_pending["last_seen"] = time.time()
+            except Exception:
+                pass
             await self._dispatch_ready_job(nxt_job_g, sid, from_waiting=True)
 
     # ----- submission & lifecycle -----
@@ -1300,6 +1385,25 @@ class Coordinator:
                 if (ra + pa) > 0:
                     self.waiting_by_type_sample.setdefault(key_ts, []).append(job)
                     self.pending_by_type_sample[key_ts] = pa + 1
+                    try:
+                        if sid != "unknown":
+                            ent_pending = self.samples_by_id.get(sid)
+                            if ent_pending is None:
+                                ent_pending = {
+                                    "sample_id": sid,
+                                    "active_jobs": 0,
+                                    "pending_jobs": 0,
+                                    "total_jobs": 0,
+                                    "completed_jobs": 0,
+                                    "failed_jobs": 0,
+                                    "job_types": set(),
+                                    "last_seen": time.time(),
+                                }
+                                self.samples_by_id[sid] = ent_pending
+                            ent_pending["pending_jobs"] = ent_pending.get("pending_jobs", 0) + 1
+                            ent_pending["last_seen"] = time.time()
+                    except Exception:
+                        pass
                     continue
                 else:
                     self.running_by_type_sample[key_ts] = ra + 1
@@ -1848,6 +1952,7 @@ class Coordinator:
                                         ent_local = {
                                             "sample_id": sid_local,
                                             "active_jobs": 0,
+                                            "pending_jobs": 0,
                                             "total_jobs": 0,
                                             "completed_jobs": 0,
                                             "failed_jobs": 0,
@@ -1998,6 +2103,14 @@ class Coordinator:
                 )
                 if self.pending_by_type_sample[key_ts] == 0:
                     self.pending_by_type_sample.pop(key_ts, None)
+                try:
+                    if sid != "unknown":
+                        ent_pending = self.samples_by_id.get(sid)
+                        if ent_pending and ent_pending.get("pending_jobs", 0) > 0:
+                            ent_pending["pending_jobs"] -= 1
+                            ent_pending["last_seen"] = time.time()
+                except Exception:
+                    pass
                 self.running_by_type_sample[key_ts] = (
                     self.running_by_type_sample.get(key_ts, 0) + 1
                 )
@@ -2026,6 +2139,7 @@ class Coordinator:
                                 ent_local2 = {
                                     "sample_id": sid_local2,
                                     "active_jobs": 0,
+                                    "pending_jobs": 0,
                                     "total_jobs": 0,
                                     "completed_jobs": 0,
                                     "failed_jobs": 0,
@@ -2110,6 +2224,7 @@ class Coordinator:
                                 ent_local3 = {
                                     "sample_id": sid_local3,
                                     "active_jobs": 0,
+                                    "pending_jobs": 0,
                                     "total_jobs": 0,
                                     "completed_jobs": 0,
                                     "failed_jobs": 0,
@@ -2306,6 +2421,7 @@ class Coordinator:
                 sample_data = {
                     "sample_id": sid,
                     "active_jobs": ent.get("active_jobs", 0),
+                    "pending_jobs": ent.get("pending_jobs", 0),
                     "total_jobs": ent.get("total_jobs", 0),
                     "completed_jobs": ent.get("completed_jobs", 0),
                     "failed_jobs": ent.get("failed_jobs", 0),
