@@ -175,6 +175,16 @@ class GeneRegion:
 
 
 @dataclass
+class TaggedGeneRegion:
+    """Represents a gene region with a classification tag."""
+
+    start: int
+    end: int
+    name: str
+    region_type: str  # "target" or "genome"
+
+
+@dataclass
 class MasterBedRegion:
     """Represents a region from the master BED file (breakpoints, CNV regions, etc.).
     Simpler than GeneRegion - just tracks coordinates without gene names.
@@ -207,6 +217,7 @@ _all_gene_region_starts_cache: Dict[str, Dict[str, List[int]]] = {}
 # Cache for NCLS indexes (optional, used when available)
 _gene_region_ncls_cache: Dict[str, Dict[str, Tuple["NCLS", List[GeneRegion]]]] = {}
 _all_gene_region_ncls_cache: Dict[str, Dict[str, Tuple["NCLS", List[GeneRegion]]]] = {}
+_combined_gene_region_ncls_cache: Dict[str, Dict[str, Tuple["NCLS", List[TaggedGeneRegion]]]] = {}
 
 # =============================================================================
 # UTILITY FUNCTIONS
@@ -262,6 +273,264 @@ def _build_ncls_index(
     ends = np.fromiter((r.end for r in regions), dtype=np.int64, count=len(regions))
     ids = np.arange(len(regions), dtype=np.int64)
     return (NCLS(starts, ends, ids), regions)
+
+
+def _build_tagged_ncls_index(
+    regions: List[TaggedGeneRegion],
+) -> Optional[Tuple["NCLS", List[TaggedGeneRegion]]]:
+    """Build an NCLS index for tagged gene regions."""
+    if not _HAS_NCLS or not regions:
+        return None
+    starts = np.fromiter((r.start for r in regions), dtype=np.int64, count=len(regions))
+    ends = np.fromiter((r.end for r in regions), dtype=np.int64, count=len(regions))
+    ids = np.arange(len(regions), dtype=np.int64)
+    return (NCLS(starts, ends, ids), regions)
+
+
+def _rows_to_dataframe(rows: List[Dict[str, Any]]) -> pd.DataFrame:
+    """Build a DataFrame from row dicts using columnar storage."""
+    if not rows:
+        return pd.DataFrame()
+    columns = list(rows[0].keys())
+    data = {column: [] for column in columns}
+    for row in rows:
+        for column in columns:
+            data[column].append(row.get(column))
+    return pd.DataFrame(data)
+
+
+_FUSION_COLUMNS = (
+    "col1",
+    "col2",
+    "col3",
+    "col4",
+    "reference_id",
+    "reference_start",
+    "reference_end",
+    "read_id",
+    "mapping_quality",
+    "strand",
+    "read_start",
+    "read_end",
+    "is_secondary",
+    "is_supplementary",
+    "mapping_span",
+)
+
+
+def _create_fusion_columnar() -> Dict[str, List[Any]]:
+    """Create an empty columnar container for fusion rows."""
+    return {column: [] for column in _FUSION_COLUMNS}
+
+
+def _build_fusion_row_dict(
+    ref_name: str,
+    gene_start: int,
+    gene_end: int,
+    gene_name: str,
+    read: pysam.AlignedSegment,
+    ref_start: int,
+    ref_end: int,
+) -> Dict[str, Any]:
+    """Build a row dict with the standard fusion columns."""
+    return {
+        "col1": ref_name,
+        "col2": gene_start,
+        "col3": gene_end,
+        "col4": gene_name,
+        "reference_id": ref_name,
+        "reference_start": ref_start,
+        "reference_end": ref_end,
+        "read_id": read.query_name,
+        "mapping_quality": read.mapping_quality,
+        "strand": "-" if read.is_reverse else "+",
+        "read_start": read.query_alignment_start,
+        "read_end": read.query_alignment_end,
+        "is_secondary": read.is_secondary,
+        "is_supplementary": read.is_supplementary,
+        "mapping_span": ref_end - ref_start,
+    }
+
+
+def _append_fusion_row(
+    data: Dict[str, List[Any]],
+    ref_name: str,
+    gene_start: int,
+    gene_end: int,
+    gene_name: str,
+    read: pysam.AlignedSegment,
+    ref_start: int,
+    ref_end: int,
+) -> None:
+    """Append a single fusion row to a columnar container."""
+    data["col1"].append(ref_name)
+    data["col2"].append(gene_start)
+    data["col3"].append(gene_end)
+    data["col4"].append(gene_name)
+    data["reference_id"].append(ref_name)
+    data["reference_start"].append(ref_start)
+    data["reference_end"].append(ref_end)
+    data["read_id"].append(read.query_name)
+    data["mapping_quality"].append(read.mapping_quality)
+    data["strand"].append("-" if read.is_reverse else "+")
+    data["read_start"].append(read.query_alignment_start)
+    data["read_end"].append(read.query_alignment_end)
+    data["is_secondary"].append(read.is_secondary)
+    data["is_supplementary"].append(read.is_supplementary)
+    data["mapping_span"].append(ref_end - ref_start)
+
+
+def _append_gene_intersections(
+    read: pysam.AlignedSegment,
+    ref_name: str,
+    ref_start: int,
+    ref_end: int,
+    gene_regions: List[GeneRegion],
+    data: Dict[str, List[Any]],
+    region_starts: Optional[List[int]] = None,
+    region_index: Optional[Tuple["NCLS", List[GeneRegion]]] = None,
+) -> int:
+    """Append gene intersections for a read into columnar storage."""
+    if not read.has_tag("SA"):
+        return 0
+    if not gene_regions:
+        return 0
+
+    added = 0
+    min_overlap = get_fusion_threshold("gene_overlap")
+    if region_index and _HAS_NCLS:
+        ncls_index, indexed_regions = region_index
+        for _, _, region_id in ncls_index.find_overlap(ref_start, ref_end):
+            gene_region = indexed_regions[region_id]
+            overlap_start = max(gene_region.start, ref_start)
+            overlap_end = min(gene_region.end, ref_end)
+            if overlap_end > overlap_start and (overlap_end - overlap_start) > min_overlap:
+                _append_fusion_row(
+                    data,
+                    ref_name,
+                    gene_region.start,
+                    gene_region.end,
+                    gene_region.name,
+                    read,
+                    ref_start,
+                    ref_end,
+                )
+                added += 1
+        return added
+
+    if region_starts is None:
+        region_starts = [region.start for region in gene_regions]
+
+    rightmost_idx = bisect.bisect_right(region_starts, ref_end)
+    for i in range(rightmost_idx - 1, -1, -1):
+        gene_region = gene_regions[i]
+        if gene_region.end < ref_start:
+            break
+        overlap_start = max(gene_region.start, ref_start)
+        overlap_end = min(gene_region.end, ref_end)
+        if overlap_end > overlap_start and (overlap_end - overlap_start) > min_overlap:
+            _append_fusion_row(
+                data,
+                ref_name,
+                gene_region.start,
+                gene_region.end,
+                gene_region.name,
+                read,
+                ref_start,
+                ref_end,
+            )
+            added += 1
+
+    return added
+
+
+def _append_combined_gene_intersections(
+    read: pysam.AlignedSegment,
+    ref_name: str,
+    ref_start: int,
+    ref_end: int,
+    combined_index: Tuple["NCLS", List[TaggedGeneRegion]],
+    target_read_alignments: Dict[str, List[Dict[str, Any]]],
+    genome_read_alignments: Dict[str, List[Dict[str, Any]]],
+    read_id: str,
+) -> None:
+    """Append overlaps from a combined tagged index into target/genome buckets."""
+    if not read.has_tag("SA"):
+        return
+
+    min_overlap = get_fusion_threshold("gene_overlap")
+    ncls_index, tagged_regions = combined_index
+    for _, _, region_id in ncls_index.find_overlap(ref_start, ref_end):
+        region = tagged_regions[region_id]
+        overlap_start = max(region.start, ref_start)
+        overlap_end = min(region.end, ref_end)
+        if overlap_end <= overlap_start or (overlap_end - overlap_start) <= min_overlap:
+            continue
+
+        row = _build_fusion_row_dict(
+            ref_name,
+            region.start,
+            region.end,
+            region.name,
+            read,
+            ref_start,
+            ref_end,
+        )
+        if region.region_type == "target":
+            target_read_alignments.setdefault(read_id, []).append(row)
+        else:
+            genome_read_alignments.setdefault(read_id, []).append(row)
+
+
+def _check_read_alignments_overlap_columnar(data: Dict[str, List[Any]]) -> bool:
+    """Columnar version of overlap checks to avoid row dicts."""
+    reference_ids = data.get("reference_id", [])
+    if len(reference_ids) < 2:
+        return False
+
+    reference_starts = data["reference_start"]
+    reference_ends = data["reference_end"]
+    gene_names = data["col4"]
+
+    genomic_alignments: Dict[str, List[str]] = {}
+    for i in range(len(reference_ids)):
+        genomic_key = (
+            f"{reference_ids[i]}:{reference_starts[i]}-{reference_ends[i]}"
+        )
+        genomic_alignments.setdefault(genomic_key, []).append(gene_names[i])
+
+    for genes in genomic_alignments.values():
+        if len(genes) > 1 and len(set(genes)) > 1:
+            return True
+
+    if get_fusion_rule("coordinate_similarity_filter"):
+        max_diff = get_fusion_threshold("coordinate_similarity")
+        alignments_by_chrom: Dict[str, List[int]] = defaultdict(list)
+        for i, chrom in enumerate(reference_ids):
+            alignments_by_chrom[chrom].append(i)
+
+        for chrom, chrom_indices in alignments_by_chrom.items():
+            if len(chrom_indices) < 2:
+                continue
+            for i in range(len(chrom_indices)):
+                for j in range(i + 1, len(chrom_indices)):
+                    idx1 = chrom_indices[i]
+                    idx2 = chrom_indices[j]
+                    if are_coordinates_similar(
+                        reference_starts[idx1],
+                        reference_ends[idx1],
+                        reference_starts[idx2],
+                        reference_ends[idx2],
+                        max_diff,
+                    ):
+                        logger.debug(
+                            "Filtering similar alignments: "
+                            f"{reference_ids[idx1]}:{reference_starts[idx1]}-{reference_ends[idx1]} vs "
+                            f"{reference_ids[idx2]}:{reference_starts[idx2]}-{reference_ends[idx2]}"
+                        )
+                        return True
+
+    return False
 
 
 # =============================================================================
@@ -427,6 +696,26 @@ def _ensure_gene_regions_loaded(target_panel: str) -> None:
                     for chrom, regions in _all_gene_regions_cache["shared"].items()
                     if regions
                 }
+
+        if _HAS_NCLS and target_panel not in _combined_gene_region_ncls_cache:
+            combined_indexes: Dict[str, Tuple["NCLS", List[TaggedGeneRegion]]] = {}
+            target_regions = _gene_regions_cache.get(target_panel, {})
+            genome_regions = _all_gene_regions_cache.get("shared", {})
+            for chrom in set(target_regions.keys()) | set(genome_regions.keys()):
+                combined_regions: List[TaggedGeneRegion] = []
+                for region in target_regions.get(chrom, []):
+                    combined_regions.append(
+                        TaggedGeneRegion(region.start, region.end, region.name, "target")
+                    )
+                for region in genome_regions.get(chrom, []):
+                    combined_regions.append(
+                        TaggedGeneRegion(region.start, region.end, region.name, "genome")
+                    )
+                if combined_regions:
+                    index = _build_tagged_ncls_index(combined_regions)
+                    if index:
+                        combined_indexes[chrom] = index
+            _combined_gene_region_ncls_cache[target_panel] = combined_indexes
 
 
 def _load_master_bed_regions(bed_file: str) -> Dict[str, List[MasterBedRegion]]:
@@ -733,23 +1022,15 @@ def _find_gene_intersections(
             overlap_end = min(gene_region.end, ref_end)
             if overlap_end > overlap_start and (overlap_end - overlap_start) > min_overlap:
                 read_rows.append(
-                    {
-                        "col1": ref_name,  # Chromosome
-                        "col2": gene_region.start,  # Gene start
-                        "col3": gene_region.end,  # Gene end
-                        "col4": gene_region.name,  # Gene name
-                        "reference_id": ref_name,  # Chromosome (duplicate for compatibility)
-                        "reference_start": ref_start,  # Read start position
-                        "reference_end": ref_end,  # Read end position
-                        "read_id": read.query_name,  # Read ID
-                        "mapping_quality": read.mapping_quality,  # Mapping quality
-                        "strand": "-" if read.is_reverse else "+",  # Strand
-                        "read_start": read.query_alignment_start,  # Read alignment start
-                        "read_end": read.query_alignment_end,  # Read alignment end
-                        "is_secondary": read.is_secondary,  # Is secondary alignment
-                        "is_supplementary": read.is_supplementary,  # Is supplementary alignment
-                        "mapping_span": ref_end - ref_start,  # Mapping span
-                    }
+                    _build_fusion_row_dict(
+                        ref_name,
+                        gene_region.start,
+                        gene_region.end,
+                        gene_region.name,
+                        read,
+                        ref_start,
+                        ref_end,
+                    )
                 )
         return read_rows
 
@@ -778,25 +1059,16 @@ def _find_gene_intersections(
         
         # Check if this region overlaps with the read
         if gene_region.overlaps_with(ref_start, ref_end):
-            # Create the EXACT column structure expected by the original code
             read_rows.append(
-                {
-                    "col1": ref_name,  # Chromosome
-                    "col2": gene_region.start,  # Gene start
-                    "col3": gene_region.end,  # Gene end
-                    "col4": gene_region.name,  # Gene name
-                    "reference_id": ref_name,  # Chromosome (duplicate for compatibility)
-                    "reference_start": ref_start,  # Read start position
-                    "reference_end": ref_end,  # Read end position
-                    "read_id": read.query_name,  # Read ID
-                    "mapping_quality": read.mapping_quality,  # Mapping quality
-                    "strand": "-" if read.is_reverse else "+",  # Strand
-                    "read_start": read.query_alignment_start,  # Read alignment start
-                    "read_end": read.query_alignment_end,  # Read alignment end
-                    "is_secondary": read.is_secondary,  # Is secondary alignment
-                    "is_supplementary": read.is_supplementary,  # Is supplementary alignment
-                    "mapping_span": ref_end - ref_start,  # Mapping span
-                }
+                _build_fusion_row_dict(
+                    ref_name,
+                    gene_region.start,
+                    gene_region.end,
+                    gene_region.name,
+                    read,
+                    ref_start,
+                    ref_end,
+                )
             )
 
     return read_rows
@@ -819,8 +1091,8 @@ def _process_reads_for_fusions(
     Returns:
         DataFrame with fusion candidates or None if no candidates found
     """
-    # Collect all alignments per read first
-    read_alignments = {}  # read_id -> list of alignment rows
+    # Collect all alignments per read first (columnar to avoid row dicts)
+    read_alignments: Dict[str, Dict[str, List[Any]]] = {}
     region_indexes: Dict[str, Tuple["NCLS", List[GeneRegion]]] = {}
     if _HAS_NCLS:
         for chrom, regions in gene_regions.items():
@@ -853,37 +1125,36 @@ def _process_reads_for_fusions(
 
                 # Check if this read intersects with any gene regions
                 if ref_name in gene_regions:
-                    read_rows = _find_gene_intersections(
+                    read_id = read.query_name
+                    if read_id not in read_alignments:
+                        read_alignments[read_id] = _create_fusion_columnar()
+                    _append_gene_intersections(
                         read,
                         ref_name,
                         ref_start,
                         ref_end,
                         gene_regions[ref_name],
+                        read_alignments[read_id],
                         None,
                         region_indexes.get(ref_name),
                     )
-                    if read_rows:
-                        read_id = read.query_name
-                        if read_id not in read_alignments:
-                            read_alignments[read_id] = []
-                        read_alignments[read_id].extend(read_rows)
 
     except Exception as e:
         logger.error(f"Error processing reads for fusions: {str(e)}")
         raise
 
     # Now filter out reads with overlapping alignments
-    filtered_rows = []
+    filtered_data = _create_fusion_columnar()
     for read_id, alignments in read_alignments.items():
-        # Check for overlaps between alignments of the same read
-        if not _check_read_alignments_overlap(alignments):
-            filtered_rows.extend(alignments)
+        if not _check_read_alignments_overlap_columnar(alignments):
+            for column in _FUSION_COLUMNS:
+                filtered_data[column].extend(alignments[column])
 
-    if not filtered_rows:
+    if not filtered_data["reference_id"]:
         return None
 
     # Create DataFrame with the EXACT column structure expected by the original code
-    df = pd.DataFrame(filtered_rows)
+    df = pd.DataFrame(filtered_data)
 
     # Apply memory optimizations
     df = _optimize_fusion_dataframe(df)
@@ -1352,6 +1623,9 @@ def process_bam_single_pass(
         genome_region_indexes = (
             _all_gene_region_ncls_cache.get("shared", {}) if _HAS_NCLS else {}
         )
+        combined_region_indexes = (
+            _combined_gene_region_ncls_cache.get(target_panel, {}) if _HAS_NCLS else {}
+        )
         
         # Convert supplementary_read_ids to set for fast lookup if provided
         supplementary_reads_set = set(supplementary_read_ids) if supplementary_read_ids else None
@@ -1411,41 +1685,54 @@ def process_bam_single_pass(
                     if read.mapping_quality <= min_mq or mapping_span <= min_span:
                         continue
                     
-                    # 1. Process for target panel fusions
-                    if ref_name in target_regions:
-                        target_starts = target_region_starts.get(ref_name)
-                        target_index = target_region_indexes.get(ref_name)
-                        target_rows = _find_gene_intersections(
+                    # 1-2. Unified target + genome overlap (NCLS only)
+                    if ref_name in combined_region_indexes:
+                        _append_combined_gene_intersections(
                             read,
                             ref_name,
                             ref_start,
                             ref_end,
-                            target_regions[ref_name],
-                            target_starts,
-                            target_index,
+                            combined_region_indexes[ref_name],
+                            target_read_alignments,
+                            genome_read_alignments,
+                            read_id,
                         )
-                        if target_rows:
-                            if read_id not in target_read_alignments:
-                                target_read_alignments[read_id] = []
-                            target_read_alignments[read_id].extend(target_rows)
-                    
-                    # 2. Process for genome-wide fusions
-                    if ref_name in genome_regions:
-                        genome_starts = genome_region_starts.get(ref_name)
-                        genome_index = genome_region_indexes.get(ref_name)
-                        genome_rows = _find_gene_intersections(
-                            read,
-                            ref_name,
-                            ref_start,
-                            ref_end,
-                            genome_regions[ref_name],
-                            genome_starts,
-                            genome_index,
-                        )
-                        if genome_rows:
-                            if read_id not in genome_read_alignments:
-                                genome_read_alignments[read_id] = []
-                            genome_read_alignments[read_id].extend(genome_rows)
+                    else:
+                        # 1. Process for target panel fusions
+                        if ref_name in target_regions:
+                            target_starts = target_region_starts.get(ref_name)
+                            target_index = target_region_indexes.get(ref_name)
+                            target_rows = _find_gene_intersections(
+                                read,
+                                ref_name,
+                                ref_start,
+                                ref_end,
+                                target_regions[ref_name],
+                                target_starts,
+                                target_index,
+                            )
+                            if target_rows:
+                                if read_id not in target_read_alignments:
+                                    target_read_alignments[read_id] = []
+                                target_read_alignments[read_id].extend(target_rows)
+                        
+                        # 2. Process for genome-wide fusions
+                        if ref_name in genome_regions:
+                            genome_starts = genome_region_starts.get(ref_name)
+                            genome_index = genome_region_indexes.get(ref_name)
+                            genome_rows = _find_gene_intersections(
+                                read,
+                                ref_name,
+                                ref_start,
+                                ref_end,
+                                genome_regions[ref_name],
+                                genome_starts,
+                                genome_index,
+                            )
+                            if genome_rows:
+                                if read_id not in genome_read_alignments:
+                                    genome_read_alignments[read_id] = []
+                                genome_read_alignments[read_id].extend(genome_rows)
                     
                     # 3. Process for master BED fusions
                     # Add primary alignment
