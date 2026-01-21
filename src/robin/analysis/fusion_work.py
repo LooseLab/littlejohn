@@ -3098,13 +3098,13 @@ def _extract_master_bed_breakpoints(fusion_metadata: FusionMetadata, work_dir: O
         
         # Group by read_id for efficient lookup
         groupby_start = time.time()
-        primary_by_read = primary_filtered.groupby("read_id", observed=True)
-        supplementary_by_read = supplementary_filtered.groupby("read_id", observed=True)
+        primary_indices_by_read = primary_filtered.groupby("read_id", observed=True).indices
+        supplementary_indices_by_read = supplementary_filtered.groupby("read_id", observed=True).indices
         logger.debug(
             "Grouped by read_id in %.3fs (primary_groups=%d, supplementary_groups=%d)",
             time.time() - groupby_start,
-            len(primary_by_read.groups),
-            len(supplementary_by_read.groups),
+            len(primary_indices_by_read),
+            len(supplementary_indices_by_read),
         )
         
         pair_creation_start = time.time()
@@ -3114,23 +3114,27 @@ def _extract_master_bed_breakpoints(fusion_metadata: FusionMetadata, work_dir: O
         missing_supplementary = 0
         total_pairs = 0
         reads_processed = 0
+        empty_primary = primary_filtered.iloc[0:0]
+        empty_supplementary = supplementary_filtered.iloc[0:0]
         for read_id in sorted(reads_with_both):
             # Get all primary and supplementary alignments for this read
+            primary_idx = primary_indices_by_read.get(read_id)
+            supplementary_idx = supplementary_indices_by_read.get(read_id)
             read_primaries = (
-                primary_by_read.get_group(read_id)
-                if read_id in primary_by_read.groups
-                else pd.DataFrame()
+                primary_filtered.iloc[primary_idx]
+                if primary_idx is not None
+                else empty_primary
             )
             read_supplementaries = (
-                supplementary_by_read.get_group(read_id)
-                if read_id in supplementary_by_read.groups
-                else pd.DataFrame()
+                supplementary_filtered.iloc[supplementary_idx]
+                if supplementary_idx is not None
+                else empty_supplementary
             )
             
             if read_primaries.empty or read_supplementaries.empty:
-                if read_primaries.empty:
+                if primary_idx is None:
                     missing_primary += 1
-                if read_supplementaries.empty:
+                if supplementary_idx is None:
                     missing_supplementary += 1
                 continue
             
