@@ -39,6 +39,12 @@ import networkx as nx
 from sklearn.cluster import DBSCAN
 import pyarrow.parquet as pq
 import shutil
+try:
+    from ncls import NCLS
+    _HAS_NCLS = True
+except Exception:
+    NCLS = None
+    _HAS_NCLS = False
 
 # Local imports
 from robin.classification_config import (
@@ -198,6 +204,10 @@ _target_panel_cache: Dict[str, str] = {}
 _gene_region_starts_cache: Dict[str, Dict[str, List[int]]] = {}
 _all_gene_region_starts_cache: Dict[str, Dict[str, List[int]]] = {}
 
+# Cache for NCLS indexes (optional, used when available)
+_gene_region_ncls_cache: Dict[str, Dict[str, Tuple["NCLS", List[GeneRegion]]]] = {}
+_all_gene_region_ncls_cache: Dict[str, Dict[str, Tuple["NCLS", List[GeneRegion]]]] = {}
+
 # =============================================================================
 # UTILITY FUNCTIONS
 # =============================================================================
@@ -240,6 +250,18 @@ def _optimize_dataframe_memory(df: pd.DataFrame) -> pd.DataFrame:
     }
 
     return df.astype(existing_columns, errors="ignore")
+
+
+def _build_ncls_index(
+    regions: List[GeneRegion],
+) -> Optional[Tuple["NCLS", List[GeneRegion]]]:
+    """Build an NCLS index for fast interval overlap queries."""
+    if not _HAS_NCLS or not regions:
+        return None
+    starts = np.fromiter((r.start for r in regions), dtype=np.int64, count=len(regions))
+    ends = np.fromiter((r.end for r in regions), dtype=np.int64, count=len(regions))
+    ids = np.arange(len(regions), dtype=np.int64)
+    return (NCLS(starts, ends, ids), regions)
 
 
 # =============================================================================
@@ -381,6 +403,12 @@ def _ensure_gene_regions_loaded(target_panel: str) -> None:
             chrom: [region.start for region in regions]
             for chrom, regions in _gene_regions_cache[target_panel].items()
         }
+        if _HAS_NCLS:
+            _gene_region_ncls_cache[target_panel] = {
+                chrom: _build_ncls_index(regions)
+                for chrom, regions in _gene_regions_cache[target_panel].items()
+                if regions
+            }
 
         # Load genome-wide gene regions (shared across all panels)
         if not _all_gene_regions_cache:
@@ -393,6 +421,12 @@ def _ensure_gene_regions_loaded(target_panel: str) -> None:
                 chrom: [region.start for region in regions]
                 for chrom, regions in _all_gene_regions_cache["shared"].items()
             }
+            if _HAS_NCLS:
+                _all_gene_region_ncls_cache["shared"] = {
+                    chrom: _build_ncls_index(regions)
+                    for chrom, regions in _all_gene_regions_cache["shared"].items()
+                    if regions
+                }
 
 
 def _load_master_bed_regions(bed_file: str) -> Dict[str, List[MasterBedRegion]]:
@@ -656,6 +690,7 @@ def _find_gene_intersections(
     ref_end: int,
     gene_regions: List[GeneRegion],
     region_starts: Optional[List[int]] = None,
+    region_index: Optional[Tuple["NCLS", List[GeneRegion]]] = None,
 ) -> List[Dict]:
     """
     Find intersections between a read and gene regions using optimized binary search.
@@ -672,6 +707,7 @@ def _find_gene_intersections(
         ref_end: Reference end position
         gene_regions: List of gene regions on this chromosome (must be sorted by start position)
         region_starts: Optional pre-computed list of start positions (for performance)
+        region_index: Optional NCLS index for fast interval overlap queries
 
     Returns:
         List of intersection dictionaries with the exact column structure
@@ -685,6 +721,36 @@ def _find_gene_intersections(
 
     # Early return if no gene regions
     if not gene_regions:
+        return read_rows
+
+    # Use NCLS if available for fast interval overlap queries
+    if region_index and _HAS_NCLS:
+        ncls_index, indexed_regions = region_index
+        min_overlap = get_fusion_threshold("gene_overlap")
+        for _, _, region_id in ncls_index.find_overlap(ref_start, ref_end):
+            gene_region = indexed_regions[region_id]
+            overlap_start = max(gene_region.start, ref_start)
+            overlap_end = min(gene_region.end, ref_end)
+            if overlap_end > overlap_start and (overlap_end - overlap_start) > min_overlap:
+                read_rows.append(
+                    {
+                        "col1": ref_name,  # Chromosome
+                        "col2": gene_region.start,  # Gene start
+                        "col3": gene_region.end,  # Gene end
+                        "col4": gene_region.name,  # Gene name
+                        "reference_id": ref_name,  # Chromosome (duplicate for compatibility)
+                        "reference_start": ref_start,  # Read start position
+                        "reference_end": ref_end,  # Read end position
+                        "read_id": read.query_name,  # Read ID
+                        "mapping_quality": read.mapping_quality,  # Mapping quality
+                        "strand": "-" if read.is_reverse else "+",  # Strand
+                        "read_start": read.query_alignment_start,  # Read alignment start
+                        "read_end": read.query_alignment_end,  # Read alignment end
+                        "is_secondary": read.is_secondary,  # Is secondary alignment
+                        "is_supplementary": read.is_supplementary,  # Is supplementary alignment
+                        "mapping_span": ref_end - ref_start,  # Mapping span
+                    }
+                )
         return read_rows
 
     # Binary search optimization:
@@ -755,6 +821,12 @@ def _process_reads_for_fusions(
     """
     # Collect all alignments per read first
     read_alignments = {}  # read_id -> list of alignment rows
+    region_indexes: Dict[str, Tuple["NCLS", List[GeneRegion]]] = {}
+    if _HAS_NCLS:
+        for chrom, regions in gene_regions.items():
+            index = _build_ncls_index(regions)
+            if index:
+                region_indexes[chrom] = index
 
     try:
         with pysam.AlignmentFile(bamfile, "rb") as bam:
@@ -782,7 +854,13 @@ def _process_reads_for_fusions(
                 # Check if this read intersects with any gene regions
                 if ref_name in gene_regions:
                     read_rows = _find_gene_intersections(
-                        read, ref_name, ref_start, ref_end, gene_regions[ref_name]
+                        read,
+                        ref_name,
+                        ref_start,
+                        ref_end,
+                        gene_regions[ref_name],
+                        None,
+                        region_indexes.get(ref_name),
                     )
                     if read_rows:
                         read_id = read.query_name
@@ -1266,6 +1344,14 @@ def process_bam_single_pass(
         # Get cached start position lists for binary search optimization
         target_region_starts = _gene_region_starts_cache.get(target_panel, {})
         genome_region_starts = _all_gene_region_starts_cache.get("shared", {})
+
+        # Get cached NCLS indexes when available
+        target_region_indexes = (
+            _gene_region_ncls_cache.get(target_panel, {}) if _HAS_NCLS else {}
+        )
+        genome_region_indexes = (
+            _all_gene_region_ncls_cache.get("shared", {}) if _HAS_NCLS else {}
+        )
         
         # Convert supplementary_read_ids to set for fast lookup if provided
         supplementary_reads_set = set(supplementary_read_ids) if supplementary_read_ids else None
@@ -1328,8 +1414,15 @@ def process_bam_single_pass(
                     # 1. Process for target panel fusions
                     if ref_name in target_regions:
                         target_starts = target_region_starts.get(ref_name)
+                        target_index = target_region_indexes.get(ref_name)
                         target_rows = _find_gene_intersections(
-                            read, ref_name, ref_start, ref_end, target_regions[ref_name], target_starts
+                            read,
+                            ref_name,
+                            ref_start,
+                            ref_end,
+                            target_regions[ref_name],
+                            target_starts,
+                            target_index,
                         )
                         if target_rows:
                             if read_id not in target_read_alignments:
@@ -1339,8 +1432,15 @@ def process_bam_single_pass(
                     # 2. Process for genome-wide fusions
                     if ref_name in genome_regions:
                         genome_starts = genome_region_starts.get(ref_name)
+                        genome_index = genome_region_indexes.get(ref_name)
                         genome_rows = _find_gene_intersections(
-                            read, ref_name, ref_start, ref_end, genome_regions[ref_name], genome_starts
+                            read,
+                            ref_name,
+                            ref_start,
+                            ref_end,
+                            genome_regions[ref_name],
+                            genome_starts,
+                            genome_index,
                         )
                         if genome_rows:
                             if read_id not in genome_read_alignments:
@@ -2433,7 +2533,6 @@ def _get_cnv_bin_width(work_dir: str, sample_id: str) -> int:
     
     # Default to 10kb if CNV data not available
     default_bin_width = 10000
-    logger.debug(f"Using default bin_width={default_bin_width}")
     return default_bin_width
 
 
