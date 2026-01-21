@@ -3739,7 +3739,8 @@ def _generate_master_bed_events_summary(
         breakpoint_pairs = []
         primary_by_read = primary_filtered.groupby("read_id", observed=True)
         supplementary_by_read = supplementary_filtered.groupby("read_id", observed=True)
-        
+        logger.debug(f"primary by read: {len(primary_by_read)}")
+        logger.debug(f"supplementary by read: {len(supplementary_by_read)}")
         for read_id in reads_with_both:
             read_primaries = primary_by_read.get_group(read_id) if read_id in primary_by_read.groups else pd.DataFrame()
             read_supplementaries = supplementary_by_read.get_group(read_id) if read_id in supplementary_by_read.groups else pd.DataFrame()
@@ -3756,12 +3757,12 @@ def _generate_master_bed_events_summary(
             summary_file = os.path.join(work_dir, sample_id, "master_bed_events_summary.csv")
             pd.DataFrame().to_csv(summary_file, index=False)
             return
-        
+        logger.debug(f"breakpoint pairs: {len(breakpoint_pairs)}")
         # Cluster similar breakpoint pairs using DBSCAN (much faster than O(n²) nested loops)
         clustered_pairs = _cluster_breakpoint_pairs_dbscan(
             breakpoint_pairs, cluster_distance=cluster_distance, min_read_support=min_read_support
         )
-        
+        logger.debug(f"clustered pairs: {len(clustered_pairs)}")
         # Filter for breakpoint pairs with sufficient read support (already filtered in DBSCAN, but keep for safety)
         supported_pairs = [
             p for p in clustered_pairs 
@@ -3773,7 +3774,7 @@ def _generate_master_bed_events_summary(
             summary_file = os.path.join(work_dir, sample_id, "master_bed_events_summary.csv")
             pd.DataFrame().to_csv(summary_file, index=False)
             return
-        
+        logger.debug(f"supported pairs: {len(supported_pairs)}")
         # Convert to DataFrame format - include both primary and supplementary regions
         events = []
         for pair in supported_pairs:
@@ -3805,7 +3806,7 @@ def _generate_master_bed_events_summary(
             return
         
         result_df = pd.DataFrame(events)
-        
+        logger.debug(f"merging nearby events: {len(result_df)} events")
         # Merge nearby duplicate events on the same chromosome
         # This prevents showing multiple very similar events that are within cluster_distance
         result_df = _merge_nearby_events(result_df, cluster_distance=cluster_distance)
