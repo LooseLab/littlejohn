@@ -1789,16 +1789,27 @@ def accumulate_fusion_candidates(
         # Use shorter timeout to avoid workers blocking each other
         # If lock can't be acquired quickly, another worker is likely already accumulating
         with FileLock(lock_file, timeout=5.0):
+            logger.debug(
+                f"Acquired accumulation lock for {sample_id} after "
+                f"{time.time() - lock_acquire_start:.3f}s"
+            )
             logger.info(f"Starting fusion batch accumulation for {sample_id} (force={force})")
             start_time = time.time()
             
             staging_dir = _get_staging_dir(work_dir, sample_id)
+            logger.debug(f"Scanning staging directory: {staging_dir}")
             
             # Find all staging files (re-check inside lock to avoid race conditions)
             # Multiple workers might have triggered accumulation, but only one should proceed
             target_files = sorted(glob.glob(os.path.join(staging_dir, "target_*.parquet")))
             genome_files = sorted(glob.glob(os.path.join(staging_dir, "genome_*.parquet")))
             master_bed_files = sorted(glob.glob(os.path.join(staging_dir, "master_bed_*.parquet")))
+            logger.debug(
+                "Staging file counts - target: %d, genome: %d, master_bed: %d",
+                len(target_files),
+                len(genome_files),
+                len(master_bed_files),
+            )
             _set_pending_count(work_dir, sample_id, len(target_files))
             
             # Track which master_bed staging files are new (for incremental processing)
@@ -1833,9 +1844,24 @@ def accumulate_fusion_candidates(
                 
                 def load_file(file_path):
                     try:
+                        file_start = time.time()
                         df = pd.read_parquet(file_path)
+                        load_elapsed = time.time() - file_start
                         if not df.empty:
+                            logger.debug(
+                                "Loaded %s parquet %s rows=%d in %.3fs",
+                                file_type,
+                                os.path.basename(file_path),
+                                len(df),
+                                load_elapsed,
+                            )
                             return df
+                        logger.debug(
+                            "Loaded %s parquet %s (empty) in %.3fs",
+                            file_type,
+                            os.path.basename(file_path),
+                            load_elapsed,
+                        )
                         return None
                     except Exception as e:
                         logger.warning(f"Error loading {file_type} staging file {os.path.basename(file_path)}: {e}")
@@ -1844,11 +1870,18 @@ def accumulate_fusion_candidates(
                 # Use parallel loading for better performance with many files
                 dfs = []
                 if len(file_list) > 1:
+                    logger.debug(
+                        "Loading %d %s parquet files with %d workers",
+                        len(file_list),
+                        file_type,
+                        max_workers,
+                    )
                     with ThreadPoolExecutor(max_workers=max_workers) as executor:
                         results = list(executor.map(load_file, file_list))
                         dfs = [df for df in results if df is not None]
                 else:
                     # Single file - no need for threading overhead
+                    logger.debug("Loading single %s parquet file without threading", file_type)
                     df = load_file(file_list[0])
                     if df is not None:
                         dfs.append(df)
@@ -1860,6 +1893,13 @@ def accumulate_fusion_candidates(
             target_dfs = load_parquet_files(target_files, "target")
             genome_dfs = load_parquet_files(genome_files, "genome")
             master_bed_dfs = load_parquet_files(master_bed_files, "master_bed")
+            logger.debug(
+                "Loaded staging files in %.3fs (target=%d, genome=%d, master_bed=%d)",
+                time.time() - load_start,
+                len(target_dfs),
+                len(genome_dfs),
+                len(master_bed_dfs),
+            )
             
             # Track which master_bed files are new (for incremental processing)
             # These are the files being accumulated in this batch - all of them are "new" for this accumulation
@@ -1880,9 +1920,17 @@ def accumulate_fusion_candidates(
                 else:
                     return pd.concat(df_list, ignore_index=True)
             
+            concat_start = time.time()
             batch_target = concat_dataframes(target_dfs)
             batch_genome = concat_dataframes(genome_dfs)
             batch_master_bed = concat_dataframes(master_bed_dfs)
+            logger.debug(
+                "Concatenated dataframes in %.3fs (target=%d, genome=%d, master_bed=%d)",
+                time.time() - concat_start,
+                len(batch_target),
+                len(batch_genome),
+                len(batch_master_bed),
+            )
             
             logger.info(
                 f"Batch merged: {len(batch_target)} target, {len(batch_genome)} genome-wide, "
@@ -1896,17 +1944,36 @@ def accumulate_fusion_candidates(
             else:
                 logger.debug("No master BED staging files found")
             
+            counts_start = time.time()
             counts = _load_fusion_counts(work_dir, sample_id)
+            logger.debug(
+                "Loaded fusion counts in %.3fs (current: target=%d, genome=%d, master_bed=%d)",
+                time.time() - counts_start,
+                counts.get("target_candidates", 0),
+                counts.get("genome_wide_candidates", 0),
+                counts.get("master_bed_candidates", 0),
+            )
             # Append batch to dataset (append-only, avoids re-reading full history)
             batch_id = _extract_staging_batch_id(target_files)
+            logger.debug("Appending batch_id=%s to fusion datasets", batch_id)
+            append_start = time.time()
             _append_fusion_candidates_parquet(batch_target, "target_candidates", work_dir, sample_id, batch_id)
             _append_fusion_candidates_parquet(batch_genome, "genome_wide_candidates", work_dir, sample_id, batch_id)
             _append_fusion_candidates_parquet(batch_master_bed, "master_bed_candidates", work_dir, sample_id, batch_id)
+            logger.debug("Appended fusion parquet files in %.3fs", time.time() - append_start)
 
             counts["target_candidates"] = counts.get("target_candidates", 0) + len(batch_target)
             counts["genome_wide_candidates"] = counts.get("genome_wide_candidates", 0) + len(batch_genome)
             counts["master_bed_candidates"] = counts.get("master_bed_candidates", 0) + len(batch_master_bed)
+            save_counts_start = time.time()
             _save_fusion_counts(work_dir, sample_id, counts)
+            logger.debug(
+                "Saved fusion counts in %.3fs (updated: target=%d, genome=%d, master_bed=%d)",
+                time.time() - save_counts_start,
+                counts.get("target_candidates", 0),
+                counts.get("genome_wide_candidates", 0),
+                counts.get("master_bed_candidates", 0),
+            )
 
             logger.info(
                 f"Final accumulated: {counts.get('target_candidates', 0)} target, "
@@ -1935,7 +2002,13 @@ def accumulate_fusion_candidates(
             )
             
             # Save metadata (without large candidate lists - they're in Parquet)
+            metadata_start = time.time()
             _save_fusion_metadata(fusion_metadata, work_dir, sample_id)
+            logger.debug(
+                "Saved fusion metadata in %.3fs for %s",
+                time.time() - metadata_start,
+                sample_id,
+            )
             
             # Generate output files only on final accumulation (force=True)
             # This avoids expensive groupby operations and CSV generation during intermediate accumulations
@@ -1953,23 +2026,44 @@ def accumulate_fusion_candidates(
                     generate_master_bed=True,  # Generate master BED on final accumulation
                     new_master_bed_files=new_master_bed_files,  # Pass new files for incremental processing
                 )
+                logger.debug(
+                    "Generated output files in %.3fs for %s",
+                    time.time() - output_start,
+                    sample_id,
+                )
             else:
                 logger.debug("Intermediate accumulation - skipping output file generation (will be generated on final accumulation)")
             
             # Clean up staging files
             logger.info("Cleaning up fusion staging files...")
+            cleanup_start = time.time()
+            removed = 0
+            failed = 0
             for f in target_files + genome_files + master_bed_files:
                 try:
                     os.remove(f)
+                    removed += 1
                 except OSError as e:
                     logger.warning(f"Could not remove staging file {f}: {e}")
+                    failed += 1
             _set_pending_count(work_dir, sample_id, 0)
+            logger.debug(
+                "Cleanup complete in %.3fs (removed=%d, failed=%d)",
+                time.time() - cleanup_start,
+                removed,
+                failed,
+            )
             
             elapsed = time.time() - start_time
             logger.info(
                 f"Fusion batch accumulation complete for {sample_id}: "
                 f"{len(target_files)} files in {elapsed:.2f}s "
                 f"({elapsed/len(target_files):.3f}s per file)"
+            )
+            logger.debug(
+                "Total accumulation time %.3fs (includes lock wait %.3fs)",
+                elapsed,
+                time.time() - lock_acquire_start,
             )
             
             return {
