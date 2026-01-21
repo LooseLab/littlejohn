@@ -3107,7 +3107,7 @@ def _extract_master_bed_breakpoints(
         
         # For each read, create breakpoint pairs (primary + supplementary)
         # A breakpoint pair represents a potential rearrangement event
-        cluster_distance = 5000  # Maximum distance for clustering breakpoint pairs (5kb)
+        cluster_distance = 500  # Maximum distance for clustering breakpoint pairs (5kb)
         
         # Build breakpoint pairs: for each read, pair its primary alignment with each supplementary alignment
         # Optimized: use vectorized operations instead of iterrows()
