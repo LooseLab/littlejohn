@@ -19,6 +19,7 @@ import os
 import random
 import logging
 import json
+import pickle
 import glob
 import fcntl
 import time
@@ -54,6 +55,8 @@ logger = logging.getLogger("robin.analysis.fusion_work")
 
 # TEMP: Disable master BED interactions for performance testing
 ENABLE_MASTER_BED = False
+# Debug flag for incremental master BED breakpoint logging
+DEBUG_MASTER_BED_INCREMENTAL = os.getenv("ROBIN_DEBUG_MASTER_BED_INCREMENTAL", "0") == "1"
 
 
 class FileLock:
@@ -2958,7 +2961,12 @@ def _cluster_breakpoint_pairs_canonical(
     return clustered_pairs
 
 
-def _extract_master_bed_breakpoints(fusion_metadata: FusionMetadata, work_dir: Optional[str] = None, min_read_support: int = 3) -> List[Dict[str, Any]]:
+def _extract_master_bed_breakpoints(
+    fusion_metadata: FusionMetadata,
+    work_dir: Optional[str] = None,
+    min_read_support: int = 3,
+    processed_read_ids: Optional[Set[str]] = None,
+) -> List[Dict[str, Any]]:
     """
     Extract breakpoint coordinates from master BED fusion candidates.
     Identifies genomic rearrangements (deletions, inversions, translocations) by finding
@@ -3055,6 +3063,15 @@ def _extract_master_bed_breakpoints(fusion_metadata: FusionMetadata, work_dir: O
         primary_read_ids = set(primary_df["read_id"].unique())
         supplementary_read_ids = set(supplementary_df["read_id"].unique())
         reads_with_both = primary_read_ids & supplementary_read_ids
+        if processed_read_ids is not None:
+            new_reads_with_both = reads_with_both - processed_read_ids
+            logger.debug(
+                "Skipping %d previously processed reads (new_reads_with_both=%d, total_reads_with_both=%d)",
+                len(reads_with_both) - len(new_reads_with_both),
+                len(new_reads_with_both),
+                len(reads_with_both),
+            )
+            reads_with_both = new_reads_with_both
         
         logger.debug(
             f"Found {len(reads_with_both)} reads with both primary and supplementary alignments "
@@ -3153,6 +3170,8 @@ def _extract_master_bed_breakpoints(fusion_metadata: FusionMetadata, work_dir: O
             missing_primary,
             missing_supplementary,
         )
+        if processed_read_ids is not None and reads_with_both:
+            processed_read_ids.update(reads_with_both)
         
         if not breakpoint_pairs:
             logger.debug("No breakpoint pairs created")
@@ -3254,6 +3273,9 @@ def _extract_master_bed_breakpoints_incremental(
     sample_dir = os.path.join(work_dir, sample_id)
     bed_dir = os.path.join(sample_dir, "bed_files")
     previous_bed_file = os.path.join(bed_dir, f"master_bed_breakpoints_{analysis_counter:03d}.bed")
+    processed_reads_path = os.path.join(sample_dir, "master_bed_processed_read_ids.pkl")
+    cluster_state_path = os.path.join(sample_dir, "master_bed_breakpoint_clusters.pkl")
+    bin_size = 500
     
     if os.path.exists(previous_bed_file):
         # Parse existing BED file to get breakpoint coordinates
@@ -3284,6 +3306,39 @@ def _extract_master_bed_breakpoints_incremental(
         except Exception as e:
             logger.warning(f"Could not load existing breakpoints from {previous_bed_file}: {e}")
     
+    # Load previously processed read_ids (optional optimization)
+    processed_read_ids: Set[str] = set()
+    if os.path.exists(processed_reads_path):
+        try:
+            with open(processed_reads_path, "rb") as f:
+                processed_read_ids = pickle.load(f)
+            if not isinstance(processed_read_ids, set):
+                processed_read_ids = set(processed_read_ids)
+        except Exception as e:
+            logger.warning(f"Could not load processed read IDs from {processed_reads_path}: {e}")
+            processed_read_ids = set()
+    
+    # Load or initialize cluster state for incremental updates
+    cluster_state = {"bin_size": bin_size, "pair_support": {}, "supported_keys": set()}
+    if os.path.exists(cluster_state_path):
+        try:
+            with open(cluster_state_path, "rb") as f:
+                cluster_state = pickle.load(f)
+        except Exception as e:
+            logger.warning(f"Could not load cluster state from {cluster_state_path}: {e}")
+            cluster_state = {"bin_size": bin_size, "pair_support": {}, "supported_keys": set()}
+    if cluster_state.get("bin_size") != bin_size:
+        logger.warning(
+            "Cluster state bin_size mismatch (found=%s, expected=%s). Resetting state.",
+            cluster_state.get("bin_size"),
+            bin_size,
+        )
+        cluster_state = {"bin_size": bin_size, "pair_support": {}, "supported_keys": set()}
+    if not isinstance(cluster_state.get("pair_support"), dict):
+        cluster_state["pair_support"] = {}
+    if not isinstance(cluster_state.get("supported_keys"), set):
+        cluster_state["supported_keys"] = set(cluster_state.get("supported_keys", []))
+
     # Process only NEW staging files
     new_data_start = time.time()
     new_master_bed_dfs = []
@@ -3294,24 +3349,177 @@ def _extract_master_bed_breakpoints_incremental(
                 new_master_bed_dfs.append(df)
         except Exception as e:
             logger.warning(f"Error loading staging file {os.path.basename(staging_file)}: {e}")
-    
-        if not new_master_bed_dfs:
-            return existing_breakpoints
+
+    if not new_master_bed_dfs:
+        return existing_breakpoints
     
     # Combine new staging files
     new_master_bed_df = pd.concat(new_master_bed_dfs, ignore_index=True) if len(new_master_bed_dfs) > 1 else new_master_bed_dfs[0]
     
-    # Create temporary FusionMetadata with only new data for extraction
-    temp_metadata = FusionMetadata(
-        sample_id=sample_id,
-        file_path="incremental",
-        analysis_timestamp=time.time(),
-        target_panel=fusion_metadata.target_panel,
-        fusion_data={"master_bed_candidates": new_master_bed_df},
-    )
+    # Extract breakpoint pairs from new data only (incremental clustering)
+    new_breakpoints: List[Dict[str, Any]] = []
+    if "read_id" not in new_master_bed_df.columns:
+        return existing_breakpoints
+
+    # Separate primary and supplementary alignments using col4
+    if "col4" in new_master_bed_df.columns:
+        primary_df = new_master_bed_df[new_master_bed_df["col4"] == "master_bed_region"].copy()
+        supplementary_df = new_master_bed_df[new_master_bed_df["col4"] == "master_bed_supplementary"].copy()
+    else:
+        if "is_supplementary" not in new_master_bed_df.columns:
+            return existing_breakpoints
+        primary_df = new_master_bed_df[new_master_bed_df["is_supplementary"] == False].copy()
+        supplementary_df = new_master_bed_df[new_master_bed_df["is_supplementary"] == True].copy()
+
+    if primary_df.empty or supplementary_df.empty:
+        return existing_breakpoints
+
+    primary_read_ids = set(primary_df["read_id"].unique())
+    supplementary_read_ids = set(supplementary_df["read_id"].unique())
+    reads_with_both = primary_read_ids & supplementary_read_ids
+    if processed_read_ids:
+        reads_with_both -= processed_read_ids
+    if DEBUG_MASTER_BED_INCREMENTAL:
+        logger.debug(
+            "Incremental master BED: reads_with_both=%d, skipped_processed=%d",
+            len(reads_with_both),
+            len(primary_read_ids & supplementary_read_ids) - len(reads_with_both),
+        )
+    if not reads_with_both:
+        return existing_breakpoints
+
+    primary_filtered = primary_df[primary_df["read_id"].isin(reads_with_both)].copy()
+    supplementary_filtered = supplementary_df[supplementary_df["read_id"].isin(reads_with_both)].copy()
+    primary_indices_by_read = primary_filtered.groupby("read_id", observed=True).indices
+    supplementary_indices_by_read = supplementary_filtered.groupby("read_id", observed=True).indices
+
+    breakpoint_pairs: List[Dict[str, Any]] = []
+    empty_primary = primary_filtered.iloc[0:0]
+    empty_supplementary = supplementary_filtered.iloc[0:0]
+    for read_id in sorted(reads_with_both):
+        primary_idx = primary_indices_by_read.get(read_id)
+        supplementary_idx = supplementary_indices_by_read.get(read_id)
+        read_primaries = (
+            primary_filtered.iloc[primary_idx]
+            if primary_idx is not None
+            else empty_primary
+        )
+        read_supplementaries = (
+            supplementary_filtered.iloc[supplementary_idx]
+            if supplementary_idx is not None
+            else empty_supplementary
+        )
+        if read_primaries.empty or read_supplementaries.empty:
+            continue
+        pairs = _create_breakpoint_pairs_vectorized(read_primaries, read_supplementaries, read_id)
+        breakpoint_pairs.extend(pairs)
+
+    if breakpoint_pairs:
+        processed_read_ids.update(reads_with_both)
+    if DEBUG_MASTER_BED_INCREMENTAL:
+        logger.debug(
+            "Incremental master BED: new_reads=%d, breakpoint_pairs=%d",
+            len(reads_with_both),
+            len(breakpoint_pairs),
+        )
+
+    def _endpoint_key(chrom: str, pos: int, strand: str) -> Tuple[str, int, str]:
+        if bin_size > 0:
+            pos = (int(pos) // int(bin_size)) * int(bin_size)
+        return (str(chrom), int(pos), str(strand) if strand else ".")
+
+    pair_support = cluster_state["pair_support"]
+    supported_keys = cluster_state["supported_keys"]
+    new_supported_pairs = []
+    touched_keys = 0
+    for pair in breakpoint_pairs:
+        primary_mid = (pair["primary_start"] + pair["primary_end"]) // 2
+        supp_mid = (pair["supp_start"] + pair["supp_end"]) // 2
+        primary_strand = pair.get("primary_strand", ".")
+        supp_strand = pair.get("supp_strand", ".")
+
+        a = _endpoint_key(pair["primary_chrom"], primary_mid, primary_strand)
+        b = _endpoint_key(pair["supp_chrom"], supp_mid, supp_strand)
+        key = (a, b) if a <= b else (b, a)
+
+        read_ids = pair_support.get(key)
+        if read_ids is None:
+            read_ids = set()
+            pair_support[key] = read_ids
+        else:
+            if not isinstance(read_ids, set):
+                read_ids = set(read_ids)
+                pair_support[key] = read_ids
+
+        prev_count = len(read_ids)
+        read_ids.add(pair["read_id"])
+        new_count = len(read_ids)
+        touched_keys += 1
+        if prev_count < min_read_support <= new_count and key not in supported_keys:
+            supported_keys.add(key)
+            a_key, b_key = key
+            a_start = a_key[1]
+            b_start = b_key[1]
+            new_supported_pairs.append(
+                {
+                    "primary_chrom": a_key[0],
+                    "primary_start": a_start,
+                    "primary_end": a_start + int(bin_size),
+                    "supp_chrom": b_key[0],
+                    "supp_start": b_start,
+                    "supp_end": b_start + int(bin_size),
+                    "read_count": new_count,
+                    "primary_strand": a_key[2],
+                    "supp_strand": b_key[2],
+                }
+            )
+
+    for pair in new_supported_pairs:
+        if pair["primary_start"] > 0 and pair["primary_end"] > pair["primary_start"]:
+            new_breakpoints.append(
+                {
+                    "chromosome": pair["primary_chrom"],
+                    "start": pair["primary_start"],
+                    "end": pair["primary_end"],
+                    "read_count": pair["read_count"],
+                    "source": "master_bed",
+                }
+            )
+        if pair["supp_start"] > 0 and pair["supp_end"] > pair["supp_start"]:
+            new_breakpoints.append(
+                {
+                    "chromosome": pair["supp_chrom"],
+                    "start": pair["supp_start"],
+                    "end": pair["supp_end"],
+                    "read_count": pair["read_count"],
+                    "source": "master_bed",
+                }
+            )
+    if DEBUG_MASTER_BED_INCREMENTAL:
+        logger.debug(
+            "Incremental master BED: touched_keys=%d, newly_supported=%d, new_breakpoints=%d",
+            touched_keys,
+            len(new_supported_pairs),
+            len(new_breakpoints),
+        )
     
-    # Extract breakpoints from new data only
-    new_breakpoints = _extract_master_bed_breakpoints(temp_metadata, work_dir=work_dir, min_read_support=min_read_support)
+    # Persist cluster state and processed read_ids
+    try:
+        tmp_path = cluster_state_path + ".tmp"
+        with open(tmp_path, "wb") as f:
+            pickle.dump(cluster_state, f, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp_path, cluster_state_path)
+    except Exception as e:
+        logger.warning(f"Could not save cluster state to {cluster_state_path}: {e}")
+    
+    # Persist processed read_ids to avoid reprocessing the same reads in future batches
+    try:
+        tmp_path = processed_reads_path + ".tmp"
+        with open(tmp_path, "wb") as f:
+            pickle.dump(processed_read_ids, f, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp_path, processed_reads_path)
+    except Exception as e:
+        logger.warning(f"Could not save processed read IDs to {processed_reads_path}: {e}")
     
     # Merge new breakpoints with existing ones
     # For now, simple merge (could be optimized to cluster nearby breakpoints)
