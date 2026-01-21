@@ -3080,6 +3080,13 @@ def _extract_master_bed_breakpoints(fusion_metadata: FusionMetadata, work_dir: O
         filter_both_start = time.time()
         primary_filtered = primary_df[primary_df["read_id"].isin(reads_with_both)].copy()
         supplementary_filtered = supplementary_df[supplementary_df["read_id"].isin(reads_with_both)].copy()
+        logger.debug(
+            "Filtered reads_with_both in %.3fs (reads=%d, primary_rows=%d, supplementary_rows=%d)",
+            time.time() - filter_both_start,
+            len(reads_with_both),
+            len(primary_filtered),
+            len(supplementary_filtered),
+        )
         
         # For each read, create breakpoint pairs (primary + supplementary)
         # A breakpoint pair represents a potential rearrangement event
@@ -3093,21 +3100,55 @@ def _extract_master_bed_breakpoints(fusion_metadata: FusionMetadata, work_dir: O
         groupby_start = time.time()
         primary_by_read = primary_filtered.groupby("read_id", observed=True)
         supplementary_by_read = supplementary_filtered.groupby("read_id", observed=True)
+        logger.debug(
+            "Grouped by read_id in %.3fs (primary_groups=%d, supplementary_groups=%d)",
+            time.time() - groupby_start,
+            len(primary_by_read.groups),
+            len(supplementary_by_read.groups),
+        )
         
         pair_creation_start = time.time()
         # Sort reads_with_both to ensure deterministic processing order
         # This prevents different results when DataFrames have different row orders
+        missing_primary = 0
+        missing_supplementary = 0
+        total_pairs = 0
+        reads_processed = 0
         for read_id in sorted(reads_with_both):
             # Get all primary and supplementary alignments for this read
-            read_primaries = primary_by_read.get_group(read_id) if read_id in primary_by_read.groups else pd.DataFrame()
-            read_supplementaries = supplementary_by_read.get_group(read_id) if read_id in supplementary_by_read.groups else pd.DataFrame()
+            read_primaries = (
+                primary_by_read.get_group(read_id)
+                if read_id in primary_by_read.groups
+                else pd.DataFrame()
+            )
+            read_supplementaries = (
+                supplementary_by_read.get_group(read_id)
+                if read_id in supplementary_by_read.groups
+                else pd.DataFrame()
+            )
             
             if read_primaries.empty or read_supplementaries.empty:
+                if read_primaries.empty:
+                    missing_primary += 1
+                if read_supplementaries.empty:
+                    missing_supplementary += 1
                 continue
             
             # Create pairs using vectorized Pandas operations (much faster than nested loops)
+            reads_processed += 1
             pairs = _create_breakpoint_pairs_vectorized(read_primaries, read_supplementaries, read_id)
             breakpoint_pairs.extend(pairs)
+            total_pairs += len(pairs)
+        
+        logger.debug(
+            "Created breakpoint pairs in %.3fs (reads_processed=%d, total_pairs=%d, "
+            "missing_primary=%d, missing_supplementary=%d)",
+            time.time() - pair_creation_start,
+            reads_processed,
+            total_pairs,
+            missing_primary,
+            missing_supplementary,
+        )
         
         if not breakpoint_pairs:
             logger.debug("No breakpoint pairs created")
@@ -3117,6 +3158,12 @@ def _extract_master_bed_breakpoints(fusion_metadata: FusionMetadata, work_dir: O
         clustering_start = time.time()
         clustered_pairs = _cluster_breakpoint_pairs_canonical(
             breakpoint_pairs, bin_size=500, min_read_support=min_read_support
+        )
+        logger.debug(
+            "Clustered breakpoint pairs in %.3fs (clustered=%d, original_pairs=%d)",
+            time.time() - clustering_start,
+            len(clustered_pairs),
+            len(breakpoint_pairs),
         )
         
         # Filter for breakpoint pairs with sufficient read support (already filtered in DBSCAN, but keep for safety)
