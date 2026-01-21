@@ -3552,9 +3552,9 @@ def _generate_master_bed_breakpoint_bed(
         master_bed_size = len(master_bed_candidates) if master_bed_candidates is not None and not master_bed_candidates.empty else 0
         
         
-        # For large datasets (>200k rows), use incremental extraction to avoid 2+ minute delays
+        # Always prefer incremental extraction when new staging files are available
         # Only process NEW staging files and merge with existing breakpoints
-        if master_bed_size > 200000 and new_master_bed_files:
+        if new_master_bed_files:
             master_bed_breakpoints = _extract_master_bed_breakpoints_incremental(
                 fusion_metadata, work_dir, sample_id, new_master_bed_files
             )
