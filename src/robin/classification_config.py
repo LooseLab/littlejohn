@@ -248,7 +248,7 @@ FUSION_DETECTION_THRESHOLDS = {
         "description": "Minimum mapping quality to consider read alignment reliable"
     },
     "mapping_span": {
-        "min_threshold": 49,  # Minimum mapping span in bases
+        "min_threshold": 149,  # Minimum mapping span in bases
         "description": "Minimum read mapping length for reliable fusion detection"
     },
     "gene_overlap": {
