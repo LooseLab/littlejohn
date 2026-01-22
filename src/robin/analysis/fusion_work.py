@@ -3315,27 +3315,40 @@ def _extract_master_bed_breakpoints(
         List of dictionaries with master BED breakpoint information (both primary and supplementary regions)
     """
     breakpoints = []
+    overall_start = time.time()
     
     # Try loading from Parquet files first (fast path, new storage format)
     master_bed_df = None
     sample_id = fusion_metadata.sample_id
     
     if work_dir and sample_id:
+        load_start = time.time()
         master_bed_df = _load_fusion_candidates_parquet("master_bed_candidates", work_dir, sample_id)
         if master_bed_df is not None and not master_bed_df.empty:
             logger.debug(f"Loaded {len(master_bed_df)} master BED candidates from Parquet for breakpoint extraction")
+        logger.debug(
+            "Loaded master BED candidates from Parquet in %.3fs (rows=%d)",
+            time.time() - load_start,
+            len(master_bed_df) if master_bed_df is not None else 0,
+        )
     
     # Fallback to in-memory data (for backward compatibility)
     if master_bed_df is None or master_bed_df.empty:
         fusion_data = fusion_metadata.fusion_data or {}
         master_bed_candidates = fusion_data.get("master_bed_candidates", [])
         if master_bed_candidates:
+            fallback_start = time.time()
             if isinstance(master_bed_candidates, list):
                 master_bed_df = pd.DataFrame(master_bed_candidates)
                 logger.debug(f"Loaded {len(master_bed_candidates)} master BED candidates from in-memory data (fallback)")
             elif isinstance(master_bed_candidates, pd.DataFrame):
                 master_bed_df = master_bed_candidates
                 logger.debug(f"Loaded {len(master_bed_candidates)} master BED candidates from in-memory DataFrame (fallback)")
+            logger.debug(
+                "Loaded master BED candidates from fallback in %.3fs (rows=%d)",
+                time.time() - fallback_start,
+                len(master_bed_df) if master_bed_df is not None else 0,
+            )
         else:
             logger.debug("No master BED candidates found in Parquet or in-memory data")
     
@@ -3372,6 +3385,12 @@ def _extract_master_bed_breakpoints(
                 return breakpoints
             primary_df = master_bed_df[master_bed_df["is_supplementary"] == False].copy()
             supplementary_df = master_bed_df[master_bed_df["is_supplementary"] == True].copy()
+        logger.debug(
+            "Separated primary/supplementary in %.3fs (primary_rows=%d, supplementary_rows=%d)",
+            time.time() - filter_start,
+            len(primary_df),
+            len(supplementary_df),
+        )
         
         # Debug: check for any misclassified alignments
         if "is_supplementary" in master_bed_df.columns and "col4" in master_bed_df.columns:
@@ -3399,6 +3418,11 @@ def _extract_master_bed_breakpoints(
                 len(reads_with_both),
             )
             reads_with_both = new_reads_with_both
+        logger.debug(
+            "Computed reads_with_both in %.3fs (reads=%d)",
+            time.time() - read_id_start,
+            len(reads_with_both),
+        )
         
         logger.debug(
             f"Found {len(reads_with_both)} reads with both primary and supplementary alignments "
@@ -3551,6 +3575,11 @@ def _extract_master_bed_breakpoints(
                         "read_count": pair["read_count"],
                         "source": "master_bed"
                     })
+            logger.debug(
+                "Extracted breakpoint coordinates in %.3fs (breakpoints=%d)",
+                time.time() - coord_extract_start,
+                len(breakpoints),
+            )
         else:
             # Log details for debugging if no supported pairs found
             if clustered_pairs:
@@ -3565,6 +3594,11 @@ def _extract_master_bed_breakpoints(
                     f"No clustered breakpoint pairs created from {len(breakpoint_pairs)} original pairs"
                 )
     
+    logger.debug(
+        "Master BED breakpoint extraction completed in %.3fs (breakpoints=%d)",
+        time.time() - overall_start,
+        len(breakpoints),
+    )
     return breakpoints
 
 
@@ -3607,6 +3641,7 @@ def _extract_master_bed_breakpoints_incremental(
     if os.path.exists(previous_bed_file):
         # Parse existing BED file to get breakpoint coordinates
         # BED format: chrom, start, end, name, score, strand
+        existing_start = time.time()
         try:
             with open(previous_bed_file, "r") as f:
                 for line in f:
@@ -3632,15 +3667,26 @@ def _extract_master_bed_breakpoints_incremental(
                             })
         except Exception as e:
             logger.warning(f"Could not load existing breakpoints from {previous_bed_file}: {e}")
+        logger.debug(
+            "Loaded existing breakpoints in %.3fs (count=%d)",
+            time.time() - existing_start,
+            len(existing_breakpoints),
+        )
     
     # Load previously processed read_ids (optional optimization)
     processed_read_ids: Set[str] = set()
     if os.path.exists(processed_reads_path):
         try:
+            processed_start = time.time()
             with open(processed_reads_path, "rb") as f:
                 processed_read_ids = pickle.load(f)
             if not isinstance(processed_read_ids, set):
                 processed_read_ids = set(processed_read_ids)
+            logger.debug(
+                "Loaded processed read IDs in %.3fs (count=%d)",
+                time.time() - processed_start,
+                len(processed_read_ids),
+            )
         except Exception as e:
             logger.warning(f"Could not load processed read IDs from {processed_reads_path}: {e}")
             processed_read_ids = set()
@@ -3649,8 +3695,15 @@ def _extract_master_bed_breakpoints_incremental(
     cluster_state = {"bin_size": bin_size, "pair_support": {}, "supported_keys": set()}
     if os.path.exists(cluster_state_path):
         try:
+            cluster_load_start = time.time()
             with open(cluster_state_path, "rb") as f:
                 cluster_state = pickle.load(f)
+            logger.debug(
+                "Loaded cluster state in %.3fs (pairs=%d, supported_keys=%d)",
+                time.time() - cluster_load_start,
+                len(cluster_state.get("pair_support", {})),
+                len(cluster_state.get("supported_keys", set())),
+            )
         except Exception as e:
             logger.warning(f"Could not load cluster state from {cluster_state_path}: {e}")
             cluster_state = {"bin_size": bin_size, "pair_support": {}, "supported_keys": set()}
@@ -3678,10 +3731,25 @@ def _extract_master_bed_breakpoints_incremental(
             logger.warning(f"Error loading staging file {os.path.basename(staging_file)}: {e}")
 
     if not new_master_bed_dfs:
+        logger.debug(
+            "Loaded new master BED staging files in %.3fs (files=0)",
+            time.time() - new_data_start,
+        )
         return existing_breakpoints
     
     # Combine new staging files
+    concat_start = time.time()
     new_master_bed_df = pd.concat(new_master_bed_dfs, ignore_index=True) if len(new_master_bed_dfs) > 1 else new_master_bed_dfs[0]
+    logger.debug(
+        "Loaded new master BED staging files in %.3fs (files=%d, rows=%d)",
+        time.time() - new_data_start,
+        len(new_master_bed_dfs),
+        len(new_master_bed_df),
+    )
+    logger.debug(
+        "Concatenated new master BED staging data in %.3fs",
+        time.time() - concat_start,
+    )
     
     # Extract breakpoint pairs from new data only (incremental clustering)
     new_breakpoints: List[Dict[str, Any]] = []
@@ -3719,10 +3787,18 @@ def _extract_master_bed_breakpoints_incremental(
     supplementary_filtered = supplementary_df[supplementary_df["read_id"].isin(reads_with_both)].copy()
     primary_indices_by_read = primary_filtered.groupby("read_id", observed=True).indices
     supplementary_indices_by_read = supplementary_filtered.groupby("read_id", observed=True).indices
+    logger.debug(
+        "Filtered reads_with_both in %.3fs (reads=%d, primary_rows=%d, supplementary_rows=%d)",
+        time.time() - new_data_start,
+        len(reads_with_both),
+        len(primary_filtered),
+        len(supplementary_filtered),
+    )
 
     breakpoint_pairs: List[Dict[str, Any]] = []
     empty_primary = primary_filtered.iloc[0:0]
     empty_supplementary = supplementary_filtered.iloc[0:0]
+    pair_start = time.time()
     for read_id in sorted(reads_with_both):
         primary_idx = primary_indices_by_read.get(read_id)
         supplementary_idx = supplementary_indices_by_read.get(read_id)
@@ -3740,6 +3816,12 @@ def _extract_master_bed_breakpoints_incremental(
             continue
         pairs = _create_breakpoint_pairs_vectorized(read_primaries, read_supplementaries, read_id)
         breakpoint_pairs.extend(pairs)
+    logger.debug(
+        "Created incremental breakpoint pairs in %.3fs (pairs=%d, reads=%d)",
+        time.time() - pair_start,
+        len(breakpoint_pairs),
+        len(reads_with_both),
+    )
 
     if breakpoint_pairs:
         processed_read_ids.update(reads_with_both)
@@ -3759,6 +3841,7 @@ def _extract_master_bed_breakpoints_incremental(
     supported_keys = cluster_state["supported_keys"]
     new_supported_pairs = []
     touched_keys = 0
+    update_start = time.time()
     for pair in breakpoint_pairs:
         primary_mid = (pair["primary_start"] + pair["primary_end"]) // 2
         supp_mid = (pair["supp_start"] + pair["supp_end"]) // 2
@@ -3829,22 +3912,39 @@ def _extract_master_bed_breakpoints_incremental(
             len(new_supported_pairs),
             len(new_breakpoints),
         )
+    logger.debug(
+        "Updated incremental cluster state in %.3fs (touched_keys=%d, new_supported=%d)",
+        time.time() - update_start,
+        touched_keys,
+        len(new_supported_pairs),
+    )
     
     # Persist cluster state and processed read_ids
     try:
+        save_state_start = time.time()
         tmp_path = cluster_state_path + ".tmp"
         with open(tmp_path, "wb") as f:
             pickle.dump(cluster_state, f, protocol=pickle.HIGHEST_PROTOCOL)
         os.replace(tmp_path, cluster_state_path)
+        logger.debug(
+            "Saved cluster state in %.3fs",
+            time.time() - save_state_start,
+        )
     except Exception as e:
         logger.warning(f"Could not save cluster state to {cluster_state_path}: {e}")
     
     # Persist processed read_ids to avoid reprocessing the same reads in future batches
     try:
+        save_reads_start = time.time()
         tmp_path = processed_reads_path + ".tmp"
         with open(tmp_path, "wb") as f:
             pickle.dump(processed_read_ids, f, protocol=pickle.HIGHEST_PROTOCOL)
         os.replace(tmp_path, processed_reads_path)
+        logger.debug(
+            "Saved processed read IDs in %.3fs (count=%d)",
+            time.time() - save_reads_start,
+            len(processed_read_ids),
+        )
     except Exception as e:
         logger.warning(f"Could not save processed read IDs to {processed_reads_path}: {e}")
     
@@ -3852,6 +3952,13 @@ def _extract_master_bed_breakpoints_incremental(
     # For now, simple merge (could be optimized to cluster nearby breakpoints)
     all_breakpoints = existing_breakpoints + new_breakpoints
     
+    logger.debug(
+        "Incremental master BED breakpoint extraction completed in %.3fs (existing=%d, new=%d, total=%d)",
+        time.time() - incremental_start,
+        len(existing_breakpoints),
+        len(new_breakpoints),
+        len(all_breakpoints),
+    )
     return all_breakpoints
 
 
@@ -3872,15 +3979,23 @@ def _generate_master_bed_breakpoint_bed(
         work_dir: Working directory
     """
     try:
+        step_start = time.time()
         # Extract master BED breakpoints
         # For large datasets, use incremental approach: only process new staging files
         # and merge with existing breakpoints from previous BED file
+        load_start = time.time()
         master_bed_candidates = _load_fusion_candidates_parquet("master_bed_candidates", work_dir, sample_id)
         master_bed_size = len(master_bed_candidates) if master_bed_candidates is not None and not master_bed_candidates.empty else 0
+        logger.debug(
+            "Loaded master BED candidates in %.3fs (rows=%d)",
+            time.time() - load_start,
+            master_bed_size,
+        )
         
         
         # Always prefer incremental extraction when new staging files are available
         # Only process NEW staging files and merge with existing breakpoints
+        extract_start = time.time()
         if new_master_bed_files:
             master_bed_breakpoints = _extract_master_bed_breakpoints_incremental(
                 fusion_metadata, work_dir, sample_id, new_master_bed_files
@@ -3888,6 +4003,11 @@ def _generate_master_bed_breakpoint_bed(
         else:
             # For smaller datasets, process all data (faster for small datasets)
             master_bed_breakpoints = _extract_master_bed_breakpoints(fusion_metadata, work_dir=work_dir)
+        logger.debug(
+            "Extracted master BED breakpoints in %.3fs (count=%d)",
+            time.time() - extract_start,
+            len(master_bed_breakpoints) if master_bed_breakpoints else 0,
+        )
         
         if not master_bed_breakpoints:
             logger.debug("No master BED breakpoints found - skipping BED file generation")
@@ -3931,8 +4051,15 @@ def _generate_master_bed_breakpoint_bed(
             
             return (chrom_num, start, end)
         
+        sort_start = time.time()
         sorted_breakpoints = sorted(master_bed_breakpoints, key=sort_key)
-        
+        logger.debug(
+            "Sorted master BED breakpoints in %.3fs (count=%d)",
+            time.time() - sort_start,
+            len(sorted_breakpoints),
+        )
+
+        write_start = time.time()
         with open(master_bed_bp_file, "w") as f:
             for bp in sorted_breakpoints:
                 chrom = bp["chromosome"]
@@ -3949,6 +4076,11 @@ def _generate_master_bed_breakpoint_bed(
                 # Write BED entry: chrom, start, end, name (master_bed-breakpoint)
                 name = "master_bed-breakpoint"
                 f.write(f"{chrom}\t{region_start}\t{region_end}\t{name}\t0\t.\n")
+        logger.debug(
+            "Wrote master BED breakpoint BED in %.3fs (%s)",
+            time.time() - write_start,
+            master_bed_bp_file,
+        )
         
         # Log summary of read support
         if master_bed_breakpoints:
@@ -3964,7 +4096,16 @@ def _generate_master_bed_breakpoint_bed(
             logger.info(f"Generated master BED breakpoint BED file: {master_bed_bp_file} with 0 breakpoints")
         
         # Generate master BED events summary CSV for GUI (pre-computed to avoid blocking UI)
+        summary_start = time.time()
         _generate_master_bed_events_summary(sample_id, fusion_metadata, work_dir)
+        logger.debug(
+            "Generated master BED events summary in %.3fs",
+            time.time() - summary_start,
+        )
+        logger.debug(
+            "Master BED breakpoint BED pipeline completed in %.3fs",
+            time.time() - step_start,
+        )
         
     except Exception as e:
         logger.warning(f"Error generating master BED breakpoint BED file: {e}")
@@ -4001,8 +4142,15 @@ def _generate_master_bed_events_summary(
         cluster_distance: Maximum distance for clustering breakpoint pairs (default: 5000bp)
     """
     try:
+        step_start = time.time()
         # Load master BED candidates from Parquet
+        load_start = time.time()
         master_bed_df = _load_fusion_candidates_parquet("master_bed_candidates", work_dir, sample_id)
+        logger.debug(
+            "Loaded master BED candidates in %.3fs (rows=%d)",
+            time.time() - load_start,
+            len(master_bed_df) if master_bed_df is not None else 0,
+        )
         
         if master_bed_df is None or master_bed_df.empty:
             logger.debug("No master BED candidates found - skipping events summary generation")
@@ -4017,6 +4165,7 @@ def _generate_master_bed_events_summary(
             return
         
         # Filter to only high-quality supplementary mappings (MapQ >= min_mapq)
+        filter_start = time.time()
         if "mapping_quality" in master_bed_df.columns and "col4" in master_bed_df.columns:
             high_quality_mask = (
                 (master_bed_df["col4"] == "master_bed_region") |
@@ -4029,6 +4178,11 @@ def _generate_master_bed_events_summary(
                 summary_file = os.path.join(work_dir, sample_id, "master_bed_events_summary.csv")
                 pd.DataFrame().to_csv(summary_file, index=False)
                 return
+        logger.debug(
+            "Filtered master BED candidates in %.3fs (rows=%d)",
+            time.time() - filter_start,
+            len(master_bed_df),
+        )
         
         # Separate primary and supplementary alignments using col4
         if "col4" in master_bed_df.columns:
@@ -4063,6 +4217,7 @@ def _generate_master_bed_events_summary(
         supplementary_filtered = supplementary_df[supplementary_df["read_id"].isin(reads_with_both)].copy()
         
         # Build breakpoint pairs
+        pair_start = time.time()
         breakpoint_pairs = []
         primary_by_read = primary_filtered.groupby("read_id", observed=True)
         supplementary_by_read = supplementary_filtered.groupby("read_id", observed=True)
@@ -4085,11 +4240,20 @@ def _generate_master_bed_events_summary(
             pd.DataFrame().to_csv(summary_file, index=False)
             return
         logger.debug(f"breakpoint pairs: {len(breakpoint_pairs)}")
+        logger.debug(
+            "Created breakpoint pairs in %.3fs",
+            time.time() - pair_start,
+        )
         # Cluster similar breakpoint pairs using DBSCAN (much faster than O(n²) nested loops)
+        cluster_start = time.time()
         clustered_pairs = _cluster_breakpoint_pairs_dbscan(
             breakpoint_pairs, cluster_distance=cluster_distance, min_read_support=min_read_support
         )
         logger.debug(f"clustered pairs: {len(clustered_pairs)}")
+        logger.debug(
+            "Clustered breakpoint pairs in %.3fs",
+            time.time() - cluster_start,
+        )
         # Filter for breakpoint pairs with sufficient read support (already filtered in DBSCAN, but keep for safety)
         supported_pairs = [
             p for p in clustered_pairs 
@@ -4103,6 +4267,7 @@ def _generate_master_bed_events_summary(
             return
         logger.debug(f"supported pairs: {len(supported_pairs)}")
         # Convert to DataFrame format - include both primary and supplementary regions
+        events_start = time.time()
         events = []
         for pair in supported_pairs:
             if pair["primary_start"] > 0 and pair["primary_end"] > pair["primary_start"]:
@@ -4136,7 +4301,13 @@ def _generate_master_bed_events_summary(
         logger.debug(f"merging nearby events: {len(result_df)} events")
         # Merge nearby duplicate events on the same chromosome
         # This prevents showing multiple very similar events that are within cluster_distance
+        merge_start = time.time()
         result_df = _merge_nearby_events(result_df, cluster_distance=cluster_distance)
+        logger.debug(
+            "Merged nearby events in %.3fs (events=%d)",
+            time.time() - merge_start,
+            len(result_df),
+        )
         
         result_df = result_df.sort_values(
             ["read_count", "chromosome", "start"],
@@ -4145,8 +4316,17 @@ def _generate_master_bed_events_summary(
         
         # Write summary CSV file
         summary_file = os.path.join(work_dir, sample_id, "master_bed_events_summary.csv")
+        write_start = time.time()
         result_df.to_csv(summary_file, index=False)
         logger.info(f"Generated master BED events summary: {summary_file} with {len(result_df)} events")
+        logger.debug(
+            "Wrote master BED events summary in %.3fs",
+            time.time() - write_start,
+        )
+        logger.debug(
+            "Master BED events summary pipeline completed in %.3fs",
+            time.time() - step_start,
+        )
         
     except Exception as e:
         logger.warning(f"Error generating master BED events summary: {e}")
