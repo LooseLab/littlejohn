@@ -4143,6 +4143,28 @@ def _generate_master_bed_events_summary(
     """
     try:
         step_start = time.time()
+        state_path = os.path.join(work_dir, sample_id, "master_bed_events_state.pkl")
+        processed_read_ids: Set[str] = set()
+        cached_breakpoint_pairs: List[Dict[str, Any]] = []
+        state_loaded = False
+        if os.path.exists(state_path):
+            try:
+                with open(state_path, "rb") as f:
+                    state = pickle.load(f)
+                processed_read_ids = set(state.get("processed_read_ids", []))
+                cached_breakpoint_pairs = list(state.get("breakpoint_pairs", []))
+                state_loaded = True
+                logger.debug(
+                    "Loaded master BED events state (reads=%d, pairs=%d)",
+                    len(processed_read_ids),
+                    len(cached_breakpoint_pairs),
+                )
+            except Exception as e:
+                logger.warning(
+                    "Could not load master BED events state from %s: %s. Rebuilding from scratch.",
+                    state_path,
+                    e,
+                )
         # Load master BED candidates from Parquet
         load_start = time.time()
         master_bed_df = _load_fusion_candidates_parquet("master_bed_candidates", work_dir, sample_id)
@@ -4205,6 +4227,20 @@ def _generate_master_bed_events_summary(
         primary_read_ids = set(primary_df["read_id"].unique())
         supplementary_read_ids = set(supplementary_df["read_id"].unique())
         reads_with_both = primary_read_ids & supplementary_read_ids
+        if state_loaded:
+            new_reads_with_both = reads_with_both - processed_read_ids
+            logger.debug(
+                "Master BED events: new_reads_with_both=%d (previously_processed=%d, total_with_both=%d)",
+                len(new_reads_with_both),
+                len(reads_with_both) - len(new_reads_with_both),
+                len(reads_with_both),
+            )
+            if not new_reads_with_both:
+                logger.info(
+                    "No new reads detected for master BED events summary - skipping update"
+                )
+                return
+            reads_with_both = new_reads_with_both
         
         if not reads_with_both:
             logger.debug("No reads have both primary and supplementary alignments")
@@ -4219,6 +4255,8 @@ def _generate_master_bed_events_summary(
         # Build breakpoint pairs
         pair_start = time.time()
         breakpoint_pairs = []
+        if state_loaded and cached_breakpoint_pairs:
+            breakpoint_pairs.extend(cached_breakpoint_pairs)
         primary_by_read = primary_filtered.groupby("read_id", observed=True)
         supplementary_by_read = supplementary_filtered.groupby("read_id", observed=True)
         logger.debug(f"primary by read: {len(primary_by_read)}")
@@ -4233,6 +4271,7 @@ def _generate_master_bed_events_summary(
             # Use vectorized breakpoint pair creation (much faster than nested loops)
             pairs = _create_breakpoint_pairs_vectorized(read_primaries, read_supplementaries, read_id)
             breakpoint_pairs.extend(pairs)
+        processed_read_ids.update(reads_with_both)
         
         if not breakpoint_pairs:
             logger.debug("No breakpoint pairs created")
@@ -4323,6 +4362,25 @@ def _generate_master_bed_events_summary(
             "Wrote master BED events summary in %.3fs",
             time.time() - write_start,
         )
+        try:
+            save_state_start = time.time()
+            state = {
+                "processed_read_ids": processed_read_ids,
+                "breakpoint_pairs": breakpoint_pairs,
+                "updated_at": time.time(),
+            }
+            tmp_path = state_path + ".tmp"
+            with open(tmp_path, "wb") as f:
+                pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+            os.replace(tmp_path, state_path)
+            logger.debug(
+                "Saved master BED events state in %.3fs (reads=%d, pairs=%d)",
+                time.time() - save_state_start,
+                len(processed_read_ids),
+                len(breakpoint_pairs),
+            )
+        except Exception as e:
+            logger.warning(f"Could not save master BED events state: {e}")
         logger.debug(
             "Master BED events summary pipeline completed in %.3fs",
             time.time() - step_start,
