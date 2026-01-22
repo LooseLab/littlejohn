@@ -21,7 +21,6 @@ import logging
 import json
 import pickle
 import glob
-import fcntl
 import time
 import bisect
 from datetime import datetime
@@ -39,12 +38,8 @@ import networkx as nx
 from sklearn.cluster import DBSCAN
 import pyarrow.parquet as pq
 import shutil
-try:
-    from ncls import NCLS
-    _HAS_NCLS = True
-except Exception:
-    NCLS = None
-    _HAS_NCLS = False
+from ncls import NCLS
+_HAS_NCLS = True
 
 # Local imports
 from robin.classification_config import (
@@ -64,46 +59,6 @@ ENABLE_MASTER_BED = False
 # Debug flag for incremental master BED breakpoint logging
 DEBUG_MASTER_BED_INCREMENTAL = os.getenv("ROBIN_DEBUG_MASTER_BED_INCREMENTAL", "0") == "1"
 
-
-class FileLock:
-    """
-    Simple file-based lock for coordinating access across processes/threads.
-    Uses fcntl for POSIX systems.
-    """
-    
-    def __init__(self, lock_file: str, timeout: float = 30.0):
-        self.lock_file = lock_file
-        self.timeout = timeout
-        self.fd = None
-    
-    def __enter__(self):
-        self.acquire()
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.release()
-    
-    def acquire(self):
-        """Acquire the lock with timeout"""
-        os.makedirs(os.path.dirname(self.lock_file), exist_ok=True)
-        self.fd = open(self.lock_file, 'w')
-        
-        start_time = time.time()
-        while True:
-            try:
-                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return
-            except IOError:
-                if time.time() - start_time > self.timeout:
-                    raise TimeoutError(f"Could not acquire lock {self.lock_file} within {self.timeout}s")
-                time.sleep(0.1)
-    
-    def release(self):
-        """Release the lock"""
-        if self.fd:
-            fcntl.flock(self.fd, fcntl.LOCK_UN)
-            self.fd.close()
-            self.fd = None
 
 
 @dataclass
@@ -214,7 +169,7 @@ _target_panel_cache: Dict[str, str] = {}
 _gene_region_starts_cache: Dict[str, Dict[str, List[int]]] = {}
 _all_gene_region_starts_cache: Dict[str, Dict[str, List[int]]] = {}
 
-# Cache for NCLS indexes (optional, used when available)
+# Cache for NCLS indexes
 _gene_region_ncls_cache: Dict[str, Dict[str, Tuple["NCLS", List[GeneRegion]]]] = {}
 _all_gene_region_ncls_cache: Dict[str, Dict[str, Tuple["NCLS", List[GeneRegion]]]] = {}
 _combined_gene_region_ncls_cache: Dict[str, Dict[str, Tuple["NCLS", List[TaggedGeneRegion]]]] = {}
@@ -1928,15 +1883,8 @@ def _get_staging_dir(work_dir: str, sample_id: str) -> str:
     return staging_dir
 
 
-def _get_lock_file(work_dir: str, sample_id: str, lock_type: str = "counter") -> str:
-    """Get lock file path for coordinating concurrent access"""
-    lock_dir = os.path.join(work_dir, sample_id, "_locks")
-    os.makedirs(lock_dir, exist_ok=True)
-    return os.path.join(lock_dir, f"fusion_{lock_type}.lock")
-
-
 def _get_pending_count(work_dir: str, sample_id: str) -> int:
-    """Get count of files pending accumulation (thread-safe)."""
+    """Get count of files pending accumulation."""
     staging_dir = _get_staging_dir(work_dir, sample_id)
     count_file = os.path.join(staging_dir, "pending_count.txt")
     try:
@@ -1951,56 +1899,49 @@ def _get_pending_count(work_dir: str, sample_id: str) -> int:
 
 
 def _set_pending_count(work_dir: str, sample_id: str, count: int) -> None:
-    """Set the pending staging file count (thread-safe)."""
-    lock_file = _get_lock_file(work_dir, sample_id, "pending")
+    """Set the pending staging file count."""
     staging_dir = _get_staging_dir(work_dir, sample_id)
     count_file = os.path.join(staging_dir, "pending_count.txt")
-    with FileLock(lock_file, timeout=30.0):
-        with open(count_file, "w") as f:
-            f.write(str(max(0, int(count))))
+    with open(count_file, "w") as f:
+        f.write(str(max(0, int(count))))
 
 
 def _increment_pending_count(work_dir: str, sample_id: str, delta: int = 1) -> int:
     """Increment the pending staging count and return the new value."""
-    lock_file = _get_lock_file(work_dir, sample_id, "pending")
     staging_dir = _get_staging_dir(work_dir, sample_id)
     count_file = os.path.join(staging_dir, "pending_count.txt")
-    with FileLock(lock_file, timeout=30.0):
-        current = _get_pending_count(work_dir, sample_id)
-        new_count = max(0, current + int(delta))
-        with open(count_file, "w") as f:
-            f.write(str(new_count))
+    current = _get_pending_count(work_dir, sample_id)
+    new_count = max(0, current + int(delta))
+    with open(count_file, "w") as f:
+        f.write(str(new_count))
     return new_count
 
 
 def _atomic_counter_increment(work_dir: str, sample_id: str) -> int:
     """
-    Atomically increment and return the fusion file counter for a sample.
-    Uses file locking to prevent race conditions.
+    Increment and return the fusion file counter for a sample.
     
     Returns:
         The counter value to use for this file
     """
-    lock_file = _get_lock_file(work_dir, sample_id, "counter")
     counter_file = os.path.join(work_dir, sample_id, "fusion_analysis_counter.txt")
     
-    with FileLock(lock_file, timeout=30.0):
-        # Read current counter
-        if os.path.exists(counter_file):
-            try:
-                with open(counter_file, "r") as f:
-                    counter = int(f.read().strip())
-            except (ValueError, IOError):
-                counter = 0
-        else:
+    # Read current counter
+    if os.path.exists(counter_file):
+        try:
+            with open(counter_file, "r") as f:
+                counter = int(f.read().strip())
+        except (ValueError, IOError):
             counter = 0
-        
-        # Write incremented counter
-        os.makedirs(os.path.dirname(counter_file), exist_ok=True)
-        with open(counter_file, "w") as f:
-            f.write(str(counter + 1))
-        
-        return counter
+    else:
+        counter = 0
+    
+    # Write incremented counter
+    os.makedirs(os.path.dirname(counter_file), exist_ok=True)
+    with open(counter_file, "w") as f:
+        f.write(str(counter + 1))
+    
+    return counter
 
 
 def process_bam_with_staging(
