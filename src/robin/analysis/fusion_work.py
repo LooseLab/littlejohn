@@ -2538,6 +2538,46 @@ def _generate_output_files(
         output_csv_name: str,
         output_pickle_name: str,
     ) -> None:
+        state_path = os.path.join(work_dir, sample_id, f"{candidate_type}_filter_state.pkl")
+        processed_read_ids: Set[str] = set()
+        read_to_genes: Dict[str, Set[str]] = {}
+        tag_counts: Dict[str, int] = defaultdict(int)
+        tag_to_read_ids: Dict[str, Set[str]] = {}
+        valid_tags: Set[str] = set()
+        written_read_ids: Set[str] = set()
+        state_loaded = False
+        if os.path.exists(state_path):
+            try:
+                with open(state_path, "rb") as f:
+                    state = pickle.load(f)
+                processed_read_ids = set(state.get("processed_read_ids", []))
+                written_read_ids = set(state.get("written_read_ids", []))
+                read_to_genes = {
+                    rid: set(genes)
+                    for rid, genes in state.get("read_to_genes", {}).items()
+                }
+                tag_counts = defaultdict(int, state.get("tag_counts", {}))
+                tag_to_read_ids = {
+                    tag: set(rids)
+                    for tag, rids in state.get("tag_to_read_ids", {}).items()
+                }
+                valid_tags = set(state.get("valid_tags", []))
+                state_loaded = True
+            except Exception as e:
+                logger.warning(
+                    "Could not load %s state from %s: %s. Rebuilding from scratch.",
+                    candidate_type,
+                    state_path,
+                    e,
+                )
+                processed_read_ids = set()
+                written_read_ids = set()
+                read_to_genes = {}
+                tag_counts = defaultdict(int)
+                tag_to_read_ids = {}
+                valid_tags = set()
+                state_loaded = False
+
         dataset_dir = _get_parquet_dataset_dir(work_dir, sample_id, candidate_type)
         dataset_files = glob.glob(os.path.join(dataset_dir, "*.parquet"))
         legacy_path = _get_parquet_paths(work_dir, sample_id).get(candidate_type)
@@ -2581,9 +2621,8 @@ def _generate_output_files(
                         os.path.join(work_dir, sample_id, output_pickle_name),
                     )
             return
-
-        # First pass: build read_id -> gene set, then tags and valid read_ids
-        read_to_genes: Dict[str, Set[str]] = {}
+        previous_valid_tags = set(valid_tags)
+        # First pass: update read_id -> gene set for new reads only
         for batch in _iter_fusion_candidates_parquet_batches(
             candidate_type, work_dir, sample_id, columns=["read_id", "col4"]
         ):
@@ -2593,51 +2632,122 @@ def _generate_output_files(
             for read_id, genes in grouped.items():
                 if pd.isna(read_id):
                     continue
-                gene_set = read_to_genes.setdefault(read_id, set())
+                if state_loaded and read_id in processed_read_ids:
+                    continue
+                old_genes = read_to_genes.get(read_id, set())
+                old_tag = ",".join(sorted(old_genes)) if len(old_genes) > 1 else None
+                gene_set = set(old_genes)
                 for gene in genes:
                     if pd.isna(gene):
                         continue
                     gene_set.add(str(gene))
+                read_to_genes[read_id] = gene_set
+                new_tag = ",".join(sorted(gene_set)) if len(gene_set) > 1 else None
+                if old_tag and old_tag != new_tag:
+                    tag_counts[old_tag] = max(0, tag_counts.get(old_tag, 0) - 1)
+                    if old_tag in tag_to_read_ids:
+                        tag_to_read_ids[old_tag].discard(read_id)
+                if new_tag:
+                    tag_counts[new_tag] = tag_counts.get(new_tag, 0) + 1
+                    tag_to_read_ids.setdefault(new_tag, set()).add(read_id)
+                processed_read_ids.add(read_id)
 
         if not read_to_genes:
             return
-
-        read_to_tag: Dict[str, str] = {}
-        tag_counts: Dict[str, int] = defaultdict(int)
-        for read_id, genes in read_to_genes.items():
-            if len(genes) > 1:
-                tag = ",".join(sorted(genes))
-                read_to_tag[read_id] = tag
-                tag_counts[tag] += 1
-
         min_support = get_fusion_threshold("read_support")
         valid_tags = {tag for tag, count in tag_counts.items() if count >= min_support}
+        newly_valid_tags = valid_tags - previous_valid_tags
         if not valid_tags:
+            try:
+                state = {
+                    "processed_read_ids": list(processed_read_ids),
+                    "written_read_ids": list(written_read_ids),
+                    "read_to_genes": {rid: list(genes) for rid, genes in read_to_genes.items()},
+                    "tag_counts": dict(tag_counts),
+                    "tag_to_read_ids": {tag: list(rids) for tag, rids in tag_to_read_ids.items()},
+                    "valid_tags": list(valid_tags),
+                    "updated_at": time.time(),
+                }
+                tmp_path = state_path + ".tmp"
+                with open(tmp_path, "wb") as f:
+                    pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+                os.replace(tmp_path, state_path)
+            except Exception as e:
+                logger.warning("Could not save %s filter state: %s", candidate_type, e)
             return
 
-        valid_read_ids = {rid for rid, tag in read_to_tag.items() if tag in valid_tags}
+        valid_read_ids = set()
+        for tag in valid_tags:
+            valid_read_ids.update(tag_to_read_ids.get(tag, set()))
         if not valid_read_ids:
+            try:
+                state = {
+                    "processed_read_ids": list(processed_read_ids),
+                    "written_read_ids": list(written_read_ids),
+                    "read_to_genes": {rid: list(genes) for rid, genes in read_to_genes.items()},
+                    "tag_counts": dict(tag_counts),
+                    "tag_to_read_ids": {tag: list(rids) for tag, rids in tag_to_read_ids.items()},
+                    "valid_tags": list(valid_tags),
+                    "updated_at": time.time(),
+                }
+                tmp_path = state_path + ".tmp"
+                with open(tmp_path, "wb") as f:
+                    pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+                os.replace(tmp_path, state_path)
+            except Exception as e:
+                logger.warning("Could not save %s filter state: %s", candidate_type, e)
             return
 
+        read_ids_to_write = {rid for rid in valid_read_ids if rid not in written_read_ids}
+        for tag in newly_valid_tags:
+            read_ids_to_write.update(
+                rid for rid in tag_to_read_ids.get(tag, set()) if rid not in written_read_ids
+            )
+
+        if not read_ids_to_write:
+            try:
+                state = {
+                    "processed_read_ids": list(processed_read_ids),
+                    "written_read_ids": list(written_read_ids),
+                    "read_to_genes": {rid: list(genes) for rid, genes in read_to_genes.items()},
+                    "tag_counts": dict(tag_counts),
+                    "tag_to_read_ids": {tag: list(rids) for tag, rids in tag_to_read_ids.items()},
+                    "valid_tags": list(valid_tags),
+                    "updated_at": time.time(),
+                }
+                tmp_path = state_path + ".tmp"
+                with open(tmp_path, "wb") as f:
+                    pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+                os.replace(tmp_path, state_path)
+            except Exception as e:
+                logger.warning("Could not save %s filter state: %s", candidate_type, e)
+            return
         output_csv_path = os.path.join(work_dir, sample_id, output_csv_name)
-        if os.path.exists(output_csv_path):
+        if not state_loaded and os.path.exists(output_csv_path):
             try:
                 os.remove(output_csv_path)
             except OSError:
                 pass
 
         filtered_batches = []
-        write_header = True
+        write_header = not os.path.exists(output_csv_path)
         for batch in _iter_fusion_candidates_parquet_batches(
             candidate_type, work_dir, sample_id, columns=None
         ):
             if "read_id" not in batch.columns:
                 continue
-            subset = batch[batch["read_id"].isin(valid_read_ids)]
+            subset = batch[batch["read_id"].isin(read_ids_to_write)]
             if subset.empty:
                 continue
             subset = subset.copy()
-            subset["tag"] = subset["read_id"].map(read_to_tag)
+            subset["tag"] = subset["read_id"].map(
+                lambda rid: ",".join(sorted(read_to_genes.get(rid, set())))
+                if len(read_to_genes.get(rid, set())) > 1
+                else ""
+            )
+            subset = subset[subset["tag"] != ""]
+            if subset.empty:
+                continue
             subset.to_csv(output_csv_path, mode="a", header=write_header, index=False)
             write_header = False
             filtered_batches.append(subset)
@@ -2645,11 +2755,33 @@ def _generate_output_files(
         if not filtered_batches:
             return
 
-        filtered_df = pd.concat(filtered_batches, ignore_index=True)
-        preprocess_fusion_data_standalone(
-            filtered_df,
-            os.path.join(work_dir, sample_id, output_pickle_name),
-        )
+        written_read_ids.update(read_ids_to_write)
+        try:
+            state = {
+                "processed_read_ids": list(processed_read_ids),
+                "written_read_ids": list(written_read_ids),
+                "read_to_genes": {rid: list(genes) for rid, genes in read_to_genes.items()},
+                "tag_counts": dict(tag_counts),
+                "tag_to_read_ids": {tag: list(rids) for tag, rids in tag_to_read_ids.items()},
+                "valid_tags": list(valid_tags),
+                "updated_at": time.time(),
+            }
+            tmp_path = state_path + ".tmp"
+            with open(tmp_path, "wb") as f:
+                pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+            os.replace(tmp_path, state_path)
+        except Exception as e:
+            logger.warning("Could not save %s filter state: %s", candidate_type, e)
+
+        try:
+            filtered_df = pd.read_csv(output_csv_path)
+            if not filtered_df.empty:
+                preprocess_fusion_data_standalone(
+                    filtered_df,
+                    os.path.join(work_dir, sample_id, output_pickle_name),
+                )
+        except Exception as e:
+            logger.warning("Could not preprocess %s from %s: %s", candidate_type, output_csv_path, e)
 
     _build_filtered_candidates(
         "target_candidates",
@@ -4408,8 +4540,116 @@ def _generate_fusion_breakpoint_bed(
         work_dir: Working directory
     """
     try:
-        # Extract fusion breakpoints (already filtered by threshold)
-        fusion_breakpoints = _extract_fusion_breakpoints(fusion_metadata)
+        sample_dir = os.path.join(work_dir, sample_id)
+        state_path = os.path.join(sample_dir, "fusion_breakpoints_state.pkl")
+        processed_read_ids: Set[str] = set()
+        fusion_breakpoints: List[Dict[str, Any]] = []
+        breakpoint_set: Set[Tuple[str, int, int, str, str]] = set()
+        state_loaded = False
+        updated_at = 0.0
+        if os.path.exists(state_path):
+            try:
+                with open(state_path, "rb") as f:
+                    state = pickle.load(f)
+                processed_read_ids = set(state.get("processed_read_ids", []))
+                fusion_breakpoints = list(state.get("breakpoints", []))
+                updated_at = float(state.get("updated_at", 0.0))
+                breakpoint_set = {
+                    (bp.get("chromosome"), bp.get("start"), bp.get("end"), bp.get("gene", "Unknown"), bp.get("source", "unknown"))
+                    for bp in fusion_breakpoints
+                }
+                state_loaded = True
+                logger.debug(
+                    "Loaded fusion breakpoint state (reads=%d, breakpoints=%d)",
+                    len(processed_read_ids),
+                    len(fusion_breakpoints),
+                )
+            except Exception as e:
+                logger.warning(
+                    "Could not load fusion breakpoint state from %s: %s. Rebuilding from scratch.",
+                    state_path,
+                    e,
+                )
+                processed_read_ids = set()
+                fusion_breakpoints = []
+                breakpoint_set = set()
+                state_loaded = False
+
+        master_csv = os.path.join(sample_dir, "fusion_candidates_master.csv")
+        genome_csv = os.path.join(sample_dir, "fusion_candidates_all.csv")
+        csv_paths = [
+            (master_csv, "target"),
+            (genome_csv, "genome"),
+        ]
+        existing_csvs = [path for path, _ in csv_paths if os.path.exists(path)]
+        if state_loaded and existing_csvs:
+            latest_mtime = max(os.path.getmtime(path) for path in existing_csvs)
+            if latest_mtime <= updated_at:
+                logger.debug("Fusion breakpoint state up-to-date; skipping CSV scan")
+            else:
+                for csv_path, source in csv_paths:
+                    if not os.path.exists(csv_path):
+                        continue
+                    for chunk in pd.read_csv(csv_path, chunksize=200000):
+                        if "read_id" not in chunk.columns:
+                            continue
+                        read_ids = set(chunk["read_id"].dropna().unique())
+                        new_read_ids = read_ids - processed_read_ids
+                        processed_read_ids.update(read_ids)
+                        if not new_read_ids:
+                            continue
+                        new_chunk = chunk[chunk["read_id"].isin(new_read_ids)]
+                        for _, row in new_chunk.iterrows():
+                            chrom = row.get("reference_id", "Unknown")
+                            start = int(row.get("reference_start", 0))
+                            end = int(row.get("reference_end", 0))
+                            gene = row.get("col4", "Unknown")
+                            if start > 0 and end > start:
+                                key = (chrom, start, end, str(gene), source)
+                                if key in breakpoint_set:
+                                    continue
+                                breakpoint_set.add(key)
+                                fusion_breakpoints.append(
+                                    {
+                                        "chromosome": chrom,
+                                        "start": start,
+                                        "end": end,
+                                        "gene": gene,
+                                        "read_id": row.get("read_id", "Unknown"),
+                                        "source": source,
+                                    }
+                                )
+        elif existing_csvs:
+            for csv_path, source in csv_paths:
+                if not os.path.exists(csv_path):
+                    continue
+                for chunk in pd.read_csv(csv_path, chunksize=200000):
+                    if "read_id" not in chunk.columns:
+                        continue
+                    read_ids = set(chunk["read_id"].dropna().unique())
+                    processed_read_ids.update(read_ids)
+                    for _, row in chunk.iterrows():
+                        chrom = row.get("reference_id", "Unknown")
+                        start = int(row.get("reference_start", 0))
+                        end = int(row.get("reference_end", 0))
+                        gene = row.get("col4", "Unknown")
+                        if start > 0 and end > start:
+                            key = (chrom, start, end, str(gene), source)
+                            if key in breakpoint_set:
+                                continue
+                            breakpoint_set.add(key)
+                            fusion_breakpoints.append(
+                                {
+                                    "chromosome": chrom,
+                                    "start": start,
+                                    "end": end,
+                                    "gene": gene,
+                                    "read_id": row.get("read_id", "Unknown"),
+                                    "source": source,
+                                }
+                            )
+        else:
+            fusion_breakpoints = _extract_fusion_breakpoints(fusion_metadata)
         
         if not fusion_breakpoints:
             logger.debug("No fusion breakpoints found - skipping BED file generation")
@@ -4422,7 +4662,6 @@ def _generate_fusion_breakpoint_bed(
         analysis_counter = _load_analysis_counter(sample_id, work_dir)
         
         # Create bed_files directory if it doesn't exist
-        sample_dir = os.path.join(work_dir, sample_id)
         bed_dir = os.path.join(sample_dir, "bed_files")
         os.makedirs(bed_dir, exist_ok=True)
         
@@ -4478,6 +4717,18 @@ def _generate_fusion_breakpoint_bed(
                 f.write(f"{chrom}\t{region_start}\t{region_end}\t{name}\n")
         
         logger.info(f"Generated fusion breakpoint BED file: {fusion_bed_file} with {len(fusion_breakpoints)} breakpoints")
+        try:
+            state = {
+                "processed_read_ids": list(processed_read_ids),
+                "breakpoints": fusion_breakpoints,
+                "updated_at": time.time(),
+            }
+            tmp_path = state_path + ".tmp"
+            with open(tmp_path, "wb") as f:
+                pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+            os.replace(tmp_path, state_path)
+        except Exception as e:
+            logger.warning(f"Could not save fusion breakpoint state: {e}")
         
     except Exception as e:
         logger.warning(f"Error generating fusion breakpoint BED file: {e}")
