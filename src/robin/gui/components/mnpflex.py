@@ -132,11 +132,17 @@ def add_mnpflex_section(launcher: Any, sample_dir: Path, sample_id: str) -> None
         verify_ssl_env = False
         verify_ssl = False
 
+        client_id = os.getenv("MNPFLEX_CLIENT_ID", "ROBIN")
+        client_secret = os.getenv("MNPFLEX_CLIENT_SECRET", "SECRET")
+        scope = os.getenv("MNPFLEX_SCOPE", "")
         client = MNPFlexClient(
             base_url=base_url,
             username=username,
             password=password,
             verify_ssl=verify_ssl,
+            client_id=client_id,
+            client_secret=client_secret,
+            scope=scope,
         )
         client.upload_retrieve_cleanup(
             bed_file_path=str(bed_path),

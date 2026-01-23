@@ -32,6 +32,9 @@ class MNPFlexClient:
         password: str,
         verify_ssl: bool = False,
         timeout: int = 120,
+        client_id: str = "",
+        client_secret: str = "",
+        scope: str = "",
     ):
         self.base_url = base_url.rstrip("/")
         self.verify_ssl = verify_ssl
@@ -45,7 +48,13 @@ class MNPFlexClient:
             }
         )
         self._token: Optional[AuthToken] = None
-        self.authenticate(username=username, password=password)
+        self.authenticate(
+            username=username,
+            password=password,
+            client_id=client_id,
+            client_secret=client_secret,
+            scope=scope,
+        )
 
     # ----------------------------
     # Auth + helpers
