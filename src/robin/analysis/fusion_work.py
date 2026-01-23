@@ -55,7 +55,7 @@ from robin.classification_config import (
 logger = logging.getLogger("robin.analysis.fusion_work")
 
 # TEMP: Disable master BED interactions for performance testing
-ENABLE_MASTER_BED = False
+ENABLE_MASTER_BED = True
 # Debug flag for incremental master BED breakpoint logging
 DEBUG_MASTER_BED_INCREMENTAL = os.getenv("ROBIN_DEBUG_MASTER_BED_INCREMENTAL", "0") == "1"
 
