@@ -129,8 +129,8 @@ def add_mnpflex_section(launcher: Any, sample_dir: Path, sample_id: str) -> None
         bed_path = _build_subset_bed_from_parquet()
 
         base_url = os.getenv("MNPFLEX_BASE_URL", "https://app.epignostix.com")
-        verify_ssl_env = os.getenv("MNPFLEX_VERIFY_SSL", "true").lower()
-        verify_ssl = verify_ssl_env not in {"0", "false", "no"}
+        verify_ssl_env = False
+        verify_ssl = False
 
         client = MNPFlexClient(
             base_url=base_url,

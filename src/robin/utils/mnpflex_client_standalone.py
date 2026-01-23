@@ -30,7 +30,7 @@ class MNPFlexClient:
         base_url: str = "https://app.epignostix.com",
         username: str,
         password: str,
-        verify_ssl: bool = True,
+        verify_ssl: bool = False,
         timeout: int = 120,
     ):
         self.base_url = base_url.rstrip("/")
