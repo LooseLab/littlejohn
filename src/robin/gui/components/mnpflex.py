@@ -96,7 +96,7 @@ def add_mnpflex_section(launcher: Any, sample_dir: Path, sample_id: str) -> None
             os.path.dirname(os.path.abspath(resources.__file__)),
             "mnp_flex_sample_clean.bed",
         )
-        api_client = MnpFlexApiClient(base_url="https://mnp-flex.org", verify_ssl=True)
+        api_client = MnpFlexApiClient(base_url="https://mnp-flex.org", verify_ssl=False)
         api_client.process_streaming(reference_bed, str(bed_path), str(subset_path))
         return subset_path
 
