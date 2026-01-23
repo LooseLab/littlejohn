@@ -3143,6 +3143,23 @@ class GUILauncher:
                         
                         workflow_steps = self.workflow_steps if hasattr(self, 'workflow_steps') else None
                         
+                        # MNP-Flex section - create UI immediately (directly after summary)
+                        try:
+                            try:
+                                from .gui.components.mnpflex import add_mnpflex_section  # type: ignore
+                            except ImportError:
+                                from robin.gui.components.mnpflex import add_mnpflex_section
+
+                            add_mnpflex_section(self, sample_dir, sample_id)
+                        except Exception as e:
+                            logging.exception(f"[GUI] MNP-Flex section failed: {e}")
+                            try:
+                                ui.notify(
+                                    f"MNP-Flex section failed: {e}", type="warning"
+                                )
+                            except Exception:
+                                pass
+
                         # Classification section (refactored component) - create UI immediately
                         enabled_classification_steps = get_enabled_classification_steps(workflow_steps)
                         if not workflow_steps or enabled_classification_steps:

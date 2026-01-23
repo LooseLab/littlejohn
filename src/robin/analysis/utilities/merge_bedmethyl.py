@@ -190,7 +190,7 @@ def modkit_pileup_file_to_bed(
     margin: Optional[int] = 25,
     neg_threshold: Optional[float] = 0.3,
     pos_threshold: Optional[float] = 0.7,
-    fivemc_code: str = "C",
+    fivemc_code: str = "m",
 ) -> pd.DataFrame:
     """Processes a modkit pileup file or DataFrame and maps methylation data to probes."""
 

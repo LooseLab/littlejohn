@@ -106,6 +106,7 @@ class RobinReport:
         from .sections.fusion import FusionSection
         from .sections.coverage import CoverageSection
         from .sections.mgmt import MGMTSection
+        from .sections.mnpflex import MNPFlexSection
         from .sections.run_data import RunDataSection
         from .sections.disclaimer import DisclaimerSection
         from .sections.variants import VariantsSection
@@ -143,6 +144,9 @@ class RobinReport:
         # MGMT section
         if not self.workflow_steps or is_section_enabled("mgmt", self.workflow_steps):
             sections.append(MGMTSection(self))
+
+        # MNP-Flex section (include if results are present)
+        sections.append(MNPFlexSection(self))
         
         # Run data section (always included)
         sections.append(RunDataSection(self))

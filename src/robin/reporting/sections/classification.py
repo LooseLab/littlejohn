@@ -343,6 +343,48 @@ class ClassificationSection(ReportSection):
             summary_table = self.create_table(summary_data, repeat_rows=1)
             self.summary_elements.append(summary_table)
             self.elements.append(Spacer(1, 12))
+
+        # Add MNP-Flex hierarchical summary (if available)
+        try:
+            from robin.reporting.sections.mnpflex import MNPFlexSection
+
+            mnpflex = MNPFlexSection(self.report)
+            results_dir = mnpflex._find_results_dir()
+            if results_dir:
+                summary = mnpflex._load_bundle_summary(results_dir)
+            else:
+                summary = None
+            classifier_summary = (summary or {}).get("classifier_summary", {}) or {}
+            hierarchy = classifier_summary.get("summary_hierarchical", []) or []
+            if hierarchy:
+                self.elements.append(
+                    Paragraph("MNP-Flex Hierarchical Summary", self.styles.styles["Heading3"])
+                )
+                self.elements.append(Spacer(1, 6))
+                flat = mnpflex._flatten_hierarchy(hierarchy)
+                if flat:
+                    best_score, best_path = max(flat, key=lambda x: x[0] or 0)
+                    self.elements.append(
+                        Paragraph(
+                            f"<b>Top path</b>: {' > '.join(best_path)} "
+                            f"({mnpflex._format_score(best_score)})",
+                            self.styles.styles["Normal"],
+                        )
+                    )
+                    self.elements.append(Spacer(1, 6))
+                table_rows = [["Group", "Score", "Description"]]
+                for node in hierarchy:
+                    table_rows.append(
+                        [
+                            node.get("group", "Unknown"),
+                            mnpflex._format_score(node.get("score")),
+                            mnpflex._collect_descriptions(node),
+                        ]
+                    )
+                self.elements.append(self.create_table(table_rows))
+                self.elements.append(Spacer(1, 12))
+        except Exception as e:
+            logger.error(f"Error adding MNP-Flex hierarchy to classification section: {e}")
             # Export summary as DataFrame
             try:
                 # Strip HTML tags from Status for CSV, keep plain text
