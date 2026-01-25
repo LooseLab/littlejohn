@@ -536,7 +536,7 @@ def _wrap_real_handler(
             try:
                 # Configure memory management based on job type
                 gc_every = 10 if job_type in {"mgmt", "cnv", "target", "fusion"} else 25
-                rss_trigger = 512 if job_type in {"mgmt", "cnv", "target", "fusion"} else 1024
+                rss_trigger = 1024 if job_type in {"mgmt", "cnv", "target", "fusion"} else 1024
                 memory_manager = MemoryManager(
                     gc_every=gc_every,
                     rss_trigger_mb=rss_trigger,
