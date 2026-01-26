@@ -345,18 +345,18 @@ CLASSIFICATION_TYPES: Set[str] = {"sturgeon", "nanodx", "pannanodx", "random_for
 
 RESOURCE_HINTS: Dict[str, Dict[str, Any]] = {
     # Tune these to your cluster
-    "preprocessing": {"num_cpus": 1},
-    "bed_conversion": {"num_cpus": 1},
-    "mgmt": {"num_cpus": 1},
-    "cnv": {"num_cpus": 1},  # CNV gets dedicated CPU but only 1 thread
-    "target": {"num_cpus": 1},
-    "fusion": {"num_cpus": 1},
+    "preprocessing": {"num_cpus": 1, "memory": 1024 * 1024**3},
+    "bed_conversion": {"num_cpus": 1, "memory": 1024 * 1024**3},
+    "mgmt": {"num_cpus": 1, "memory": 1024 * 1024**3},
+    "cnv": {"num_cpus": 1, "memory": 1024 * 1024**3},  # CNV gets dedicated CPU but only 1 thread
+    "target": {"num_cpus": 1, "memory": 1024 * 1024**3},
+    "fusion": {"num_cpus": 1, "memory": 1024 * 1024**3},
     # Classifiers do not require GPU by default (CPU-only)
-    "sturgeon": {"num_cpus": 1},
-    "nanodx": {"num_cpus": 1},
-    "pannanodx": {"num_cpus": 1},
-    "random_forest": {"num_cpus": 1},
-    "igv_bam": {"num_cpus": 1},
+    "sturgeon": {"num_cpus": 1, "memory": 1024 * 1024**3},
+    "nanodx": {"num_cpus": 1, "memory": 1024 * 1024**3},
+    "pannanodx": {"num_cpus": 1, "memory": 1024 * 1024**3},
+    "random_forest": {"num_cpus": 1, "memory": 1024 * 1024**3},
+    "igv_bam": {"num_cpus": 1, "memory": 1024 * 1024**3},
 }
 
 # ---------- Sample Job Batcher ----------
