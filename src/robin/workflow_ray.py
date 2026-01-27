@@ -56,6 +56,9 @@ try:
 except ImportError:
     MemoryManager = None
 
+# Disable memory manager for testing via env flag
+DISABLE_MEMORY_MANAGER = True #os.getenv("ROBIN_DISABLE_MEMORY_MANAGER", "0") == "1"
+
 # Optional GUI hook integration
 try:
     from robin.gui_launcher import (
@@ -187,8 +190,8 @@ BATCH_CONFIG: Dict[str, Dict[str, Any]] = {
     "bed_conversion": {"max_batch_size": 20, "timeout_seconds": 2},
     "mgmt": {"max_batch_size": 20, "timeout_seconds": 2},
     "cnv": {"max_batch_size": 50, "timeout_seconds": 2},
-    "target": {"max_batch_size": 100, "timeout_seconds": 10},
-    "fusion": {"max_batch_size": 50, "timeout_seconds": 2},
+    "target": {"max_batch_size": 100, "timeout_seconds": 2},
+    "fusion": {"max_batch_size": 20, "timeout_seconds": 2},
     "sturgeon": {"max_batch_size": 20, "timeout_seconds": 2},
     "nanodx": {"max_batch_size": 20, "timeout_seconds": 2},
     "pannanodx": {"max_batch_size": 20, "timeout_seconds": 2},
@@ -345,18 +348,18 @@ CLASSIFICATION_TYPES: Set[str] = {"sturgeon", "nanodx", "pannanodx", "random_for
 
 RESOURCE_HINTS: Dict[str, Dict[str, Any]] = {
     # Tune these to your cluster
-    "preprocessing": {"num_cpus": 1, "memory": 1024 * 1024**3},
-    "bed_conversion": {"num_cpus": 1, "memory": 1024 * 1024**3},
-    "mgmt": {"num_cpus": 1, "memory": 1024 * 1024**3},
-    "cnv": {"num_cpus": 1, "memory": 1024 * 1024**3},  # CNV gets dedicated CPU but only 1 thread
-    "target": {"num_cpus": 1, "memory": 1024 * 1024**3},
-    "fusion": {"num_cpus": 1, "memory": 1024 * 1024**3},
+    "preprocessing": {"num_cpus": 1, "memory": 1024 * 1024},
+    "bed_conversion": {"num_cpus": 1, "memory": 1024 * 1024},
+    "mgmt": {"num_cpus": 1, "memory": 1024 * 1024},
+    "cnv": {"num_cpus": 1, "memory": 1024 * 1024},  # CNV gets dedicated CPU but only 1 thread
+    "target": {"num_cpus": 1, "memory": 1024 * 1024},
+    "fusion": {"num_cpus": 1, "memory": 1024 * 4 * 1024},
     # Classifiers do not require GPU by default (CPU-only)
-    "sturgeon": {"num_cpus": 1, "memory": 1024 * 1024**3},
-    "nanodx": {"num_cpus": 1, "memory": 1024 * 1024**3},
-    "pannanodx": {"num_cpus": 1, "memory": 1024 * 1024**3},
-    "random_forest": {"num_cpus": 1, "memory": 1024 * 1024**3},
-    "igv_bam": {"num_cpus": 1, "memory": 1024 * 1024**3},
+    "sturgeon": {"num_cpus": 1, "memory": 1024 * 1024},
+    "nanodx": {"num_cpus": 1, "memory": 1024 * 1024},
+    "pannanodx": {"num_cpus": 1, "memory": 1024 * 1024},
+    "random_forest": {"num_cpus": 1, "memory": 1024 * 1024},
+    "igv_bam": {"num_cpus": 1, "memory": 1024 * 1024},
 }
 
 # ---------- Sample Job Batcher ----------
@@ -532,7 +535,7 @@ def _wrap_real_handler(
     def _impl(job: Job) -> WorkflowContext:
         # Initialize memory manager for this handler execution
         memory_manager = None
-        if MemoryManager is not None:
+        if MemoryManager is not None and not DISABLE_MEMORY_MANAGER:
             try:
                 # Configure memory management based on job type
                 gc_every = 10 if job_type in {"mgmt", "cnv", "target", "fusion"} else 25
@@ -729,7 +732,7 @@ class TypeProcessor:
         
         # Initialize memory manager for long-running actor
         self.memory_manager = None
-        if MemoryManager is not None:
+        if MemoryManager is not None and not DISABLE_MEMORY_MANAGER:
             try:
                 # Configure memory management based on job type
                 gc_every = 25 if job_type in {"mgmt", "cnv", "target", "fusion"} else 50
@@ -2649,7 +2652,7 @@ class Pool:
         
         # Initialize memory manager for long-running pool actor
         self.memory_manager = None
-        if MemoryManager is not None:
+        if MemoryManager is not None and not DISABLE_MEMORY_MANAGER:
             try:
                 # Configure memory management based on queue type
                 gc_every = 30 if queue_name in {"analysis", "classif"} else 50
