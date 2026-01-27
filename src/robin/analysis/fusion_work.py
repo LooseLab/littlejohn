@@ -3245,6 +3245,15 @@ def _cluster_breakpoint_pairs_dbscan(
     if not breakpoint_pairs:
         return []
     
+    logger.debug(
+        "DBSCAN clustering start: pairs=%d, cluster_distance=%d, min_read_support=%d",
+        len(breakpoint_pairs),
+        cluster_distance,
+        min_read_support,
+    )
+    cluster_start = time.time()
+    max_dbscan_pairs = int(os.environ.get("ROBIN_DBSCAN_MAX_PAIRS", "100000"))
+    
     # Group pairs by chromosome combination (required for clustering)
     pairs_by_chrom = {}
     for i, pair in enumerate(breakpoint_pairs):
@@ -3260,9 +3269,37 @@ def _cluster_breakpoint_pairs_dbscan(
         if len(chrom_pairs) == 0:
             continue
         
+        chrom_start = time.time()
+        logger.debug(
+            "DBSCAN chrom group: primary=%s, supp=%s, pairs=%d",
+            chrom_key[0],
+            chrom_key[1],
+            len(chrom_pairs),
+        )
+        
         # Extract indices and pairs
         indices = [idx for idx, _ in chrom_pairs]
         pairs = [pair for _, pair in chrom_pairs]
+        
+        if max_dbscan_pairs > 0 and len(pairs) > max_dbscan_pairs:
+            fallback_start = time.time()
+            logger.warning(
+                "DBSCAN skipped for chrom group (pairs=%d exceeds max=%d); using canonical binning",
+                len(pairs),
+                max_dbscan_pairs,
+            )
+            fallback_pairs = _cluster_breakpoint_pairs_canonical(
+                pairs,
+                bin_size=cluster_distance,
+                min_read_support=min_read_support,
+            )
+            clustered_pairs.extend(fallback_pairs)
+            logger.debug(
+                "Canonical fallback done: retained=%d, time=%.3fs",
+                len(fallback_pairs),
+                time.time() - fallback_start,
+            )
+            continue
         
         # Create feature matrix for DBSCAN: [primary_midpoint, supp_midpoint]
         # We use midpoints for clustering to reduce dimensionality
@@ -3281,8 +3318,16 @@ def _cluster_breakpoint_pairs_dbscan(
         min_samples = min_read_support  # Minimum samples in a cluster
         
         # Cluster using DBSCAN
+        dbscan_start = time.time()
         clustering = DBSCAN(eps=eps, min_samples=min_samples, metric='manhattan')
         labels = clustering.fit_predict(features)
+        logger.debug(
+            "DBSCAN fitted: eps=%.1f, min_samples=%d, labels=%d, time=%.3fs",
+            eps,
+            min_samples,
+            len(labels),
+            time.time() - dbscan_start,
+        )
         
         # Group pairs by cluster label
         clusters = {}
@@ -3324,7 +3369,9 @@ def _cluster_breakpoint_pairs_dbscan(
                 clusters[label]["supp_spans"].append(pairs[idx]["supp_span"])
         
         # Create clustered breakpoint pairs
+        clustered_before_support = 0
         for label, cluster_data in clusters.items():
+            clustered_before_support += 1
             if len(cluster_data["read_ids"]) < min_read_support:
                 continue
             
@@ -3350,6 +3397,19 @@ def _cluster_breakpoint_pairs_dbscan(
                 clustered_pair["supp_avg_span"] = sum(cluster_data["supp_spans"]) / len(cluster_data["supp_spans"])
             
             clustered_pairs.append(clustered_pair)
+        
+        logger.debug(
+            "DBSCAN chrom group done: clusters=%d, retained=%d, time=%.3fs",
+            clustered_before_support,
+            len([p for p in clustered_pairs if p["primary_chrom"] == chrom_key[0] and p["supp_chrom"] == chrom_key[1]]),
+            time.time() - chrom_start,
+        )
+    
+    logger.debug(
+        "DBSCAN clustering complete: clustered_pairs=%d, time=%.3fs",
+        len(clustered_pairs),
+        time.time() - cluster_start,
+    )
     
     return clustered_pairs
 
@@ -3673,10 +3733,18 @@ def _extract_master_bed_breakpoints(
         )
         
         # Filter for breakpoint pairs with sufficient read support (already filtered in DBSCAN, but keep for safety)
+        filter_support_start = time.time()
         supported_pairs = [
-            p for p in clustered_pairs 
+            p for p in clustered_pairs
             if p["read_count"] >= min_read_support
         ]
+        logger.debug(
+            "Supported pairs filter: input=%d, output=%d, min_read_support=%d, time=%.3fs",
+            len(clustered_pairs),
+            len(supported_pairs),
+            min_read_support,
+            time.time() - filter_support_start,
+        )
         
         if len(supported_pairs) > 0:
             logger.info(
@@ -4389,20 +4457,43 @@ def _generate_master_bed_events_summary(
         breakpoint_pairs = []
         if state_loaded and cached_breakpoint_pairs:
             breakpoint_pairs.extend(cached_breakpoint_pairs)
+            logger.debug(
+                "Starting with cached breakpoint pairs: %d",
+                len(cached_breakpoint_pairs),
+            )
         primary_by_read = primary_filtered.groupby("read_id", observed=True)
         supplementary_by_read = supplementary_filtered.groupby("read_id", observed=True)
-        logger.debug(f"primary by read: {len(primary_by_read)}")
-        logger.debug(f"supplementary by read: {len(supplementary_by_read)}")
-        for read_id in reads_with_both:
+        logger.debug("primary by read: %d", len(primary_by_read))
+        logger.debug("supplementary by read: %d", len(supplementary_by_read))
+        reads_with_both_list = list(reads_with_both)
+        total_reads_with_both = len(reads_with_both_list)
+        logger.debug("Reads with both alignments to process: %d", total_reads_with_both)
+        progress_interval = max(1, total_reads_with_both // 10)
+        empty_pair_skips = 0
+        for idx, read_id in enumerate(reads_with_both_list, start=1):
+            if idx == 1 or idx % progress_interval == 0 or idx == total_reads_with_both:
+                logger.debug(
+                    "Breakpoint pair progress: %d/%d (%.1f%%)",
+                    idx,
+                    total_reads_with_both,
+                    (idx / total_reads_with_both) * 100 if total_reads_with_both else 100.0,
+                )
             read_primaries = primary_by_read.get_group(read_id) if read_id in primary_by_read.groups else pd.DataFrame()
             read_supplementaries = supplementary_by_read.get_group(read_id) if read_id in supplementary_by_read.groups else pd.DataFrame()
             
             if read_primaries.empty or read_supplementaries.empty:
+                empty_pair_skips += 1
                 continue
             
             # Use vectorized breakpoint pair creation (much faster than nested loops)
             pairs = _create_breakpoint_pairs_vectorized(read_primaries, read_supplementaries, read_id)
             breakpoint_pairs.extend(pairs)
+        logger.debug(
+            "Breakpoint pair build complete: reads_processed=%d, empty_pair_skips=%d, pairs_total=%d",
+            total_reads_with_both,
+            empty_pair_skips,
+            len(breakpoint_pairs),
+        )
         processed_read_ids.update(reads_with_both)
         
         if not breakpoint_pairs:
@@ -4448,8 +4539,8 @@ def _generate_master_bed_events_summary(
                     "end": pair["primary_end"],
                     "event_type": "breakpoint_pair_primary",
                     "read_count": pair["read_count"],
-                    "avg_mapping_quality": round(pair["primary_avg_mapq"], 1),
-                    "avg_mapping_span": round(pair["primary_avg_span"], 0),
+                    "avg_mapping_quality": round(pair.get("primary_avg_mapq", 0.0), 1),
+                    "avg_mapping_span": round(pair.get("primary_avg_span", 0.0), 0),
                 })
             
             if pair["supp_start"] > 0 and pair["supp_end"] > pair["supp_start"]:
@@ -4459,8 +4550,8 @@ def _generate_master_bed_events_summary(
                     "end": pair["supp_end"],
                     "event_type": "breakpoint_pair_supplementary",
                     "read_count": pair["read_count"],
-                    "avg_mapping_quality": round(pair["supp_avg_mapq"], 1),
-                    "avg_mapping_span": round(pair["supp_avg_span"], 0),
+                    "avg_mapping_quality": round(pair.get("supp_avg_mapq", 0.0), 1),
+                    "avg_mapping_span": round(pair.get("supp_avg_span", 0.0), 0),
                 })
         
         if not events:
