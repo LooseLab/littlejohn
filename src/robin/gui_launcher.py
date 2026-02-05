@@ -4617,13 +4617,7 @@ class GUILauncher:
                             )
 
                     if trigger_snp and finalization_succeeded:
-                        try:
-                            from robin.analysis.target_analysis import run_snp_analysis
-                        except ImportError as exc:
-                            logging.error(f"Unable to import SNP analysis module: {exc}")
-                            return
-
-                        # Ensure only one SNP analysis runs at a time
+                        # Ensure only one SNP analysis submission runs at a time
                         with self._snp_analysis_lock:
                             running_sample = self._snp_analysis_running_sample
                             if running_sample:
@@ -4685,50 +4679,51 @@ class GUILauncher:
                                 )
                                 return
 
-                            logging.info(
-                                f"Starting manual SNP analysis for {sample_id} using reference {reference_path}"
-                            )
-                            self.send_update(
-                                UpdateType.WARNING_NOTIFICATION,
-                                {
-                                    "title": "SNP analysis started",
-                                    "message": "SNP analysis is running; this may take several minutes.",
-                                    "sample_id": sample_id,
-                                    "level": "info",
-                                },
-                                priority=6,
-                            )
+                            workflow_runner = getattr(self, "workflow_runner", None)
+                            if workflow_runner and hasattr(
+                                workflow_runner, "submit_snp_analysis_job"
+                            ):
+                                submitted = workflow_runner.submit_snp_analysis_job(
+                                    sample_dir=str(sample_dir),
+                                    sample_id=sample_id,
+                                    reference=reference_path,
+                                    threads=4,
+                                    force_regenerate=False,
+                                )
+                            elif workflow_runner and hasattr(
+                                workflow_runner, "submit_sample_job"
+                            ):
+                                submitted = workflow_runner.submit_sample_job(
+                                    sample_dir=str(sample_dir),
+                                    job_type="snp_analysis",
+                                    sample_id=sample_id,
+                                )
+                            else:
+                                submitted = False
 
-                            snp_result = run_snp_analysis(
-                                sample_dir=str(sample_dir),
-                                threads=4,
-                                force_regenerate=False,
-                                reference=reference_path,
-                            )
-
-                            if snp_result:
+                            if submitted:
                                 logging.info(
-                                    f"SNP analysis completed for {sample_id}; results in {snp_result}"
+                                    f"SNP analysis job submitted for {sample_id} using reference {reference_path}"
                                 )
                                 self.send_update(
                                     UpdateType.WARNING_NOTIFICATION,
                                     {
-                                        "title": "SNP analysis completed",
-                                        "message": "SNP analysis finished successfully.",
+                                        "title": "SNP analysis queued",
+                                        "message": "SNP analysis job submitted to the workflow queue.",
                                         "sample_id": sample_id,
-                                        "level": "positive",
+                                        "level": "info",
                                     },
                                     priority=6,
                                 )
                             else:
                                 logging.warning(
-                                    f"SNP analysis did not produce results for {sample_id}"
+                                    "No workflow runner available; SNP analysis not submitted."
                                 )
                                 self.send_update(
                                     UpdateType.WARNING_NOTIFICATION,
                                     {
-                                        "title": "SNP analysis warning",
-                                        "message": "SNP analysis finished but did not produce annotated results.",
+                                        "title": "SNP analysis skipped",
+                                        "message": "Workflow runner unavailable; SNP analysis not submitted.",
                                         "sample_id": sample_id,
                                         "level": "warning",
                                     },
@@ -4736,13 +4731,14 @@ class GUILauncher:
                                 )
                         except Exception as snp_exc:
                             logging.error(
-                                f"Error running SNP analysis for {sample_id}: {snp_exc}", exc_info=True
+                                f"Error submitting SNP analysis for {sample_id}: {snp_exc}",
+                                exc_info=True,
                             )
                             self.send_update(
                                 UpdateType.WARNING_NOTIFICATION,
                                 {
                                     "title": "SNP analysis failed",
-                                    "message": f"Error running SNP analysis: {snp_exc}",
+                                    "message": f"Error submitting SNP analysis: {snp_exc}",
                                     "sample_id": sample_id,
                                     "level": "negative",
                                 },

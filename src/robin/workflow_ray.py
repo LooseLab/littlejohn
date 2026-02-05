@@ -1267,6 +1267,23 @@ class Coordinator:
             if sample_id is None:
                 sample_id = Path(sample_dir).name
 
+            # Determine target panel from master.csv if present
+            target_panel = None
+            try:
+                master_csv = Path(sample_dir) / "master.csv"
+                if master_csv.exists():
+                    import csv
+
+                    with master_csv.open("r", newline="") as fh:
+                        reader = csv.DictReader(fh)
+                        first_row = next(reader, None)
+                        if first_row:
+                            panel = first_row.get("analysis_panel", "").strip()
+                            if panel:
+                                target_panel = panel
+            except Exception:
+                pass
+
             # Create a context for this sample with SNP-specific metadata
             metadata = {
                 "sample_id": sample_id,
@@ -1278,6 +1295,9 @@ class Coordinator:
                 "force_regenerate": force_regenerate,
                 "bam_metadata": {"sample_id": sample_id},
             }
+
+            if target_panel:
+                metadata["target_panel"] = target_panel
 
             # Add reference genome if provided
             if reference:

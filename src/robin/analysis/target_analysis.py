@@ -3808,13 +3808,15 @@ def snp_analysis_handler(job, work_dir: Optional[str] = None) -> None:
         logger.info("ABOUT TO CALL run_snp_analysis function")
         logger.info(
             "Calling run_snp_analysis with: sample_dir=%s, threads=%s, "
-            "force_regenerate=%s, reference=%s, annotation_only=%s, annotation_verbose=%s",
-            sample_dir,
-            threads,
-            force_regenerate,
-            reference,
-            annotation_only,
-            annotation_verbose,
+            "force_regenerate=%s, reference=%s, annotation_only=%s, annotation_verbose=%s"
+            % (
+                sample_dir,
+                threads,
+                force_regenerate,
+                reference,
+                annotation_only,
+                annotation_verbose,
+            )
         )
 
         output_dir = run_snp_analysis(
