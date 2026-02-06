@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- SNP analysis pipeline via Clair3 with snpEff and SnpSift annotation.
+- SNP display data generation and GUI table with IGV navigation. Current extensive logging to the command line to track progress.
+- IGV-ready BAM creation for consistent genome browser loading.
+- Workflow support for `igv_bam` and `snp_analysis` job types.
+- SNP analysis queueing from the GUI with concurrency control.
+- MNP-FLEX upload support for bedMethyl outputs for beta users with Epignostix credentials (https://epignostix.com/). Supply credentials via `MNPFLEX_USER` and `MNPFLEX_PASS` environment variables.
+
+### Changed
+- IGV viewer initialization and BAM loading prioritization.
+- Target analysis now always emits `targets_exceeding_threshold.bed` for SNP analysis.
+- MGMT methylation classification uses per-read probabilities (fixes aggregated max bleed).
+
+### Dependencies
+- Added snpEff and SnpSift for SNP annotation.
+
 ## [0.0.2] - 2024-12-19
 
 ### Added

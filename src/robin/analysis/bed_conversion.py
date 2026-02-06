@@ -267,8 +267,11 @@ class BedConversionAnalysis:
                 "robin.analysis.temp_utilities.merge_modkit_files is required for parquet creation"
             )
 
-        # Configuration for mnpflex - exactly like the working code
-        mnpflex_config = {"mnpuser": None, "mnppass": None}
+        # Configuration for mnpflex - allow env var overrides
+        mnpflex_config = {
+            "mnpuser": os.getenv("MNPFLEX_USER"),
+            "mnppass": os.getenv("MNPFLEX_PASS"),
+        }
 
         logger.debug(f"Creating parquet file: {state}")
         logger.debug(f"Processing {len(data)} matkit files")
