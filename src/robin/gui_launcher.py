@@ -218,6 +218,7 @@ class GUILauncher:
         self._samples_record_lock = threading.Lock()
         self._master_record_cache_file: Optional[Path] = None  # Set when monitored_directory is known
         self._background_scan_interval: float = 10.0  # Scan every 10 seconds
+        self._background_scan_in_progress: bool = False
         # MGMT per-sample cache (latest count seen)
         self._mgmt_state: Dict[str, Dict[str, Any]] = {}
         # Coverage per-sample cache (file mtimes, computed metrics)
@@ -293,15 +294,40 @@ class GUILauncher:
             logging.debug(f"Error saving master record cache: {e}")
 
     def _background_scan_samples(self) -> None:
-        """Background process that scans folder and updates master record.
-        This runs in a separate timer and does NOT block the UI thread."""
+        """Schedule a background scan without blocking the UI thread."""
+        try:
+            import asyncio
+            asyncio.create_task(self._background_scan_samples_async())
+        except RuntimeError:
+            # Fallback if no event loop is available
+            self._background_scan_samples_sync()
+        except Exception as e:
+            logging.debug(f"Failed to schedule background scan: {e}")
+
+    async def _background_scan_samples_async(self) -> None:
+        """Run the background scan off the UI thread and refresh UI afterwards."""
+        if getattr(self, "_background_scan_in_progress", False):
+            return
+        self._background_scan_in_progress = True
+        try:
+            import asyncio
+            updated_any = await asyncio.to_thread(self._background_scan_samples_sync)
+            if updated_any and hasattr(self, "samples_table"):
+                self._refresh_table_from_master()
+        except Exception as e:
+            logging.debug(f"Background scan task failed: {e}")
+        finally:
+            self._background_scan_in_progress = False
+
+    def _background_scan_samples_sync(self) -> bool:
+        """Scan folder and update master record (file I/O). Returns True if updated."""
         try:
             if not self.monitored_directory:
-                return
+                return False
             
             base = Path(self.monitored_directory)
             if not base.exists():
-                return
+                return False
             
             # Scan all sample directories
             now_ts = time.time()
@@ -452,12 +478,12 @@ class GUILauncher:
             # Save cache if anything changed
             if updated_any:
                 self._save_master_record_cache()
-                # Trigger UI refresh if table exists
-                if hasattr(self, "samples_table"):
-                    self._refresh_table_from_master()
+            
+            return updated_any
         
         except Exception as e:
             logging.error(f"Error in background sample scan: {e}")
+            return False
 
     def _refresh_table_from_master(self) -> None:
         """Fast UI refresh - reads from master record and applies filters.
