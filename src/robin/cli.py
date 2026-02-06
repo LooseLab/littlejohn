@@ -36,8 +36,10 @@ warnings.filterwarnings(
 
 import os
 import sys
+import csv
+import tempfile
 from pathlib import Path
-from typing import Optional, List, Dict, Tuple, Any
+from typing import Optional, List, Dict, Tuple, Any, Iterable
 
 import click
 import logging
@@ -55,6 +57,8 @@ from robin.analysis.nanodx_analysis import nanodx_handler, pannanodx_handler
 from robin.analysis.random_forest_analysis import random_forest_handler
 from robin.analysis.target_analysis import target_handler
 from robin.analysis.fusion_analysis import fusion_handler
+from robin.analysis.utilities.matkit import run_matkit
+from robin.analysis.mgmt_analysis import extract_mgmt_site_rows_from_bed
 from robin.logging_config import (
     configure_logging,
 )
@@ -357,6 +361,140 @@ def _get_user_acknowledgment() -> bool:
 def main() -> None:
     """Robin now uses Little John - his second in command who kept the merry men in line."""
     pass
+
+
+def _iter_mgmt_bams(root: Path, recursive: bool) -> Iterable[Path]:
+    """Yield mgmt_sorted.bam paths under a root directory."""
+    if recursive:
+        yield from root.rglob("mgmt_sorted.bam")
+        return
+
+    direct = root / "mgmt_sorted.bam"
+    if direct.exists():
+        yield direct
+
+    for entry in root.iterdir():
+        if not entry.is_dir():
+            continue
+        candidate = entry / "mgmt_sorted.bam"
+        if candidate.exists():
+            yield candidate
+
+
+@main.group()
+def utils() -> None:
+    """Utility helpers for inspecting robin outputs."""
+    pass
+
+
+@utils.command()
+@click.argument("output_dir", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--recursive",
+    "-r",
+    is_flag=True,
+    help="Search for mgmt_sorted.bam recursively under output_dir.",
+)
+@click.option(
+    "--out",
+    "-o",
+    "out_path",
+    type=click.Path(path_type=Path),
+    default="-",
+    help="Output TSV path (default: stdout).",
+)
+def mgmt(output_dir: Path, recursive: bool, out_path: Path) -> None:
+    """Summarize MGMT CpG site methylation counts from mgmt_sorted.bam files."""
+    if not output_dir.exists():
+        click.echo(f"Error: output_dir not found: {output_dir}", err=True)
+        sys.exit(1)
+
+    bam_paths = list(_iter_mgmt_bams(output_dir, recursive))
+    if not bam_paths:
+        click.echo(
+            f"No mgmt_sorted.bam files found under {output_dir} (recursive={recursive}).",
+            err=True,
+        )
+        sys.exit(1)
+
+    output_stream = sys.stdout if str(out_path) == "-" else open(out_path, "w", newline="")
+    try:
+        writer = csv.writer(output_stream, delimiter="\t")
+        writer.writerow(
+            [
+                "sample_id",
+                "run_path",
+                "site",
+                "chr",
+                "pos",
+                "cov_fwd",
+                "cov_rev",
+                "cov_total",
+                "meth_fwd",
+                "meth_rev",
+                "meth_total",
+                "meth_pct",
+            ]
+        )
+
+        for bam_path in sorted(bam_paths):
+            run_dir = bam_path.parent
+            sample_id = run_dir.name
+            rel_run_path = os.path.relpath(run_dir, output_dir)
+
+            with tempfile.NamedTemporaryFile(
+                suffix=".bed", delete=False
+            ) as temp_bed:
+                temp_bed_path = temp_bed.name
+
+            try:
+                run_matkit(str(bam_path), temp_bed_path)
+                site_rows = extract_mgmt_site_rows_from_bed(temp_bed_path)
+            except Exception as exc:
+                click.echo(
+                    f"Failed to process {bam_path}: {exc}",
+                    err=True,
+                )
+                continue
+            finally:
+                try:
+                    os.remove(temp_bed_path)
+                except OSError:
+                    pass
+
+            if not site_rows:
+                click.echo(
+                    f"No MGMT site data found in {bam_path}",
+                    err=True,
+                )
+                continue
+
+            for row in site_rows:
+                meth_fwd = int(row.get("meth_fwd", 0))
+                meth_rev = int(row.get("meth_rev", 0))
+                meth_total = meth_fwd + meth_rev
+                cov_total = int(row.get("cov_total", 0))
+                meth_pct = round((meth_total / cov_total) * 100.0, 2) if cov_total else 0.0
+                site_label = str(row.get("site", "")).split(" ")[0] if row.get("site") else ""
+                writer.writerow(
+                    [
+                        sample_id,
+                        rel_run_path,
+                        site_label,
+                        row.get("chr", ""),
+                        row.get("pos", ""),
+                        row.get("cov_fwd", 0),
+                        row.get("cov_rev", 0),
+                        cov_total,
+                        meth_fwd,
+                        meth_rev,
+                        meth_total,
+                        meth_pct,
+                    ]
+                )
+    finally:
+        if output_stream is not sys.stdout:
+            output_stream.close()
 
 
 def _remove_panel_from_system(panel_name: str) -> bool:

@@ -311,6 +311,10 @@ def extract_mgmt_site_rows_from_bed(bed_path: str) -> List[Dict[str, Any]]:
             
             df["Nvalid_cov"] = df["Nvalid_cov"].astype(float)
             df["Fraction_Modified"] = df["Fraction_Modified"].astype(float)
+            # Some bedmethyl outputs store fraction as percent (0-100).
+            # Normalize to 0-1 if needed.
+            if len(df) > 0 and (df["Fraction_Modified"] > 1.0).any():
+                df["Fraction_Modified"] = df["Fraction_Modified"] / 100.0
             if "Nmod" in df.columns:
                 df["Nmod"] = df["Nmod"].astype(float)
             else:
