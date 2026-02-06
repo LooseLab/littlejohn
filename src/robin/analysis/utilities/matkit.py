@@ -1045,7 +1045,6 @@ def process_bam_counts_improved(
 
     # Debug tracking for specific positions
     debug_data = {} if debug_positions else None
-
     for read in tqdm(iterable, desc="Processing reads", disable=True):
         # Skip unmapped, secondary, and optionally supplementary alignments
         # Note: modkit appears to filter out secondary alignments by default
@@ -1104,10 +1103,10 @@ def process_bam_counts_improved(
                 c = counts[site_key]
                 c["total"] += 1
 
-                # Track max probabilities for C, m, h from the original mod_probs
+                # Track per-read max probabilities for C, m, h from the original mod_probs
                 total_mod_prob = 0.0
-                max_prob_m = c["max_prob_m"]
-                max_prob_h = c["max_prob_h"]
+                local_max_prob_m = 0
+                local_max_prob_h = 0
 
                 for mod_code, probs in mod_probs.items():
                     if mod_code != CANONICAL_CODE:  # Skip canonical base
@@ -1115,22 +1114,24 @@ def process_bam_counts_improved(
                         max_mod_prob_01 = max_mod_prob / 255.0  # Convert to 0-1
                         total_mod_prob += max_mod_prob_01
                         if mod_code == "m":
-                            if max_mod_prob > max_prob_m:
-                                max_prob_m = max_mod_prob
-                                c["max_prob_m"] = max_mod_prob
+                            if max_mod_prob > local_max_prob_m:
+                                local_max_prob_m = max_mod_prob
                         elif mod_code == "h":
-                            if max_mod_prob > max_prob_h:
-                                max_prob_h = max_mod_prob
-                                c["max_prob_h"] = max_mod_prob
+                            if max_mod_prob > local_max_prob_h:
+                                local_max_prob_h = max_mod_prob
 
                 # Canonical probability is the complement
                 canonical_prob = max(0.0, 1.0 - total_mod_prob)
                 canonical_prob_255 = int(canonical_prob * 255)
                 if canonical_prob_255 > c["max_prob_C"]:
                     c["max_prob_C"] = canonical_prob_255
+                if local_max_prob_m > c["max_prob_m"]:
+                    c["max_prob_m"] = local_max_prob_m
+                if local_max_prob_h > c["max_prob_h"]:
+                    c["max_prob_h"] = local_max_prob_h
 
                 # Use the highest probability among canonical, 5mC, and 5hmC for classification
-                max_prob = max(canonical_prob_255, max_prob_m, max_prob_h)
+                max_prob = max(canonical_prob_255, local_max_prob_m, local_max_prob_h)
 
                 # Apply modkit classification logic based on the highest probability
                 if max_prob >= thresh:
@@ -1142,6 +1143,7 @@ def process_bam_counts_improved(
                     c["canonical"] += 1  # Canonical call
                 else:
                     c["fail"] += 1  # Failed call (0 < prob < threshold)
+
 
                 # Debug tracking for specific positions
                 if debug_positions and (chrom, refpos, strand) in debug_positions:
@@ -1215,6 +1217,7 @@ def process_bam_counts_improved(
                 c = counts[site_key]
                 c["total"] += 1
                 max_prob = max(probs)
+                has_other_mod_above_thresh = False
 
                 # Apply modkit classification logic
                 if max_prob >= thresh:
@@ -1223,7 +1226,6 @@ def process_bam_counts_improved(
                     # Check if there are other modification types at this site with prob >= threshold
                     # Only classify as other_mod if the other modification is above threshold
                     # Optimized: use early exit for better performance
-                    has_other_mod_above_thresh = False
                     for (r, s, m), ps in read_mod_calls.items():
                         if (r, s) == (rp, strand) and m != mod_code:
                             for prob in ps:
@@ -1241,7 +1243,6 @@ def process_bam_counts_improved(
                     # Check if there are other modification types at this site with prob >= threshold
                     # If so, classify as other_mod instead of fail
                     # Optimized: use early exit for better performance
-                    has_other_mod_above_thresh = False
                     for (r, s, m), ps in read_mod_calls.items():
                         if (r, s) == (rp, strand) and m != mod_code:
                             for prob in ps:
@@ -1255,6 +1256,7 @@ def process_bam_counts_improved(
                         c["other_mod"] += 1  # Other modification call
                     else:
                         c["fail"] += 1  # Failed call (0 < prob < threshold)
+
 
         # Process reads without modification data as canonical bases
         # Note: modkit only outputs positions with explicit modification data (MM tags)
