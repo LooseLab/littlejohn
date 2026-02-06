@@ -465,22 +465,69 @@ def add_classification_section(sample_dir: Path, launcher: Any = None) -> None:
                 logging.warning(f"[Classification] Sample directory not found: {sample_dir}")
                 return
             
-            # Update all classification charts directly (already in background)
+            # Check modification times for all files upfront
+            import time
+            file_mtimes = {}
+            files_changed = {}
+            any_changes = False
+            
             for tool_name, cfg in tool_to_file.items():
                 file_path = sample_dir / cfg["file"] if sample_dir else None
-                if file_path:
+                if file_path and file_path.exists():
+                    mtime = file_path.stat().st_mtime
+                    file_mtimes[tool_name] = mtime
+                    prev_mtime = charts[tool_name].get("last_mtime", 0)
+                    if prev_mtime is None or mtime > prev_mtime:
+                        files_changed[tool_name] = True
+                        any_changes = True
+                    else:
+                        files_changed[tool_name] = False
+                else:
+                    file_mtimes[tool_name] = 0
+                    files_changed[tool_name] = False
+            
+            # Check if this is a fresh visit (no files have been processed yet)
+            is_fresh_visit = any(
+                charts[tool_name].get("last_mtime") is None 
+                for tool_name in tool_to_file.keys()
+            )
+            
+            # Early exit if nothing has changed and not a fresh visit
+            if not any_changes and not is_fresh_visit:
+                logging.debug(f"[Classification] ⏭ Skipping classification update - no file changes detected")
+                return
+            
+            # Log what changed
+            if any_changes or is_fresh_visit:
+                reasons = []
+                if is_fresh_visit:
+                    reasons.append("fresh_visit")
+                for tool_name, changed in files_changed.items():
+                    if changed:
+                        reasons.append(f"{tool_to_file[tool_name]['file']}")
+                if reasons:
+                    logging.debug(f"[Classification] Update needed. Reasons: {', '.join(reasons)}")
+            
+            # Update only files that have changed
+            for tool_name, cfg in tool_to_file.items():
+                file_path = sample_dir / cfg["file"] if sample_dir else None
+                if file_path and files_changed.get(tool_name, False):
                     _check_and_update_file(tool_name, cfg["file"], file_path, charts)
+                    # Update mtime in charts dict after successful update
+                    if tool_name in file_mtimes:
+                        charts[tool_name]["last_mtime"] = file_mtimes[tool_name]
         except Exception as e:
             logging.exception(f"[Classification] Refresh failed: {e}")
 
     def _check_and_update_file(tool_name: str, filename: str, file_path: Path, charts: Dict[str, Any]) -> None:
-        """Check file and update charts if needed."""
+        """Check file and update charts if needed.
+        
+        Note: This function is now called only when the file has changed,
+        so we can skip the mtime check here (it's done upstream).
+        """
         try:
             if file_path.exists():
-                mtime = file_path.stat().st_mtime
-                if charts[tool_name].get("last_mtime") is None or mtime > charts[tool_name].get("last_mtime", 0):
-                    _update_charts_from_file(tool_name, filename)
-                    charts[tool_name]["last_mtime"] = mtime
+                _update_charts_from_file(tool_name, filename)
         except Exception:
             pass
 

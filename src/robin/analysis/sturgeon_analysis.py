@@ -622,9 +622,7 @@ def predict_sample_from_dataframe(
 
     # Ensure output directory exists
     # os.makedirs(output_dir, exist_ok=True)
-    modelfile = os.path.join(
-        os.path.dirname(os.path.abspath(models.__file__)), "general.zip"
-    )
+    modelfile = str(models.DIR / "general.zip")
 
     # Save DataFrame as a temporary BED file
     with tempfile.NamedTemporaryFile(delete=False, suffix=".bed") as tmp_bed:

@@ -158,7 +158,24 @@ except ImportError:
     resources = None
 
 
-def run_bedtools(bamfile, bedfile, tempbamfile):
+def _load_bed_regions(bedfile: str) -> List[Tuple[str, int, int]]:
+    """Load BED regions into a list of (chrom, start, end) tuples."""
+    regions: List[Tuple[str, int, int]] = []
+    with open(bedfile, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split('\t')
+            if len(parts) >= 3:
+                chrom = parts[0]
+                start = int(parts[1])
+                end = int(parts[2])
+                regions.append((chrom, start, end))
+    return regions
+
+
+def run_bedtools(bamfile, bedfile, tempbamfile, regions: Optional[List[Tuple[str, int, int]]] = None):
     """
     Extract target regions from BAM file, keeping all mappings (primary, secondary, supplementary)
     for reads that overlap the target regions.
@@ -175,6 +192,8 @@ def run_bedtools(bamfile, bedfile, tempbamfile):
         Path to the BED file defining regions
     tempbamfile : str
         Path where the output BAM file should be written
+    regions : list of tuples, optional
+        Pre-loaded BED regions to avoid repeated parsing
     """
     logger = logging.getLogger("robin.target")
 
@@ -185,19 +204,9 @@ def run_bedtools(bamfile, bedfile, tempbamfile):
         # We use -F 2304 to exclude supplementary and secondary, keeping only primary alignments
         logger.debug(f"Step 1: Extracting read names from primary alignments overlapping {bedfile}")
         
-        # Read BED file to get regions
-        regions = []
-        with open(bedfile, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-                parts = line.split('\t')
-                if len(parts) >= 3:
-                    chrom = parts[0]
-                    start = int(parts[1])
-                    end = int(parts[2])
-                    regions.append((chrom, start, end))
+        # Read BED file to get regions (unless preloaded)
+        if regions is None:
+            regions = _load_bed_regions(bedfile)
         
         if not regions:
             logger.warning(f"No valid regions found in BED file: {bedfile}")
@@ -212,48 +221,24 @@ def run_bedtools(bamfile, bedfile, tempbamfile):
         # Open input BAM and collect read names from primary alignments overlapping regions
         read_names = set()
         with pysam.AlignmentFile(bamfile, "rb") as in_bam:
-            # Check if BAM is indexed by checking for index file
+            # Require BAM index for performance and correctness
             index_file = f"{bamfile}.bai"
-            use_indexed = os.path.exists(index_file)
+            if not os.path.exists(index_file):
+                raise FileNotFoundError(f"BAM index (.bai) not found for {bamfile}")
             
-            if not use_indexed:
-                logger.debug("BAM file is not indexed, using full-scan method")
-            
-            if use_indexed:
-                # Use indexed access (faster)
-                for chrom, start, end in regions:
-                    try:
-                        # Fetch reads overlapping this region
-                        for read in in_bam.fetch(chrom, start, end):
-                            # Only consider primary alignments (not supplementary or secondary)
-                            # Flag checks: not supplementary (0x800) and not secondary (0x100)
-                            if not (read.flag & 0x800) and not (read.flag & 0x100):
-                                read_names.add(read.query_name)
-                    except ValueError:
-                        # Chromosome not found in BAM, skip
-                        logger.debug(f"Chromosome {chrom} not found in BAM file, skipping")
-                        continue
-            else:
-                # BAM is not indexed, iterate through all reads
-                # Create a dictionary of regions for fast lookup
-                region_dict = {}
-                for chrom, start, end in regions:
-                    if chrom not in region_dict:
-                        region_dict[chrom] = []
-                    region_dict[chrom].append((start, end))
-                
-                # Iterate through all reads
-                for read in in_bam.fetch(until_eof=True):
-                    # Only consider primary alignments
-                    if not (read.flag & 0x800) and not (read.flag & 0x100):
-                        if read.reference_name in region_dict:
-                            read_start = read.reference_start
-                            read_end = read.reference_end
-                            # Check if read overlaps any region on this chromosome
-                            for reg_start, reg_end in region_dict[read.reference_name]:
-                                if not (read_end <= reg_start or read_start >= reg_end):
-                                    read_names.add(read.query_name)
-                                    break
+            # Use indexed access (faster)
+            for chrom, start, end in regions:
+                try:
+                    # Fetch reads overlapping this region
+                    for read in in_bam.fetch(chrom, start, end):
+                        # Only consider primary alignments (not supplementary or secondary)
+                        # Flag checks: not supplementary (0x800) and not secondary (0x100)
+                        if not (read.flag & 0x800) and not (read.flag & 0x100):
+                            read_names.add(read.query_name)
+                except ValueError:
+                    # Chromosome not found in BAM, skip
+                    logger.debug(f"Chromosome {chrom} not found in BAM file, skipping")
+                    continue
         
         logger.debug(f"Found {len(read_names)} unique read names overlapping target regions")
         
@@ -415,6 +400,97 @@ def get_covdfs(bamfile, bedfile=None):
     except Exception as e:
         logger.error(f"Error in get_covdfs: {str(e)}")
         return None, None
+
+
+def get_read_counts_per_target(bamfile, bedfile):
+    """
+    Count reads overlapping each target region in a BED file.
+    
+    Parameters
+    ----------
+    bamfile : str
+        Path to the input BAM file
+    bedfile : str
+        Path to the BED file defining target regions
+    
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with columns: chrom, startpos, endpos, name, reads
+        Returns empty DataFrame if extraction fails
+    """
+    logger = logging.getLogger("robin.target")
+    
+    try:
+        # Read BED file to get regions
+        bed_regions = []
+        with open(bedfile, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split('\t')
+                if len(parts) >= 4:
+                    chrom = parts[0]
+                    start = int(parts[1])
+                    end = int(parts[2])
+                    name = parts[3] if parts[3].strip() else f"{chrom}:{start}-{end}"
+                    bed_regions.append((chrom, start, end, name))
+        
+        if not bed_regions:
+            logger.warning(f"No valid regions found in BED file: {bedfile}")
+            return pd.DataFrame(columns=["chrom", "startpos", "endpos", "name", "reads"])
+        
+        # Count reads per region
+        read_counts = []
+        with pysam.AlignmentFile(bamfile, "rb") as bam:
+            index_file = f"{bamfile}.bai"
+            use_indexed = os.path.exists(index_file)
+            
+            for chrom, start, end, name in bed_regions:
+                try:
+                    # Count primary alignments only (not supplementary or secondary)
+                    read_count = 0
+                    if use_indexed:
+                        # Use indexed access (faster)
+                        for read in bam.fetch(chrom, start, end):
+                            # Only count primary alignments
+                            if not (read.flag & 0x800) and not (read.flag & 0x100):
+                                read_count += 1
+                    else:
+                        # BAM is not indexed, count manually
+                        for read in bam.fetch(chrom, start, end):
+                            # Only count primary alignments
+                            if not (read.flag & 0x800) and not (read.flag & 0x100):
+                                read_count += 1
+                    
+                    read_counts.append({
+                        'chrom': chrom,
+                        'startpos': start,
+                        'endpos': end,
+                        'name': name,
+                        'reads': read_count
+                    })
+                except ValueError:
+                    logger.debug(f"Chromosome {chrom} not found in BAM file, skipping")
+                    read_counts.append({
+                        'chrom': chrom,
+                        'startpos': start,
+                        'endpos': end,
+                        'name': name,
+                        'reads': 0
+                    })
+                    continue
+        
+        df = pd.DataFrame(read_counts)
+        logger.debug(f"Extracted read counts for {len(df)} target regions from {bamfile}")
+        return df
+        
+    except Exception as e:
+        logger.error(f"Error extracting read counts per target: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return pd.DataFrame(columns=["chrom", "startpos", "endpos", "name", "reads"])
 
 
 def run_bedmerge(newcovdf, cov_df_main, bedcovdf, bedcov_df_main):
@@ -584,6 +660,47 @@ class TargetAnalysis:
             )
 
         logger.info(f"Target Analysis initialized (staging={'enabled' if use_staging else 'disabled'}, batch_size={batch_size})")
+
+    def _get_master_bed_path(self, sample_id: str) -> Optional[str]:
+        """
+        Get the path to the master BED file for a sample if it exists.
+        Master BED includes target panel + CNV breakpoints + fusion breakpoints + master BED breakpoints.
+        
+        Args:
+            sample_id: Sample ID
+            
+        Returns:
+            Path to master BED file, or None if not found
+        """
+        logger = logging.getLogger("robin.target")
+        try:
+            import glob
+            from robin.analysis.fusion_work import _load_analysis_counter
+            
+            sample_dir = os.path.join(self.work_dir, sample_id)
+            bed_dir = os.path.join(sample_dir, "bed_files")
+            
+            if not os.path.exists(bed_dir):
+                return None
+            
+            # Try to get analysis counter
+            analysis_counter = _load_analysis_counter(sample_id, self.work_dir)
+            master_bed_path = os.path.join(bed_dir, f"master_{analysis_counter:03d}.bed")
+            
+            if os.path.exists(master_bed_path):
+                return master_bed_path
+            
+            # Try to find the latest master BED file if counter-based doesn't exist
+            master_bed_files = glob.glob(os.path.join(bed_dir, "master_*.bed"))
+            if master_bed_files:
+                # Sort by modification time and return the latest
+                latest = max(master_bed_files, key=os.path.getmtime)
+                logger.debug(f"Using latest master BED file: {latest}")
+                return latest
+        except Exception as e:
+            logger.debug(f"Error finding master BED file: {e}")
+        
+        return None
 
     def _find_target_bed(self, target_panel: str) -> str:
         """Find the target BED file from robin resources based on panel type"""
@@ -918,12 +1035,6 @@ class TargetAnalysis:
 
                 # Store coverage data in metadata
                 target_result.coverage_data = {
-                    "genome_coverage": (
-                        newcovdf.to_dict("records") if not newcovdf.empty else []
-                    ),
-                    "target_coverage": (
-                        bedcovdf.to_dict("records") if not bedcovdf.empty else []
-                    ),
                     "genome_coverage_shape": newcovdf.shape,
                     "target_coverage_shape": bedcovdf.shape,
                 }
@@ -939,8 +1050,13 @@ class TargetAnalysis:
                     dir=sample_output_dir, suffix=".bam"
                 )
 
+                # Prefer master BED file if available, otherwise use original target panel BED
+                # Master BED includes target panel + CNV + fusion + master BED breakpoints
+                sample_id = metadata.get("sample_id", "unknown")
+                targets_bed = self._get_master_bed_path(sample_id) or self.bedfile
+                
                 # Run bedtools intersection
-                run_bedtools(file_path, self.bedfile, tempbamfile.name)
+                run_bedtools(file_path, targets_bed, tempbamfile.name)
 
                 # Check if target BAM has reads
                 if (
@@ -1105,6 +1221,115 @@ class TargetAnalysis:
                 )
 
                 target_result.processing_steps.append("target_coverage_calculated")
+
+                # Step 13b: Create target coverage with timestamp and read counts (optimized)
+                logger.info("Calculating read counts per target...")
+                new_read_counts_df = get_read_counts_per_target(file_path, self.bedfile)
+                
+                if not new_read_counts_df.empty:
+                    # Use optimized approach: store latest cumulative reads in separate Parquet file for fast access
+                    time_coverage_file = os.path.join(sample_output_dir, "target_coverage_time.csv")
+                    latest_reads_cache = os.path.join(sample_output_dir, "_target_coverage_latest_reads.parquet")
+                    
+                    # Load previous cumulative reads from cache (much faster than reading entire CSV)
+                    previous_cumulative_reads = None
+                    if os.path.exists(latest_reads_cache):
+                        try:
+                            previous_cumulative_reads = pd.read_parquet(latest_reads_cache)
+                            previous_cumulative_reads.rename(columns={'reads': 'previous_reads'}, inplace=True)
+                        except Exception as e:
+                            logger.debug(f"Could not load cached latest reads, will try CSV: {e}")
+                            # Fallback to CSV if cache doesn't exist
+                            if os.path.exists(time_coverage_file):
+                                try:
+                                    # Only read last chunk for efficiency
+                                    existing_time_df = pd.read_csv(time_coverage_file)
+                                    if not existing_time_df.empty:
+                                        latest_timestamp = existing_time_df['timestamp'].max()
+                                        previous_cumulative_reads = existing_time_df[
+                                            existing_time_df['timestamp'] == latest_timestamp
+                                        ][['chrom', 'startpos', 'endpos', 'name', 'reads']].copy()
+                                        previous_cumulative_reads.rename(columns={'reads': 'previous_reads'}, inplace=True)
+                                except Exception as e2:
+                                    logger.warning(f"Error loading existing target_coverage_time.csv: {e2}")
+                    
+                    # Merge new read counts with target coverage data
+                    target_coverage_with_reads = target_coverage_df.merge(
+                        new_read_counts_df[['chrom', 'startpos', 'endpos', 'name', 'reads']],
+                        on=['chrom', 'startpos', 'endpos', 'name'],
+                        how='left'
+                    )
+                    # Fill missing reads with 0
+                    target_coverage_with_reads['reads'] = target_coverage_with_reads['reads'].fillna(0).astype(int)
+                    
+                    # Accumulate with previous cumulative reads if available
+                    if previous_cumulative_reads is not None:
+                        target_coverage_with_reads = target_coverage_with_reads.merge(
+                            previous_cumulative_reads,
+                            on=['chrom', 'startpos', 'endpos', 'name'],
+                            how='left'
+                        )
+                        target_coverage_with_reads['previous_reads'] = target_coverage_with_reads['previous_reads'].fillna(0).astype(int)
+                        # Add new reads to previous cumulative reads
+                        target_coverage_with_reads['reads'] = (
+                            target_coverage_with_reads['reads'] + target_coverage_with_reads['previous_reads']
+                        )
+                        target_coverage_with_reads.drop(columns=['previous_reads'], inplace=True)
+                    
+                    # Calculate normalized reads (reads per length)
+                    target_coverage_with_reads['reads_per_length'] = (
+                        target_coverage_with_reads['reads'] / target_coverage_with_reads['length']
+                    )
+                    
+                    # Add timestamp
+                    if self.simtime and timestamp:
+                        current_timestamp = timestamp * 1000
+                    else:
+                        current_timestamp = time.time() * 1000
+                    target_coverage_with_reads['timestamp'] = current_timestamp
+                    
+                    # Reorder columns: chrom, startpos, endpos, name, length, coverage, bases, timestamp, reads, reads_per_length
+                    target_coverage_with_reads = target_coverage_with_reads[
+                        ['chrom', 'startpos', 'endpos', 'name', 'length', 'coverage', 'bases',
+                         'timestamp', 'reads', 'reads_per_length']
+                    ]
+                    
+                    # Save latest cumulative reads to cache for next time (fast access)
+                    try:
+                        target_coverage_with_reads[['chrom', 'startpos', 'endpos', 'name', 'reads']].to_parquet(
+                            latest_reads_cache, index=False
+                        )
+                    except Exception as e:
+                        logger.debug(f"Could not save latest reads cache: {e}")
+                    
+                    # Append to CSV using append mode (much faster than reading entire file)
+                    try:
+                        # Check if file exists to determine if we need header
+                        file_exists = os.path.exists(time_coverage_file)
+                        target_coverage_with_reads.to_csv(
+                            time_coverage_file, 
+                            mode='a', 
+                            header=not file_exists,
+                            index=False
+                        )
+                    except Exception as e:
+                        logger.warning(f"Error appending to target_coverage_time.csv: {e}")
+                        # Fallback: read and concat (slower but works)
+                        if os.path.exists(time_coverage_file):
+                            try:
+                                existing_time_df = pd.read_csv(time_coverage_file)
+                                target_coverage_with_reads = pd.concat(
+                                    [existing_time_df, target_coverage_with_reads],
+                                    ignore_index=True
+                                )
+                                target_coverage_with_reads.to_csv(time_coverage_file, index=False)
+                            except Exception as e2:
+                                logger.error(f"Error in fallback CSV write: {e2}")
+                    
+                    logger.info(f"Saved target coverage with timestamp and cumulative read counts: {time_coverage_file}")
+                    target_result.processing_steps.append("target_coverage_time_saved")
+                else:
+                    logger.warning("No read counts extracted, skipping target_coverage_time.csv")
 
                 # Step 13: Identify targets exceeding threshold
                 run_list = target_coverage_df[
@@ -1488,44 +1713,72 @@ class TargetAnalysis:
                     f"Accumulating {len(coverage_files)} staged files for {sample_id}"
                 )
                 
-                # Load all staged files (they're small and fast to load)
-                staged_covdfs = []
-                staged_bedcovdfs = []
+                # Load staged files incrementally to keep memory bounded
+                batch_covdf = None
+                batch_bedcovdf = None
                 timestamps = []
                 source_bam_paths = []
+                loaded_files = 0
                 
                 for cov_file, bed_file, ts_file, source_bam_file in zip(coverage_files, bedcov_files, timestamp_files, source_bam_files):
                     try:
-                        staged_covdfs.append(pd.read_parquet(cov_file))
-                        staged_bedcovdfs.append(pd.read_parquet(bed_file))
+                        cov_df = pd.read_parquet(cov_file)
+                        bed_df = pd.read_parquet(bed_file)
+                        
+                        # Group within each file (small) then merge into accumulator
+                        cov_df = cov_df.groupby(['#rname', 'startpos', 'endpos'], as_index=False).agg({
+                            'numreads': 'sum',
+                            'covbases': 'sum',
+                            'meandepth': 'sum'
+                        })
+                        bed_df = bed_df.groupby(
+                            ['chrom', 'startpos', 'endpos', 'name'], as_index=False
+                        ).agg({'bases': 'sum'})
+                        
+                        if batch_covdf is None:
+                            batch_covdf = cov_df
+                        else:
+                            batch_covdf = batch_covdf.merge(
+                                cov_df,
+                                on=['#rname', 'startpos', 'endpos'],
+                                how='outer',
+                                suffixes=('_df1', '_df2'),
+                            )
+                            batch_covdf['numreads'] = batch_covdf['numreads_df1'].fillna(0) + batch_covdf['numreads_df2'].fillna(0)
+                            batch_covdf['covbases'] = batch_covdf['covbases_df1'].fillna(0) + batch_covdf['covbases_df2'].fillna(0)
+                            batch_covdf['meandepth'] = batch_covdf['meandepth_df1'].fillna(0) + batch_covdf['meandepth_df2'].fillna(0)
+                            batch_covdf.drop(columns=['numreads_df1', 'numreads_df2', 'covbases_df1', 'covbases_df2', 'meandepth_df1', 'meandepth_df2'], inplace=True)
+                        
+                        if batch_bedcovdf is None:
+                            batch_bedcovdf = bed_df
+                        else:
+                            batch_bedcovdf = batch_bedcovdf.merge(
+                                bed_df,
+                                on=['chrom', 'startpos', 'endpos', 'name'],
+                                how='outer',
+                                suffixes=('_df1', '_df2'),
+                            )
+                            batch_bedcovdf['bases'] = batch_bedcovdf['bases_df1'].fillna(0) + batch_bedcovdf['bases_df2'].fillna(0)
+                            batch_bedcovdf.drop(columns=['bases_df1', 'bases_df2'], inplace=True)
+                        
                         with open(ts_file, "r") as f:
                             timestamps.append(float(f.read().strip()))
                         with open(source_bam_file, "r") as f:
                             source_bam_paths.append(f.read().strip())
+                        
+                        loaded_files += 1
                     except Exception as e:
                         logger.warning(f"Error loading staging file {cov_file}: {e}")
                         continue
                 
-                if not staged_covdfs:
+                if batch_covdf is None or batch_bedcovdf is None:
                     logger.error("No staging files could be loaded successfully")
                     return {"status": "load_failed", "files_attempted": len(coverage_files)}
                 
-                logger.info(f"Loaded {len(staged_covdfs)} staging files successfully")
+                logger.info(f"Loaded {loaded_files} staging files successfully")
                 
-                # Efficient batch merge using concat + groupby (much faster than iterative merge)
                 logger.info("Merging staged coverage data...")
-                batch_covdf = pd.concat(staged_covdfs, ignore_index=True)
-                batch_covdf = batch_covdf.groupby(['#rname', 'startpos', 'endpos'], as_index=False).agg({
-                    'numreads': 'sum',
-                    'covbases': 'sum',
-                    'meandepth': 'sum'
-                })
-                
                 logger.info("Merging staged target coverage data...")
-                batch_bedcovdf = pd.concat(staged_bedcovdfs, ignore_index=True)
-                batch_bedcovdf = batch_bedcovdf.groupby(
-                    ['chrom', 'startpos', 'endpos', 'name'], as_index=False
-                ).agg({'bases': 'sum'})
                 
                 logger.info(
                     f"Batch merged: genome={batch_covdf.shape}, targets={batch_bedcovdf.shape}"
@@ -1619,6 +1872,125 @@ class TargetAnalysis:
                     index=False,
                 )
                 
+                # Create target coverage with timestamp and read counts (optimized)
+                logger.info("Calculating cumulative read counts per target for batch...")
+                if source_bam_paths:
+                    # Count reads from ALL BAM files in the batch and sum them
+                    batch_read_counts_list = []
+                    for bam_path in source_bam_paths:
+                        read_counts_df = get_read_counts_per_target(bam_path, self.bedfile)
+                        if not read_counts_df.empty:
+                            batch_read_counts_list.append(read_counts_df)
+                    
+                    if batch_read_counts_list:
+                        # Sum read counts across all BAM files in the batch
+                        batch_read_counts = pd.concat(batch_read_counts_list, ignore_index=True)
+                        batch_read_counts = batch_read_counts.groupby(
+                            ['chrom', 'startpos', 'endpos', 'name'], as_index=False
+                        ).agg({'reads': 'sum'})
+                        
+                        # Use optimized approach: store latest cumulative reads in separate Parquet file for fast access
+                        time_coverage_file = os.path.join(sample_output_dir, "target_coverage_time.csv")
+                        latest_reads_cache = os.path.join(sample_output_dir, "_target_coverage_latest_reads.parquet")
+                        
+                        # Load previous cumulative reads from cache (much faster than reading entire CSV)
+                        previous_cumulative_reads = None
+                        if os.path.exists(latest_reads_cache):
+                            try:
+                                previous_cumulative_reads = pd.read_parquet(latest_reads_cache)
+                                previous_cumulative_reads.rename(columns={'reads': 'previous_reads'}, inplace=True)
+                            except Exception as e:
+                                logger.debug(f"Could not load cached latest reads, will try CSV: {e}")
+                                # Fallback to CSV if cache doesn't exist
+                                if os.path.exists(time_coverage_file):
+                                    try:
+                                        # Only read last chunk for efficiency
+                                        existing_time_df = pd.read_csv(time_coverage_file)
+                                        if not existing_time_df.empty:
+                                            latest_timestamp = existing_time_df['timestamp'].max()
+                                            previous_cumulative_reads = existing_time_df[
+                                                existing_time_df['timestamp'] == latest_timestamp
+                                            ][['chrom', 'startpos', 'endpos', 'name', 'reads']].copy()
+                                            previous_cumulative_reads.rename(columns={'reads': 'previous_reads'}, inplace=True)
+                                    except Exception as e2:
+                                        logger.warning(f"Error loading existing target_coverage_time.csv: {e2}")
+                        
+                        # Merge batch read counts with target coverage data
+                        target_coverage_with_reads = target_coverage_df.merge(
+                            batch_read_counts[['chrom', 'startpos', 'endpos', 'name', 'reads']],
+                            on=['chrom', 'startpos', 'endpos', 'name'],
+                            how='left'
+                        )
+                        # Fill missing reads with 0
+                        target_coverage_with_reads['reads'] = target_coverage_with_reads['reads'].fillna(0).astype(int)
+                        
+                        # Accumulate with previous cumulative reads if available
+                        if previous_cumulative_reads is not None:
+                            target_coverage_with_reads = target_coverage_with_reads.merge(
+                                previous_cumulative_reads,
+                                on=['chrom', 'startpos', 'endpos', 'name'],
+                                how='left'
+                            )
+                            target_coverage_with_reads['previous_reads'] = target_coverage_with_reads['previous_reads'].fillna(0).astype(int)
+                            # Add batch reads to previous cumulative reads
+                            target_coverage_with_reads['reads'] = (
+                                target_coverage_with_reads['reads'] + target_coverage_with_reads['previous_reads']
+                            )
+                            target_coverage_with_reads.drop(columns=['previous_reads'], inplace=True)
+                        
+                        # Calculate normalized reads (reads per length)
+                        target_coverage_with_reads['reads_per_length'] = (
+                            target_coverage_with_reads['reads'] / target_coverage_with_reads['length']
+                        )
+                        
+                        # Add timestamp (use most recent timestamp from batch)
+                        current_timestamp = max(timestamps) if timestamps else time.time() * 1000
+                        target_coverage_with_reads['timestamp'] = current_timestamp
+                        
+                        # Reorder columns: chrom, startpos, endpos, name, length, coverage, bases, timestamp, reads, reads_per_length
+                        target_coverage_with_reads = target_coverage_with_reads[
+                            ['chrom', 'startpos', 'endpos', 'name', 'length', 'coverage', 'bases',
+                             'timestamp', 'reads', 'reads_per_length']
+                        ]
+                        
+                        # Save latest cumulative reads to cache for next time (fast access)
+                        try:
+                            target_coverage_with_reads[['chrom', 'startpos', 'endpos', 'name', 'reads']].to_parquet(
+                                latest_reads_cache, index=False
+                            )
+                        except Exception as e:
+                            logger.debug(f"Could not save latest reads cache: {e}")
+                        
+                        # Append to CSV using append mode (much faster than reading entire file)
+                        try:
+                            # Check if file exists to determine if we need header
+                            file_exists = os.path.exists(time_coverage_file)
+                            target_coverage_with_reads.to_csv(
+                                time_coverage_file, 
+                                mode='a', 
+                                header=not file_exists,
+                                index=False
+                            )
+                        except Exception as e:
+                            logger.warning(f"Error appending to target_coverage_time.csv: {e}")
+                            # Fallback: read and concat (slower but works)
+                            if os.path.exists(time_coverage_file):
+                                try:
+                                    existing_time_df = pd.read_csv(time_coverage_file)
+                                    target_coverage_with_reads = pd.concat(
+                                        [existing_time_df, target_coverage_with_reads],
+                                        ignore_index=True
+                                    )
+                                    target_coverage_with_reads.to_csv(time_coverage_file, index=False)
+                                except Exception as e2:
+                                    logger.error(f"Error in fallback CSV write: {e2}")
+                        
+                        logger.info(f"Saved target coverage with timestamp and cumulative read counts: {time_coverage_file}")
+                    else:
+                        logger.warning("No read counts extracted from batch BAM files, skipping target_coverage_time.csv")
+                else:
+                    logger.warning("No source BAM files available for read counting")
+                
                 # Identify and save targets exceeding threshold
                 run_list = target_coverage_df[
                     target_coverage_df["coverage"].ge(self.callthreshold)
@@ -1658,8 +2030,14 @@ class TargetAnalysis:
                         original_bam_files = list(set(source_bam_paths))  # Remove duplicates
                         
                         if original_bam_files:
-                            # Use the original target panel BED file
-                            targets_bed = self.bedfile
+                            # Prefer master BED file if available (includes target panel + CNV + fusion + master BED breakpoints)
+                            # Fall back to original target panel BED file if master BED doesn't exist
+                            targets_bed = self._get_master_bed_path(sample_id) or self.bedfile
+                            
+                            if targets_bed != self.bedfile:
+                                logger.info(f"Using master BED file for target.bam: {targets_bed}")
+                            else:
+                                logger.info(f"Using original target panel BED file for target.bam: {targets_bed}")
                             
                             # Create filtered BAM directory
                             filtered_bams_dir = os.path.join(sample_output_dir, "_filtered_bams")
@@ -1667,12 +2045,18 @@ class TargetAnalysis:
                             
                             # Process each source BAM file and save filtered version
                             new_filtered_bams = []
+                            bed_regions_cache = None
+                            try:
+                                bed_regions_cache = _load_bed_regions(targets_bed)
+                            except Exception as e:
+                                logger.warning(f"Could not preload BED regions from {targets_bed}: {e}")
+
                             for i, source_bam in enumerate(original_bam_files):
                                 filtered_bam_name = f"filtered_{i:06d}_{os.path.basename(source_bam)}"
                                 filtered_bam_path = os.path.join(filtered_bams_dir, filtered_bam_name)
                                 
                                 logger.info(f"Filtering BAM {i+1}/{len(original_bam_files)}: {os.path.basename(source_bam)}")
-                                run_bedtools(source_bam, targets_bed, filtered_bam_path)
+                                run_bedtools(source_bam, targets_bed, filtered_bam_path, regions=bed_regions_cache)
                                 
                                 if os.path.exists(filtered_bam_path):
                                     new_filtered_bams.append(filtered_bam_path)

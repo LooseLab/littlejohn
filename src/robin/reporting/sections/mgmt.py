@@ -644,6 +644,8 @@ class MGMTSection(ReportSection):
                 if bam_path:
                     try:
                         from robin.analysis.methylation_wrapper import locus_figure
+                        import warnings
+                        import matplotlib.pyplot as plt
                         
                         logger.info(f"Generating MGMT plot from BAM file for report: {os.path.basename(bam_path)}")
                         fig = locus_figure(
@@ -655,7 +657,11 @@ class MGMTSection(ReportSection):
                         
                         # Save to a file in the report output directory
                         plot_path = os.path.join(self.report.output, "mgmt_report_plot.png")
-                        fig.savefig(plot_path, dpi=150, bbox_inches='tight')
+                        # Suppress GridSpec warnings when saving figure
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore", UserWarning)
+                            fig.savefig(plot_path, dpi=150, bbox_inches='tight')
+                        plt.close(fig)
                         
                         # Add to report
                         self.elements.append(Image(plot_path, width=6 * inch, height=4 * inch))

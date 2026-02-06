@@ -70,11 +70,15 @@ def _download_missing_models(missing_files, models_dir):
     
     print("\n🔄 Attempting to download missing models...")
     
+    # Find project root from models_dir location
+    # models_dir is src/robin/models, so project root is 3 levels up
+    project_root = models_dir.parent.parent.parent
+    
     # Load assets manifest
     try:
-        assets_file = Path.cwd() / "assets.json"
+        assets_file = project_root / "assets.json"
         if not assets_file.exists():
-            print("❌ assets.json not found. Cannot download models automatically.")
+            print(f"❌ assets.json not found at {assets_file}. Cannot download models automatically.")
             return False
         
         with open(assets_file, 'r') as f:
@@ -158,53 +162,35 @@ def _download_missing_models(missing_files, models_dir):
 
 def _check_models_or_exit():
     """Check for required model files and offer to download them if missing."""
+    from robin.utils.model_checker import (
+        get_models_directory,
+        check_model_files,
+        validate_models_or_exit,
+    )
     from pathlib import Path
     
-    # Define required models
-    required_models = [
-        "general.zip",
-        "Capper_et_al_NN.pkl", 
-        "pancan_devel_v5i_NN.pkl"
-    ]
-    
-    # Try to find models directory - prioritize current working directory
-    strategies = [
-        # Strategy 1: Current working directory (most reliable for development)
-        Path.cwd() / "src" / "robin" / "models",
-        # Strategy 2: Look for project root from current directory
-        Path.cwd() / "robin" / "models",
-        # Strategy 3: Look relative to this file (for installed packages)
-        Path(__file__).parent.parent / "models",
-        # Strategy 4: Look in common installation locations
-        Path.home() / ".local" / "share" / "robin" / "models",
-        Path("/usr/local/share/robin/models"),
-        Path("/opt/robin/models"),
-    ]
-    
-    models_dir = None
-    for strategy in strategies:
-        if strategy.exists():
-            models_dir = strategy
-            break
-    
-    if models_dir is None:
+    # Get models directory using the centralized function
+    # This uses the models module's DIR constant, which works regardless of
+    # where robin is run from
+    try:
+        models_dir = get_models_directory()
+    except Exception as e:
         print("❌ Could not locate ROBIN models directory")
-        print("Please ensure you're running ROBIN from the project root directory")
-        print("or that the models are installed in a standard location.")
+        print(f"Error: {e}")
+        print("Please ensure the models are installed in the correct location.")
         sys.exit(1)
     
-    # Check for missing files
-    missing_files = []
-    present_files = []
+    # Check if models directory exists
+    if not models_dir.exists():
+        print("❌ Could not locate ROBIN models directory")
+        print(f"Expected location: {models_dir}")
+        print("Please ensure the models are installed in the correct location.")
+        sys.exit(1)
     
-    for filename in required_models:
-        model_path = models_dir / filename
-        if model_path.exists() and model_path.stat().st_size > 0:
-            present_files.append(filename)
-        else:
-            missing_files.append(filename)
+    # Check for missing files using the centralized function
+    all_present, missing_files, present_files = check_model_files()
     
-    if missing_files:
+    if not all_present:
         print("\n" + "="*60)
         print("ROBIN MODEL STATUS CHECK")
         print("="*60)

@@ -26,7 +26,7 @@ import csv
 from datetime import datetime
 from robin.analysis.master_csv_manager import MasterCSVManager
 
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Set
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from enum import Enum
@@ -41,6 +41,35 @@ from robin.gui.components.news_feed import NewsFeed
 from robin.reporting.report import create_pdf
 from robin.reporting.sections.disclaimer_text import EXTENDED_DISCLAIMER_TEXT
 
+
+# Files that indicate an analysis step is complete.
+COMPLETION_JOB_PATTERNS: Dict[str, List[str]] = {
+    "fusion": [
+        "fusion_candidates_master_processed.pkl",
+        "fusion_candidates_all_processed.pkl",
+        "fusion_summary.csv",
+        "fusion_results.csv",
+        "sv_count.txt",
+    ],
+    "cnv": [
+        "CNV_dict.npy",
+        "XYestimate.pkl",
+        "cnv_results.csv",
+        "cnv_summary.txt",
+        "cnv_analysis_counter.txt",
+        "cnv_analysis_results.pkl",
+    ],
+    "mgmt": ["final_mgmt.csv", "*_mgmt.csv"],
+    "target": ["coverage_main.csv", "bed_coverage_main.csv"],
+    "sturgeon": ["sturgeon_scores.csv", "sturgeon_results.csv", "sturgeon_summary.csv"],
+    "nanodx": ["NanoDX_scores.csv", "nanodx_results.csv", "nanodx_summary.csv"],
+    "pannanodx": ["PanNanoDX_scores.csv", "pannanodx_results.csv", "pannanodx_summary.csv"],
+    "random_forest": [
+        "random_forest_scores.csv",
+        "random_forest_results.csv",
+        "random_forest_summary.csv",
+    ],
+}
 
 try:
     from nicegui import ui, app
@@ -82,6 +111,7 @@ class SampleRecord:
     device: str = ""
     flowcell: str = ""
     active_jobs: int = 0
+    pending_jobs: int = 0
     total_jobs: int = 0
     completed_jobs: int = 0
     failed_jobs: int = 0
@@ -90,6 +120,8 @@ class SampleRecord:
     _last_seen_raw: float = 0.0  # Raw timestamp for sorting
     _dirty: bool = False  # Flag to indicate record needs UI update
     _file_mtime: float = 0.0  # master.csv modification time
+    files_seen: int = 0  # Total files seen/processed
+    files_processed: int = 0  # Files completely processed through all analysis steps
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for table rows."""
@@ -100,11 +132,15 @@ class SampleRecord:
             "device": self.device,
             "flowcell": self.flowcell,
             "active_jobs": self.active_jobs,
+            "pending_jobs": self.pending_jobs,
             "total_jobs": self.total_jobs,
             "completed_jobs": self.completed_jobs,
             "failed_jobs": self.failed_jobs,
             "job_types": self.job_types,
             "last_seen": self.last_seen,
+            "files_seen": self.files_seen,
+            "files_processed": self.files_processed,
+            "file_progress": self.files_processed / self.files_seen if self.files_seen > 0 else 0.0,
             "actions": "View",
             "_last_seen_raw": self._last_seen_raw,
         }
@@ -145,9 +181,10 @@ class GUILauncher:
         # Monotonic tiebreaker for priority queue to avoid tuple comparison of GUIUpdate
         self._update_seq: int = 0
         
-        # Throttle queue size warnings to avoid log spam
-        self._last_queue_warning_time: float = 0.0
-        self._queue_warning_interval: float = 10.0  # Only log once every 10 seconds
+        # Adaptive throttling and update coalescing
+        self._last_update_times: Dict[UpdateType, float] = {}
+        self._last_queue_size_logged: int = 0
+        self._last_log_time: float = 0.0
 
         # Runtime state
         self._start_time: Optional[float] = None
@@ -338,6 +375,9 @@ class GUILauncher:
                                 record.active_jobs = int(
                                     first_row.get("samples_overview_active_jobs", 0) or 0
                                 )
+                                record.pending_jobs = int(
+                                    first_row.get("samples_overview_pending_jobs", 0) or 0
+                                )
                                 record.total_jobs = int(
                                     first_row.get("samples_overview_total_jobs", 0) or 0
                                 )
@@ -362,7 +402,7 @@ class GUILauncher:
                         prev_origin = record.origin
                         # Only mark as Complete if timeout passed AND no active jobs
                         if record.origin == "Live" and (now_ts - record._last_seen_raw) >= self.completion_timeout_seconds:
-                            if record.active_jobs == 0:
+                            if record.active_jobs == 0 and record.pending_jobs == 0:
                                 record.origin = "Complete"
                                 record._dirty = True
                                 # Trigger finalization if transitioning from Live to Complete
@@ -375,7 +415,7 @@ class GUILauncher:
                             pass
                         elif record.origin == "Complete":
                             # Reactivate if file was modified recently OR if there are active jobs
-                            if (now_ts - record._last_seen_raw) < self.completion_timeout_seconds or record.active_jobs > 0:
+                            if (now_ts - record._last_seen_raw) < self.completion_timeout_seconds or record.active_jobs > 0 or record.pending_jobs > 0:
                                 record.origin = "Live"
                                 record._dirty = True
                         
@@ -387,6 +427,7 @@ class GUILauncher:
                             manager = MasterCSVManager(str(base))
                             persist_payload = {
                                 "active_jobs": int(record.active_jobs),
+                                "pending_jobs": int(record.pending_jobs),
                                 "total_jobs": int(record.total_jobs),
                                 "completed_jobs": int(record.completed_jobs),
                                 "failed_jobs": int(record.failed_jobs),
@@ -470,9 +511,14 @@ class GUILauncher:
                     
                     # Update job counts from workflow data (these are more current than file scans)
                     record.active_jobs = s.get("active_jobs", 0)
+                    record.pending_jobs = s.get("pending_jobs", 0)
                     record.total_jobs = s.get("total_jobs", 0)
                     record.completed_jobs = s.get("completed_jobs", 0)
                     record.failed_jobs = s.get("failed_jobs", 0)
+                    
+                    # Update file progress from job counts (same data source as other columns)
+                    record.files_seen = record.total_jobs
+                    record.files_processed = record.completed_jobs
                     
                     # Update job types
                     job_types = s.get("job_types", [])
@@ -502,6 +548,7 @@ class GUILauncher:
                             if record._dirty:
                                 persist_payload = {
                                     "active_jobs": int(record.active_jobs),
+                                    "pending_jobs": int(record.pending_jobs),
                                     "total_jobs": int(record.total_jobs),
                                     "completed_jobs": int(record.completed_jobs),
                                     "failed_jobs": int(record.failed_jobs),
@@ -528,7 +575,12 @@ class GUILauncher:
         reload: bool = False,
         center: str = None,
     ) -> bool:
-        """Launch the GUI in a completely isolated background thread."""
+        """Launch the GUI in a completely isolated background thread.
+        
+        Note: When reload=True, the GUI must run in the main thread because
+        signal handlers can only be set in the main thread. In this case,
+        this method will block until the GUI is stopped.
+        """
         if ui is None:
             logging.error("NiceGUI is not available")
             return False
@@ -553,7 +605,31 @@ class GUILauncher:
                 logging.info("Loaded samples from cache - table will populate immediately")
 
         try:
-            # Start GUI in completely isolated background thread
+            # When reload is requested, we must run in the main thread
+            # because signal handlers can only be set in the main thread
+            if self.reload:
+                # Check if we're in the main thread
+                if threading.current_thread() is threading.main_thread():
+                    # Run directly in main thread (blocking)
+                    logging.info("Running GUI with reload in main thread")
+                    self.is_running = True
+                    try:
+                        self._run_gui_worker()
+                    except KeyboardInterrupt:
+                        logging.info("GUI stopped by user")
+                    finally:
+                        self.is_running = False
+                    return True
+                else:
+                    # Not in main thread - can't use reload
+                    logging.warning(
+                        "Reload requested but not in main thread. "
+                        "Disabling reload functionality. "
+                        "Run from main thread to enable reload."
+                    )
+                    self.reload = False
+            
+            # Start GUI in completely isolated background thread (when reload is False)
             self.gui_thread = threading.Thread(
                 target=self._run_gui_worker, daemon=True, name="robin-GUI-Thread"
             )
@@ -584,37 +660,42 @@ class GUILauncher:
     ):
         """Send an update to the GUI without blocking the workflow."""
         try:
-            # Rate limiting: Skip low-priority updates if queue is getting too large
+            current_time = time.time()
             queue_size = self.update_queue.qsize()
-            if queue_size > 100 and priority < 5:
-                # Throttle warnings to avoid log spam (only log once every 10 seconds)
-                current_time = time.time()
-                if current_time - self._last_queue_warning_time >= self._queue_warning_interval:
+            # Adaptive threshold: higher threshold for large workloads
+            # Threshold increases based on queue size to prevent dropping updates during bursts
+            threshold = 500 if queue_size < 200 else 1000
+            
+            # Rate limiting: Skip low-priority updates if queue is getting too large
+            if queue_size > threshold and priority < 5:
+                # Only log when queue size changes significantly to reduce log spam
+                if abs(queue_size - self._last_queue_size_logged) > 50 or (current_time - self._last_log_time) > 10.0:
                     logging.warning(
-                        f"[GUI] Queue backlog detected (size: {queue_size}), "
-                        f"skipping low-priority updates. This is normal under heavy load."
+                        f"[GUI] Skipping low-priority update due to queue size: "
+                        f"{queue_size} (threshold: {threshold})"
                     )
-                    self._last_queue_warning_time = current_time
+                    self._last_queue_size_logged = queue_size
+                    self._last_log_time = current_time
                 return
             
-            # Rate limiting: Skip duplicate updates of the same type within 1 second
-            current_time = time.time()
-            if hasattr(self, '_last_update_times'):
-                last_time = self._last_update_times.get(update_type, 0)
-                if current_time - last_time < 1.0 and priority < 8:
-                    logging.debug(f"[GUI] Skipping duplicate update: {update_type.value}")
-                    return
-            else:
-                self._last_update_times = {}
+            # Update coalescing: Skip duplicate low-priority updates of the same type within 0.5 seconds
+            # This prevents queue buildup from rapid duplicate updates
+            last_time = self._last_update_times.get(update_type, 0)
+            time_since_last = current_time - last_time
             
-            self._last_update_times[update_type] = current_time
+            if priority < 5 and time_since_last < 0.5:
+                # Skip duplicate low-priority updates within coalescing window
+                return
             
+            # Create and enqueue the current update
             update = GUIUpdate(
                 update_type=update_type,
                 timestamp=current_time,
                 data=data,
                 priority=priority,
             )
+            
+            self._last_update_times[update_type] = current_time
 
             # Use negative priority so higher priority updates come first.
             # Include a monotonically increasing sequence as a tiebreaker so
@@ -622,9 +703,12 @@ class GUILauncher:
             self._update_seq += 1
             self.update_queue.put((-priority, self._update_seq, update))
             self.total_updates_enqueued += 1
-            logging.info(
-                f"[GUI] Enqueued update #{self.total_updates_enqueued}: {update.update_type.value}"
-            )
+            
+            # Reduced logging: only log every 100th update or important updates
+            if self.total_updates_enqueued % 100 == 0 or priority >= 8:
+                logging.debug(
+                    f"[GUI] Enqueued update #{self.total_updates_enqueued}: {update_type.value} (queue: {queue_size})"
+                )
 
         except Exception as e:
             # Don't let update failures affect the workflow
@@ -768,27 +852,54 @@ class GUILauncher:
             logging.error(f"Error handling progress update: {e}")
 
     def _drain_updates_on_ui(self):
-        """Drain queued updates and apply them on the UI thread (called by ui.timer)."""
+        """Drain queued updates and apply them on the UI thread (called by ui.timer).
+        
+        Uses adaptive throttling: processes more updates when queue is large,
+        fewer when queue is small. Batches UI updates for better performance.
+        """
         if not self.gui_ready.is_set():
             return
-        processed_any = False
+        
+        processed_count = 0
+        max_updates_per_cycle = 50  # Limit updates per cycle to prevent UI blocking
+        
         try:
-            while True:
+            queue_size = self.update_queue.qsize()
+            
+            # Adaptive processing: process more updates when queue is large
+            if queue_size > 200:
+                max_updates_per_cycle = 100  # Process more aggressively when backlogged
+            elif queue_size > 100:
+                max_updates_per_cycle = 75
+            elif queue_size < 20:
+                max_updates_per_cycle = 25  # Process fewer when queue is small
+            
+            # Process updates in batch
+            while processed_count < max_updates_per_cycle:
                 try:
                     # Entries are (-priority, seq, GUIUpdate)
                     _, _, update = self.update_queue.get_nowait()
                 except queue.Empty:
                     break
+                
                 self._handle_update(update)
                 self.total_updates_processed += 1
-                processed_any = True
-                logging.info(
-                    f"[GUI] Processed update #{self.total_updates_processed}: {update.update_type.value}"
-                )
+                processed_count += 1
+                
+                # Reduced logging: only log every 50th update or when queue size changes significantly
+                if self.total_updates_processed % 50 == 0:
+                    logging.debug(
+                        f"[GUI] Processed update #{self.total_updates_processed}: {update.update_type.value} (queue: {queue_size})"
+                    )
+            
+            # Note: Timer interval is fixed at 0.5s for consistent performance
+            # Adaptive processing (max_updates_per_cycle) handles queue size variations
+                
         except Exception as e:
             logging.debug(f"[GUI] Error draining updates on UI: {e}")
         finally:
-            if processed_any:
+            # Batch UI update: only call ui.update() once per drain cycle
+            if processed_count > 0:
                 try:
                     ui.update()
                 except Exception:
@@ -1035,6 +1146,73 @@ class GUILauncher:
         except Exception as e:
             logging.debug(f"Error updating progress: {e}")
 
+    def _update_file_progress(self):
+        """Update file progress display in workflow monitor from current samples data."""
+        try:
+            if not hasattr(self, "sample_files_progress_container") or not hasattr(self, "_last_samples_rows"):
+                return
+            
+            rows = self._last_samples_rows or []
+            total_files_seen = 0
+            total_files_processed = 0
+            sample_progress_data = []
+            
+            # Calculate totals and collect per-sample data
+            for row in rows:
+                files_seen = row.get("files_seen", 0) or 0
+                files_processed = row.get("files_processed", 0) or 0
+                sample_id = row.get("sample_id", "")
+                
+                if files_seen > 0:
+                    total_files_seen += files_seen
+                    total_files_processed += files_processed
+                    sample_progress_data.append({
+                        "sample_id": sample_id,
+                        "files_seen": files_seen,
+                        "files_processed": files_processed,
+                        "progress": files_processed / files_seen if files_seen > 0 else 0.0
+                    })
+            
+            # Update overall progress
+            if hasattr(self, "overall_files_progress") and hasattr(self, "overall_files_label"):
+                overall_progress = total_files_processed / total_files_seen if total_files_seen > 0 else 0.0
+                self.overall_files_progress.set_value(round(overall_progress, 2))
+                self.overall_files_label.set_text(f"{total_files_processed}/{total_files_seen} files processed")
+            
+            # Update per-sample progress bars (limit to first 20 to avoid UI overload)
+            if hasattr(self, "sample_files_progress_container"):
+                try:
+                    # Clear existing content
+                    self.sample_files_progress_container.clear()
+                    
+                    if sample_progress_data:
+                        # Sort by progress (lowest first) to show samples needing attention
+                        sample_progress_data.sort(key=lambda x: x["progress"])
+                        
+                        # Show up to 20 samples with most activity
+                        for sample_info in sample_progress_data[:20]:
+                            sample_id = sample_info["sample_id"]
+                            progress = sample_info["progress"]
+                            files_seen = sample_info["files_seen"]
+                            files_processed = sample_info["files_processed"]
+                            
+                            with self.sample_files_progress_container:
+                                with ui.row().classes("w-full items-center gap-2 mb-1"):
+                                    ui.label(sample_id).classes("text-xs font-medium min-w-[120px]")
+                                    progress_bar = ui.linear_progress(progress).classes("flex-1")
+                                    if progress >= 1.0:
+                                        progress_bar.props("color=positive")
+                                    ui.label(f"{files_processed}/{files_seen}").classes("text-xs text-gray-600 min-w-[60px]")
+                    else:
+                        # Show placeholder when no data
+                        with self.sample_files_progress_container:
+                            ui.label("No file progress data available yet").classes("text-xs text-gray-500 italic")
+                except Exception as e:
+                    logging.debug(f"Error updating per-sample file progress: {e}")
+                            
+        except Exception as e:
+            logging.debug(f"Error updating file progress: {e}")
+
     def _update_errors(self, data: Dict[str, Any]):
         """Update error information in the GUI."""
         try:
@@ -1233,9 +1411,9 @@ class GUILauncher:
                 """Setup global timers and update processing."""
                 try:
                     self.gui_ready.set()
-                    # Rate limit GUI updates to prevent system lockup
-                    # Increased from 0.3s to 2.0s to reduce update frequency
-                    app.timer(2.0, self._drain_updates_on_ui, active=True)
+                    # Faster drain rate: 0.5s to keep up with high-volume updates
+                    # The _drain_updates_on_ui method adaptively processes more/fewer updates per cycle
+                    app.timer(0.5, self._drain_updates_on_ui, active=True)
                     
                     # Background master record scanner - scans folder periodically
                     # Runs every 10 seconds to keep master record up to date
@@ -1492,9 +1670,21 @@ class GUILauncher:
                                 "sortable": True,
                             },
                             {
+                                "name": "file_progress",
+                                "label": "File Progress",
+                                "field": "file_progress",
+                                "sortable": True,
+                            },
+                            {
                                 "name": "active_jobs",
                                 "label": "Active",
                                 "field": "active_jobs",
+                                "sortable": True,
+                            },
+                            {
+                                "name": "pending_jobs",
+                                "label": "Pending",
+                                "field": "pending_jobs",
                                 "sortable": True,
                             },
                             {
@@ -1578,6 +1768,29 @@ class GUILauncher:
            color=\"secondary\" size=\"sm\" label=\"Finalize\" icon=\"merge_type\"
            @click=\"$parent.$emit('finalize-target', props.row.sample_id)\" />
   </q-btn-group>
+</q-td>
+""",
+                        )
+                    except Exception:
+                        pass
+                    
+                    # Add file progress column with linear progress bar
+                    try:
+                        self.samples_table.add_slot(
+                            "body-cell-file_progress",
+                            """
+<q-td key=\"file_progress\" :props=\"props\">
+  <div style=\"min-width: 120px;\">
+    <q-linear-progress 
+      :value=\"props.row.file_progress || 0\" 
+      :color=\"props.row.file_progress >= 1 ? 'positive' : 'primary'\" 
+      size=\"12px\" 
+      rounded
+      class=\"q-mb-xs\" />
+    <div style=\"font-size: 10px; color: #666; text-align: center;\">
+      {{ props.row.files_processed || 0 }}/{{ props.row.files_seen || 0 }} files
+    </div>
+  </div>
 </q-td>
 """,
                         )
@@ -2054,6 +2267,10 @@ class GUILauncher:
             if not hasattr(self, "samples_table"):
                 return
             samples = data.get("samples", [])
+            expected_job_types = self._get_expected_completion_job_types()
+            base = (
+                Path(self.monitored_directory) if self.monitored_directory else None
+            )
 
             # Deduplicate by sample_id taking the newest last_seen
             by_id: Dict[str, Dict[str, Any]] = {}
@@ -2080,16 +2297,33 @@ class GUILauncher:
                                 break
                     try:
                         active_jobs_count = s.get("active_jobs", 0)
+                        pending_jobs_count = s.get("pending_jobs", 0)
                         # Only mark as Complete if timeout passed AND no active jobs
                         if origin_value == "Live" and (time.time() - last_seen) >= self.completion_timeout_seconds:
-                            if active_jobs_count == 0:
-                                origin_value = "Complete"
-                                # Trigger finalization if transitioning from Live to Complete
-                                if prev_origin == "Live" or prev_origin is None:
-                                    self._trigger_target_bam_finalization(sid)
+                            if active_jobs_count == 0 and pending_jobs_count == 0:
+                                should_complete = True
+                                if expected_job_types and base is not None:
+                                    sample_dir = base / sid
+                                    should_complete = self._expected_jobs_completed(
+                                        sample_dir, expected_job_types
+                                    )
+                                if should_complete:
+                                    origin_value = "Complete"
+                                    # Trigger finalization if transitioning from Live to Complete
+                                    if prev_origin == "Live" or prev_origin is None:
+                                        self._trigger_target_bam_finalization(sid)
                             # If there are active jobs, keep as Live even if timeout passed
                     except Exception:
                         pass
+                    # Get job counts
+                    total_jobs = s.get("total_jobs", 0)
+                    completed_jobs = s.get("completed_jobs", 0)
+                    
+                    # Set file progress directly from job counts (same data source as other columns)
+                    files_seen = total_jobs
+                    files_processed = completed_jobs
+                    file_progress = completed_jobs / total_jobs if total_jobs > 0 else 0.0
+                    
                     by_id[sid] = {
                         "sample_id": sid,
                         "origin": origin_value,
@@ -2098,8 +2332,9 @@ class GUILauncher:
                         "device": "",
                         "flowcell": "",
                         "active_jobs": s.get("active_jobs", 0),
-                        "total_jobs": s.get("total_jobs", 0),
-                        "completed_jobs": s.get("completed_jobs", 0),
+                        "pending_jobs": s.get("pending_jobs", 0),
+                        "total_jobs": total_jobs,
+                        "completed_jobs": completed_jobs,
                         "failed_jobs": s.get("failed_jobs", 0),
                         "job_types": (
                             ",".join(sorted(set(s.get("job_types", []))))
@@ -2109,15 +2344,15 @@ class GUILauncher:
                         "last_seen": time.strftime(
                             "%Y-%m-%d %H:%M:%S", time.localtime(last_seen)
                         ),
+                        "files_seen": files_seen,
+                        "files_processed": files_processed,
+                        "file_progress": file_progress,
                         "actions": "View",
                         "_last_seen_raw": last_seen,
                     }
 
             # Patch from master.csv and persist the new overview values for later reload
             try:
-                base = (
-                    Path(self.monitored_directory) if self.monitored_directory else None
-                )
                 manager = (
                     MasterCSVManager(str(base)) if base and base.exists() else None
                 )
@@ -2130,6 +2365,7 @@ class GUILauncher:
                     if manager is not None:
                         persist_payload = {
                             "active_jobs": int(row.get("active_jobs", 0)),
+                            "pending_jobs": int(row.get("pending_jobs", 0)),
                             "total_jobs": int(row.get("total_jobs", 0)),
                             "completed_jobs": int(row.get("completed_jobs", 0)),
                             "failed_jobs": int(row.get("failed_jobs", 0)),
@@ -2138,7 +2374,7 @@ class GUILauncher:
                         }
                         manager.update_sample_overview(sid, persist_payload)
 
-                    # Read run info from master.csv to display in table
+                    # Read run info and file progress from master.csv to display in table
                     if base is not None:
                         csv_path = base / sid / "master.csv"
                         if csv_path.exists():
@@ -2169,6 +2405,8 @@ class GUILauncher:
             # Update UI on main thread
             if rows and hasattr(self, "samples_table"):
                 self._apply_samples_table_filters()
+                # Also update file progress display in workflow monitor
+                self._update_file_progress()
 
         except Exception as e:
             logging.error(f"Error in samples table update: {e}")
@@ -2284,9 +2522,10 @@ class GUILauncher:
                         if r.get("origin") == "Live":
                             last_raw = float(r.get("_last_seen_raw", 0))
                             active_jobs_count = r.get("active_jobs", 0)
+                            pending_jobs_count = r.get("pending_jobs", 0)
                             # Only mark as Complete if timeout passed AND no active jobs
                             if last_raw and (now_ts - last_raw) >= self.completion_timeout_seconds:
-                                if active_jobs_count == 0:
+                                if active_jobs_count == 0 and pending_jobs_count == 0:
                                     r["origin"] = "Complete"
                                 # If there are active jobs, keep as Live even if timeout passed
                     except Exception:
@@ -2914,6 +3153,23 @@ class GUILauncher:
                         
                         workflow_steps = self.workflow_steps if hasattr(self, 'workflow_steps') else None
                         
+                        # MNP-Flex section - create UI immediately (directly after summary)
+                        try:
+                            try:
+                                from .gui.components.mnpflex import add_mnpflex_section  # type: ignore
+                            except ImportError:
+                                from robin.gui.components.mnpflex import add_mnpflex_section
+
+                            add_mnpflex_section(self, sample_dir, sample_id)
+                        except Exception as e:
+                            logging.exception(f"[GUI] MNP-Flex section failed: {e}")
+                            try:
+                                ui.notify(
+                                    f"MNP-Flex section failed: {e}", type="warning"
+                                )
+                            except Exception:
+                                pass
+
                         # Classification section (refactored component) - create UI immediately
                         enabled_classification_steps = get_enabled_classification_steps(workflow_steps)
                         if not workflow_steps or enabled_classification_steps:
@@ -2956,7 +3212,7 @@ class GUILauncher:
                                     ui.notify(f"Coverage section failed: {e}", type="warning")
                                 except Exception:
                                     pass
-
+                        
                         # MGMT section (refactored component) - create UI immediately
                         if not workflow_steps or is_section_enabled("mgmt", workflow_steps):
                             try:
@@ -2974,7 +3230,7 @@ class GUILauncher:
                                     ui.notify(f"MGMT section failed: {e}", type="warning")
                                 except Exception:
                                     pass
-
+                        
                         # CNV section (refactored component) - create UI immediately
                         if not workflow_steps or is_section_enabled("cnv", workflow_steps):
                             try:
@@ -3009,6 +3265,23 @@ class GUILauncher:
                                 logging.exception(f"[GUI] Fusion section failed: {e}")
                                 try:
                                     ui.notify(f"Fusion section failed: {e}", type="warning")
+                                except Exception:
+                                    pass
+                            
+                            # BED Coverage section
+                            try:
+                                try:
+                                    from .gui.components.bed_coverage import add_bed_coverage_section  # type: ignore
+                                except ImportError:
+                                    # Try absolute import if relative fails
+                                    from robin.gui.components.bed_coverage import add_bed_coverage_section
+                                
+                                # Create the UI components immediately on the main thread
+                                add_bed_coverage_section(self, sample_dir)
+                            except Exception as e:
+                                logging.exception(f"[GUI] BED Coverage section failed: {e}")
+                                try:
+                                    ui.notify(f"BED Coverage section failed: {e}", type="warning")
                                 except Exception:
                                     pass
 
@@ -3221,14 +3494,10 @@ class GUILauncher:
                         try:
                             # Run file operations in background threads
                             #import concurrent.futures
-                            #with concurrent.futures.ThreadPoolExecutor() as executor:
-                            #    files_future = executor.submit(_refresh_files_list_sync)
-                            #    csv_future = executor.submit(_refresh_csv_summary_sync)
-                                
-                            #    files_result = await asyncio.wrap_future(files_future)
-                            #    csv_result = await asyncio.wrap_future(csv_future)
-                            files_result = _refresh_files_list_sync()
-                            csv_result = _refresh_csv_summary_sync()
+                            # Run file I/O operations in background threads to avoid blocking GUI
+                            import asyncio
+                            files_result = await asyncio.to_thread(_refresh_files_list_sync)
+                            csv_result = await asyncio.to_thread(_refresh_csv_summary_sync)
                             
                             
                             # Update UI with results
@@ -3273,21 +3542,27 @@ class GUILauncher:
                                     pass
                                 _notify_state["files_error"] = True
 
-                        # Refresh master.csv summary
-                        try:
-                            rows2 = _refresh_csv_summary_sync()
-                            summary_table.rows = rows2
-                            summary_table.update()
-                        except Exception as e:
-                            if not _notify_state["csv_error"]:
-                                try:
-                                    ui.notify(
-                                        f"Failed to read master.csv for {sample_id}: {e}",
-                                        type="warning",
-                                    )
-                                except Exception:
-                                    pass
-                                _notify_state["csv_error"] = True
+                        # Refresh master.csv summary (non-blocking)
+                        def update_csv_summary():
+                            try:
+                                rows2 = _refresh_csv_summary_sync()
+                                summary_table.rows = rows2
+                                summary_table.update()
+                            except Exception as e:
+                                if not _notify_state["csv_error"]:
+                                    try:
+                                        ui.notify(
+                                            f"Failed to read master.csv for {sample_id}: {e}",
+                                            type="warning",
+                                        )
+                                    except Exception:
+                                        pass
+                                    _notify_state["csv_error"] = True
+                        
+                        # Run in background thread to avoid blocking GUI
+                        import threading
+                        thread = threading.Thread(target=update_csv_summary, daemon=True)
+                        thread.start()
 
                     # Show content and hide loading after initial data load (only when showing loading)
                     if show_loading and loading_container:
@@ -3431,8 +3706,8 @@ class GUILauncher:
                         fusion_data_loaded = False
                         fusion_data = None
                         try:
-                            target_file = sample_dir / "fusion_candidates_master_processed.csv"
-                            genome_file = sample_dir / "fusion_candidates_all_processed.csv"
+                            target_file = sample_dir / "fusion_candidates_master_processed.pkl"
+                            genome_file = sample_dir / "fusion_candidates_all_processed.pkl"
                             
                             # Try to load target panel data first, then genome-wide
                             if target_file.exists():
@@ -3876,6 +4151,29 @@ class GUILauncher:
                             coverage_file = bed_coverage_file
                         
                         if coverage_file:
+                            # Load coverage data asynchronously to avoid blocking GUI
+                            def load_coverage_data():
+                                try:
+                                    import pandas as pd
+                                    return pd.read_csv(coverage_file)
+                                except Exception as e:
+                                    logging.error(f"Failed to load coverage file {coverage_file}: {e}")
+                                    return None
+                            
+                            # Create placeholder table that will be updated when data loads
+                            coverage_table_placeholder = ui.table(
+                                columns=[
+                                    {"name": "gene", "label": "Gene", "field": "gene"},
+                                    {"name": "chrom", "label": "Chrom", "field": "chrom"},
+                                    {"name": "startpos", "label": "Start", "field": "startpos"},
+                                    {"name": "endpos", "label": "End", "field": "endpos"},
+                                    {"name": "coverage", "label": "Coverage", "field": "coverage"},
+                                ],
+                                rows=[],
+                            ).classes("w-full")
+                            
+                            # Load coverage data synchronously (fast enough for typical file sizes)
+                            # Note: This runs during page creation, not during user interaction
                             try:
                                 import pandas as pd
                                 df = pd.read_csv(coverage_file)
@@ -4150,7 +4448,6 @@ class GUILauncher:
                                             # Add summary
                                             total_genes = len(table_data)
                                             ui.label(f"Total target genes: {total_genes}").classes("text-xs text-gray-500 mt-2")
-                                        
                             except Exception as e:
                                 logging.warning(f"Could not load target gene table: {e}")
 
@@ -4224,6 +4521,26 @@ class GUILauncher:
                             self.total_count = ui.label("0").classes(
                                 "text-xs font-semibold"
                             )
+
+                # File Processing Progress (Per-Run)
+                with ui.card().classes("w-full bg-gradient-to-r from-green-50 to-emerald-50"):
+                    ui.label("File Processing Progress (Per Run)").classes(
+                        "text-lg font-semibold mb-4 text-green-800"
+                    )
+                    with ui.column().classes("w-full gap-3"):
+                        # Overall file progress summary
+                        with ui.row().classes("w-full items-center gap-4"):
+                            ui.label("Overall Files:").classes("text-sm font-medium text-gray-700")
+                            self.overall_files_progress = ui.linear_progress(0.0).classes("flex-1")
+                            self.overall_files_label = ui.label("0/0 files processed").classes(
+                                "text-sm text-gray-600 min-w-[120px]"
+                            )
+                        
+                        # Per-sample file progress will be shown in a scrollable container
+                        ui.label("Per-Sample Progress:").classes("text-sm font-medium text-gray-700 mt-2")
+                        with ui.scroll_area().classes("w-full").style("max-height: 300px;"):
+                            self.sample_files_progress_container = ui.column().classes("w-full gap-2 p-2")
+                            # Individual sample progress bars will be added here dynamically
 
                 # Queue Status
                 with ui.card().classes("w-full"):
@@ -4778,6 +5095,7 @@ class GUILauncher:
                     device = ""
                     flowcell = ""
                     ov_active = 0
+                    ov_pending = 0
                     ov_total = 0
                     ov_completed = 0
                     ov_failed = 0
@@ -4802,6 +5120,9 @@ class GUILauncher:
                             ov_active = int(
                                 first_row.get("samples_overview_active_jobs", 0) or 0
                             )
+                            ov_pending = int(
+                                first_row.get("samples_overview_pending_jobs", 0) or 0
+                            )
                             ov_total = int(
                                 first_row.get("samples_overview_total_jobs", 0) or 0
                             )
@@ -4824,7 +5145,7 @@ class GUILauncher:
                     try:
                         # Only mark as Complete if timeout passed AND no active jobs
                         if origin_value == "Live" and (time.time() - last_seen) >= self.completion_timeout_seconds:
-                            if ov_active == 0:
+                            if ov_active == 0 and ov_pending == 0:
                                 origin_value = "Complete"
                                 # Check if this is a transition from Live to Complete
                                 existing = self._last_samples_rows or []
@@ -4847,6 +5168,7 @@ class GUILauncher:
                             "device": device,
                             "flowcell": flowcell,
                             "active_jobs": ov_active,
+                            "pending_jobs": ov_pending,
                             "total_jobs": ov_total,
                             "completed_jobs": ov_completed,
                             "failed_jobs": ov_failed,
@@ -4892,7 +5214,33 @@ class GUILauncher:
             return self._last_samples_rows
         return None
 
-    def _calculate_job_counts_from_files(self, sample_dir: Path) -> Dict[str, Any]:
+    def _get_expected_completion_job_types(self) -> Set[str]:
+        """Get the set of job types expected to complete for this workflow."""
+        if not self.workflow_steps:
+            return set()
+        expected: Set[str] = set()
+        for step in self.workflow_steps:
+            step_name = step.split(":")[-1] if ":" in step else step
+            if step_name in COMPLETION_JOB_PATTERNS:
+                expected.add(step_name)
+        return expected
+
+    def _expected_jobs_completed(self, sample_dir: Path, expected_job_types: Set[str]) -> bool:
+        """Return True if all expected job types have completion outputs."""
+        if not expected_job_types:
+            return True
+        if not sample_dir.exists():
+            return False
+        counts = self._calculate_job_counts_from_files(
+            sample_dir, expected_job_types=expected_job_types
+        )
+        total_jobs = int(counts.get("total_jobs", 0))
+        completed_jobs = int(counts.get("completed_jobs", 0))
+        return total_jobs > 0 and completed_jobs >= total_jobs
+
+    def _calculate_job_counts_from_files(
+        self, sample_dir: Path, expected_job_types: Optional[Set[str]] = None
+    ) -> Dict[str, Any]:
         """Calculate job counts and types from actual analysis result files in the sample directory."""
         try:
             total_jobs = 0
@@ -4900,23 +5248,14 @@ class GUILauncher:
             failed_jobs = 0
             job_types = set()
             
-            # Define job type patterns and their corresponding files
-            job_patterns = {
-                "fusion": ["fusion_candidates_master_processed.csv", "fusion_candidates_all_processed.csv", "fusion_summary.csv"],
-                "cnv": ["cnv_results.csv", "cnv_summary.csv", "copy_numbers.pkl"],
-                "mgmt": ["final_mgmt.csv", "*_mgmt.csv"],
-                "coverage": ["coverage_summary.csv", "coverage_results.csv"],
-                "igv_bam": ["*.bam", "*.bai"],
-                "bed_conversion": ["*.bed", "*.bedmethyl"],
-                "nanodx": ["nanodx_results.csv", "nanodx_summary.csv"],
-                "pannanodx": ["pannanodx_results.csv", "pannanodx_summary.csv"],
-                "random_forest": ["random_forest_results.csv", "random_forest_summary.csv"],
-                "sturgeon": ["sturgeon_results.csv", "sturgeon_summary.csv"],
-                "target": ["target_results.csv", "target_summary.csv"]
-            }
+            job_patterns = COMPLETION_JOB_PATTERNS
+            job_types_to_check = (
+                expected_job_types if expected_job_types else set(job_patterns.keys())
+            )
             
             # Check for each job type
-            for job_type, patterns in job_patterns.items():
+            for job_type in job_types_to_check:
+                patterns = job_patterns.get(job_type, [])
                 job_found = False
                 for pattern in patterns:
                     if "*" in pattern:
@@ -4935,6 +5274,9 @@ class GUILauncher:
                     total_jobs += 1
                     completed_jobs += 1  # Assume completed if files exist
                     job_types.add(job_type)
+
+            if expected_job_types:
+                total_jobs = len(expected_job_types)
             
             return {
                 "total_jobs": total_jobs,
@@ -5009,6 +5351,7 @@ class GUILauncher:
     def _process_sample_batch(self, sample_dirs: List[Path]) -> List[Dict[str, Any]]:
         """Process a batch of sample directories synchronously"""
         rows: List[Dict[str, Any]] = []
+        expected_job_types = self._get_expected_completion_job_types()
         
         for sample_dir in sample_dirs:
             if not sample_dir.is_dir():
@@ -5026,6 +5369,7 @@ class GUILauncher:
                 device = ""
                 flowcell = ""
                 ov_active = 0
+                ov_pending = 0
                 ov_total = 0
                 ov_completed = 0
                 ov_failed = 0
@@ -5054,6 +5398,9 @@ class GUILauncher:
                         ov_active = int(
                             first_row.get("samples_overview_active_jobs", 0) or 0
                         )
+                        ov_pending = int(
+                            first_row.get("samples_overview_pending_jobs", 0) or 0
+                        )
                         ov_total = int(
                             first_row.get("samples_overview_total_jobs", 0) or 0
                         )
@@ -5069,7 +5416,10 @@ class GUILauncher:
                         
                         # If overview data is not available (0 values), calculate from actual analysis files
                         if ov_total == 0 and ov_completed == 0:
-                            calculated_counts = self._calculate_job_counts_from_files(sample_dir)
+                            calculated_counts = self._calculate_job_counts_from_files(
+                                sample_dir,
+                                expected_job_types=expected_job_types or None,
+                            )
                             ov_total = calculated_counts["total_jobs"]
                             ov_completed = calculated_counts["completed_jobs"]
                             ov_failed = calculated_counts["failed_jobs"]
@@ -5086,29 +5436,45 @@ class GUILauncher:
                     # Only mark as Complete if timeout passed AND no active jobs
                     if origin_value == "Live" and (time.time() - last_seen) >= self.completion_timeout_seconds:
                         if ov_active == 0:
-                            origin_value = "Complete"
+                            should_complete = True
+                            if expected_job_types:
+                                should_complete = self._expected_jobs_completed(
+                                    sample_dir, expected_job_types
+                                )
+                            if should_complete:
+                                origin_value = "Complete"
                         # If there are active jobs, keep as Live even if timeout passed
                 except Exception:
                     pass
                     
-                rows.append(
-                    {
-                        "sample_id": sid,
-                        "origin": origin_value,
-                        "run_start": self._format_timestamp_for_display(run_start),
-                        "device": device,
-                        "flowcell": flowcell,
-                        "active_jobs": ov_active,
-                        "total_jobs": ov_total,
-                        "completed_jobs": ov_completed,
-                        "failed_jobs": ov_failed,
-                        "job_types": ov_job_types,
-                        "last_seen": time.strftime(
-                            "%Y-%m-%d %H:%M:%S", time.localtime(last_seen)
-                        ),
-                        "_last_seen_raw": last_seen,
-                    }
-                )
+                # File progress - use the same job counts that drive other columns
+                # This ensures consistency with the Active, Total, Completed columns
+                files_seen = ov_total  # Use total_jobs as files_seen
+                files_processed = ov_completed  # Use completed_jobs as files_processed
+                file_progress = files_processed / files_seen if files_seen > 0 else 0.0
+                
+                row_data = {
+                    "sample_id": sid,
+                    "origin": origin_value,
+                    "run_start": self._format_timestamp_for_display(run_start),
+                    "device": device,
+                    "flowcell": flowcell,
+                    "active_jobs": ov_active,
+                    "pending_jobs": ov_pending,
+                    "total_jobs": ov_total,
+                    "completed_jobs": ov_completed,
+                    "failed_jobs": ov_failed,
+                    "job_types": ov_job_types,
+                    "files_seen": files_seen,
+                    "files_processed": files_processed,
+                    "file_progress": file_progress,
+                    "last_seen": time.strftime(
+                        "%Y-%m-%d %H:%M:%S", time.localtime(last_seen)
+                    ),
+                    "_last_seen_raw": last_seen,
+                }
+                
+                rows.append(row_data)
         
         return rows
 
@@ -5202,6 +5568,7 @@ class GUILauncher:
                         device = ""
                         flowcell = ""
                         ov_active = 0
+                        ov_pending = 0
                         ov_total = 0
                         ov_completed = 0
                         ov_failed = 0
@@ -5223,6 +5590,9 @@ class GUILauncher:
                                 pass
                             ov_active = int(
                                 first_row.get("samples_overview_active_jobs", 0) or 0
+                            )
+                            ov_pending = int(
+                                first_row.get("samples_overview_pending_jobs", 0) or 0
                             )
                             ov_total = int(
                                 first_row.get("samples_overview_total_jobs", 0) or 0
@@ -5283,6 +5653,7 @@ class GUILauncher:
                             if ov_job_types:
                                 updated["job_types"] = ov_job_types
                             updated["active_jobs"] = ov_active
+                            updated["pending_jobs"] = ov_pending
                             updated["total_jobs"] = ov_total
                             updated["completed_jobs"] = ov_completed
                             updated["failed_jobs"] = ov_failed
@@ -5295,7 +5666,7 @@ class GUILauncher:
                             try:
                                 # Only mark as Complete if timeout passed AND no active jobs
                                 if (time.time() - last_seen) >= self.completion_timeout_seconds:
-                                    if ov_active == 0:
+                                    if ov_active == 0 and ov_pending == 0:
                                         updated["origin"] = "Complete"
                                         # Trigger finalization if transitioning from Live to Complete
                                         if prev_origin == "Live":
@@ -5449,7 +5820,7 @@ def send_gui_update(update_type: UpdateType, data: Dict[str, Any], priority: int
 _current_gui_launcher = None
 
 
-if __name__ == "__main__":
+if __name__ in {"__main__", "__mp_main__"}:
     """
     Command-line interface for direct GUI launching.
 
@@ -5468,6 +5839,9 @@ if __name__ == "__main__":
 
         # Launch GUI on different host
         python gui_launcher.py test_out_priority_ray4 --host 0.0.0.0
+
+        # Launch GUI with auto-reload for development
+        python gui_launcher.py test_out_priority_ray4 --reload
     """
     import argparse
     import sys
@@ -5481,6 +5855,7 @@ if __name__ == "__main__":
         python gui_launcher.py test_out_priority_ray4            # Monitor specific directory
         python gui_launcher.py test_out_priority_ray4 --port 8081 # Use different port
         python gui_launcher.py test_out_priority_ray4 --no-show   # Don't open browser
+        python gui_launcher.py test_out_priority_ray4 --reload    # Enable auto-reload for development
                 """,
     )
 
@@ -5505,6 +5880,12 @@ if __name__ == "__main__":
         "--no-show", action="store_true", help="Don't automatically open the browser"
     )
 
+    parser.add_argument(
+        "--reload",
+        action="store_true",
+        help="Enable auto-reload for development (watches for file changes)",
+    )
+
     args = parser.parse_args()
 
     # Validate monitored directory if provided
@@ -5526,7 +5907,7 @@ if __name__ == "__main__":
         launcher = GUILauncher(
             host=args.host,
             port=args.port,
-            reload=False,
+            reload=args.reload,
         )
 
         # Set monitored directory if provided

@@ -134,9 +134,9 @@ class FusionSection(ReportSection):
             "master_candidates": None,
             "all_candidates": None,
             "master_path": os.path.join(
-                self.report.output, "fusion_candidates_master_processed.csv"
+                self.report.output, "fusion_candidates_master_processed.pkl"
             ),
-            "all_path": os.path.join(self.report.output, "fusion_candidates_all_processed.csv"),
+            "all_path": os.path.join(self.report.output, "fusion_candidates_all_processed.pkl"),
         }
 
         try:

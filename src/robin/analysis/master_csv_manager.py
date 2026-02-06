@@ -182,6 +182,7 @@ class MasterCSVManager:
             "analysis_panel": "",
             # Samples overview (persisted GUI table aggregates)
             "samples_overview_active_jobs": 0,
+            "samples_overview_pending_jobs": 0,
             "samples_overview_total_jobs": 0,
             "samples_overview_completed_jobs": 0,
             "samples_overview_failed_jobs": 0,
@@ -367,6 +368,7 @@ class MasterCSVManager:
 
         Expected keys in ``overview`` (all optional, defaults applied when missing):
           - active_jobs: int
+          - pending_jobs: int
           - total_jobs: int
           - completed_jobs: int
           - failed_jobs: int
@@ -384,6 +386,12 @@ class MasterCSVManager:
             existing_data["samples_overview_active_jobs"] = int(
                 overview.get(
                     "active_jobs", existing_data.get("samples_overview_active_jobs", 0)
+                )
+            )
+            existing_data["samples_overview_pending_jobs"] = int(
+                overview.get(
+                    "pending_jobs",
+                    existing_data.get("samples_overview_pending_jobs", 0),
                 )
             )
             existing_data["samples_overview_total_jobs"] = int(

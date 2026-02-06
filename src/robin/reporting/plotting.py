@@ -160,6 +160,61 @@ def target_distribution_plot(df):
     return buf
 
 
+def _create_empty_cnv_buffer():
+    """Create a minimal valid JPEG buffer for empty CNV plots."""
+    try:
+        plt.figure(figsize=(16, 4))
+        plt.text(0.5, 0.5, "No CNV data available", 
+                ha='center', va='center', transform=plt.gca().transAxes,
+                fontsize=14, color='gray')
+        plt.title("Copy Number Changes")
+        plt.axis('off')
+        
+        buf = io.BytesIO()
+        fig = plt.gcf()
+        plt.savefig(buf, format="jpg", dpi=300, bbox_inches="tight")
+        plt.close(fig)
+        buf.seek(0)
+        
+        # Validate buffer contains data
+        if buf.getvalue():
+            return buf
+        else:
+            raise ValueError("Empty buffer")
+    except Exception:
+        # If even this fails, create a minimal valid JPEG programmatically
+        try:
+            # Create a minimal 1x1 white JPEG
+            from PIL import Image as PILImage
+            img = PILImage.new('RGB', (1, 1), color='white')
+            buf = io.BytesIO()
+            img.save(buf, format='JPEG')
+            buf.seek(0)
+            return buf
+        except Exception:
+            # Last resort: return a minimal valid JPEG binary directly
+            # This is a valid 1x1 white JPEG
+            jpeg_bytes = bytes([
+                0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
+                0x01, 0x01, 0x00, 0x48, 0x00, 0x48, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43,
+                0x00, 0x08, 0x06, 0x06, 0x07, 0x06, 0x05, 0x08, 0x07, 0x07, 0x07, 0x09,
+                0x09, 0x08, 0x0A, 0x0C, 0x14, 0x0D, 0x0C, 0x0B, 0x0B, 0x0C, 0x19, 0x12,
+                0x13, 0x0F, 0x14, 0x1D, 0x1A, 0x1F, 0x1E, 0x1D, 0x1A, 0x1C, 0x1C, 0x20,
+                0x24, 0x2E, 0x27, 0x20, 0x22, 0x2C, 0x23, 0x1C, 0x1C, 0x28, 0x37, 0x29,
+                0x2C, 0x30, 0x31, 0x34, 0x34, 0x34, 0x1F, 0x27, 0x39, 0x3D, 0x38, 0x32,
+                0x3C, 0x2E, 0x33, 0x34, 0x32, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01,
+                0x00, 0x01, 0x01, 0x01, 0x11, 0x00, 0xFF, 0xC4, 0x00, 0x14, 0x00, 0x01,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x08, 0xFF, 0xC4, 0x00, 0x14, 0x10, 0x01, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00,
+                0xD2, 0xCF, 0x20, 0xFF, 0xD9
+            ])
+            buf = io.BytesIO(jpeg_bytes)
+            buf.seek(0)
+            return buf
+
+
 def create_CNV_plot(result, cnv_dict):
     """
     Creates a CNV plot.
@@ -171,71 +226,102 @@ def create_CNV_plot(result, cnv_dict):
     Returns:
         io.BytesIO: Buffer containing the plot image.
     """
-    set_modern_style()
+    try:
+        set_modern_style()
 
-    # Prepare data for plotting
-    plot_data = []
-    offset = 0
-    contig_centers = {}
+        # Check if result has CNV data
+        if not hasattr(result, 'cnv') or not result.cnv:
+            logger.warning("No CNV data available for plotting")
+            return _create_empty_cnv_buffer()
 
-    for contig, values in result.cnv.items():
-        if contig in ["chr" + str(i) for i in range(0, 23)] + ["chrX", "chrY"]:
-            start_offset = offset
-            for i, value in enumerate(values):
-                plot_data.append((contig, i + offset, value))
-            end_offset = offset + len(values) - 1
-            contig_centers[contig] = (
-                start_offset + end_offset
-            ) / 2  # Calculate central position
-            offset += len(values)  # Increase the offset for the next contig
+        # Prepare data for plotting
+        plot_data = []
+        offset = 0
+        contig_centers = {}
 
-    # Convert to DataFrame
-    df = pd.DataFrame(plot_data, columns=["Contig", "Position", "Value"])
-    df["Position_Corrected"] = df["Position"] * cnv_dict["bin_width"]
+        for contig, values in result.cnv.items():
+            if contig in ["chr" + str(i) for i in range(0, 23)] + ["chrX", "chrY"]:
+                start_offset = offset
+                for i, value in enumerate(values):
+                    plot_data.append((contig, i + offset, value))
+                end_offset = offset + len(values) - 1
+                contig_centers[contig] = (
+                    start_offset + end_offset
+                ) / 2  # Calculate central position
+                offset += len(values)  # Increase the offset for the next contig
 
-    # Calculate the mean and standard deviation of the 'Value' column
-    mean_value = df["Value"].mean()
-    std_value = df["Value"].std()
+        # Check if we have any data to plot
+        if not plot_data:
+            logger.warning("No plot data available for CNV plot")
+            return _create_empty_cnv_buffer()
 
-    # Calculate the threshold
-    threshold = mean_value + 5 * std_value
+        # Convert to DataFrame
+        df = pd.DataFrame(plot_data, columns=["Contig", "Position", "Value"])
+        df["Position_Corrected"] = df["Position"] * cnv_dict["bin_width"]
 
-    # Create scatter plot
-    width = 16
-    plt.figure(figsize=(width, width / 4))
-    sns.scatterplot(
-        data=df,
-        x="Position_Corrected",
-        y="Value",
-        hue="Contig",
-        palette="Set2",  # Modern color palette
-        legend=False,
-        s=2,
-        alpha=0.6,
-    )
+        # Calculate the mean and standard deviation of the 'Value' column
+        mean_value = df["Value"].mean()
+        std_value = df["Value"].std()
 
-    min_y = df["Value"].min()  # Minimum y-value
-    label_y_position = 4.5  # Position labels below the minimum y-value
+        # Calculate the threshold
+        threshold = mean_value + 5 * std_value
 
-    for contig, center in contig_centers.items():
-        plt.text(
-            center * cnv_dict["bin_width"],
-            label_y_position,
-            contig,
-            fontsize=12,
-            ha="center",
-            va="top",
-            rotation=45,
+        # Create scatter plot
+        width = 16
+        fig = plt.figure(figsize=(width, width / 4))
+        sns.scatterplot(
+            data=df,
+            x="Position_Corrected",
+            y="Value",
+            hue="Contig",
+            palette="Set2",  # Modern color palette
+            legend=False,
+            s=2,
+            alpha=0.6,
         )
 
-    plt.ylim(min_y, threshold)  # Set the y-axis limits
-    plt.title("Copy Number Changes")
-    plt.xlabel("Position")
-    plt.ylabel("Estimated ploidy")
-    buf = io.BytesIO()
-    plt.savefig(buf, format="jpg", dpi=300, bbox_inches="tight")
-    buf.seek(0)
-    return buf
+        min_y = df["Value"].min()  # Minimum y-value
+        label_y_position = 4.5  # Position labels below the minimum y-value
+
+        for contig, center in contig_centers.items():
+            plt.text(
+                center * cnv_dict["bin_width"],
+                label_y_position,
+                contig,
+                fontsize=12,
+                ha="center",
+                va="top",
+                rotation=45,
+            )
+
+        plt.ylim(min_y, threshold)  # Set the y-axis limits
+        plt.title("Copy Number Changes")
+        plt.xlabel("Position")
+        plt.ylabel("Estimated ploidy")
+        
+        # Save plot to bytes buffer with error handling
+        buf = io.BytesIO()
+        plt.savefig(buf, format="jpg", dpi=300, bbox_inches="tight")
+        plt.close(fig)
+        buf.seek(0)
+        
+        # Validate buffer contains data
+        if not buf.getvalue():
+            logger.warning("Empty buffer for CNV plot")
+            return _create_empty_cnv_buffer()
+        
+        # Validate it's a valid JPEG by checking magic bytes
+        buf_data = buf.getvalue()
+        if len(buf_data) < 2 or buf_data[:2] != b'\xff\xd8':
+            logger.warning("Invalid JPEG data for CNV plot")
+            return _create_empty_cnv_buffer()
+        
+        buf.seek(0)
+        return buf
+    except Exception as e:
+        logger.error(f"Error creating CNV plot: {str(e)}")
+        plt.close('all')
+        return _create_empty_cnv_buffer()
 
 
 def create_CNV_plot_per_chromosome(result, cnv_dict, significant_regions=None):
@@ -250,101 +336,130 @@ def create_CNV_plot_per_chromosome(result, cnv_dict, significant_regions=None):
     Returns:
         List[Tuple[str, io.BytesIO]]: List of tuples containing chromosome names and plot buffers.
     """
-    set_modern_style()
-
     plots = []
-    for contig, values in result.cnv.items():
-        if contig in ["chr" + str(i) for i in range(0, 23)] + ["chrX", "chrY"]:
-            # Calculate mean and standard deviation for this chromosome
-            values_array = np.array(values)
-            mean_cnv = np.mean(values_array)
-            std_cnv = np.std(values_array)
+    try:
+        set_modern_style()
 
-            # Set y-axis limits based on mean and standard deviation
-            y_min = 0
-            y_max = mean_cnv + (2 * std_cnv)
+        # Check if result has CNV data
+        if not hasattr(result, 'cnv') or not result.cnv:
+            logger.warning("No CNV data available for per-chromosome plotting")
+            return plots
 
-            # Calculate positions in megabases
-            positions = (
-                np.arange(len(values)) * cnv_dict["bin_width"] / 1_000_000
-            )  # Convert to Mb
+        for contig, values in result.cnv.items():
+            if contig in ["chr" + str(i) for i in range(0, 23)] + ["chrX", "chrY"]:
+                # Calculate mean and standard deviation for this chromosome
+                values_array = np.array(values)
+                mean_cnv = np.mean(values_array)
+                std_cnv = np.std(values_array)
 
-            plt.figure(figsize=(4, 2))
+                # Set y-axis limits based on mean and standard deviation
+                y_min = 0
+                y_max = mean_cnv + (2 * std_cnv)
 
-            # If we have significant regions for this chromosome, highlight them
-            if significant_regions and contig in significant_regions:
-                for region in significant_regions[contig]:
-                    start_mb = region["start_pos"] / 1_000_000  # Convert to Mb
-                    end_mb = region["end_pos"] / 1_000_000  # Convert to Mb
+                # Calculate positions in megabases
+                positions = (
+                    np.arange(len(values)) * cnv_dict["bin_width"] / 1_000_000
+                )  # Convert to Mb
 
-                    # Choose color based on type
-                    color = (
-                        "#e8f5e9" if region["type"] == "GAIN" else "#ffebee"
-                    )  # Light green for gains, light red for losses
-                    alpha = 0.3
+                plt.figure(figsize=(4, 2))
 
-                    # Add shaded region
-                    plt.axvspan(start_mb, end_mb, color=color, alpha=alpha, zorder=1)
+                # If we have significant regions for this chromosome, highlight them
+                if significant_regions and contig in significant_regions:
+                    for region in significant_regions[contig]:
+                        start_mb = region["start_pos"] / 1_000_000  # Convert to Mb
+                        end_mb = region["end_pos"] / 1_000_000  # Convert to Mb
 
-                    # Add cytoband label with background
-                    mid_point = (start_mb + end_mb) / 2
-                    y_pos = y_max - (0.1 * (y_max - y_min))  # Position near the top
+                        # Choose color based on type
+                        color = (
+                            "#e8f5e9" if region["type"] == "GAIN" else "#ffebee"
+                        )  # Light green for gains, light red for losses
+                        alpha = 0.3
 
-                    # Create background box for text
-                    bbox_props = dict(
-                        boxstyle="round,pad=0.3",
-                        fc="white",
-                        ec=color.replace("e8", "a5").replace(
-                            "ff", "ef"
-                        ),  # Darker version of highlight color
-                        alpha=0.8,
-                    )
+                        # Add shaded region
+                        plt.axvspan(start_mb, end_mb, color=color, alpha=alpha, zorder=1)
 
-                    # Add text with background
-                    plt.text(
-                        mid_point,
-                        y_pos,
-                        region.get("name", ""),  # Add cytoband name if available
-                        fontsize=8,
-                        fontweight="bold",
-                        ha="center",
-                        va="center",
-                        bbox=bbox_props,
-                        zorder=4,
-                    )
+                        # Add cytoband label with background
+                        mid_point = (start_mb + end_mb) / 2
+                        y_pos = y_max - (0.1 * (y_max - y_min))  # Position near the top
 
-            # Plot CNV data points on top of highlighted regions
-            sns.scatterplot(
-                x=positions,
-                y=values,
-                s=2,
-                color=MODERN_COLORS["accent"],
-                alpha=0.6,
-                zorder=2,
-            )
+                        # Create background box for text
+                        bbox_props = dict(
+                            boxstyle="round,pad=0.3",
+                            fc="white",
+                            ec=color.replace("e8", "a5").replace(
+                                "ff", "ef"
+                            ),  # Darker version of highlight color
+                            alpha=0.8,
+                        )
 
-            plt.xlabel("Position (Mb)")
-            plt.ylabel("Estimated Ploidy")
-            plt.ylim(y_min, y_max)
+                        # Add text with background
+                        plt.text(
+                            mid_point,
+                            y_pos,
+                            region.get("name", ""),  # Add cytoband name if available
+                            fontsize=8,
+                            fontweight="bold",
+                            ha="center",
+                            va="center",
+                            bbox=bbox_props,
+                            zorder=4,
+                        )
 
-            # Add horizontal lines for mean and standard deviations
-            plt.axhline(y=mean_cnv, color="gray", linestyle="--", alpha=0.5, zorder=3)
-            plt.axhline(
-                y=mean_cnv + std_cnv, color="gray", linestyle=":", alpha=0.3, zorder=3
-            )
-            plt.axhline(
-                y=mean_cnv + (2 * std_cnv),
-                color="gray",
-                linestyle=":",
-                alpha=0.3,
-                zorder=3,
-            )
+                # Plot CNV data points on top of highlighted regions
+                sns.scatterplot(
+                    x=positions,
+                    y=values,
+                    s=2,
+                    color=MODERN_COLORS["accent"],
+                    alpha=0.6,
+                    zorder=2,
+                )
 
-            buf = io.BytesIO()
-            plt.savefig(buf, format="jpg", dpi=300, bbox_inches="tight")
-            buf.seek(0)
-            plots.append((contig, buf))
-            plt.close()
+                plt.xlabel("Position (Mb)")
+                plt.ylabel("Estimated Ploidy")
+                plt.ylim(y_min, y_max)
+
+                # Add horizontal lines for mean and standard deviations
+                plt.axhline(y=mean_cnv, color="gray", linestyle="--", alpha=0.5, zorder=3)
+                plt.axhline(
+                    y=mean_cnv + std_cnv, color="gray", linestyle=":", alpha=0.3, zorder=3
+                )
+                plt.axhline(
+                    y=mean_cnv + (2 * std_cnv),
+                    color="gray",
+                    linestyle=":",
+                    alpha=0.3,
+                    zorder=3,
+                )
+
+                try:
+                    buf = io.BytesIO()
+                    fig = plt.gcf()
+                    plt.savefig(buf, format="jpg", dpi=300, bbox_inches="tight")
+                    plt.close(fig)
+                    buf.seek(0)
+                    
+                    # Validate buffer contains data
+                    if not buf.getvalue():
+                        logger.warning(f"Empty buffer for chromosome {contig} CNV plot")
+                        continue
+                    
+                    # Validate it's a valid JPEG by checking magic bytes
+                    buf_data = buf.getvalue()
+                    if len(buf_data) < 2 or buf_data[:2] != b'\xff\xd8':
+                        logger.warning(f"Invalid JPEG data for chromosome {contig} CNV plot")
+                        continue
+                    
+                    buf.seek(0)
+                    plots.append((contig, buf))
+                except Exception as e:
+                    logger.error(f"Error creating CNV plot for chromosome {contig}: {str(e)}")
+                    plt.close('all')
+                    continue
+
+    except Exception as e:
+        logger.error(f"Error in create_CNV_plot_per_chromosome: {str(e)}")
+        plt.close('all')
 
     return plots
 

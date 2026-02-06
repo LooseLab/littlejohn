@@ -27,6 +27,37 @@ logger = logging.getLogger(__name__)
 class ClassificationSection(ReportSection):
     """Section containing the methylation classification results."""
 
+    def _create_empty_plot_buffer(self):
+        """Create a minimal valid PNG buffer for empty plots."""
+        try:
+            plt.figure(figsize=(8, 5), facecolor="white")
+            plt.text(0.5, 0.5, "No data available", 
+                    ha='center', va='center', transform=plt.gca().transAxes,
+                    fontsize=14, color='gray')
+            plt.title("Classification Plot")
+            plt.axis('off')
+            
+            buf = io.BytesIO()
+            plt.savefig(buf, format="png", dpi=300, bbox_inches="tight", facecolor="white")
+            plt.close()
+            buf.seek(0)
+            
+            # Validate buffer contains data
+            if buf.getvalue():
+                return buf
+            else:
+                raise ValueError("Empty buffer")
+        except Exception:
+            # If even this fails, return a minimal PNG
+            import base64
+            # Minimal 1x1 transparent PNG
+            png_data = base64.b64decode(
+                'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
+            )
+            buf = io.BytesIO(png_data)
+            buf.seek(0)
+            return buf
+
     def _create_time_plot(self, df, classifier_name):
         """Create a time series plot for classifier predictions.
 
@@ -37,126 +68,156 @@ class ClassificationSection(ReportSection):
         Returns:
             BytesIO object containing the plot image
         """
-        # Drop non-classification columns
-        df = df.drop(columns=["number_probes"]) if "number_probes" in df.columns else df
+        try:
+            # Drop non-classification columns
+            df = df.drop(columns=["number_probes"]) if "number_probes" in df.columns else df
 
-        # Convert confidence values to percentages if not already
-        if (
-            classifier_name != "Random Forest"
-        ):  # Random Forest is already in percentages
-            df = df * 100
+            # Check if dataframe is empty or has no data
+            if df.empty or len(df) == 0:
+                logger.warning(f"Empty dataframe for {classifier_name} time series plot")
+                return self._create_empty_plot_buffer()
 
-        # Get top classifications (those that exceed 5% at any point)
-        threshold = 5
-        top_classes = df.columns[df.max() > threshold]
+            # Convert confidence values to percentages if not already
+            if (
+                classifier_name != "Random Forest"
+            ):  # Random Forest is already in percentages
+                df = df * 100
 
-        # Get current highest confidence for subtitle
-        last_row = df.iloc[-1]
-        top_prediction = last_row.sort_values(ascending=False).head(1)
-        predicted_class = top_prediction.index[0]
-        confidence_value = float(top_prediction.values[0])
+            # Get top classifications (those that exceed 5% at any point)
+            threshold = 5
+            top_classes = df.columns[df.max() > threshold]
 
-        # Create the plot with white background and adjusted figure size for better spacing
-        plt.figure(
-            figsize=(8, 5), facecolor="white"
-        )  # Increased height for better spacing
-        ax = plt.gca()
-        ax.set_facecolor("white")
+            # Check if we have any classes to plot
+            if len(top_classes) == 0:
+                logger.warning(f"No classes above threshold for {classifier_name} time series plot")
+                return self._create_empty_plot_buffer()
 
-        # Website-like colors - extended for more classes
-        colors = {
-            # Sturgeon colors
-            "Embryonal - HGNET - BCOR": "#34C759",  # Green
-            "Ependymal - EPN - PF B": "#FF9500",  # Orange
-            "Ependymal - EPN - RELA": "#FF2D55",  # Red
-            # Additional colors for other classifications
-            "color4": "#007AFF",  # Blue
-            "color5": "#5856D6",  # Purple
-            "color6": "#FF3B30",  # Red-Orange
-            "color7": "#5AC8FA",  # Light Blue
-            "color8": "#4CD964",  # Light Green
-        }
+            # Get current highest confidence for subtitle
+            last_row = df.iloc[-1]
+            top_prediction = last_row.sort_values(ascending=False).head(1)
+            predicted_class = top_prediction.index[0]
+            confidence_value = float(top_prediction.values[0])
 
-        # Convert index to datetime
-        df.index = pd.to_datetime(df.index, unit="ms")
+            # Create the plot with white background and adjusted figure size for better spacing
+            fig = plt.figure(
+                figsize=(8, 5), facecolor="white"
+            )  # Increased height for better spacing
+            ax = plt.gca()
+            ax.set_facecolor("white")
 
-        # Plot each classification
-        for idx, column in enumerate(top_classes):
-            # Get color from map or use from additional colors
-            if column in colors:
-                color = colors[column]
-            else:
-                color = colors[
-                    f"color{(idx % 5) + 4}"
-                ]  # Cycle through additional colors
+            # Website-like colors - extended for more classes
+            colors = {
+                # Sturgeon colors
+                "Embryonal - HGNET - BCOR": "#34C759",  # Green
+                "Ependymal - EPN - PF B": "#FF9500",  # Orange
+                "Ependymal - EPN - RELA": "#FF2D55",  # Red
+                # Additional colors for other classifications
+                "color4": "#007AFF",  # Blue
+                "color5": "#5856D6",  # Purple
+                "color6": "#FF3B30",  # Red-Orange
+                "color7": "#5AC8FA",  # Light Blue
+                "color8": "#4CD964",  # Light Green
+            }
 
-            plt.plot(
-                df.index,
-                df[column],
-                "o-",  # Line with circles
-                label=column,
-                color=color,
-                linewidth=1,
-                markersize=3,
-                markeredgewidth=0,
+            # Convert index to datetime
+            df.index = pd.to_datetime(df.index, unit="ms")
+
+            # Plot each classification
+            for idx, column in enumerate(top_classes):
+                # Get color from map or use from additional colors
+                if column in colors:
+                    color = colors[column]
+                else:
+                    color = colors[
+                        f"color{(idx % 5) + 4}"
+                    ]  # Cycle through additional colors
+
+                plt.plot(
+                    df.index,
+                    df[column],
+                    "o-",  # Line with circles
+                    label=column,
+                    color=color,
+                    linewidth=1,
+                    markersize=3,
+                    markeredgewidth=0,
+                )
+
+            # Add title and subtitle with better spacing
+            plt.suptitle(
+                f"{classifier_name} Classification Confidence Over Time",
+                y=0.95,
+                fontsize=10,
+            )
+            plt.title(
+                f"Current highest confidence: {predicted_class} ({confidence_value:.1f}%)",
+                pad=10,
+                fontsize=9,
             )
 
-        # Add title and subtitle with better spacing
-        plt.suptitle(
-            f"{classifier_name} Classification Confidence Over Time",
-            y=0.95,
-            fontsize=10,
-        )
-        plt.title(
-            f"Current highest confidence: {predicted_class} ({confidence_value:.1f}%)",
-            pad=10,
-            fontsize=9,
-        )
+            # Format x-axis to show HH:MM
+            ax.xaxis.set_major_formatter(matplotlib.dates.DateFormatter("%H:%M"))
+            plt.xlabel("Time", fontsize=9, labelpad=5)
 
-        # Format x-axis to show HH:MM
-        ax.xaxis.set_major_formatter(matplotlib.dates.DateFormatter("%H:%M"))
-        plt.xlabel("Time", fontsize=9, labelpad=5)
+            # Format y-axis with better spacing
+            plt.ylabel("Confidence (%)", fontsize=9, labelpad=10)
+            ax.yaxis.set_major_formatter(matplotlib.ticker.PercentFormatter(decimals=0))
 
-        # Format y-axis with better spacing
-        plt.ylabel("Confidence (%)", fontsize=9, labelpad=10)
-        ax.yaxis.set_major_formatter(matplotlib.ticker.PercentFormatter(decimals=0))
+            # Customize grid
+            plt.grid(True, linestyle="--", alpha=0.2)
 
-        # Customize grid
-        plt.grid(True, linestyle="--", alpha=0.2)
+            # Set axis ranges
+            plt.ylim(0, 100)
 
-        # Set axis ranges
-        plt.ylim(0, 100)
+            # Customize legend with better positioning
+            plt.legend(
+                bbox_to_anchor=(0, 1.15, 1, 0),
+                loc="lower left",
+                mode="expand",
+                ncol=3,
+                fontsize=8,
+                frameon=False,
+                markerscale=2,
+            )
 
-        # Customize legend with better positioning
-        plt.legend(
-            bbox_to_anchor=(0, 1.15, 1, 0),
-            loc="lower left",
-            mode="expand",
-            ncol=3,
-            fontsize=8,
-            frameon=False,
-            markerscale=2,
-        )
+            # Remove spines
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.spines["left"].set_alpha(0.2)
+            ax.spines["bottom"].set_alpha(0.2)
 
-        # Remove spines
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        ax.spines["left"].set_alpha(0.2)
-        ax.spines["bottom"].set_alpha(0.2)
+            # Adjust tick parameters
+            ax.tick_params(axis="both", labelsize=8)
+            plt.xticks(rotation=0)
 
-        # Adjust tick parameters
-        ax.tick_params(axis="both", labelsize=8)
-        plt.xticks(rotation=0)
+            # Adjust layout to prevent label cutoff - use constrained layout instead of subplots_adjust
+            plt.tight_layout()
 
-        # Adjust layout to prevent label cutoff - use constrained layout instead of subplots_adjust
-        plt.tight_layout()
-
-        # Save plot to bytes buffer with high DPI for crisp rendering
-        buf = io.BytesIO()
-        plt.savefig(buf, format="png", dpi=300, bbox_inches="tight", facecolor="white")
-        plt.close()
-        buf.seek(0)
-        return buf
+            # Save plot to bytes buffer with high DPI for crisp rendering
+            buf = io.BytesIO()
+            plt.savefig(buf, format="png", dpi=300, bbox_inches="tight", facecolor="white")
+            plt.close(fig)
+            buf.seek(0)
+            
+            # Validate buffer contains valid image data
+            if not buf.getvalue():
+                logger.warning(f"Empty buffer for {classifier_name} time series plot")
+                return self._create_empty_plot_buffer()
+            
+            # Try to validate it's a valid PNG by checking magic bytes
+            buf_data = buf.getvalue()
+            if len(buf_data) < 8 or buf_data[:8] != b'\x89PNG\r\n\x1a\n':
+                logger.warning(f"Invalid PNG data for {classifier_name} time series plot")
+                return self._create_empty_plot_buffer()
+            
+            # Reset buffer position after validation
+            buf.seek(0)
+            return buf
+            
+        except Exception as e:
+            logger.error(f"Error creating {classifier_name} time series plot: {str(e)}")
+            plt.close('all')  # Close any open figures
+            return self._create_empty_plot_buffer()
 
     def add_content(self):
         """Add the classification content to the report."""
@@ -282,6 +343,48 @@ class ClassificationSection(ReportSection):
             summary_table = self.create_table(summary_data, repeat_rows=1)
             self.summary_elements.append(summary_table)
             self.elements.append(Spacer(1, 12))
+
+        # Add MNP-Flex hierarchical summary (if available)
+        try:
+            from robin.reporting.sections.mnpflex import MNPFlexSection
+
+            mnpflex = MNPFlexSection(self.report)
+            results_dir = mnpflex._find_results_dir()
+            if results_dir:
+                summary = mnpflex._load_bundle_summary(results_dir)
+            else:
+                summary = None
+            classifier_summary = (summary or {}).get("classifier_summary", {}) or {}
+            hierarchy = classifier_summary.get("summary_hierarchical", []) or []
+            if hierarchy:
+                self.elements.append(
+                    Paragraph("MNP-Flex Hierarchical Summary", self.styles.styles["Heading3"])
+                )
+                self.elements.append(Spacer(1, 6))
+                flat = mnpflex._flatten_hierarchy(hierarchy)
+                if flat:
+                    best_score, best_path = max(flat, key=lambda x: x[0] or 0)
+                    self.elements.append(
+                        Paragraph(
+                            f"<b>Top path</b>: {' > '.join(best_path)} "
+                            f"({mnpflex._format_score(best_score)})",
+                            self.styles.styles["Normal"],
+                        )
+                    )
+                    self.elements.append(Spacer(1, 6))
+                table_rows = [["Group", "Score", "Description"]]
+                for node in hierarchy:
+                    table_rows.append(
+                        [
+                            node.get("group", "Unknown"),
+                            mnpflex._format_score(node.get("score")),
+                            mnpflex._collect_descriptions(node),
+                        ]
+                    )
+                self.elements.append(self.create_table(table_rows))
+                self.elements.append(Spacer(1, 12))
+        except Exception as e:
+            logger.error(f"Error adding MNP-Flex hierarchy to classification section: {e}")
             # Export summary as DataFrame
             try:
                 # Strip HTML tags from Status for CSV, keep plain text

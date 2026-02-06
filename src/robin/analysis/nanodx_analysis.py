@@ -248,9 +248,7 @@ class NanodxAnalysis:
 
         if models is not None:
             try:
-                model_path = os.path.join(
-                    os.path.dirname(os.path.abspath(models.__file__)), self.model
-                )
+                model_path = str(models.DIR / self.model)
                 if os.path.exists(model_path):
                     return model_path
             except Exception:

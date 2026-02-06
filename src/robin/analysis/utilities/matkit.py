@@ -642,6 +642,7 @@ PLUS_STRAND = "+"
 MINUS_STRAND = "-"
 COLOR_VALUE = "255,0,0"
 CANONICAL_CODE = "C"
+COMBINED_MOD_CODE = "m"
 
 
 def run_matkit(sortfile: str, temp: str) -> None:
@@ -1091,12 +1092,12 @@ def process_bam_counts_improved(
                         read_sites[site_key][mod_code] = []
                     read_sites[site_key][mod_code].append(prob)
                     # Track this as a modkit output site
-                    mod_sites.add((chrom, refpos, strand, CANONICAL_CODE))
+                    mod_sites.add((chrom, refpos, strand, COMBINED_MOD_CODE))
 
             # Process each site for this read
             for (refpos, strand), mod_probs in read_sites.items():
                 # Update counts directly - each read contributes once per site
-                site_key = (chrom, refpos, strand, CANONICAL_CODE)
+                site_key = (chrom, refpos, strand, COMBINED_MOD_CODE)
                 if site_key not in counts:
                     counts[site_key] = DEFAULT_COUNT_DICT.copy()
 

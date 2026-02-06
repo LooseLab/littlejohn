@@ -183,10 +183,11 @@ robin workflow ~/data/bam_files \
 ## Known Issues
 
 1. Currently SNP calling is not enabled in this version of ROBIN. It will be re-enabled in the near future.
-2. CNV change inference is based on extensive heuristics - every call should be checked by visual inspection.
-3. If you ctrl-c to end ROBIN it will do its best to clean up and stop gracefully but may fail.
-4. CSV data export is in development but is not currently available - it will be enabled in the near future.
-5. Many other unknown issues - please open an issue and we will resolve where possible.
+1. CNV change inference is based on extensive heuristics - every call should be checked by visual inspection.
+1. If you ctrl-c to quit ROBIN it will do its best to clean up and stop gracefully but may fail.
+1. CSV data export is in development but is not currently available - it will be enabled in the near future.
+1. If you wish to reanalyse a data set you must remove the exsiting result in the robin output folder.
+1. Many other unknown issues - please open an issue and we will resolve where possible.
 
 ## Available Commands
 

@@ -129,11 +129,71 @@ def locus_figure(
     # Final safeguard: ensure all argv entries are plain strings
     argv = [str(a) for a in argv]
 
-    # Check if BAM file is indexed before calling methylartist
+    # Check if BAM file is indexed and the index is valid before calling methylartist
     import os
+    import pysam
+    import logging
+    
     bai_path = f"{bam_path}.bai"
     if not os.path.exists(bai_path):
         raise RuntimeError(f"BAM file is not indexed: {bam_path}. Index file (.bai) not found.")
+    
+    # Check if index file has content (not empty)
+    try:
+        bai_size = os.path.getsize(bai_path)
+        if bai_size == 0:
+            raise RuntimeError(
+                f"BAM index file is empty: {bai_path}. "
+                f"The index file exists but has no content. "
+                f"This may indicate the index creation was interrupted. "
+                f"Try regenerating the index."
+            )
+    except OSError as e:
+        logging.warning(f"[MGMT] Could not check index file size: {bai_path} - {e}")
+        # Continue anyway - might be a permission issue
+    
+    # Verify the index is actually readable and valid
+    try:
+        with pysam.AlignmentFile(bam_path, "rb") as test_bam:
+            # Try to access the header first
+            _ = test_bam.header
+            
+            # Verify file has references
+            if not test_bam.references:
+                raise RuntimeError(
+                    f"BAM file has no references: {bam_path}. "
+                    f"The file may be empty or corrupted."
+                )
+            
+            # Verify the index is actually readable
+            try:
+                test_bam.check_index()
+            except AttributeError:
+                # Older pysam versions might not have check_index
+                # Try to actually use the index by fetching a small region
+                first_chrom = test_bam.references[0]
+                # Try fetching a small region - this will fail if index is invalid
+                list(test_bam.fetch(first_chrom, 0, min(1000, test_bam.get_reference_length(first_chrom) or 1000)))
+            except Exception as idx_error:
+                logging.warning(f"[MGMT] BAM index exists but is not readable: {bai_path} - {idx_error}")
+                raise RuntimeError(
+                    f"BAM file index is invalid or corrupted: {bam_path}. "
+                    f"The index file exists but cannot be read. "
+                    f"Error: {idx_error}. "
+                    f"This may indicate the index is incomplete or corrupted. "
+                    f"Try regenerating the index with: pysam.index('{bam_path}')"
+                )
+    except RuntimeError:
+        # Re-raise our custom RuntimeError
+        raise
+    except Exception as e:
+        # Other errors (file not readable, etc.)
+        logging.warning(f"[MGMT] Failed to validate BAM index: {bam_path} - {e}")
+        raise RuntimeError(
+            f"BAM file index validation failed: {bam_path}. "
+            f"Error: {e}. "
+            f"The index file exists but may be invalid or the BAM file may be corrupted."
+        )
 
     captured = {"fig": None}
 
@@ -145,14 +205,78 @@ def locus_figure(
         try:
             runpy.run_path(cli, run_name="__main__")
         except SystemExit as e:
-            # Convert SystemExit to RuntimeError for better error handling
-            error_msg = str(e) if str(e) else "methylartist exited unexpectedly"
-            raise RuntimeError(f"methylartist failed: {error_msg}")
+            # SystemExit(0) is normal for successful completion
+            # Only raise error if exit code is non-zero
+            exit_code = e.code if hasattr(e, 'code') else 0
+            if exit_code != 0:
+                error_msg = str(e) if str(e) else f"methylartist exited with code {exit_code}"
+                raise RuntimeError(f"methylartist failed: {error_msg}")
 
-    if captured["fig"] is None:
-        raise RuntimeError("methylartist locus did not produce a figure.")
-
+    # Try to get figure from capture first
     fig = captured["fig"]
+    
+    # Fallback: if savefig wasn't called, try to get the figure from matplotlib's figure manager
+    if fig is None:
+        import matplotlib.pyplot as plt
+        import logging
+        
+        # Try to get the current figure
+        try:
+            # Get all figure numbers
+            figure_numbers = plt.get_fignums()
+            if figure_numbers:
+                # Get the most recent figure (highest number)
+                latest_fig_num = max(figure_numbers)
+                fig = plt.figure(latest_fig_num)
+                logging.debug(f"[MGMT] Captured figure from matplotlib figure manager (figure {latest_fig_num})")
+            else:
+                # Try to get current figure (might be None)
+                fig = plt.gcf()
+                if fig and len(fig.get_axes()) > 0:
+                    logging.debug(f"[MGMT] Captured current figure from matplotlib")
+                else:
+                    fig = None
+        except Exception as e:
+            logging.debug(f"[MGMT] Failed to get figure from matplotlib figure manager: {e}")
+            fig = None
+    
+    if fig is None:
+        # Provide more helpful error message
+        import logging
+        logging.error(f"[MGMT] methylartist locus did not produce a figure. "
+                     f"BAM: {bam_path}, Interval: {interval}")
+        raise RuntimeError(
+            f"methylartist locus did not produce a figure. "
+            f"This may indicate that the BAM file has no reads in the specified interval "
+            f"({interval}) or methylartist encountered an error. "
+            f"Check that the BAM file contains methylation data (MM/ML tags) for this region."
+        )
+    
+    # Verify the figure has content (axes with data)
+    try:
+        axes = fig.get_axes()
+        if not axes:
+            import logging
+            logging.warning(f"[MGMT] Figure has no axes - methylartist may have produced an empty figure")
+            # Still return the figure - let the caller handle empty figures
+        else:
+            # Check if at least one axis has data
+            has_data = False
+            for ax in axes:
+                if hasattr(ax, 'has_data') and ax.has_data():
+                    has_data = True
+                    break
+                # Check if axis has any artists (lines, patches, etc.)
+                if len(ax.get_children()) > 0:
+                    has_data = True
+                    break
+            if not has_data:
+                import logging
+                logging.debug(f"[MGMT] Figure axes exist but contain no data - this may indicate no reads in interval")
+    except Exception as e:
+        import logging
+        logging.debug(f"[MGMT] Could not verify figure content: {e}")
+        # Continue anyway - figure might still be valid
 
     # Always add MGMT CpG site annotations if we're in the MGMT interval
     # Check if interval matches MGMT region (chr10:129466536-129467536)

@@ -1429,6 +1429,339 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 }
             ).classes("w-full h-64")
 
+        # Target Coverage Over Time Analysis
+        with ui.card().classes("w-full mt-4"):
+            ui.label("📈 Target Coverage Over Time Analysis").classes("text-lg font-semibold mb-2")
+            ui.label(
+                "Analyze mean target coverage over time and identify significant outliers. "
+                "Outliers are detected using standard deviation method: values more than 2 SD above or below the mean for each gene."
+            ).classes("text-sm text-gray-600 mb-4")
+            
+            def _get_coverage_state():
+                key = str(sample_dir)
+                if hasattr(launcher, "_coverage_state"):
+                    if key not in launcher._coverage_state:
+                        launcher._coverage_state[key] = {}
+                    return launcher._coverage_state[key]
+                launcher._coverage_state = {}
+                launcher._coverage_state[key] = {}
+                return launcher._coverage_state[key]
+            
+            coverage_state = _get_coverage_state()
+            stored_outlier_limit = coverage_state.get("target_cov_outlier_limit", 10)
+            try:
+                stored_outlier_limit = int(stored_outlier_limit)
+            except (TypeError, ValueError):
+                stored_outlier_limit = 10
+
+            # Chart container
+            target_coverage_time_chart_state = {"container": None, "chart": None}
+            outlier_limit_state = {"value": max(1, stored_outlier_limit)}
+            
+            def _plot_target_coverage_over_time():
+                """Load target_coverage_time.csv and plot mean coverage with outlier detection"""
+                try:
+                    time_coverage_file = sample_dir / "target_coverage_time.csv"
+                    if not time_coverage_file.exists():
+                        if target_coverage_time_chart_state["container"]:
+                            with target_coverage_time_chart_state["container"]:
+                                ui.label("No target_coverage_time.csv file found.").classes("text-gray-600")
+                        return
+                    
+                    # Load data
+                    df = pd.read_csv(time_coverage_file)
+                    if df.empty:
+                        if target_coverage_time_chart_state["container"]:
+                            with target_coverage_time_chart_state["container"]:
+                                ui.label("No data available in target_coverage_time.csv").classes("text-gray-600")
+                        return
+                    
+                    # Convert timestamp to datetime (milliseconds to datetime)
+                    df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+                    
+                    # Calculate mean coverage per timepoint
+                    mean_coverage = df.groupby('timestamp')['coverage'].mean().reset_index()
+                    mean_coverage['datetime'] = pd.to_datetime(mean_coverage['timestamp'], unit='ms')
+                    
+                    # Calculate mean reads_per_length per timepoint
+                    mean_reads_per_length = df.groupby('timestamp')['reads_per_length'].mean().reset_index()
+                    mean_reads_per_length['datetime'] = pd.to_datetime(mean_reads_per_length['timestamp'], unit='ms')
+                    
+                    # Detect outliers using standard deviation method (Z-score)
+                    def detect_outliers_sd(series, num_sd=2.0):
+                        """Detect outliers using standard deviation method (Z-score)
+                        
+                        Args:
+                            series: Pandas Series of values
+                            num_sd: Number of standard deviations from mean (default: 2.0)
+                        
+                        Returns:
+                            Boolean Series indicating which values are outliers
+                        """
+                        mean = series.mean()
+                        std = series.std()
+                        
+                        # Handle case where std is 0 (all values are the same)
+                        if std == 0:
+                            return pd.Series([False] * len(series), index=series.index)
+                        
+                        lower_bound = mean - num_sd * std
+                        upper_bound = mean + num_sd * std
+                        return (series < lower_bound) | (series > upper_bound)
+                    
+                    # Detect outliers: compare each gene's coverage to the distribution of ALL genes
+                    # This detects genes that are outliers compared to other genes, not just timepoints
+                    outliers = []
+                    
+                    # Calculate global statistics across all genes at each timepoint
+                    # This allows us to detect genes that are outliers relative to the population
+                    for timestamp in df['timestamp'].unique():
+                        timepoint_data = df[df['timestamp'] == timestamp].copy()
+                        if len(timepoint_data) < 3:  # Need at least 3 genes to calculate SD
+                            continue
+                        
+                        # Calculate mean and SD across all genes at this timepoint
+                        global_mean = timepoint_data['coverage'].mean()
+                        global_std = timepoint_data['coverage'].std()
+                        
+                        if global_std == 0:  # All genes have same coverage
+                            continue
+                        
+                        # Detect outliers: genes > 2 SD from global mean at this timepoint
+                        lower_bound = global_mean - 2.0 * global_std
+                        upper_bound = global_mean + 2.0 * global_std
+                        
+                        outlier_mask = (timepoint_data['coverage'] < lower_bound) | (timepoint_data['coverage'] > upper_bound)
+                        outlier_points = timepoint_data[outlier_mask]
+                        
+                        for _, row in outlier_points.iterrows():
+                            outliers.append({
+                                'gene': row['name'],
+                                'timestamp': row['timestamp'],
+                                'datetime': row['datetime'],
+                                'coverage': row['coverage'],
+                                'reads': row['reads'],
+                                'reads_per_length': row['reads_per_length'],
+                                'type': 'high' if row['coverage'] > global_mean else 'low',
+                                'global_mean': global_mean,
+                                'global_std': global_std
+                            })
+                    
+                    outliers_df = pd.DataFrame(outliers) if outliers else pd.DataFrame()
+                    
+                    # Identify unique outlier genes (genes that are outliers at any timepoint)
+                    outlier_genes = set()
+                    if not outliers_df.empty:
+                        outlier_genes = set(outliers_df['gene'].unique())
+                    
+                    try:
+                        outlier_limit = int(outlier_limit_state["value"])
+                    except (TypeError, ValueError):
+                        outlier_limit = 10
+                    outlier_limit = max(1, outlier_limit)
+                    
+                    # Prepare data for ECharts
+                    # Mean coverage series
+                    mean_coverage_data = [
+                        [int(ts), float(cov)] 
+                        for ts, cov in zip(mean_coverage['timestamp'], mean_coverage['coverage'])
+                    ]
+                    
+                    # Mean reads_per_length series
+                    mean_reads_data = [
+                        [int(ts), float(rpl)] 
+                        for ts, rpl in zip(mean_reads_per_length['timestamp'], mean_reads_per_length['reads_per_length'])
+                    ]
+                    
+                    # Plot full time series profiles for outlier genes
+                    outlier_gene_series = []
+                    sorted_outlier_genes = []  # Initialize for use in legend
+                    if outlier_genes:
+                        # Get color palette for outlier genes
+                        import colorsys
+                        num_outliers = len(outlier_genes)
+                        colors = []
+                        for i in range(num_outliers):
+                            hue = i / max(num_outliers, 1)
+                            rgb = colorsys.hsv_to_rgb(hue, 0.8, 0.9)
+                            colors.append(f"rgb({int(rgb[0]*255)},{int(rgb[1]*255)},{int(rgb[2]*255)})")
+                        
+                        # Sort outlier genes by maximum coverage (to prioritize high outliers)
+                        outlier_gene_max_coverage = df[df['name'].isin(outlier_genes)].groupby('name')['coverage'].max().sort_values(ascending=False)
+                        sorted_outlier_genes = outlier_gene_max_coverage.index.tolist()
+                        
+                        # Limit outlier genes to avoid clutter
+                        genes_to_plot = sorted_outlier_genes[:outlier_limit]
+                        
+                        for idx, gene in enumerate(genes_to_plot):
+                            gene_data = df[df['name'] == gene].copy()
+                            if len(gene_data) < 2:  # Need at least 2 points for a line
+                                continue
+                            
+                            # Sort by timestamp
+                            gene_data = gene_data.sort_values('timestamp')
+                            
+                            # Prepare time series data
+                            gene_series_data = [
+                                [int(ts), float(cov)] 
+                                for ts, cov in zip(gene_data['timestamp'], gene_data['coverage'])
+                            ]
+                            
+                            # Determine if this is primarily a high or low outlier
+                            is_high_outlier = outliers_df[outliers_df['gene'] == gene]['type'].value_counts().get('high', 0) > \
+                                             outliers_df[outliers_df['gene'] == gene]['type'].value_counts().get('low', 0)
+                            
+                            outlier_gene_series.append({
+                                "name": gene,
+                                "type": "line",
+                                "smooth": True,
+                                "data": gene_series_data,
+                                "yAxisIndex": 0,
+                                "symbol": "none",
+                                "itemStyle": {"color": colors[idx % len(colors)]},
+                                "lineStyle": {"width": 2, "type": "dashed" if not is_high_outlier else "solid"},
+                                "label": {
+                                    "show": False
+                                },
+                                "labelLayout": {
+                                    "hideOverlap": True
+                                },
+                                "emphasis": {
+                                    "focus": "series"
+                                }
+                            })
+                    
+                    # Create/update chart
+                    if target_coverage_time_chart_state["container"] is None:
+                        target_coverage_time_chart_state["container"] = ui.column().classes("w-full")
+                    
+                    with target_coverage_time_chart_state["container"]:
+                        # Clear existing content
+                        target_coverage_time_chart_state["container"].clear()
+                        
+                        # Summary statistics
+                        with ui.row().classes("w-full mb-4 gap-4"):
+                            ui.label(f"Total timepoints: {len(mean_coverage)}").classes("text-sm")
+                            ui.label(f"Total targets: {len(df['name'].unique())}").classes("text-sm")
+                            ui.label(f"Outliers detected: {len(outliers_df)}").classes("text-sm")
+                        
+                        # Chart
+                        chart_config = {
+                            "backgroundColor": "transparent",
+                            "title": {
+                                "text": "Mean Target Coverage Over Time with Outliers",
+                                "left": "center",
+                                "top": 10,
+                                "textStyle": {"fontSize": 16, "color": "#000"},
+                            },
+                            "tooltip": {
+                                "trigger": "axis",
+                                "axisPointer": {"type": "cross"},
+                            },
+                            "legend": {
+                                "data": ["Mean Coverage", "Mean Reads per Length"] + (sorted_outlier_genes[:outlier_limit] if outlier_genes else []),
+                                "left": 10,
+                                "top": 40,
+                                "orient": "vertical",
+                                "itemGap": 5,
+                                "type": "scroll",
+                                "textStyle": {"fontSize": 10}
+                            },
+                            "grid": {
+                                "left": "15%",
+                                "right": "5%",
+                                "bottom": "10%",
+                                "top": "20%",
+                                "containLabel": True,
+                            },
+                            "xAxis": {
+                                "type": "time",
+                                "name": "Time",
+                                "nameGap": 30,
+                            },
+                            "yAxis": [
+                                {
+                                    "type": "value",
+                                    "name": "Mean Coverage",
+                                    "nameGap": 50,
+                                    "position": "left",
+                                },
+                                {
+                                    "type": "value",
+                                    "name": "Mean Reads per Length",
+                                    "nameGap": 50,
+                                    "position": "right",
+                                }
+                            ],
+                            "series": [
+                                {
+                                    "name": "Mean Coverage",
+                                    "type": "line",
+                                    "smooth": True,
+                                    "data": mean_coverage_data,
+                                    "yAxisIndex": 0,
+                                    "symbol": "none",
+                                    "itemStyle": {"color": "#5470c6"},
+                                    "lineStyle": {"width": 2},
+                                },
+                                {
+                                    "name": "Mean Reads per Length",
+                                    "type": "line",
+                                    "smooth": True,
+                                    "data": mean_reads_data,
+                                    "yAxisIndex": 1,
+                                    "symbol": "none",
+                                    "itemStyle": {"color": "#91cc75"},
+                                    "lineStyle": {"width": 2},
+                                },
+                            ] + outlier_gene_series,
+                        }
+                        
+                        target_coverage_time_chart_state["chart"] = ui.echart(chart_config).classes("w-full h-96")
+                        
+                        # Show summary of outlier genes
+                        if outlier_genes:
+                            outlier_count = len(outlier_genes)
+                            ui.label(f"Showing profiles for {min(outlier_count, outlier_limit)} outlier genes (out of {outlier_count} total)").classes("text-sm text-gray-600 mt-2")
+                        else:
+                            ui.label("No significant outliers detected.").classes("text-gray-600 mt-2")
+                
+                except Exception as e:
+                    logging.error(f"Error plotting target coverage over time: {e}")
+                    import traceback
+                    logging.error(traceback.format_exc())
+                    if target_coverage_time_chart_state["container"]:
+                        with target_coverage_time_chart_state["container"]:
+                            ui.label(f"Error: {str(e)}").classes("text-red-600")
+            
+            # Auto-plot on load
+            _plot_target_coverage_over_time()
+            
+            def _set_outlier_limit(e) -> None:
+                try:
+                    outlier_limit_state["value"] = int(e.value)
+                except (TypeError, ValueError):
+                    outlier_limit_state["value"] = 10
+                outlier_limit_state["value"] = max(1, outlier_limit_state["value"])
+                coverage_state["target_cov_outlier_limit"] = outlier_limit_state["value"]
+                _plot_target_coverage_over_time()
+            
+            # Refresh button + outlier limit control
+            with ui.row().classes("w-full mt-4 items-center gap-3"):
+                ui.label("Outliers to show").classes("text-sm text-gray-600")
+                ui.number(
+                    value=outlier_limit_state["value"],
+                    min=1,
+                    max=50,
+                    step=1,
+                    format="%.0f",
+                    on_change=_set_outlier_limit,
+                ).props("dense").classes("w-24")
+                ui.button(
+                    "Refresh Analysis",
+                    on_click=_plot_target_coverage_over_time
+                ).classes("ml-2")
+
         with ui.card().classes("w-full"):
             with ui.row().classes("w-full items-center justify-between mb-2"):
                 ui.label("Target Coverage").classes("text-lg font-semibold")
@@ -5401,165 +5734,233 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             bed_cov = sample_dir / "bed_coverage_main.csv"
             target_cov = sample_dir / "target_coverage.csv"
             cov_time = sample_dir / "coverage_time_chart.npy"
-            if cov_main.exists():
-                m = cov_main.stat().st_mtime
-                # Force update on fresh page visit or if mtime changed or data not in state
-                if is_fresh_visit or state.get("cov_main_mtime") != m or "cov_df" not in state:
-                    try:
-                        cov_df = pd.read_csv(cov_main)
-                        # Backfill meandepth if missing
-                        if "meandepth" not in cov_df.columns and {
-                            "covbases",
-                            "endpos",
-                        }.issubset(set(cov_df.columns)):
-                            cov_df = cov_df.copy()
-                            with np.errstate(divide="ignore", invalid="ignore"):
-                                cov_df["meandepth"] = (
-                                    cov_df["covbases"]
-                                    / cov_df["endpos"].replace(0, np.nan)
-                                ).fillna(0)
-                        state["cov_df"] = cov_df
-                        state["cov_main_mtime"] = m  # only set on success
-                    except Exception as e:
-                        _log_notify(
-                            f"Failed to read coverage_main.csv: {e}",
-                            level="error",
-                            notify=True,
-                        )
+            
+            # Check modification times for all files
+            cov_main_mtime = cov_main.stat().st_mtime if cov_main.exists() else 0
+            bed_cov_mtime = bed_cov.stat().st_mtime if bed_cov.exists() else 0
+            target_cov_mtime = target_cov.stat().st_mtime if target_cov.exists() else 0
+            cov_time_mtime = cov_time.stat().st_mtime if cov_time.exists() else 0
+            
+            # Get previous state values (use sentinel values if not present)
+            prev_cov_main_mtime = state.get("cov_main_mtime", 0)
+            prev_bed_cov_mtime = state.get("bed_cov_mtime", 0)
+            prev_target_cov_mtime = state.get("target_cov_mtime", 0)
+            prev_cov_time_mtime = state.get("cov_time_mtime", 0)
+            
+            # Check if any file has changed
+            cov_main_changed = prev_cov_main_mtime != cov_main_mtime
+            bed_cov_changed = prev_bed_cov_mtime != bed_cov_mtime
+            target_cov_changed = prev_target_cov_mtime != target_cov_mtime
+            cov_time_changed = prev_cov_time_mtime != cov_time_mtime
+            
+            # Also check if data is missing from state (needs initial load)
+            data_missing = (
+                (cov_main.exists() and "cov_df" not in state) or
+                (bed_cov.exists() and "bed_df" not in state)
+            )
+            
+            # Determine if any update is needed
+            needs_update = (
+                is_fresh_visit
+                or cov_main_changed
+                or bed_cov_changed
+                or target_cov_changed
+                or cov_time_changed
+                or data_missing
+            )
+            
+            # Early exit if nothing has changed (except for periodic checks that run less frequently)
+            if not needs_update:
+                # Still check for SNP/LGA/IGV status updates (these have their own throttling)
+                # But skip all file reading and UI updates
+                logging.debug(f"[Coverage] ⏭ Skipping coverage update - no file changes detected")
+                # Continue to SNP/LGA/IGV checks below (they have their own throttling)
+                # But we'll skip the file processing section
             else:
-                _log_notify("coverage_main.csv not found", level="debug", notify=False)
-            if bed_cov.exists():
-                m = bed_cov.stat().st_mtime
-                # Force update on fresh page visit or if mtime changed or data not in state
-                if is_fresh_visit or state.get("bed_cov_mtime") != m or "bed_df" not in state:
-                    try:
-                        bed_df = pd.read_csv(bed_cov)
-                        state["bed_df"] = bed_df
-                        panel_display_name = state.get("panel_display_name", "Target Coverage")
-                        _update_boxplot(bed_df, panel_display_name)
-                        if state.get("cov_df") is not None:
-                            _update_target_cov(state["cov_df"], bed_df)
-                        state["bed_cov_mtime"] = m  # only set on success
-                    except Exception as e:
-                        _log_notify(
-                            f"Failed to read bed_coverage_main.csv: {e}",
-                            level="error",
-                            notify=True,
-                        )
-            else:
-                _log_notify(
-                    "bed_coverage_main.csv not found", level="debug", notify=False
-                )
-            if target_cov.exists():
-                m = target_cov.stat().st_mtime
-                # Force update on fresh page visit or if mtime changed
-                if is_fresh_visit or state.get("target_cov_mtime") != m:
-                    try:
-                        tdf = pd.read_csv(target_cov)
-                        _update_target_table(tdf)
-                        state["target_cov_mtime"] = m  # only set on success
-                    except Exception as e:
-                        _log_notify(
-                            f"Failed to read target_coverage.csv: {e}",
-                            level="error",
-                            notify=True,
-                        )
-            else:
-                _log_notify(
-                    "target_coverage.csv not found", level="debug", notify=False
-                )
-            if cov_time.exists():
-                m = cov_time.stat().st_mtime
-                # Force update on fresh page visit or if mtime changed
-                if is_fresh_visit or state.get("cov_time_mtime") != m:
-                    try:
-                        _update_time(cov_time)
-                        state["cov_time_mtime"] = m
-                    except Exception as e:
-                        _log_notify(
-                            f"Failed to load coverage_time_chart.npy: {e}",
-                            level="warning",
-                            notify=False,
-                        )
-            # Summary
-            try:
-                global_cov = None
-                target_cov_v = None
-                enrich_v = None
-                if state.get("cov_df") is not None:
-                    cdf = state["cov_df"]
+                # Log what changed
+                reasons = []
+                if is_fresh_visit:
+                    reasons.append("fresh_visit")
+                if cov_main_changed:
+                    reasons.append("coverage_main.csv")
+                if bed_cov_changed:
+                    reasons.append("bed_coverage_main.csv")
+                if target_cov_changed:
+                    reasons.append("target_coverage.csv")
+                if cov_time_changed:
+                    reasons.append("coverage_time_chart.npy")
+                if data_missing:
+                    reasons.append("data_missing")
+                logging.debug(f"[Coverage] Update needed. Reasons: {', '.join(reasons)}")
+            # Only process files if update is needed
+            if needs_update:
+                if cov_main.exists():
+                    m = cov_main_mtime
+                    # Force update on fresh page visit or if mtime changed or data not in state
+                    if is_fresh_visit or cov_main_changed or "cov_df" not in state:
+                        try:
+                            cov_df = pd.read_csv(cov_main)
+                            # Backfill meandepth if missing
+                            if "meandepth" not in cov_df.columns and {
+                                "covbases",
+                                "endpos",
+                            }.issubset(set(cov_df.columns)):
+                                cov_df = cov_df.copy()
+                                with np.errstate(divide="ignore", invalid="ignore"):
+                                    cov_df["meandepth"] = (
+                                        cov_df["covbases"]
+                                        / cov_df["endpos"].replace(0, np.nan)
+                                    ).fillna(0)
+                            state["cov_df"] = cov_df
+                            state["cov_main_mtime"] = m  # only set on success
+                        except Exception as e:
+                            _log_notify(
+                                f"Failed to read coverage_main.csv: {e}",
+                                level="error",
+                                notify=True,
+                            )
+                else:
+                    _log_notify("coverage_main.csv not found", level="debug", notify=False)
+                if bed_cov.exists():
+                    m = bed_cov_mtime
+                    # Force update on fresh page visit or if mtime changed or data not in state
+                    if is_fresh_visit or bed_cov_changed or "bed_df" not in state:
+                        try:
+                            bed_df = pd.read_csv(bed_cov)
+                            state["bed_df"] = bed_df
+                            panel_display_name = state.get("panel_display_name", "Target Coverage")
+                            _update_boxplot(bed_df, panel_display_name)
+                            if state.get("cov_df") is not None:
+                                _update_target_cov(state["cov_df"], bed_df)
+                            state["bed_cov_mtime"] = m  # only set on success
+                        except Exception as e:
+                            _log_notify(
+                                f"Failed to read bed_coverage_main.csv: {e}",
+                                level="error",
+                                notify=True,
+                            )
+                else:
+                    _log_notify(
+                        "bed_coverage_main.csv not found", level="debug", notify=False
+                    )
+                if target_cov.exists():
+                    m = target_cov_mtime
+                    # Force update on fresh page visit or if mtime changed
+                    if is_fresh_visit or target_cov_changed:
+                        try:
+                            tdf = pd.read_csv(target_cov)
+                            _update_target_table(tdf)
+                            state["target_cov_mtime"] = m  # only set on success
+                        except Exception as e:
+                            _log_notify(
+                                f"Failed to read target_coverage.csv: {e}",
+                                level="error",
+                                notify=True,
+                            )
+                else:
+                    _log_notify(
+                        "target_coverage.csv not found", level="debug", notify=False
+                    )
+                if cov_time.exists():
+                    m = cov_time_mtime
+                    # Force update on fresh page visit or if mtime changed
+                    if is_fresh_visit or cov_time_changed:
+                        try:
+                            _update_time(cov_time)
+                            state["cov_time_mtime"] = m
+                        except Exception as e:
+                            _log_notify(
+                                f"Failed to load coverage_time_chart.npy: {e}",
+                                level="warning",
+                                notify=False,
+                            )
+                # Summary - only recalculate if data changed
+                try:
+                    global_cov = None
+                    target_cov_v = None
+                    enrich_v = None
+                    if state.get("cov_df") is not None:
+                        cdf = state["cov_df"]
+                        if (
+                            "covbases" in cdf.columns
+                            and "endpos" in cdf.columns
+                            and cdf["endpos"].sum() > 0
+                        ):
+                            global_cov = float(cdf["covbases"].sum()) / float(
+                                cdf["endpos"].sum()
+                            )
+                    if state.get("bed_df") is not None:
+                        bdf = state["bed_df"].copy()
+                        if "length" not in bdf.columns:
+                            bdf["length"] = (bdf["endpos"] - bdf["startpos"] + 1).astype(
+                                float
+                            )
+                        if bdf["length"].sum() > 0:
+                            target_cov_v = float(bdf["bases"].sum()) / float(
+                                bdf["length"].sum()
+                            )
                     if (
-                        "covbases" in cdf.columns
-                        and "endpos" in cdf.columns
-                        and cdf["endpos"].sum() > 0
+                        global_cov is not None
+                        and target_cov_v is not None
+                        and global_cov > 0
                     ):
-                        global_cov = float(cdf["covbases"].sum()) / float(
-                            cdf["endpos"].sum()
+                        enrich_v = target_cov_v / global_cov
+                    if target_cov_v is not None:
+                        if target_cov_v >= 30:
+                            q_text, q_cls, q_bg = (
+                                "Excellent",
+                                "text-green-600",
+                                "bg-green-100",
+                            )
+                        elif target_cov_v >= 20:
+                            q_text, q_cls, q_bg = "Good", "text-blue-600", "bg-blue-100"
+                        elif target_cov_v >= 10:
+                            q_text, q_cls, q_bg = (
+                                "Moderate",
+                                "text-yellow-600",
+                                "bg-yellow-100",
+                            )
+                        else:
+                            q_text, q_cls, q_bg = (
+                                "Insufficient",
+                                "text-red-600",
+                                "bg-red-100",
+                            )
+                        cov_quality_label.set_text(f"Quality: {q_text}")
+                        try:
+                            cov_quality_label.classes(
+                                replace=f"text-sm font-medium {q_cls}"
+                            )
+                            cov_quality_badge.classes(
+                                replace=f"px-2 py-1 rounded {q_bg} {q_cls}"
+                            )
+                        except Exception:
+                            pass
+                        cov_quality_badge.set_text(f"{target_cov_v:.2f}x")
+                    if global_cov is not None:
+                        cov_global_lbl.set_text(
+                            f"Global Estimated Coverage: {global_cov:.2f}x"
                         )
-                if state.get("bed_df") is not None:
-                    bdf = state["bed_df"].copy()
-                    if "length" not in bdf.columns:
-                        bdf["length"] = (bdf["endpos"] - bdf["startpos"] + 1).astype(
-                            float
+                    if target_cov_v is not None:
+                        cov_target_lbl.set_text(
+                            f"Targets Estimated Coverage: {target_cov_v:.2f}x"
                         )
-                    if bdf["length"].sum() > 0:
-                        target_cov_v = float(bdf["bases"].sum()) / float(
-                            bdf["length"].sum()
-                        )
-                if (
-                    global_cov is not None
-                    and target_cov_v is not None
-                    and global_cov > 0
-                ):
-                    enrich_v = target_cov_v / global_cov
-                if target_cov_v is not None:
-                    if target_cov_v >= 30:
-                        q_text, q_cls, q_bg = (
-                            "Excellent",
-                            "text-green-600",
-                            "bg-green-100",
-                        )
-                    elif target_cov_v >= 20:
-                        q_text, q_cls, q_bg = "Good", "text-blue-600", "bg-blue-100"
-                    elif target_cov_v >= 10:
-                        q_text, q_cls, q_bg = (
-                            "Moderate",
-                            "text-yellow-600",
-                            "bg-yellow-100",
-                        )
-                    else:
-                        q_text, q_cls, q_bg = (
-                            "Insufficient",
-                            "text-red-600",
-                            "bg-red-100",
-                        )
-                    cov_quality_label.set_text(f"Quality: {q_text}")
-                    try:
-                        cov_quality_label.classes(
-                            replace=f"text-sm font-medium {q_cls}"
-                        )
-                        cov_quality_badge.classes(
-                            replace=f"px-2 py-1 rounded {q_bg} {q_cls}"
-                        )
-                    except Exception:
-                        pass
-                    cov_quality_badge.set_text(f"{target_cov_v:.2f}x")
-                if global_cov is not None:
-                    cov_global_lbl.set_text(
-                        f"Global Estimated Coverage: {global_cov:.2f}x"
+                    if enrich_v is not None:
+                        cov_enrich_lbl.set_text(f"Estimated enrichment: {enrich_v:.2f}x")
+                except Exception as e:
+                    _log_notify(
+                        f"Coverage summary update failed: {e}",
+                        level="warning",
+                        notify=False,
                     )
-                if target_cov_v is not None:
-                    cov_target_lbl.set_text(
-                        f"Targets Estimated Coverage: {target_cov_v:.2f}x"
-                    )
-                if enrich_v is not None:
-                    cov_enrich_lbl.set_text(f"Estimated enrichment: {enrich_v:.2f}x")
-            except Exception as e:
-                _log_notify(
-                    f"Coverage summary update failed: {e}",
-                    level="warning",
-                    notify=False,
-                )
+            # Update state with current modification times
+            if needs_update:
+                state["cov_main_mtime"] = cov_main_mtime
+                state["bed_cov_mtime"] = bed_cov_mtime
+                state["target_cov_mtime"] = target_cov_mtime
+                state["cov_time_mtime"] = cov_time_mtime
+                state["last_visit_time"] = state.get("last_visit_time", time.time())
+            
             launcher._coverage_state[key] = state
 
             # SNP Analysis results check - only update if necessary
