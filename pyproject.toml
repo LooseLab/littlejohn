@@ -34,6 +34,7 @@ dependencies = [
     "ruptures>=1.1.0",
     "tqdm>=4.64.0",
     "ray[default]>=2.0.0",
+    "uvloop"<0.22",
     "networkx",
     "sturgeon@git+https://github.com/looselab/sturgeon@pysam",
     "methylartist@git+https://github.com/mattloose/methylartist",
