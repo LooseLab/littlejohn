@@ -549,6 +549,35 @@ def job_queue_of(job_type: str) -> str:
     return "slow"
 
 
+def _get_ray_runtime_ids() -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    try:
+        ctx = ray.get_runtime_context()
+        task_id = str(ctx.get_task_id())
+        job_id = str(ctx.get_job_id())
+        node_id = None
+        try:
+            node_id = str(ctx.get_node_id())
+        except Exception:
+            node_id = None
+        return task_id, job_id, node_id
+    except Exception:
+        return None, None, None
+
+
+def _get_sample_id(job: Job) -> Optional[str]:
+    try:
+        if hasattr(job.context, "get_sample_id"):
+            sample_id = job.context.get_sample_id()
+            if sample_id:
+                return sample_id
+    except Exception:
+        pass
+    try:
+        return job.context.metadata.get("sample_id")
+    except Exception:
+        return None
+
+
 # ---------- Real handler wrappers as Ray tasks ----------
 # Each wrapper returns an updated WorkflowContext.
 
@@ -591,6 +620,15 @@ def _wrap_real_handler(
         except Exception:
             pass
         logger = _get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
+        task_id, ray_job_id, node_id = _get_ray_runtime_ids()
+        sample_id = _get_sample_id(job)
+        filepath = getattr(job.context, "filepath", None)
+        logger.info(
+            f"ray_task_start job_type={job_type} "
+            f"job_id={getattr(job, 'job_id', None)} "
+            f"ray_job_id={ray_job_id} task_id={task_id} node_id={node_id} "
+            f"pid={os.getpid()} sample_id={sample_id} filepath={filepath}"
+        )
         try:
             if py_handler is None:
                 raise RuntimeError(
