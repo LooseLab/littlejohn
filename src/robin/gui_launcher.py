@@ -3180,10 +3180,28 @@ class GUILauncher:
                         workflow_steps = self.workflow_steps if hasattr(self, 'workflow_steps') else None
 
                         # Defer heavy analysis sections until after initial render
+                        analysis_loading_card = ui.card().classes("w-full p-4")
+                        with analysis_loading_card:
+                            with ui.row().classes("items-center gap-3"):
+                                ui.spinner(size="md", color="primary")
+                                ui.label("Loading analysis sections…").classes(
+                                    "text-sm text-gray-700"
+                                )
+                            ui.label(
+                                "This can take a moment for large datasets."
+                            ).classes("text-xs text-gray-500 mt-2")
+
                         analysis_container = ui.column().classes("w-full gap-4")
 
                         def _build_analysis_sections():
                             try:
+                                try:
+                                    analysis_loading_card.set_visibility(False)
+                                except Exception:
+                                    try:
+                                        analysis_loading_card.style("display: none")
+                                    except Exception:
+                                        pass
                                 analysis_container.clear()
                                 with analysis_container:
                                     # MNP-Flex section

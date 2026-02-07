@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MGMT methylation classification uses per-read probabilities (fixes aggregated max bleed).
 - Version metadata aligned to `0.4.0` across packaging and app entry points.
 - `robin utils mgmt` now reports methylation percent from counts and normalizes bedmethyl fraction inputs.
+- MNP-Flex results panel now hides empty fields until results are available.
+- `robin utils mgmt` supports recursive search and file output for TSV summaries.
 
 ### Dependencies
 - Added snpEff and SnpSift for SNP annotation.
