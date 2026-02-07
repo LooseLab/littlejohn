@@ -24,9 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `robin utils mgmt` now reports methylation percent from counts and normalizes bedmethyl fraction inputs.
 - MNP-Flex results panel now hides empty fields until results are available.
 - `robin utils mgmt` supports recursive search and file output for TSV summaries.
+- Command-line progress output supports Rich styling; updating the installation is required to enable Rich functionality.
 
 ### Dependencies
 - Added snpEff and SnpSift for SNP annotation.
+- Added Rich for enhanced CLI progress and styled output (requires updating installation).
 
 ## [0.0.2] - 2024-12-19
 

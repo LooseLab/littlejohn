@@ -308,6 +308,34 @@ JOBS_REQUIRING_BED_CONVERSION = {"sturgeon", "nanodx", "pannanodx", "random_fore
 
 from robin.reporting.sections.disclaimer_text import EXTENDED_DISCLAIMER_TEXT
 
+try:
+    from rich.console import Console
+    from rich.panel import Panel
+
+    _RICH_AVAILABLE = True
+except Exception:
+    _RICH_AVAILABLE = False
+
+_RICH_CONSOLE = Console() if _RICH_AVAILABLE else None
+
+
+def _echo_styled(message: str, level: str = "info") -> None:
+    """Print with optional rich styling (no emojis)."""
+    if not _RICH_AVAILABLE or _RICH_CONSOLE is None:
+        click.echo(message)
+        return
+
+    styles = {
+        "info": "cyan",
+        "success": "green",
+        "warn": "yellow",
+        "error": "red",
+        "header": "bold magenta",
+        "muted": "dim",
+    }
+    style = styles.get(level, "white")
+    _RICH_CONSOLE.print(message, style=style)
+
 # Disclaimer text for user acknowledgment
 DISCLAIMER_TEXT = EXTENDED_DISCLAIMER_TEXT
 
@@ -337,9 +365,24 @@ def _get_user_acknowledgment() -> bool:
     if is_development_mode:
         return True
         
-    click.echo("\nDISCLAIMER:")
-    click.echo(DISCLAIMER_TEXT)
-    click.echo("\nTo proceed, please type 'I agree' (exactly as shown):")
+    if _RICH_AVAILABLE and _RICH_CONSOLE is not None:
+        _RICH_CONSOLE.print(
+            Panel(
+                DISCLAIMER_TEXT,
+                title="DISCLAIMER",
+                title_align="left",
+                border_style="yellow",
+                style="yellow",
+                expand=False,
+            )
+        )
+    else:
+        click.echo("\n" + "=" * 70)
+        click.echo("DISCLAIMER:")
+        click.echo("=" * 70)
+        click.echo(DISCLAIMER_TEXT)
+        click.echo("=" * 70)
+    _echo_styled("\nTo proceed, please type 'I agree' (exactly as shown):", level="warn")
     try:
         response = input().strip()
     except (KeyboardInterrupt, EOFError):
@@ -1726,27 +1769,29 @@ def _display_workflow_config(
     queue_priority: tuple = (),
 ) -> None:
     """Display workflow configuration information."""
-    click.echo(f"Center: {center}")
+    _echo_styled(f"Center: {center}", level="info")
     
     if no_process_existing:
-        click.echo(
+            _echo_styled(
             f"Starting workflow on {path} for BAM files (skipping existing files)..."
-        )
+            )
     else:
-        click.echo(
+            _echo_styled(
             f"Starting workflow on {path} for BAM files (will process existing files first)..."
-        )
+            )
 
     if work_dir:
-        click.echo(f"Output directory: {work_dir}")
+        _echo_styled(f"Output directory: {work_dir}", level="info")
     else:
-        click.echo("Output directory: Not specified (using input directory)")
+        _echo_styled(
+            "Output directory: Not specified (using input directory)", level="warn"
+        )
 
     if uses_simplified_format:
         # Extract job types from the final workflow steps
         final_job_types = [step.split(":")[1] for step in workflow_steps if ":" in step]
-        click.echo(f"Workflow plan (simplified): {final_job_types}")
-        click.echo(f"Auto-assigned queues: {workflow_steps}")
+        _echo_styled(f"Workflow plan (simplified): {final_job_types}", level="info")
+        _echo_styled(f"Auto-assigned queues: {workflow_steps}", level="info")
 
         # Check if bed_conversion was auto-added
         if original_workflow and isinstance(original_workflow, str):
@@ -1755,14 +1800,15 @@ def _display_workflow_config(
                 "bed_conversion" in final_job_types
                 and "bed_conversion" not in original_jobs
             ):
-                click.echo(
-                    "Note: bed_conversion was automatically added as it's required for other jobs"
+                _echo_styled(
+                    "Note: bed_conversion was automatically added as it's required for other jobs",
+                    level="warn",
                 )
     else:
-        click.echo(f"Workflow plan: {workflow_steps}")
+        _echo_styled(f"Workflow plan: {workflow_steps}", level="info")
 
-    click.echo(f"Commands: {command_map}")
-    click.echo(f"Log_level: {log_level}")
+    _echo_styled(f"Commands: {command_map}", level="info")
+    _echo_styled(f"Log_level: {log_level}", level="info")
 
     if job_levels:
         click.echo(f"Job log levels: {job_levels}")
@@ -1771,7 +1817,7 @@ def _display_workflow_config(
 
     # Display Ray configuration if enabled
     if use_ray:
-        click.echo("Distributed computing: Ray (experimental)")
+        _echo_styled("Distributed computing: Ray (experimental)", level="info")
         if ray_num_cpus:
             click.echo(f"  - Ray CPUs: {ray_num_cpus}")
         else:
@@ -1785,7 +1831,9 @@ def _display_workflow_config(
         if queue_priority:
             click.echo(f"  - Queue priorities: {list(queue_priority)}")
     else:
-        click.echo("Distributed computing: Disabled (using threading)")
+        _echo_styled(
+            "Distributed computing: Disabled (using threading)", level="warn"
+        )
         click.echo("Worker configuration:")
         if legacy_analysis_queue:
             click.echo(
@@ -1800,8 +1848,8 @@ def _display_workflow_config(
 
         click.echo("  - Other queues: 1 worker each (fixed)")
 
-    click.echo("Press Ctrl+C to stop")
-    click.echo("Running The Workflow!")
+    _echo_styled("Press Ctrl+C to stop", level="warn")
+    _echo_styled("Running the workflow...", level="success")
 
 
 @main.command()
@@ -1999,12 +2047,15 @@ def workflow(
                 ref_path = str(reference) if isinstance(reference, Path) else reference
                 
                 # Use click.echo for visibility even when log level is ERROR
-                click.echo(f"Validating reference genome: {reference}")
+                _echo_styled(f"Validating reference genome: {reference}", level="info")
                 
                 # Validate and ensure index exists
                 _ensure_fasta_index(ref_path)
                 
-                click.echo(f"✓ Reference genome validated and indexed: {reference}")
+                _echo_styled(
+                    f"Reference genome validated and indexed: {reference}",
+                    level="success",
+                )
             except Exception as e:
                 error_msg = (
                     f"Failed to validate reference genome: {e}\n"

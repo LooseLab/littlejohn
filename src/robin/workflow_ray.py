@@ -50,6 +50,42 @@ from tqdm import tqdm
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+try:
+    from rich.progress import (
+        BarColumn,
+        Progress,
+        SpinnerColumn,
+        TaskProgressColumn,
+        TextColumn,
+        TimeElapsedColumn,
+        TimeRemainingColumn,
+    )
+    from rich.console import Console
+
+    _RICH_AVAILABLE = True
+except Exception:
+    _RICH_AVAILABLE = False
+
+_RICH_CONSOLE = Console() if _RICH_AVAILABLE else None
+
+
+def _print_styled(message: str, level: str = "info") -> None:
+    """Print with optional rich styling (no emojis)."""
+    if not _RICH_AVAILABLE or _RICH_CONSOLE is None:
+        print(message)
+        return
+
+    styles = {
+        "info": "cyan",
+        "success": "green",
+        "warn": "yellow",
+        "error": "red",
+        "header": "bold magenta",
+        "muted": "dim",
+    }
+    style = styles.get(level, "white")
+    _RICH_CONSOLE.print(message, style=style)
+
 # Import memory management
 try:
     from robin.memory_manager import MemoryManager
@@ -3051,6 +3087,107 @@ async def tqdm_monitor(coord, continuous: bool = False) -> None:
         overall.close()
 
 
+def _should_use_rich_progress() -> bool:
+    if not _RICH_AVAILABLE:
+        return False
+    preference = os.environ.get("ROBIN_PROGRESS", "").strip().lower()
+    if preference in {"tqdm", "plain", "off", "0", "false", "no"}:
+        return False
+    if preference in {"rich", "on", "1", "true", "yes"}:
+        return True
+    return True
+
+
+async def rich_monitor(coord, continuous: bool = False) -> None:
+    order = [
+        "preprocessing",
+        "bed_conversion",
+        "mgmt",
+        "cnv",
+        "target",
+        "fusion",
+        "classification",
+        "slow",
+    ]
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("{task.description}"),
+        BarColumn(bar_width=20),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        TextColumn("{task.fields[detail]}"),
+        refresh_per_second=4,
+    )
+    task_ids = {
+        q: progress.add_task(q.title(), total=None, detail="") for q in order
+    }
+    overall_id = progress.add_task("Overall Progress", total=None, detail="")
+
+    progress.start()
+    try:
+        while True:
+            s = await coord.stats.remote()
+            completed_by_type = s.get("completed_by_type", {})
+            failed_by_type = s.get("failed_by_type", {})
+
+            completed_queue_counts: Dict[str, int] = {q: 0 for q in order}
+            for jt, c in completed_by_type.items():
+                q = job_queue_of(jt)
+                completed_queue_counts[q] += c
+            for jt, c in failed_by_type.items():
+                q = job_queue_of(jt)
+                completed_queue_counts[q] += c
+
+            active_by_queue = s.get("active_by_queue", {})
+
+            for q in order:
+                completed_in_q = completed_queue_counts.get(q, 0)
+                active_in_q = len(active_by_queue.get(q, []))
+                total_for_q = completed_in_q + active_in_q
+                active_jobs_info = active_by_queue.get(q, [])
+                parts = []
+                total_for_q_display = str(total_for_q) if total_for_q > 0 else "-"
+                parts.append(f"{completed_in_q}/{total_for_q_display}")
+                if active_jobs_info:
+                    for j in active_jobs_info[:2]:
+                        fn = os.path.basename(j.get("filepath", ""))
+                        if len(fn) > 25:
+                            fn = fn[:22] + "..."
+                        parts.append(f"{fn}({j['duration']}s)")
+                progress.update(
+                    task_ids[q],
+                    total=total_for_q if total_for_q > 0 else None,
+                    completed=completed_in_q,
+                    detail=" | ".join(parts),
+                )
+
+            total_with_waiting = (
+                s.get("total_enqueued", 0) - s.get("total_skipped", 0)
+            ) + int(s.get("waiting_serialized", 0) or 0)
+            progress.update(
+                overall_id,
+                total=total_with_waiting if total_with_waiting > 0 else None,
+                completed=s["completed"] + s["failed"],
+                detail=(
+                    f"Done:{s['completed'] + s['failed']}/{total_with_waiting} | "
+                    f"Act:{s['active_count']} | "
+                    f"Fail:{s['failed']} | Skip:{s['total_skipped']}"
+                ),
+            )
+
+            if (
+                (not continuous)
+                and s["active_count"] == 0
+                and s["completed"] + s["failed"] >= total_with_waiting
+            ):
+                break
+
+            await asyncio.sleep(0.5)
+    finally:
+        progress.stop()
+
+
 class RayFileWatcher(FileSystemEventHandler):
     def __init__(
         self,
@@ -3269,7 +3406,9 @@ async def run(
         elif not work_dir:
             print("GUI not launched: --work-dir not provided.")
         else:
-            print("Launching GUI early to ensure immediate availability...")
+            _print_styled(
+                "Launching GUI early to ensure immediate availability...", level="info"
+            )
             launcher = _gui_launch(
                 host=gui_host,
                 port=gui_port,
@@ -3285,9 +3424,9 @@ async def run(
                     if hasattr(launcher, "get_gui_url")
                     else "http://localhost:8081"
                 )
-                print(f"GUI launched successfully on {url}")
+                _print_styled(f"GUI launched successfully on {url}", level="success")
             except Exception:
-                print("GUI launched successfully")
+                _print_styled("GUI launched successfully", level="success")
 
             # Start GUI update publishing task immediately
             async def _publish_gui():
@@ -3486,14 +3625,18 @@ async def run(
                         await asyncio.sleep(15.0)  # Poll every 15 seconds to reduce update frequency
 
             gui_publish_task = asyncio.create_task(_publish_gui())
-            print("GUI monitoring started - workflow status will be updated in real-time")
+            _print_styled(
+                "GUI monitoring started - workflow status will be updated in real-time",
+                level="info",
+            )
     except Exception as e:
         print(f"Warning: GUI failed to launch: {e}")
 
     # Create monitoring tasks BEFORE submitting paths so progress appears immediately
     tasks = []
     if monitor:
-        tasks.append(asyncio.create_task(tqdm_monitor(coord, continuous=watch)))
+        monitor_fn = rich_monitor if _should_use_rich_progress() else tqdm_monitor
+        tasks.append(asyncio.create_task(monitor_fn(coord, continuous=watch)))
     
     # Add GUI publish task if GUI was launched
     if gui_publish_task is not None:
