@@ -690,4 +690,5 @@ def add_mnpflex_section(launcher: Any, sample_dir: Path, sample_id: str) -> None
 
         fetch_button.on_click(_handle_fetch_click)
         build_button.on_click(_handle_build_click)
-        ui.timer(30.0, _poll_status, active=True, immediate=True)
+        ui.timer(30.0, _poll_status, active=True, immediate=False)
+        ui.timer(0.5, _poll_status, once=True)

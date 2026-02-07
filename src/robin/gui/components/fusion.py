@@ -3303,7 +3303,8 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
         
         # Start the refresh timer (every 30 seconds)
         logging.info("[Fusion] Setting up refresh timer with immediate=True")
-        ui.timer(30.0, refresh_fusion, active=True, immediate=True)
+        ui.timer(30.0, refresh_fusion, active=True, immediate=False)
+        ui.timer(0.5, refresh_fusion, once=True)
         logging.info("[Fusion] Timer set up successfully")
     except Exception as e:
         logging.exception(f"[Fusion] Exception in timer setup: {e}")

@@ -3178,138 +3178,136 @@ class GUILauncher:
                             get_enabled_classification_steps = lambda steps: {"sturgeon", "nanodx", "random_forest", "pannanodx"}
                         
                         workflow_steps = self.workflow_steps if hasattr(self, 'workflow_steps') else None
-                        
-                        # MNP-Flex section - create UI immediately (directly after summary)
-                        try:
-                            try:
-                                from .gui.components.mnpflex import add_mnpflex_section  # type: ignore
-                            except ImportError:
-                                from robin.gui.components.mnpflex import add_mnpflex_section
 
-                            add_mnpflex_section(self, sample_dir, sample_id)
-                        except Exception as e:
-                            logging.exception(f"[GUI] MNP-Flex section failed: {e}")
-                            try:
-                                ui.notify(
-                                    f"MNP-Flex section failed: {e}", type="warning"
-                                )
-                            except Exception:
-                                pass
+                        # Defer heavy analysis sections until after initial render
+                        analysis_container = ui.column().classes("w-full gap-4")
 
-                        # Classification section (refactored component) - create UI immediately
-                        enabled_classification_steps = get_enabled_classification_steps(workflow_steps)
-                        if not workflow_steps or enabled_classification_steps:
+                        def _build_analysis_sections():
                             try:
-                                try:
-                                    from .gui.components.classification import add_classification_section  # type: ignore
-                                except ImportError:
-                                    # Try absolute import if relative fails
-                                    from robin.gui.components.classification import (
-                                        add_classification_section,
-                                    )
+                                analysis_container.clear()
+                                with analysis_container:
+                                    # MNP-Flex section
+                                    try:
+                                        try:
+                                            from .gui.components.mnpflex import add_mnpflex_section  # type: ignore
+                                        except ImportError:
+                                            from robin.gui.components.mnpflex import add_mnpflex_section
 
-                                # Create the UI components immediately on the main thread
-                                add_classification_section(sample_dir, self)
+                                        add_mnpflex_section(self, sample_dir, sample_id)
+                                    except Exception as e:
+                                        logging.exception(f"[GUI] MNP-Flex section failed: {e}")
+                                        try:
+                                            ui.notify(
+                                                f"MNP-Flex section failed: {e}", type="warning"
+                                            )
+                                        except Exception:
+                                            pass
+
+                                    # Classification section
+                                    enabled_classification_steps = get_enabled_classification_steps(workflow_steps)
+                                    if not workflow_steps or enabled_classification_steps:
+                                        try:
+                                            try:
+                                                from .gui.components.classification import add_classification_section  # type: ignore
+                                            except ImportError:
+                                                from robin.gui.components.classification import (
+                                                    add_classification_section,
+                                                )
+
+                                            add_classification_section(sample_dir, self)
+                                        except Exception as e:
+                                            logging.exception(f"[GUI] Classification section failed: {e}")
+                                            try:
+                                                ui.notify(
+                                                    f"Classification section failed: {e}", type="warning"
+                                                )
+                                            except Exception:
+                                                pass
+
+                                    # Coverage section (target)
+                                    if not workflow_steps or is_section_enabled("target", workflow_steps):
+                                        try:
+                                            try:
+                                                from .gui.components.coverage import add_coverage_section  # type: ignore
+                                            except ImportError:
+                                                from robin.gui.components.coverage import (
+                                                    add_coverage_section,
+                                                    add_igv_viewer,
+                                                )
+
+                                            add_coverage_section(self, sample_dir)
+                                        except Exception as e:
+                                            try:
+                                                ui.notify(f"Coverage section failed: {e}", type="warning")
+                                            except Exception:
+                                                pass
+                                    
+                                    # MGMT section
+                                    if not workflow_steps or is_section_enabled("mgmt", workflow_steps):
+                                        try:
+                                            try:
+                                                from .gui.components.mgmt import add_mgmt_section  # type: ignore
+                                            except ImportError:
+                                                from robin.gui.components.mgmt import add_mgmt_section
+
+                                            add_mgmt_section(self, sample_dir)
+                                        except Exception as e:
+                                            logging.exception(f"[GUI] MGMT section failed: {e}")
+                                            try:
+                                                ui.notify(f"MGMT section failed: {e}", type="warning")
+                                            except Exception:
+                                                pass
+                                    
+                                    # CNV section
+                                    if not workflow_steps or is_section_enabled("cnv", workflow_steps):
+                                        try:
+                                            try:
+                                                from .gui.components.cnv import add_cnv_section  # type: ignore
+                                            except ImportError:
+                                                from robin.gui.components.cnv import add_cnv_section
+
+                                            add_cnv_section(self, sample_dir)
+                                        except Exception as e:
+                                            logging.exception(f"[GUI] CNV section failed: {e}")
+                                            try:
+                                                ui.notify(f"CNV section failed: {e}", type="warning")
+                                            except Exception:
+                                                pass
+
+                                    # Fusion section + BED coverage
+                                    if not workflow_steps or is_section_enabled("fusion", workflow_steps):
+                                        try:
+                                            try:
+                                                from .gui.components.fusion import add_fusion_section  # type: ignore
+                                            except ImportError:
+                                                from robin.gui.components.fusion import add_fusion_section
+
+                                            add_fusion_section(self, sample_dir)
+                                        except Exception as e:
+                                            logging.exception(f"[GUI] Fusion section failed: {e}")
+                                            try:
+                                                ui.notify(f"Fusion section failed: {e}", type="warning")
+                                            except Exception:
+                                                pass
+                                        
+                                        try:
+                                            try:
+                                                from .gui.components.bed_coverage import add_bed_coverage_section  # type: ignore
+                                            except ImportError:
+                                                from robin.gui.components.bed_coverage import add_bed_coverage_section
+                                            
+                                            add_bed_coverage_section(self, sample_dir)
+                                        except Exception as e:
+                                            logging.exception(f"[GUI] BED Coverage section failed: {e}")
+                                            try:
+                                                ui.notify(f"BED Coverage section failed: {e}", type="warning")
+                                            except Exception:
+                                                pass
                             except Exception as e:
-                                logging.exception(f"[GUI] Classification section failed: {e}")
-                                try:
-                                    ui.notify(
-                                        f"Classification section failed: {e}", type="warning"
-                                    )
-                                except Exception:
-                                    pass
+                                logging.exception(f"[GUI] Failed to build analysis sections: {e}")
 
-                        # Coverage section (target) - create UI immediately
-                        if not workflow_steps or is_section_enabled("target", workflow_steps):
-                            try:
-                                try:
-                                    from .gui.components.coverage import add_coverage_section  # type: ignore
-                                except ImportError:
-                                    # Try absolute import if relative fails
-                                    from robin.gui.components.coverage import (
-                                        add_coverage_section,
-                                        add_igv_viewer,
-                                    )
-
-                                # Create the UI components immediately on the main thread
-                                add_coverage_section(self, sample_dir)
-                            except Exception as e:
-                                try:
-                                    ui.notify(f"Coverage section failed: {e}", type="warning")
-                                except Exception:
-                                    pass
-                        
-                        # MGMT section (refactored component) - create UI immediately
-                        if not workflow_steps or is_section_enabled("mgmt", workflow_steps):
-                            try:
-                                try:
-                                    from .gui.components.mgmt import add_mgmt_section  # type: ignore
-                                except ImportError:
-                                    # Try absolute import if relative fails
-                                    from robin.gui.components.mgmt import add_mgmt_section
-
-                                # Create the UI components immediately on the main thread
-                                add_mgmt_section(self, sample_dir)
-                            except Exception as e:
-                                logging.exception(f"[GUI] MGMT section failed: {e}")
-                                try:
-                                    ui.notify(f"MGMT section failed: {e}", type="warning")
-                                except Exception:
-                                    pass
-                        
-                        # CNV section (refactored component) - create UI immediately
-                        if not workflow_steps or is_section_enabled("cnv", workflow_steps):
-                            try:
-                                try:
-                                    from .gui.components.cnv import add_cnv_section  # type: ignore
-                                except ImportError:
-                                    # Try absolute import if relative fails
-                                    from robin.gui.components.cnv import add_cnv_section
-
-                                # Create the UI components immediately on the main thread
-                                # Pass launcher for shared state access (launcher._cnv_state)
-                                add_cnv_section(self, sample_dir)
-                            except Exception as e:
-                                logging.exception(f"[GUI] CNV section failed: {e}")
-                                try:
-                                    ui.notify(f"CNV section failed: {e}", type="warning")
-                                except Exception:
-                                    pass
-
-                        # Fusion section (target and genome-wide; excludes full SV UI) - create UI immediately
-                        if not workflow_steps or is_section_enabled("fusion", workflow_steps):
-                            try:
-                                try:
-                                    from .gui.components.fusion import add_fusion_section  # type: ignore
-                                except ImportError:
-                                    # Try absolute import if relative fails
-                                    from robin.gui.components.fusion import add_fusion_section
-
-                                # Create the UI components immediately on the main thread
-                                add_fusion_section(self, sample_dir)
-                            except Exception as e:
-                                logging.exception(f"[GUI] Fusion section failed: {e}")
-                                try:
-                                    ui.notify(f"Fusion section failed: {e}", type="warning")
-                                except Exception:
-                                    pass
-                            
-                            # BED Coverage section
-                            try:
-                                try:
-                                    from .gui.components.bed_coverage import add_bed_coverage_section  # type: ignore
-                                except ImportError:
-                                    # Try absolute import if relative fails
-                                    from robin.gui.components.bed_coverage import add_bed_coverage_section
-                                
-                                # Create the UI components immediately on the main thread
-                                add_bed_coverage_section(self, sample_dir)
-                            except Exception as e:
-                                logging.exception(f"[GUI] BED Coverage section failed: {e}")
-                                try:
-                                    ui.notify(f"BED Coverage section failed: {e}", type="warning")
-                                except Exception:
-                                    pass
+                        # Delay heavy UI creation to allow websocket handshake to complete
+                        ui.timer(0.5, _build_analysis_sections, once=True)
 
                         # Files in output directory
                         with ui.card().classes("w-full"):

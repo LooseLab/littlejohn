@@ -6081,4 +6081,5 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             )
 
     # Trigger an immediate refresh on page load, then continue with periodic refreshes
-    ui.timer(30.0, _refresh_coverage_async, active=True, immediate=True)  # Periodic refresh every 30 seconds
+    ui.timer(30.0, _refresh_coverage_async, active=True, immediate=False)  # Periodic refresh every 30 seconds
+    ui.timer(0.5, _refresh_coverage_async, once=True)

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import asyncio
+import threading
 import json
 import csv
 from datetime import datetime
@@ -21,10 +23,36 @@ from robin.gui.config import (
 )
 
 
+_SUMMARY_CACHE: Dict[str, Dict[str, Any]] = {}
+_SUMMARY_CACHE_LOCK = threading.Lock()
+
+
+def _get_summary_cache(sample_dir: Path) -> Dict[str, Any]:
+    key = str(sample_dir)
+    with _SUMMARY_CACHE_LOCK:
+        return dict(_SUMMARY_CACHE.get(key, {}))
+
+
+def _set_summary_cache(sample_dir: Path, data: Dict[str, Any]) -> None:
+    key = str(sample_dir)
+    with _SUMMARY_CACHE_LOCK:
+        _SUMMARY_CACHE[key] = data
+
+
 @ui.refreshable
 def _run_info_section(sample_dir: Path, sample_id: str):
     """Create refreshable run information section."""
-    run_info = _extract_run_information(sample_dir, sample_id)
+    cache = _get_summary_cache(sample_dir)
+    run_info = cache.get(
+        "run_info",
+        {
+            "run_time": "Loading...",
+            "model": "Loading...",
+            "device": "Loading...",
+            "flow_cell": "Loading...",
+            "panel": "Loading...",
+        },
+    )
     
     with ui.card().classes("w-full"):
         ui.label("Run Details").classes("text-lg font-semibold text-blue-800")
@@ -54,7 +82,36 @@ def _run_info_section(sample_dir: Path, sample_id: str):
 @ui.refreshable
 def _classification_section(sample_dir: Path, launcher: Any = None):
     """Create refreshable classification section."""
-    classification_data = _extract_classification_data(sample_dir)
+    cache = _get_summary_cache(sample_dir)
+    classification_data = cache.get(
+        "classification_data",
+        {
+            "sturgeon": {
+                "classification": "Loading...",
+                "confidence": 0.0,
+                "confidence_level": "Loading...",
+                "features": 0,
+            },
+            "nanodx": {
+                "classification": "Loading...",
+                "confidence": 0.0,
+                "confidence_level": "Loading...",
+                "features": 0,
+            },
+            "pannanodx": {
+                "classification": "Loading...",
+                "confidence": 0.0,
+                "confidence_level": "Loading...",
+                "features": 0,
+            },
+            "random_forest": {
+                "classification": "Loading...",
+                "confidence": 0.0,
+                "confidence_level": "Loading...",
+                "features": 0,
+            },
+        },
+    )
     
     # Get workflow steps from launcher if available
     workflow_steps = launcher.workflow_steps if launcher and hasattr(launcher, 'workflow_steps') else None
@@ -127,11 +184,12 @@ def _analysis_section(sample_dir: Path, launcher: Any = None):
     """Create refreshable analysis section."""
     # Get workflow steps from launcher if available
     workflow_steps = launcher.workflow_steps if launcher and hasattr(launcher, 'workflow_steps') else None
-    
-    coverage_data = _extract_coverage_data(sample_dir) if not workflow_steps or is_section_enabled("target", workflow_steps) else {}
-    cnv_data = _extract_cnv_data(sample_dir) if not workflow_steps or is_section_enabled("cnv", workflow_steps) else {}
-    mgmt_data = _extract_mgmt_data(sample_dir) if not workflow_steps or is_section_enabled("mgmt", workflow_steps) else {}
-    fusion_data = _extract_fusion_data(sample_dir) if not workflow_steps or is_section_enabled("fusion", workflow_steps) else {}
+    cache = _get_summary_cache(sample_dir)
+    analysis_data = cache.get("analysis_data", {})
+    coverage_data = analysis_data.get("coverage", {}) if not workflow_steps or is_section_enabled("target", workflow_steps) else {}
+    cnv_data = analysis_data.get("cnv", {}) if not workflow_steps or is_section_enabled("cnv", workflow_steps) else {}
+    mgmt_data = analysis_data.get("mgmt", {}) if not workflow_steps or is_section_enabled("mgmt", workflow_steps) else {}
+    fusion_data = analysis_data.get("fusion", {}) if not workflow_steps or is_section_enabled("fusion", workflow_steps) else {}
     
     # Check if any analysis section should be shown
     should_show_target = not workflow_steps or is_section_enabled("target", workflow_steps)
@@ -192,19 +250,65 @@ def _analysis_section(sample_dir: Path, launcher: Any = None):
 
 def add_summary_section(sample_dir: Path, sample_id: str, launcher: Any = None) -> None:
     """Build the Summary section at the top of the sample detail page using ui.refreshable."""
-    
+
     # Create refreshable sections synchronously for immediate rendering
-    # This ensures they appear at the top of the page
     _run_info_section(sample_dir, sample_id)
     _classification_section(sample_dir, launcher)
     _analysis_section(sample_dir, launcher)
-    
-    # Start periodic refresh timer (every 30 seconds)
-    ui.timer(30.0, lambda: [
-        _run_info_section.refresh(),
-        _classification_section.refresh(),
-        _analysis_section.refresh()
-    ], active=True, immediate=True)
+
+    async def _refresh_summary_cache_async() -> None:
+        try:
+            data = await asyncio.to_thread(
+                _refresh_summary_cache_sync, sample_dir, sample_id, launcher
+            )
+            _set_summary_cache(sample_dir, data)
+            _run_info_section.refresh()
+            _classification_section.refresh()
+            _analysis_section.refresh()
+        except Exception as e:
+            logging.debug(f"[Summary] Async refresh failed: {e}")
+
+    def _schedule_refresh() -> None:
+        try:
+            asyncio.create_task(_refresh_summary_cache_async())
+        except RuntimeError:
+            # If no running loop, fall back to sync refresh (still updates cache)
+            data = _refresh_summary_cache_sync(sample_dir, sample_id, launcher)
+            _set_summary_cache(sample_dir, data)
+            _run_info_section.refresh()
+            _classification_section.refresh()
+            _analysis_section.refresh()
+
+    # Initial async load shortly after page render
+    ui.timer(0.2, _refresh_summary_cache_async, once=True)
+    # Periodic refresh timer (every 30 seconds)
+    ui.timer(30.0, _refresh_summary_cache_async, active=True, immediate=False)
+
+
+def _refresh_summary_cache_sync(
+    sample_dir: Path, sample_id: str, launcher: Any = None
+) -> Dict[str, Any]:
+    """Compute summary data in a background thread."""
+    workflow_steps = launcher.workflow_steps if launcher and hasattr(launcher, "workflow_steps") else None
+    data: Dict[str, Any] = {
+        "run_info": _extract_run_information(sample_dir, sample_id),
+        "classification_data": _extract_classification_data(sample_dir),
+        "analysis_data": {},
+    }
+
+    # Analysis data (only compute enabled sections)
+    analysis_data: Dict[str, Any] = {}
+    if not workflow_steps or is_section_enabled("target", workflow_steps):
+        analysis_data["coverage"] = _extract_coverage_data(sample_dir)
+    if not workflow_steps or is_section_enabled("cnv", workflow_steps):
+        analysis_data["cnv"] = _extract_cnv_data(sample_dir)
+    if not workflow_steps or is_section_enabled("mgmt", workflow_steps):
+        analysis_data["mgmt"] = _extract_mgmt_data(sample_dir)
+    if not workflow_steps or is_section_enabled("fusion", workflow_steps):
+        analysis_data["fusion"] = _extract_fusion_data(sample_dir)
+
+    data["analysis_data"] = analysis_data
+    return data
 
 
 def _create_dashboard_card(title: str, value: str, icon: str, description: str) -> None:
