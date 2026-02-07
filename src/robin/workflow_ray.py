@@ -35,6 +35,8 @@ warnings.filterwarnings(
 )
 
 import os
+import sys
+import resource
 import time
 import asyncio
 import argparse
@@ -549,6 +551,45 @@ def job_queue_of(job_type: str) -> str:
     return "slow"
 
 
+def _get_rss_mb() -> Optional[float]:
+    try:
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        if sys.platform == "darwin":
+            return rss / (1024 * 1024)
+        return rss / 1024
+    except Exception:
+        return None
+
+
+def _get_ray_runtime_ids() -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    try:
+        ctx = ray.get_runtime_context()
+        task_id = str(ctx.get_task_id())
+        job_id = str(ctx.get_job_id())
+        node_id = None
+        try:
+            node_id = str(ctx.get_node_id())
+        except Exception:
+            node_id = None
+        return task_id, job_id, node_id
+    except Exception:
+        return None, None, None
+
+
+def _get_sample_id(job: Job) -> Optional[str]:
+    try:
+        if hasattr(job.context, "get_sample_id"):
+            sample_id = job.context.get_sample_id()
+            if sample_id:
+                return sample_id
+    except Exception:
+        pass
+    try:
+        return job.context.metadata.get("sample_id")
+    except Exception:
+        return None
+
+
 # ---------- Real handler wrappers as Ray tasks ----------
 # Each wrapper returns an updated WorkflowContext.
 
@@ -591,6 +632,23 @@ def _wrap_real_handler(
         except Exception:
             pass
         logger = _get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
+        task_id, ray_job_id, node_id = _get_ray_runtime_ids()
+        pid = os.getpid()
+        rss_mb = _get_rss_mb()
+        sample_id = _get_sample_id(job)
+        filepath = getattr(job.context, "filepath", None)
+        logger.info(
+            "ray_task_start job_type=%s job_id=%s ray_job_id=%s task_id=%s node_id=%s pid=%s sample_id=%s filepath=%s rss_mb=%s",
+            job_type,
+            getattr(job, "job_id", None),
+            ray_job_id,
+            task_id,
+            node_id,
+            pid,
+            sample_id,
+            filepath,
+            f"{rss_mb:.2f}" if rss_mb is not None else None,
+        )
         try:
             if py_handler is None:
                 raise RuntimeError(
@@ -677,9 +735,28 @@ def _wrap_real_handler(
                 logger.info(f"{job_type} completed")
         except Exception as e:
             job.context.add_error(job_type, str(e))
-            logger.error(f"{job_type} failed: {e}")
+            rss_mb = _get_rss_mb()
+            logger.error(
+                "%s failed: %s (task_id=%s node_id=%s pid=%s rss_mb=%s)",
+                job_type,
+                e,
+                task_id,
+                node_id,
+                pid,
+                f"{rss_mb:.2f}" if rss_mb is not None else None,
+            )
             # still return context with error recorded
         finally:
+            rss_mb = _get_rss_mb()
+            logger.info(
+                "ray_task_end job_type=%s job_id=%s task_id=%s node_id=%s pid=%s rss_mb=%s",
+                job_type,
+                getattr(job, "job_id", None),
+                task_id,
+                node_id,
+                pid,
+                f"{rss_mb:.2f}" if rss_mb is not None else None,
+            )
             # Mark result if user handler didn't
             if job_type not in job.context.results:
                 job.context.add_result(job_type, f"{job_type}_ok")
