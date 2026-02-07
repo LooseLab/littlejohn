@@ -282,7 +282,13 @@ def add_summary_section(sample_dir: Path, sample_id: str, launcher: Any = None) 
     # Initial async load shortly after page render
     ui.timer(0.2, _refresh_summary_cache_async, once=True)
     # Periodic refresh timer (every 30 seconds)
-    ui.timer(30.0, _refresh_summary_cache_async, active=True, immediate=False)
+    refresh_timer = ui.timer(
+        30.0, _refresh_summary_cache_async, active=True, immediate=False
+    )
+    try:
+        ui.context.client.on_disconnect(lambda: refresh_timer.deactivate())
+    except Exception:
+        pass
 
 
 def _refresh_summary_cache_sync(

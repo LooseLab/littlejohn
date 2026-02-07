@@ -2048,5 +2048,9 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
         pass
 
     # Start the refresh timer (every 30 seconds)
-    ui.timer(30.0, _refresh_cnv, active=True, immediate=False)
+    refresh_timer = ui.timer(30.0, _refresh_cnv, active=True, immediate=False)
     ui.timer(0.5, _refresh_cnv, once=True)
+    try:
+        ui.context.client.on_disconnect(lambda: refresh_timer.deactivate())
+    except Exception:
+        pass

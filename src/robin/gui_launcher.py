@@ -3622,7 +3622,13 @@ class GUILauncher:
 
                     # Start periodic refresh with async version
                     try:
-                        ui.timer(30.0, _refresh_sample_detail_async)
+                        refresh_timer = ui.timer(30.0, _refresh_sample_detail_async)
+                        try:
+                            ui.context.client.on_disconnect(
+                                lambda: refresh_timer.deactivate()
+                            )
+                        except Exception:
+                            pass
                     except Exception:
                         pass
 

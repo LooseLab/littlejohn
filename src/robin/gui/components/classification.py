@@ -532,6 +532,10 @@ def add_classification_section(sample_dir: Path, launcher: Any = None) -> None:
             pass
 
     # Start the refresh timer (every 30 seconds)
-    ui.timer(30.0, _refresh_classification, active=True, immediate=False)
+    refresh_timer = ui.timer(30.0, _refresh_classification, active=True, immediate=False)
     # Initial refresh after the page is rendered
     ui.timer(0.5, _refresh_classification, once=True)
+    try:
+        ui.context.client.on_disconnect(lambda: refresh_timer.deactivate())
+    except Exception:
+        pass

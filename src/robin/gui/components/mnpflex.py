@@ -690,5 +690,9 @@ def add_mnpflex_section(launcher: Any, sample_dir: Path, sample_id: str) -> None
 
         fetch_button.on_click(_handle_fetch_click)
         build_button.on_click(_handle_build_click)
-        ui.timer(30.0, _poll_status, active=True, immediate=False)
+        refresh_timer = ui.timer(30.0, _poll_status, active=True, immediate=False)
         ui.timer(0.5, _poll_status, once=True)
+        try:
+            ui.context.client.on_disconnect(lambda: refresh_timer.deactivate())
+        except Exception:
+            pass

@@ -267,7 +267,7 @@ def add_bed_coverage_section(launcher: Any, sample_dir: Path) -> None:
         except Exception as e:
             logger.exception(f"[BED Coverage] Error processing result: {e}")
     
-    ui.timer(0.5, check_result_queue, active=True)
+    result_timer = ui.timer(0.5, check_result_queue, active=True)
     
     # Initial load - use a small delay to ensure chart is fully initialized
     def initial_load():
@@ -286,4 +286,9 @@ def add_bed_coverage_section(launcher: Any, sample_dir: Path) -> None:
         except Exception as e:
             logger.exception(f"[BED Coverage] Refresh failed: {e}")
     
-    ui.timer(30.0, refresh_coverage, active=True)
+    refresh_timer = ui.timer(30.0, refresh_coverage, active=True)
+    try:
+        ui.context.client.on_disconnect(lambda: result_timer.deactivate())
+        ui.context.client.on_disconnect(lambda: refresh_timer.deactivate())
+    except Exception:
+        pass
