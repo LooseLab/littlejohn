@@ -36,6 +36,9 @@ warnings.filterwarnings(
 
 import os
 import time
+import tempfile
+import pickle
+import uuid
 import asyncio
 import argparse
 from dataclasses import dataclass, field
@@ -925,6 +928,16 @@ class Coordinator:
         self.inflight_by_queue: Dict[str, int] = {}
         self.waiting_by_queue: Dict[str, List[Job]] = {}
         self.waiting_global: List[Job] = []
+        # Optional on-disk spooling of waiting jobs to reduce memory pressure
+        self._spool_enabled: bool = os.getenv("ROBIN_QUEUE_SPOOL", "1") != "0"
+        self._spool_dir_source: str = "env"
+        self.queue_spool_dir: Optional[str] = os.getenv("ROBIN_QUEUE_SPOOL_DIR")
+        if not self.queue_spool_dir:
+            self._spool_dir_source = "temp"
+            self.queue_spool_dir = os.path.join(
+                tempfile.gettempdir(), f"robin_queue_{os.getpid()}"
+            )
+        self._spool_counter: int = 0
         # per-sample tracking for GUI
         self.samples_by_id: Dict[str, Dict[str, Any]] = {}
         # Sample cleanup tracking to prevent unbounded memory growth
@@ -989,6 +1002,60 @@ class Coordinator:
     def set_work_dir(self, work_dir: Optional[str]) -> None:
         """Set the work directory for the coordinator."""
         self.work_dir = work_dir
+        # If no explicit spool dir was provided, prefer work_dir for spooling
+        if (
+            self._spool_enabled
+            and self._spool_dir_source == "temp"
+            and work_dir
+            and not os.getenv("ROBIN_QUEUE_SPOOL_DIR")
+        ):
+            self.queue_spool_dir = os.path.join(work_dir, ".robin_queue")
+
+    def _ensure_spool_dir(self) -> None:
+        if not self._spool_enabled or not self.queue_spool_dir:
+            return
+        try:
+            os.makedirs(self.queue_spool_dir, exist_ok=True)
+        except Exception:
+            pass
+
+    def _spool_job(self, job: Job, sample_id: Optional[str]) -> Any:
+        if not self._spool_enabled:
+            return job
+        self._ensure_spool_dir()
+        if not self.queue_spool_dir:
+            return job
+        self._spool_counter += 1
+        fname = f"job_{self._spool_counter}_{job.job_id}_{uuid.uuid4().hex}.pkl"
+        path = os.path.join(self.queue_spool_dir, fname)
+        try:
+            with open(path, "wb") as fh:
+                pickle.dump(job, fh, protocol=pickle.HIGHEST_PROTOCOL)
+            return {"spool_path": path, "sample_id": sample_id or "unknown"}
+        except Exception:
+            return job
+
+    def _unspool_job(self, entry: Any) -> Tuple[Optional[Job], Optional[str]]:
+        if isinstance(entry, dict) and entry.get("spool_path"):
+            path = entry.get("spool_path")
+            sample_id = entry.get("sample_id") or "unknown"
+            try:
+                with open(path, "rb") as fh:
+                    job = pickle.load(fh)
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+                return job, sample_id
+            except Exception:
+                return None, sample_id
+        if isinstance(entry, Job):
+            try:
+                sid = entry.context.get_sample_id()
+            except Exception:
+                sid = "unknown"
+            return entry, sid
+        return None, None
 
     # ----- handler registration API -----
     async def register_handler(self, job_type: str, remote_func) -> None:
@@ -1220,7 +1287,7 @@ class Coordinator:
 
         # Global inflight cap
         if self._total_inflight() >= self.max_total_inflight:
-            self.waiting_global.append(job)
+            self.waiting_global.append(self._spool_job(job, sample_id))
             try:
                 sid_pending = sample_id or "unknown"
                 if sid_pending != "unknown":
@@ -1247,7 +1314,9 @@ class Coordinator:
         # Per-queue inflight cap
         if int(self.inflight_by_queue.get(q, 0)) >= self._queue_inflight_cap(q):
             await self._wait_for_queue_capacity(q)
-            self.waiting_by_queue.setdefault(q, []).append(job)
+            self.waiting_by_queue.setdefault(q, []).append(
+                self._spool_job(job, sample_id)
+            )
             try:
                 sid_pending = sample_id or "unknown"
                 if sid_pending != "unknown":
@@ -1273,7 +1342,9 @@ class Coordinator:
         # Per-type inflight cap
         inflight_for_type = int(self.inflight_by_type.get(job.job_type, 0))
         if inflight_for_type >= self.max_inflight_per_type:
-            self.waiting_by_type_global.setdefault(job.job_type, []).append(job)
+            self.waiting_by_type_global.setdefault(job.job_type, []).append(
+                self._spool_job(job, sample_id)
+            )
             try:
                 sid_pending = sample_id or "unknown"
                 if sid_pending != "unknown":
@@ -1355,11 +1426,10 @@ class Coordinator:
     async def _drain_waiting_jobs(self, queue_name: Optional[str], job_type: str) -> None:
         # Try one global waiting job first to avoid starvation
         if self.waiting_global and self._total_inflight() < self.max_total_inflight:
-            nxt_global = self.waiting_global.pop(0)
-            try:
-                sid = nxt_global.context.get_sample_id()
-            except Exception:
-                sid = "unknown"
+            entry = self.waiting_global.pop(0)
+            nxt_global, sid = self._unspool_job(entry)
+            if nxt_global is None:
+                return
             try:
                 if sid != "unknown":
                     ent_pending = self.samples_by_id.get(sid)
@@ -1374,13 +1444,12 @@ class Coordinator:
         if queue_name:
             queue_jobs = self.waiting_by_queue.get(queue_name, [])
             if queue_jobs and int(self.inflight_by_queue.get(queue_name, 0)) < self._queue_inflight_cap(queue_name):
-                nxt_queue = queue_jobs.pop(0)
+                entry = queue_jobs.pop(0)
                 if not queue_jobs:
                     self.waiting_by_queue.pop(queue_name, None)
-                try:
-                    sid = nxt_queue.context.get_sample_id()
-                except Exception:
-                    sid = "unknown"
+                nxt_queue, sid = self._unspool_job(entry)
+                if nxt_queue is None:
+                    return
                 try:
                     if sid != "unknown":
                         ent_pending = self.samples_by_id.get(sid)
@@ -1394,13 +1463,12 @@ class Coordinator:
         # Finally, release one per-type waiting job
         queue_global = self.waiting_by_type_global.get(job_type, [])
         if queue_global and int(self.inflight_by_type.get(job_type, 0)) < self.max_inflight_per_type:
-            nxt_job_g = queue_global.pop(0)
+            entry = queue_global.pop(0)
             if not queue_global:
                 self.waiting_by_type_global.pop(job_type, None)
-            try:
-                sid = nxt_job_g.context.get_sample_id()
-            except Exception:
-                sid = "unknown"
+            nxt_job_g, sid = self._unspool_job(entry)
+            if nxt_job_g is None:
+                return
             try:
                 if sid != "unknown":
                     ent_pending = self.samples_by_id.get(sid)
