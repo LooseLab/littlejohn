@@ -4965,21 +4965,50 @@ class GUILauncher:
                         logging.info(
                             f"Triggering target.bam finalization for sample {sample_id} (status: Complete)"
                         )
-                        result = finalize_accumulation_for_sample(
-                            sample_id=sample_id,
-                            work_dir=str(self.monitored_directory),
-                            target_panel=target_panel
-                        )
-                        if result.get("status") != "error":
-                            self._finalized_samples.add(sample_id)
-                            logging.info(
-                                f"Successfully finalized target.bam for sample {sample_id}"
+                        workflow_runner = getattr(self, "workflow_runner", None)
+                        if (not trigger_snp) and workflow_runner and hasattr(
+                            workflow_runner, "submit_target_bam_finalize_job"
+                        ):
+                            submitted = workflow_runner.submit_target_bam_finalize_job(
+                                sample_dir=str(sample_dir),
+                                sample_id=sample_id,
+                                target_panel=target_panel,
                             )
-                        else:
-                            finalization_succeeded = False
-                            logging.warning(
-                                f"Target.bam finalization returned error for {sample_id}: {result.get('error', 'Unknown')}"
+                            if submitted:
+                                logging.info(
+                                    f"Target BAM finalization job submitted for {sample_id}"
+                                )
+                                self.send_update(
+                                    UpdateType.WARNING_NOTIFICATION,
+                                    {
+                                        "title": "Target BAM finalization queued",
+                                        "message": "Finalization job submitted to the workflow queue.",
+                                        "sample_id": sample_id,
+                                        "level": "info",
+                                    },
+                                    priority=6,
+                                )
+                                finalization_succeeded = False
+                            else:
+                                logging.warning(
+                                    f"Target BAM finalization job submission failed for {sample_id}; running inline"
+                                )
+                        if finalization_succeeded:
+                            result = finalize_accumulation_for_sample(
+                                sample_id=sample_id,
+                                work_dir=str(self.monitored_directory),
+                                target_panel=target_panel,
                             )
+                            if result.get("status") != "error":
+                                self._finalized_samples.add(sample_id)
+                                logging.info(
+                                    f"Successfully finalized target.bam for sample {sample_id}"
+                                )
+                            else:
+                                finalization_succeeded = False
+                                logging.warning(
+                                    f"Target.bam finalization returned error for {sample_id}: {result.get('error', 'Unknown')}"
+                                )
 
                     if trigger_snp and finalization_succeeded:
                         # Ensure only one SNP analysis submission runs at a time

@@ -2839,6 +2839,82 @@ def finalize_accumulation_for_sample(
         return {"status": "error", "error": str(e), "sample_id": sample_id}
 
 
+def target_bam_finalize_handler(job, work_dir: Optional[str] = None) -> None:
+    """
+    Workflow handler to finalize target BAMs for a sample.
+    Runs accumulation and merges batch BAMs into target.bam.
+
+    Required metadata:
+    - sample_id: Sample identifier (optional; defaults to context sample ID)
+    - work_dir: Parent directory containing sample folder (optional)
+    - target_panel: Target panel type (optional; resolved from master.csv if missing)
+    """
+    logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
+
+    try:
+        sid = (
+            job.context.get_sample_id()
+            if hasattr(job.context, "get_sample_id")
+            else "unknown"
+        )
+        metadata = job.context.metadata or {}
+        sample_id = metadata.get("sample_id") or sid
+        sample_dir = metadata.get("sample_dir")
+        base = work_dir or metadata.get("work_dir")
+
+        if not sample_dir:
+            if base and sample_id and sample_id != "unknown":
+                sample_dir = os.path.join(base, sample_id)
+            elif os.path.isdir(job.context.filepath):
+                sample_dir = job.context.filepath
+            else:
+                sample_dir = os.path.dirname(job.context.filepath)
+
+        if not base and sample_dir:
+            base = os.path.dirname(sample_dir)
+
+        if not base or not sample_id:
+            raise RuntimeError(
+                f"Missing work_dir/sample_id for target BAM finalization (work_dir={base}, sample_id={sample_id})"
+            )
+
+        target_panel = metadata.get("target_panel")
+        if not target_panel and sample_dir and os.path.isdir(sample_dir):
+            try:
+                import csv
+                master_csv = os.path.join(sample_dir, "master.csv")
+                if os.path.exists(master_csv):
+                    with open(master_csv, "r", newline="") as fh:
+                        reader = csv.DictReader(fh)
+                        first_row = next(reader, None)
+                        if first_row:
+                            panel = first_row.get("analysis_panel", "").strip()
+                            if panel:
+                                target_panel = panel
+            except Exception:
+                pass
+
+        if not target_panel:
+            target_panel = "rCNS2"
+
+        logger.info(
+            f"Finalizing target BAM: sample_id={sample_id}, work_dir={base}, target_panel={target_panel}"
+        )
+
+        result = finalize_accumulation_for_sample(
+            sample_id=sample_id, work_dir=base, target_panel=target_panel
+        )
+
+        if result.get("status") == "error":
+            job.context.add_error("target_bam_finalize", result.get("error", "Unknown error"))
+        else:
+            job.context.add_result("target_bam_finalize", result)
+
+    except Exception as e:
+        job.context.add_error("target_bam_finalize", str(e))
+        logger.error(f"Error in target BAM finalization handler: {e}")
+
+
 def ensure_sorted_igv_bam(
     sample_dir: str, threads: int = 4, force_regenerate: bool = False
 ) -> str:

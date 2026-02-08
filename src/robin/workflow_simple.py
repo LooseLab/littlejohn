@@ -28,7 +28,11 @@ try:
 except Exception:
     _RICH_AVAILABLE = False
 from robin.logging_config import get_job_logger
-from robin.analysis.target_analysis import igv_bam_handler, snp_analysis_handler
+from robin.analysis.target_analysis import (
+    igv_bam_handler,
+    snp_analysis_handler,
+    target_bam_finalize_handler,
+)
 
 # ---------- Batch Configuration ----------
 BATCH_CONFIG: Dict[str, Dict[str, Any]] = {
@@ -560,6 +564,7 @@ class WorkflowManager:
                 "quick": "target",  # For testing purposes - map to target queue
                 # IGV BAM build goes to slow queue to avoid contention with analyses
                 "igv_bam": "slow",
+                "target_bam_finalize": "slow",
                 # Classification queue
                 "sturgeon": "classification",
                 "nanodx": "classification",
@@ -584,6 +589,7 @@ class WorkflowManager:
                 "long": "analysis",  # For testing purposes
                 "quick": "analysis",  # For testing purposes
                 "igv_bam": "slow",
+                "target_bam_finalize": "slow",
                 # Classification queue
                 "sturgeon": "classification",
                 "nanodx": "classification",
@@ -1852,6 +1858,10 @@ class WorkflowRunner:
         self.manager.register_handler("slow", "igv_bam", igv_bam_handler)
         # Register SNP analysis handler on slow queue
         self.manager.register_handler("slow", "snp_analysis", snp_analysis_handler)
+        # Register target BAM finalization handler on slow queue
+        self.manager.register_handler(
+            "slow", "target_bam_finalize", target_bam_finalize_handler
+        )
 
     def register_handler(
         self, queue_type: str, job_type: str, handler: Callable[[Job], None]
@@ -2020,6 +2030,69 @@ class WorkflowRunner:
             if self.verbose:
                 print(
                     f"[WorkflowRunner] Failed to submit SNP analysis job for sample {sample_id}: {e}"
+                )
+            return False
+
+    def submit_target_bam_finalize_job(
+        self,
+        sample_dir: str,
+        sample_id: str = None,
+        target_panel: str = None,
+    ) -> bool:
+        """
+        Submit a target BAM finalization job for an existing sample directory.
+        """
+        try:
+            if sample_id is None:
+                sample_id = Path(sample_dir).name
+
+            if target_panel is None:
+                try:
+                    import csv
+                    master_csv = Path(sample_dir) / "master.csv"
+                    if master_csv.exists():
+                        with master_csv.open("r", newline="") as fh:
+                            reader = csv.DictReader(fh)
+                            first_row = next(reader, None)
+                            if first_row:
+                                panel = first_row.get("analysis_panel", "").strip()
+                                if panel:
+                                    target_panel = panel
+                except Exception:
+                    pass
+
+            metadata = {
+                "sample_id": sample_id,
+                "sample_dir": sample_dir,
+                "work_dir": os.path.dirname(sample_dir),
+                "bam_metadata": {"sample_id": sample_id},
+            }
+
+            if target_panel:
+                metadata["target_panel"] = target_panel
+
+            context = WorkflowContext(filepath=sample_dir, metadata=metadata)
+
+            job = Job(
+                job_id=next(_job_id_counter),
+                job_type="target_bam_finalize",
+                context=context,
+                origin="slow",
+                workflow=["slow:target_bam_finalize"],
+            )
+
+            self.manager.enqueue_jobs([job])
+
+            if self.verbose:
+                print(
+                    f"[WorkflowRunner] Submitted target BAM finalization job for sample {sample_id}"
+                )
+
+            return True
+        except Exception as e:
+            if self.verbose:
+                print(
+                    f"[WorkflowRunner] Failed to submit target BAM finalization job for sample {sample_id}: {e}"
                 )
             return False
 

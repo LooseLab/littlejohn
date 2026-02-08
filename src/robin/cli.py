@@ -1294,6 +1294,52 @@ def _create_ray_workflow_runner(
                 except Exception:
                     return False
 
+            def submit_target_bam_finalize_job(
+                self,
+                sample_dir: str,
+                sample_id: str = None,
+                target_panel: str = None,
+            ) -> bool:
+                """Submit a target BAM finalization job for an existing sample directory using Ray workflow."""
+                try:
+                    import time
+                    from robin import workflow_ray as wrn
+
+                    max_retries = 5
+                    retry_delay = 1.0
+
+                    for attempt in range(max_retries):
+                        if self.coordinator is None:
+                            try:
+                                self.coordinator = wrn.get_coordinator_sync()
+                            except Exception:
+                                pass
+
+                        if self.coordinator is None:
+                            break
+
+                        if attempt < max_retries - 1:
+                            time.sleep(retry_delay)
+                            retry_delay *= 1.5
+
+                    if self.coordinator is None:
+                        return False
+
+                    result = self.coordinator.submit_target_bam_finalize_job.remote(
+                        sample_dir, sample_id, target_panel
+                    )
+
+                    import ray
+
+                    try:
+                        final_result = ray.get(result, timeout=30.0)
+                        return final_result
+                    except Exception:
+                        return False
+
+                except Exception:
+                    return False
+
             def is_sample_ready_for_snp_analysis(
                 self, sample_dir: str
             ) -> tuple[bool, list[str]]:

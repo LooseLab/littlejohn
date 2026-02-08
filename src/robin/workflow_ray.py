@@ -155,11 +155,13 @@ try:
         target_handler as _target_handler,
         igv_bam_handler as _igv_bam_handler,
         snp_analysis_handler as _snp_analysis_handler,
+        target_bam_finalize_handler as _target_bam_finalize_handler,
     )
 except Exception:
     _target_handler = None
     _igv_bam_handler = None
     _snp_analysis_handler = None
+    _target_bam_finalize_handler = None
 
 try:
     from robin.analysis.fusion_analysis import fusion_handler as _fusion_handler
@@ -358,7 +360,7 @@ QUEUE_TO_TYPES: Dict[str, Set[str]] = {
     "target": {"target"},
     "fusion": {"fusion"},
     "classification": {"sturgeon", "nanodx", "pannanodx"},
-    "slow": {"random_forest", "igv_bam"},
+    "slow": {"random_forest", "igv_bam", "snp_analysis", "target_bam_finalize"},
 }
 
 TRIGGERS: Dict[str, List[str]] = {
@@ -399,6 +401,8 @@ RESOURCE_HINTS: Dict[str, Dict[str, Any]] = {
     "pannanodx": {"num_cpus": 1, "memory": 1024 * 1024},
     "random_forest": {"num_cpus": 1, "memory": 1024 * 1024},
     "igv_bam": {"num_cpus": 1, "memory": 1024 * 1024},
+    "snp_analysis": {"num_cpus": 1, "memory": 1024 * 1024},
+    "target_bam_finalize": {"num_cpus": 1, "memory": 1024 * 1024},
 }
 
 # ---------- Sample Job Batcher ----------
@@ -1083,6 +1087,14 @@ class Coordinator:
                 "snp_analysis",
                 ray.remote(_wrap_real_handler(_snp_analysis_handler, "snp_analysis")),
             ),
+            (
+                "target_bam_finalize",
+                ray.remote(
+                    _wrap_real_handler(
+                        _target_bam_finalize_handler, "target_bam_finalize"
+                    )
+                ),
+            ),
         ]
 
         preset = (self.preset or "").lower().strip()
@@ -1124,6 +1136,7 @@ class Coordinator:
                 "slow": [
                     "igv_bam",
                     "snp_analysis",
+                    "target_bam_finalize",
                 ],  # Slow pool for igv_bam and snp_analysis jobs
             }
 
@@ -1728,6 +1741,61 @@ class Coordinator:
             # Submit the job
             await self.submit_jobs([job])
 
+            return True
+
+        except Exception:
+            return False
+
+    async def submit_target_bam_finalize_job(
+        self,
+        sample_dir: str,
+        sample_id: str = None,
+        target_panel: str = None,
+    ) -> bool:
+        """
+        Submit a target BAM finalization job for an existing sample directory.
+        """
+        try:
+            if sample_id is None:
+                sample_id = Path(sample_dir).name
+
+            if target_panel is None:
+                try:
+                    import csv
+                    master_csv = Path(sample_dir) / "master.csv"
+                    if master_csv.exists():
+                        with master_csv.open("r", newline="") as fh:
+                            reader = csv.DictReader(fh)
+                            first_row = next(reader, None)
+                            if first_row:
+                                panel = first_row.get("analysis_panel", "").strip()
+                                if panel:
+                                    target_panel = panel
+                except Exception:
+                    pass
+
+            metadata = {
+                "sample_id": sample_id,
+                "sample_dir": sample_dir,
+                "work_dir": os.path.dirname(sample_dir),
+                "bam_metadata": {"sample_id": sample_id},
+            }
+
+            if target_panel:
+                metadata["target_panel"] = target_panel
+
+            context = WorkflowContext(filepath=sample_dir, metadata=metadata)
+
+            job = Job(
+                job_id=next(_job_id_counter),
+                job_type="target_bam_finalize",
+                origin="manual",
+                workflow=["slow:target_bam_finalize"],
+                step=0,
+                context=context,
+            )
+
+            await self.submit_jobs([job])
             return True
 
         except Exception:
