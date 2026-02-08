@@ -28,7 +28,6 @@ from pathlib import Path
 from collections import defaultdict
 from typing import Dict, Any, Optional, List, Tuple, Set, Union
 from dataclasses import dataclass, asdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Third-party imports
 import numpy as np
@@ -1347,7 +1346,11 @@ def _filter_fusion_candidates(df: pd.DataFrame) -> Optional[pd.DataFrame]:
 
 
 def process_bam_for_master_bed_fusions(
-    bamfile: str, work_dir: str, sample_id: str, supplementary_read_ids: Optional[List[str]] = None
+    bamfile: str,
+    work_dir: str,
+    sample_id: str,
+    supplementary_read_ids: Optional[List[str]] = None,
+    supplementary_read_ids_complete: bool = False,
 ) -> Optional[pd.DataFrame]:
     """
     Process BAM file to find fusion candidates by tracking ALL supplementary alignments.
@@ -1393,16 +1396,17 @@ def process_bam_for_master_bed_fusions(
                         continue
                     
                     # Check for supplementary alignments
-                    # Always check SA tag directly to ensure we catch ALL reads with supplementary alignments
-                    # The supplementary_read_ids list may be incomplete if preprocessing missed some reads
-                    # or if reads were added after preprocessing
-                    has_supplementary = read.has_tag("SA")
-                    
-                    # Optional optimization: if we have a supplementary_read_ids list and the read is not in it,
-                    # we can skip the SA tag check (but this risks missing reads if the list is incomplete)
-                    # For now, we always check SA tag to be safe
-                    if not has_supplementary:
-                        continue
+                    if supplementary_reads_set is not None and supplementary_read_ids_complete:
+                        if read.query_name not in supplementary_reads_set:
+                            continue
+                        has_supplementary = True
+                    else:
+                        # Always check SA tag directly to ensure we catch ALL reads with supplementary alignments
+                        # The supplementary_read_ids list may be incomplete if preprocessing missed some reads
+                        # or if reads were added after preprocessing
+                        has_supplementary = read.has_tag("SA")
+                        if not has_supplementary:
+                            continue
                     
                     # Process this read: it has supplementary alignments
                     reads_with_supplementary_count += 1
@@ -1432,7 +1436,12 @@ def process_bam_for_master_bed_fusions(
                     )
                     
                     # Parse SA tag to get all supplementary alignments
-                    if read.has_tag("SA"):
+                    if supplementary_reads_set is not None and supplementary_read_ids_complete:
+                        try:
+                            sa_tag = read.get_tag("SA")
+                        except KeyError:
+                            continue
+                    elif read.has_tag("SA"):
                         try:
                             sa_tag = read.get_tag("SA")
                             # SA tag format: "chr,pos,strand,CIGAR,mapQ,NM;chr,pos,strand,CIGAR,mapQ,NM;..."
@@ -1531,6 +1540,7 @@ def process_bam_single_pass(
     work_dir: Optional[str] = None,
     sample_id: Optional[str] = None,
     supplementary_read_ids: Optional[List[str]] = None,
+    supplementary_read_ids_complete: bool = False,
 ) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame], Optional[pd.DataFrame]]:
     """
     Process BAM file in a single pass to find all fusion candidates.
@@ -1589,6 +1599,17 @@ def process_bam_single_pass(
         target_read_alignments = {}  # read_id -> list of alignment rows
         genome_read_alignments = {}  # read_id -> list of alignment rows
         master_bed_rows = []  # List of master BED alignment rows
+        master_bed_chunks = []  # Chunked DataFrames to cap memory usage
+        master_bed_chunk_size = 200000
+
+        def _flush_master_bed_rows(rows: List[Dict[str, Any]]) -> None:
+            if not rows:
+                return
+            df = pd.DataFrame(rows)
+            df = _optimize_fusion_dataframe(df)
+            if not df.empty:
+                master_bed_chunks.append(df)
+            rows.clear()
         
         reads_with_supplementary_count = 0
         
@@ -1616,18 +1637,21 @@ def process_bam_single_pass(
                         continue
                     
                     # Check for supplementary alignments
-                    # Always check SA tag directly to ensure we catch ALL reads
-                    has_supplementary = read.has_tag("SA")
-                    
-                    # Optional optimization: if we have a supplementary_read_ids list and the read is not in it,
-                    # we can skip the SA tag check (but this risks missing reads if the list is incomplete)
-                    if supplementary_reads_set is not None and read.query_name not in supplementary_reads_set:
-                        # Skip if not in the list (but still check SA tag to be safe)
+                    # If we have a complete supplementary_read_ids list, trust it and skip SA tag checks
+                    if supplementary_reads_set is not None and supplementary_read_ids_complete:
+                        if read.query_name not in supplementary_reads_set:
+                            continue
+                        has_supplementary = True
+                    else:
+                        # Always check SA tag directly to ensure we catch ALL reads
+                        has_supplementary = read.has_tag("SA")
+                        # Optional optimization: if we have a supplementary_read_ids list and the read is not in it,
+                        # we can skip the SA tag check (but this risks missing reads if the list is incomplete)
+                        if supplementary_reads_set is not None and read.query_name not in supplementary_reads_set:
+                            if not has_supplementary:
+                                continue
                         if not has_supplementary:
                             continue
-                    
-                    if not has_supplementary:
-                        continue
                     
                     # This read has supplementary alignments - process it for all fusion types
                     reads_with_supplementary_count += 1
@@ -1710,9 +1734,16 @@ def process_bam_single_pass(
                             "mapping_span": ref_end - ref_start,
                         }
                     )
+                    if len(master_bed_rows) >= master_bed_chunk_size:
+                        _flush_master_bed_rows(master_bed_rows)
                     
                     # Parse SA tag to get all supplementary alignments
-                    if read.has_tag("SA"):
+                    if supplementary_reads_set is not None and supplementary_read_ids_complete:
+                        try:
+                            sa_tag = read.get_tag("SA")
+                        except KeyError:
+                            continue
+                    elif read.has_tag("SA"):
                         try:
                             sa_tag = read.get_tag("SA")
                             # SA tag format: "chr,pos,strand,CIGAR,mapQ,NM;chr,pos,strand,CIGAR,mapQ,NM;..."
@@ -1763,6 +1794,8 @@ def process_bam_single_pass(
                                             "mapping_span": sa_end - sa_pos,
                                         }
                                     )
+                                    if len(master_bed_rows) >= master_bed_chunk_size:
+                                        _flush_master_bed_rows(master_bed_rows)
                         except (ValueError, KeyError) as e:
                             logger.debug(f"Could not parse SA tag for read {read.query_name}: {e}")
                             continue
@@ -1817,9 +1850,14 @@ def process_bam_single_pass(
         # Process master BED candidates
         master_bed_candidates = None
         if master_bed_rows:
-            master_bed_df = pd.DataFrame(master_bed_rows)
-            master_bed_df = _optimize_fusion_dataframe(master_bed_df)
-            master_bed_candidates = master_bed_df if not master_bed_df.empty else None
+            _flush_master_bed_rows(master_bed_rows)
+        if master_bed_chunks:
+            if len(master_bed_chunks) == 1:
+                master_bed_candidates = master_bed_chunks[0]
+            else:
+                master_bed_candidates = pd.concat(master_bed_chunks, ignore_index=True)
+        else:
+            master_bed_candidates = None
         
         logger.info(
             f"Single-pass results: {len(target_candidates) if target_candidates is not None else 0} target, "
@@ -1993,13 +2031,21 @@ def process_bam_with_staging(
         ), False
     
     try:
+        supplementary_read_ids_complete = bool(
+            metadata.get("supplementary_read_ids_complete", False)
+        )
         # Get atomic counter (thread-safe)
         counter = _atomic_counter_increment(work_dir, sample_id)
         logger.debug(f"Assigned fusion file counter: {counter}")
         
         # Process BAM file in single pass (combines all three operations)
         target_candidates, genome_wide_candidates, master_bed_candidates = process_bam_single_pass(
-            file_path, target_panel, work_dir, sample_id, supplementary_read_ids
+            file_path,
+            target_panel,
+            work_dir,
+            sample_id,
+            supplementary_read_ids,
+            supplementary_read_ids_complete,
         )
         
         # Apply fusion candidate filtering
@@ -2151,117 +2197,64 @@ def accumulate_fusion_candidates(
             f"Accumulating {len(target_files)} staged fusion files for {sample_id}"
         )
         
-        # Load all staged files efficiently
-        # Use list comprehensions to load all files of each type
-        # This is more efficient than sequential loading and doesn't require index matching
-        def load_parquet_files(file_list, file_type="file", max_workers=1):
-            """Load multiple parquet files in parallel, skipping empty or failed files."""
-            if not file_list:
-                return []
-            
-            def load_file(file_path):
+        # Stream staged files and append to datasets to cap memory usage
+        
+        def _extract_batch_id(file_path: str) -> int:
+            name = os.path.basename(file_path)
+            try:
+                counter_str = name.split("_", 1)[1].split(".", 1)[0]
+                return int(counter_str)
+            except (IndexError, ValueError):
+                return int(time.time())
+
+        def _append_staged_files(file_list: List[str], candidate_type: str) -> int:
+            total_rows = 0
+            for file_path in file_list:
                 try:
                     file_start = time.time()
                     df = pd.read_parquet(file_path)
                     load_elapsed = time.time() - file_start
-                    if not df.empty:
+                    if df is None or df.empty:
                         logger.debug(
-                            "Loaded %s parquet %s rows=%d in %.3fs",
-                            file_type,
+                            "Loaded %s parquet %s (empty) in %.3fs",
+                            candidate_type,
                             os.path.basename(file_path),
-                            len(df),
                             load_elapsed,
                         )
-                        return df
+                        continue
+                    batch_id = _extract_batch_id(file_path)
+                    _append_fusion_candidates_parquet(
+                        df, candidate_type, work_dir, sample_id, batch_id
+                    )
+                    total_rows += len(df)
                     logger.debug(
-                        "Loaded %s parquet %s (empty) in %.3fs",
-                        file_type,
+                        "Appended %s parquet %s rows=%d in %.3fs",
+                        candidate_type,
                         os.path.basename(file_path),
+                        len(df),
                         load_elapsed,
                     )
-                    return None
                 except Exception as e:
                     logger.warning(
-                        f"Error loading {file_type} staging file {os.path.basename(file_path)}: {e}"
+                        f"Error loading {candidate_type} staging file {os.path.basename(file_path)}: {e}"
                     )
-                    return None
-            
-            # Use parallel loading for better performance with many files
-            dfs = []
-            if len(file_list) > 1:
-                logger.debug(
-                    "Loading %d %s parquet files with %d workers",
-                    len(file_list),
-                    file_type,
-                    max_workers,
-                )
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    results = list(executor.map(load_file, file_list))
-                    dfs = [df for df in results if df is not None]
-            else:
-                # Single file - no need for threading overhead
-                logger.debug("Loading single %s parquet file without threading", file_type)
-                df = load_file(file_list[0])
-                if df is not None:
-                    dfs.append(df)
-            
-            return dfs
-        
-        # Load all files of each type in parallel (no need to match by index - just load all available)
-        load_start = time.time()
-        target_dfs = load_parquet_files(target_files, "target")
-        genome_dfs = load_parquet_files(genome_files, "genome")
-        master_bed_dfs = load_parquet_files(master_bed_files, "master_bed")
+            return total_rows
+
+        append_start = time.time()
+        batch_target_rows = _append_staged_files(target_files, "target_candidates")
+        batch_genome_rows = _append_staged_files(genome_files, "genome_wide_candidates")
+        batch_master_bed_rows = _append_staged_files(master_bed_files, "master_bed_candidates")
         logger.debug(
-            "Loaded staging files in %.3fs (target=%d, genome=%d, master_bed=%d)",
-            time.time() - load_start,
-            len(target_dfs),
-            len(genome_dfs),
-            len(master_bed_dfs),
+            "Appended staging files in %.3fs (target=%d, genome=%d, master_bed=%d)",
+            time.time() - append_start,
+            batch_target_rows,
+            batch_genome_rows,
+            batch_master_bed_rows,
         )
-        
-        # Track which master_bed files are new (for incremental processing)
-        # These are the files being accumulated in this batch - all of them are "new" for this accumulation
-        new_master_bed_files = set(master_bed_files)
         logger.info(
-            f"Loaded {len(target_dfs)} target, {len(genome_dfs)} genome-wide, "
-            f"and {len(master_bed_dfs)} master BED staging files"
+            f"Batch appended: {batch_target_rows} target, {batch_genome_rows} genome-wide, "
+            f"{batch_master_bed_rows} master BED candidates"
         )
-        
-        # Efficient batch merge using concat
-        # Optimize for common cases: single file (no concat needed) or empty list
-        def concat_dataframes(df_list):
-            """Efficiently concatenate a list of DataFrames, handling edge cases."""
-            if not df_list:
-                return pd.DataFrame()
-            elif len(df_list) == 1:
-                return df_list[0].copy()  # Return a copy to avoid modifying original
-            else:
-                return pd.concat(df_list, ignore_index=True)
-        
-        concat_start = time.time()
-        batch_target = concat_dataframes(target_dfs)
-        batch_genome = concat_dataframes(genome_dfs)
-        batch_master_bed = concat_dataframes(master_bed_dfs)
-        logger.debug(
-            "Concatenated dataframes in %.3fs (target=%d, genome=%d, master_bed=%d)",
-            time.time() - concat_start,
-            len(batch_target),
-            len(batch_genome),
-            len(batch_master_bed),
-        )
-        
-        logger.info(
-            f"Batch merged: {len(batch_target)} target, {len(batch_genome)} genome-wide, "
-            f"{len(batch_master_bed)} master BED candidates"
-        )
-        
-        # Debug logging for master BED candidates
-        if len(master_bed_files) > 0:
-            logger.debug(f"Found {len(master_bed_files)} master Bed staging files")
-            logger.debug(f"Loaded {len(master_bed_dfs)} non-empty master BED DataFrames from staging")
-        else:
-            logger.debug("No master BED staging files found")
         
         counts_start = time.time()
         counts = _load_fusion_counts(work_dir, sample_id)
@@ -2272,18 +2265,9 @@ def accumulate_fusion_candidates(
             counts.get("genome_wide_candidates", 0),
             counts.get("master_bed_candidates", 0),
         )
-        # Append batch to dataset (append-only, avoids re-reading full history)
-        batch_id = _extract_staging_batch_id(target_files)
-        logger.debug("Appending batch_id=%s to fusion datasets", batch_id)
-        append_start = time.time()
-        _append_fusion_candidates_parquet(batch_target, "target_candidates", work_dir, sample_id, batch_id)
-        _append_fusion_candidates_parquet(batch_genome, "genome_wide_candidates", work_dir, sample_id, batch_id)
-        _append_fusion_candidates_parquet(batch_master_bed, "master_bed_candidates", work_dir, sample_id, batch_id)
-        logger.debug("Appended fusion parquet files in %.3fs", time.time() - append_start)
-
-        counts["target_candidates"] = counts.get("target_candidates", 0) + len(batch_target)
-        counts["genome_wide_candidates"] = counts.get("genome_wide_candidates", 0) + len(batch_genome)
-        counts["master_bed_candidates"] = counts.get("master_bed_candidates", 0) + len(batch_master_bed)
+        counts["target_candidates"] = counts.get("target_candidates", 0) + batch_target_rows
+        counts["genome_wide_candidates"] = counts.get("genome_wide_candidates", 0) + batch_genome_rows
+        counts["master_bed_candidates"] = counts.get("master_bed_candidates", 0) + batch_master_bed_rows
         save_counts_start = time.time()
         _save_fusion_counts(work_dir, sample_id, counts)
         logger.debug(
@@ -2421,6 +2405,9 @@ def process_bam_file(
     """
     has_sup = has_supplementary
     sample_id = fusion_metadata.sample_id
+    supplementary_read_ids_complete = bool(
+        metadata.get("supplementary_read_ids_complete", False)
+    )
 
     # Load existing fusion metadata from disk if work_dir is provided
     if work_dir and sample_id:
@@ -2437,7 +2424,12 @@ def process_bam_file(
     if has_sup:
         # Process BAM file in single pass (combines all three operations)
         target_candidates, genome_wide_candidates, master_bed_candidates = process_bam_single_pass(
-            file_path, target_panel, work_dir, sample_id
+            file_path,
+            target_panel,
+            work_dir,
+            sample_id,
+            supplementary_read_ids,
+            supplementary_read_ids_complete,
         )
 
         # Apply fusion candidate filtering to get the final results
@@ -5767,17 +5759,22 @@ def _load_fusion_metadata(work_dir: str, sample_id: str) -> Optional[FusionMetad
         metadata_dict = _migrate_old_fusion_metadata(metadata_dict)
 
         # Check if we have Parquet files (new format) or JSON lists (old format)
-        # Try loading from Parquet first (fast path)
         fusion_data = metadata_dict.get("fusion_data", {})
         parquet_loaded = False
         
         for candidate_type in ["target_candidates", "genome_wide_candidates", "master_bed_candidates"]:
-            parquet_df = _load_fusion_candidates_parquet(candidate_type, work_dir, sample_id)
-            if parquet_df is not None and not parquet_df.empty:
-                # Parquet file exists - use it (convert to list for compatibility)
-                fusion_data[candidate_type] = parquet_df.to_dict("records")
+            dataset_dir = _get_parquet_dataset_dir(work_dir, sample_id, candidate_type)
+            dataset_files = glob.glob(os.path.join(dataset_dir, "*.parquet"))
+            legacy_path = _get_parquet_paths(work_dir, sample_id).get(candidate_type)
+            has_parquet = bool(dataset_files) or (legacy_path and os.path.exists(legacy_path))
+            
+            if has_parquet:
+                # Parquet exists - avoid loading into memory, keep empty list for metadata
+                fusion_data[candidate_type] = []
                 parquet_loaded = True
-            elif candidate_type in fusion_data:
+                continue
+            
+            if candidate_type in fusion_data:
                 # Check if JSON has data (old format)
                 candidates_list = fusion_data.get(candidate_type, [])
                 if isinstance(candidates_list, list) and len(candidates_list) > 0:
@@ -5815,6 +5812,21 @@ def _load_fusion_metadata(work_dir: str, sample_id: str) -> Optional[FusionMetad
             fusion_metadata.fusion_data["genome_wide_candidates"] = []
         if "master_bed_candidates" not in fusion_metadata.fusion_data:
             fusion_metadata.fusion_data["master_bed_candidates"] = []
+
+        # Update analysis results counts from parquet when available
+        if parquet_loaded:
+            counts = _load_fusion_counts(work_dir, sample_id)
+            if not fusion_metadata.analysis_results:
+                fusion_metadata.analysis_results = {}
+            fusion_metadata.analysis_results["target_candidates_count"] = counts.get(
+                "target_candidates", 0
+            )
+            fusion_metadata.analysis_results["genome_wide_candidates_count"] = counts.get(
+                "genome_wide_candidates", 0
+            )
+            fusion_metadata.analysis_results["master_bed_candidates_count"] = counts.get(
+                "master_bed_candidates", 0
+            )
 
         # Save migrated metadata back to disk if migration occurred
         if "migrated_from_csv" in fusion_metadata.processing_steps or parquet_loaded:
