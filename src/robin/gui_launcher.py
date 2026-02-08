@@ -3105,8 +3105,8 @@ class GUILauncher:
             with ui.card().classes("w-full").style("border: 2px solid var(--md-primary)"):
                 with ui.row().classes("w-full flex justify-between items-center"):
                     with ui.column():
-                        ui.label(f"{sample_id}").classes("text-2xl font-bold")
-                        ui.label("Detailed sample information.").classes(
+                        ui.label(f"Sample Details: {sample_id}").classes("text-2xl font-bold")
+                        ui.label("Detailed sample information and analysis results.").classes(
                             "text-sm ml-4 opacity-80"
                         )
                     with ui.column().classes("flex gap-2 items-center"):
@@ -3695,9 +3695,9 @@ class GUILauncher:
             setup_notifications=self._setup_notification_system,
         ):
             # Main content - full width like sample page
-            with ui.column().classes("w-full p-4 gap-4"):
+            with ui.card().classes("w-full").style("border: 2px solid var(--md-primary)"):
                 # Header section
-                with ui.row().classes("w-full flex justify-between items-center flex-wrap gap-2"):
+                with ui.row().classes("w-full flex justify-between items-center flex-wrap gap-2 p-4"):
                     with ui.column():
                         ui.label(f"Sample Details: {sample_id}").classes("text-2xl font-bold")
                         ui.label("IGV Viewer, sample information and analysis results.").classes(
@@ -3712,7 +3712,7 @@ class GUILauncher:
                 ui.separator().classes().style("border: 1px solid var(--md-primary)")
                 
                 # Placeholder content
-                with ui.column().classes("w-full gap-4"):
+                with ui.column().classes("w-full p-4 gap-4"):
                     ui.label("Sample Details Page").classes("text-headline-medium text-center")
                     # Sample information section
                     with ui.card().classes("w-full elevation-2 rounded-lg p-4"):
