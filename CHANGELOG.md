@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `parquet_filter.txt` as preferred CpG filter for parquet creation (falls back to `sturg_nanodx_cpgs_0125.bed.gz` when absent).
+- `scripts/compare_mgmt_parquet_methylation.py` to compare MGMT methylation counts between bed and parquet for validation.
+- `METHYLATION_EXTRACTION_COMPARISON.md` documenting differences between MNP-Flex (parquet) and MGMT (bedmethyl) methylation extraction, including coordinate handling and BAM set divergence.
 - SNP analysis pipeline via Clair3 with snpEff and SnpSift annotation.
 - SNP display data generation and GUI table with IGV navigation. Current extensive logging to the command line to track progress.
 - IGV-ready BAM creation for consistent genome browser loading.
@@ -17,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `robin utils mgmt` command to summarize MGMT CpG site methylation counts from `mgmt_sorted.bam` outputs.
 
 ### Changed
+- Parquet filter loading: `.txt` files (e.g. `parquet_filter.txt`) are treated as 1-based Illumina coordinates and converted to 0-based for BED/PyRanges; fixes off-by-one in CpG site filtering.
+- Parquet filter cache: distinct cache suffix (`_1based`) for `.txt` filters to avoid stale data after coordinate conversion change.
+- Parquet filter format: support for header row and whitespace-separated columns in `parquet_filter.txt`.
+- **Note:** After the parquet filter coordinate fix, existing parquet files should be rebuilt (delete parquet and re-run bed_conversion) to obtain correct methylation counts.
 - IGV viewer initialization and BAM loading prioritization.
 - Target analysis now always emits `targets_exceeding_threshold.bed` for SNP analysis.
 - MGMT methylation classification uses per-read probabilities (fixes aggregated max bleed).
