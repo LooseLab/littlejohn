@@ -92,17 +92,22 @@ class BedConversionAnalysis:
         self.logger.debug(f"Threads: {self.threads}")
 
     def _find_cpgs_master_file(self) -> str:
-        """Find the CPGs master file from robin resources"""
+        """Find the parquet filter file (CPGs to retain) from robin resources.
+        Prefers parquet_filter.txt; falls back to sturg_nanodx_cpgs_0125.bed.gz."""
         global _CPGS_MASTER_FILE_CACHE
         if _CPGS_MASTER_FILE_CACHE is not None:
             return _CPGS_MASTER_FILE_CACHE
 
         if resources is not None:
             try:
-                cpgs_path = os.path.join(
-                    os.path.dirname(os.path.abspath(resources.__file__)),
-                    "sturg_nanodx_cpgs_0125.bed.gz",
-                )
+                resources_dir = os.path.dirname(os.path.abspath(resources.__file__))
+                # Prefer parquet_filter.txt
+                parquet_filter = os.path.join(resources_dir, "parquet_filter.txt")
+                if os.path.exists(parquet_filter):
+                    _CPGS_MASTER_FILE_CACHE = parquet_filter
+                    return _CPGS_MASTER_FILE_CACHE
+                # Fallback to legacy file
+                cpgs_path = os.path.join(resources_dir, "sturg_nanodx_cpgs_0125.bed.gz")
                 if os.path.exists(cpgs_path):
                     _CPGS_MASTER_FILE_CACHE = cpgs_path
                     return _CPGS_MASTER_FILE_CACHE
@@ -117,7 +122,7 @@ class BedConversionAnalysis:
 
         # If not found, create a placeholder (this will cause an error later)
         logger = logging.getLogger("robin.analysis.bed_conversion")
-        logger.warning("CPGs master file not found, will use placeholder")
+        logger.warning("Parquet filter file not found, will use placeholder")
         return "sturg_nanodx_cpgs_0125.bed.gz"
 
     def _get_next_file_number(self) -> int:

@@ -171,22 +171,47 @@ def merge_modkit_files(
         )
 
         # Cache or build PyRanges filter with improved caching
+        # Use distinct cache for .txt (1-based converted) vs .gz (0-based) to avoid stale data
+        cache_suffix = "_1based" if filter_bed_file.endswith(".txt") else ""
         cache_path = os.path.join(
-            sample_output_dir, f"{os.path.basename(filter_bed_file)}.pgr_cache"
+            sample_output_dir,
+            f"{os.path.basename(filter_bed_file)}{cache_suffix}.pgr_cache",
         )
         if os.path.exists(cache_path):
             with open(cache_path, "rb") as f:
                 filter_ranges = pickle.load(f)
         else:
             comp = "gzip" if filter_bed_file.endswith(".gz") else None
-            bed_df = pd.read_csv(
-                filter_bed_file,
-                sep="\t",
-                header=None,
-                names=["Chromosome", "Start", "End", "cg_label"],
-                compression=comp,
-                dtype={"Chromosome": str},
-            )
+            if filter_bed_file.endswith(".txt"):
+                # parquet_filter.txt format: header "chr start end IlmnID" (spaces/tabs)
+                # Illumina-derived files use 1-based coordinates; BED/PyRanges expect 0-based.
+                bed_df = pd.read_csv(
+                    filter_bed_file,
+                    sep=r"\s+",
+                    header=0,
+                    dtype=str,
+                )
+                # Map to expected column names (handle chr/start/end)
+                rename = {}
+                for c in bed_df.columns:
+                    if c.lower() == "chr":
+                        rename[c] = "Chromosome"
+                    elif c.lower() == "start":
+                        rename[c] = "Start"
+                    elif c.lower() == "end":
+                        rename[c] = "End"
+                bed_df = bed_df.rename(columns=rename)
+                bed_df["Start"] = bed_df["Start"].astype(int) - 1  # 1-based -> 0-based
+                bed_df["End"] = bed_df["End"].astype(int)  # 1-based end inclusive -> 0-based exclusive
+            else:
+                bed_df = pd.read_csv(
+                    filter_bed_file,
+                    sep="\t",
+                    header=None,
+                    names=["Chromosome", "Start", "End", "cg_label"],
+                    compression=comp,
+                    dtype={"Chromosome": str},
+                )
             filter_ranges = pr.PyRanges(bed_df[["Chromosome", "Start", "End"]])
             with open(cache_path, "wb") as f:
                 pickle.dump(filter_ranges, f)
