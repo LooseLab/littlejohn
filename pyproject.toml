@@ -55,7 +55,7 @@ dependencies = [
     "networkx",
     "docker",
     "opencv-python",
-    "zxing-cpp",
+    "zxing-cpp<3",
     "pyranges",
     "pyarrow==16.1",
     "requests",
