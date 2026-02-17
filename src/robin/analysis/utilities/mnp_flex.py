@@ -1,6 +1,5 @@
 import requests
 from typing import Any, Dict, Tuple, List
-from collections import deque
 import logging
 import os
 
@@ -210,17 +209,18 @@ class APIClient:
 
     def process_streaming(self, file1: str, file2: str, out_file: str) -> None:
         """
-        One‐pass merge‐join of sorted inputs.  If the inputs aren't already
-        sorted, we sort them in‐memory first (O(N log N) time, O(N) memory).
-        Windows with no matching CpGs in file2 are skipped entirely.
+        One-pass merge-join of sorted inputs. Outputs one row per CpG position
+        (per strand) within each reference window, in stranded fashion:
+        chr start end coverage methylation_percentage IlmnID
+
+        Forward and reverse strand CpGs are reported separately (e.g. for a CpG
+        at 10524-10526: one row for 10524-10525, one for 10525-10526).
         """
 
-        # --- helper to sort chromosome positions lexicographically ---
         def chr_pos_key(x):
-            # x[0] is chr (str), x[1] is start (int)
             return (x[0], x[1])
 
-        # --- load and sort file1 windows ---
+        # --- load and sort file1 (reference windows) ---
         windows: List[Tuple[str, int, int, str]] = []
         with open(file1) as f1:
             next(f1)  # skip header
@@ -229,7 +229,7 @@ class APIClient:
                 windows.append((chr_, int(s), int(e), id_))
         windows.sort(key=chr_pos_key)
 
-        # --- load and sort file2 CpGs ---
+        # --- load and sort file2 (bedmethyl: one row per strand per position) ---
         cpgs: List[Tuple[str, int, int, float, float]] = []
         with open(file2) as f2:
             for line in f2:
@@ -240,49 +240,30 @@ class APIClient:
                         int(cols[1]),  # start
                         int(cols[2]),  # end
                         float(cols[9]),  # coverage
-                        float(cols[10]),  # methylation fraction
+                        float(cols[10]),  # methylation fraction (0-100)
                     )
                 )
         cpgs.sort(key=chr_pos_key)
 
-        # --- now do the one-pass merge ---
-        buffer = deque()
+        # --- one-pass merge: output one row per CpG position per window ---
         idx2 = 0
         n2 = len(cpgs)
 
         with open(out_file, "w") as out:
-            out.write("chr start end methylation_percentage coverage IlmnID\n")
+            out.write("chr start end coverage methylation_percentage IlmnID\n")
 
             for chr1, w0, w1, id1 in windows:
-                # advance idx2 until cpgs[idx2].start ≥ window start
+                # advance idx2 until cpgs[idx2] >= window start
                 while idx2 < n2 and (cpgs[idx2][0], cpgs[idx2][1]) < (chr1, w0):
                     idx2 += 1
 
-                # buffer all CpGs with start ≤ window end
+                # output each CpG row that falls within [w0, w1)
                 j = idx2
-                while j < n2 and (cpgs[j][0], cpgs[j][1]) <= (chr1, w1):
-                    buffer.append(cpgs[j])
+                while j < n2 and cpgs[j][0] == chr1 and cpgs[j][1] < w1:
+                    cchr, cstart, cend, cov, pct = cpgs[j]
+                    if cstart >= w0 and cend <= w1:
+                        out.write(
+                            f"{cchr} {cstart} {cend} {int(cov)} {pct:.2f} {id1}\n"
+                        )
                     j += 1
                 idx2 = j
-
-                # drop any CpGs not fully inside [w0, w1] or wrong chr
-                while buffer and (
-                    buffer[0][0] != chr1  # different chromosome
-                    or buffer[0][1] < w0  # start before window
-                    or buffer[0][2] > w1  # end after window
-                ):
-                    buffer.popleft()
-
-                # compute coverage & methylation
-                tot_cov = 0.0
-                tot_mr = 0.0
-                for _, _, _, cov2, pct2 in buffer:
-                    tot_cov += cov2
-                    tot_mr += cov2 * pct2 * 0.01
-
-                # skip windows with no coverage
-                if tot_cov == 0.0:
-                    continue
-
-                meth_pct = tot_mr / tot_cov * 100.0
-                out.write(f"{chr1} {w0} {w1} {meth_pct:.2f} {int(tot_cov)} {id1}\n")

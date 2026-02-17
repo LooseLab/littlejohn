@@ -216,45 +216,98 @@ def add_mnpflex_section(launcher: Any, sample_dir: Path, sample_id: str) -> None
                 top_path_value = ui.label("--").classes(
                     "text-xs text-gray-800 leading-relaxed"
                 )
-                ui.label("Hierarchy aggregates (top entry)").classes(
-                    "text-xs text-gray-500 mt-3"
+                no_classification_notice = ui.row().classes(
+                    "w-full mt-3 p-3 rounded-lg bg-amber-50 border border-amber-200"
                 )
-                with ui.row().classes("w-full gap-4 mt-2 flex-nowrap items-stretch"):
-                    with ui.card().classes("w-1/4 min-w-0 p-3 bg-gray-50"):
-                        ui.label("Subclass").classes("text-xs text-gray-500")
-                        agg_subclass_name = ui.label("--").classes(
-                            "text-sm font-medium text-gray-900"
-                        )
-                        agg_subclass_badge = ui.badge("--").classes(
-                            "text-xs bg-gray-100 text-gray-700"
-                        )
-                    with ui.card().classes("w-1/4 min-w-0 p-3 bg-gray-50"):
-                        ui.label("Class").classes("text-xs text-gray-500")
-                        agg_class_name = ui.label("--").classes(
-                            "text-sm font-medium text-gray-900"
-                        )
-                        agg_class_badge = ui.badge("--").classes(
-                            "text-xs bg-gray-100 text-gray-700"
-                        )
-                    with ui.card().classes("w-1/4 min-w-0 p-3 bg-gray-50"):
-                        ui.label("Family").classes("text-xs text-gray-500")
-                        agg_family_name = ui.label("--").classes(
-                            "text-sm font-medium text-gray-900"
-                        )
-                        agg_family_badge = ui.badge("--").classes(
-                            "text-xs bg-gray-100 text-gray-700"
-                        )
-                    with ui.card().classes("w-1/4 min-w-0 p-3 bg-gray-50"):
-                        ui.label("Superfamily").classes("text-xs text-gray-500")
-                        agg_superfamily_name = ui.label("--").classes(
-                            "text-sm font-medium text-gray-900"
-                        )
-                        agg_superfamily_badge = ui.badge("--").classes(
-                            "text-xs bg-gray-100 text-gray-700"
-                        )
+                with no_classification_notice:
+                    ui.icon("warning", size="sm").classes("text-amber-600 mt-0.5")
+                    ui.label(
+                        "This is not a confirmed classification. No hierarchical summary is available from the classifier. Information on the top 10 classifications returned can be viewed below."
+                    ).classes("text-sm text-amber-800")
+                no_classification_notice.set_visibility(False)
+                main_aggregates_section = ui.column().classes("w-full mt-3 gap-2")
+                with main_aggregates_section:
+                    ui.label("Hierarchy aggregates (top entry)").classes(
+                        "text-xs text-gray-500"
+                    )
+                    main_aggregates_container = ui.row().classes(
+                        "w-full gap-4 flex-nowrap items-stretch"
+                    )
+                    with main_aggregates_container:
+                        with ui.card().classes("w-1/4 min-w-0 p-3 bg-gray-50"):
+                            ui.label("Subclass").classes("text-xs text-gray-500")
+                            agg_subclass_name = ui.label("--").classes(
+                                "text-sm font-medium text-gray-900"
+                            )
+                            agg_subclass_badge = ui.badge("--").classes(
+                                "text-xs bg-gray-100 text-gray-700"
+                            )
+                        with ui.card().classes("w-1/4 min-w-0 p-3 bg-gray-50"):
+                            ui.label("Class").classes("text-xs text-gray-500")
+                            agg_class_name = ui.label("--").classes(
+                                "text-sm font-medium text-gray-900"
+                            )
+                            agg_class_badge = ui.badge("--").classes(
+                                "text-xs bg-gray-100 text-gray-700"
+                            )
+                        with ui.card().classes("w-1/4 min-w-0 p-3 bg-gray-50"):
+                            ui.label("Family").classes("text-xs text-gray-500")
+                            agg_family_name = ui.label("--").classes(
+                                "text-sm font-medium text-gray-900"
+                            )
+                            agg_family_badge = ui.badge("--").classes(
+                                "text-xs bg-gray-100 text-gray-700"
+                            )
+                        with ui.card().classes("w-1/4 min-w-0 p-3 bg-gray-50"):
+                            ui.label("Superfamily").classes("text-xs text-gray-500")
+                            agg_superfamily_name = ui.label("--").classes(
+                                "text-sm font-medium text-gray-900"
+                            )
+                            agg_superfamily_badge = ui.badge("--").classes(
+                                "text-xs bg-gray-100 text-gray-700"
+                            )
                 with ui.expansion("Top 10 classifier scores", value=False).classes(
                     "w-full mt-2"
                 ):
+                    expansion_aggregates_container = ui.column().classes("w-full gap-2")
+                    expansion_aggregates_container.set_visibility(False)
+                    with expansion_aggregates_container:
+                        ui.label("Hierarchy aggregates (top entry)").classes(
+                            "text-xs text-gray-500"
+                        )
+                        with ui.row().classes("w-full gap-4 flex-nowrap items-stretch"):
+                            with ui.card().classes("w-1/4 min-w-0 p-3 bg-gray-50"):
+                                ui.label("Subclass").classes("text-xs text-gray-500")
+                                agg_subclass_name_exp = ui.label("--").classes(
+                                    "text-sm font-medium text-gray-900"
+                                )
+                                agg_subclass_badge_exp = ui.badge("--").classes(
+                                    "text-xs bg-gray-100 text-gray-700"
+                                )
+                            with ui.card().classes("w-1/4 min-w-0 p-3 bg-gray-50"):
+                                ui.label("Class").classes("text-xs text-gray-500")
+                                agg_class_name_exp = ui.label("--").classes(
+                                    "text-sm font-medium text-gray-900"
+                                )
+                                agg_class_badge_exp = ui.badge("--").classes(
+                                    "text-xs bg-gray-100 text-gray-700"
+                                )
+                            with ui.card().classes("w-1/4 min-w-0 p-3 bg-gray-50"):
+                                ui.label("Family").classes("text-xs text-gray-500")
+                                agg_family_name_exp = ui.label("--").classes(
+                                    "text-sm font-medium text-gray-900"
+                                )
+                                agg_family_badge_exp = ui.badge("--").classes(
+                                    "text-xs bg-gray-100 text-gray-700"
+                                )
+                            with ui.card().classes("w-1/4 min-w-0 p-3 bg-gray-50"):
+                                ui.label("Superfamily").classes("text-xs text-gray-500")
+                                agg_superfamily_name_exp = ui.label("--").classes(
+                                    "text-sm font-medium text-gray-900"
+                                )
+                                agg_superfamily_badge_exp = ui.badge("--").classes(
+                                    "text-xs bg-gray-100 text-gray-700"
+                                )
                     ui.label(
                         "Detailed scores for reference (non-primary view)."
                     ).classes("text-xs text-gray-500")
@@ -476,6 +529,9 @@ def add_mnpflex_section(launcher: Any, sample_dir: Path, sample_id: str) -> None
                 _set_badge_value(agg_class_badge, None)
                 _set_badge_value(agg_family_badge, None)
                 _set_badge_value(agg_superfamily_badge, None)
+                no_classification_notice.set_visibility(False)
+                main_aggregates_section.set_visibility(True)
+                expansion_aggregates_container.set_visibility(False)
                 return
 
             qc = summary.get("qc", {}) or {}
@@ -518,6 +574,7 @@ def add_mnpflex_section(launcher: Any, sample_dir: Path, sample_id: str) -> None
                 f"Type: {classifier.get('classifier_type', 'Unknown')}"
             )
             scores = classifier_summary.get("scores") or []
+            subclass_sum = class_sum = family_sum = superfamily_sum = None
             classifier_scores_table.rows = _extract_classifier_rows(classifier_summary)
             classifier_scores_table.update()
             if scores:
@@ -541,15 +598,20 @@ def add_mnpflex_section(launcher: Any, sample_dir: Path, sample_id: str) -> None
                     scores, "molecular_superfamily", top_superfamily
                 )
 
-                agg_subclass_name.set_text(top_subclass or "N/A")
-                agg_class_name.set_text(top_class or "N/A")
-                agg_family_name.set_text(top_family or "N/A")
-                agg_superfamily_name.set_text(top_superfamily or "N/A")
+                disp_subclass = top_subclass or "N/A"
+                disp_class = top_class or "N/A"
+                disp_family = top_family or "N/A"
+                disp_superfamily = top_superfamily or "N/A"
+                agg_subclass_name.set_text(disp_subclass)
+                agg_class_name.set_text(disp_class)
+                agg_family_name.set_text(disp_family)
+                agg_superfamily_name.set_text(disp_superfamily)
                 _set_badge_value(agg_subclass_badge, subclass_sum)
                 _set_badge_value(agg_class_badge, class_sum)
                 _set_badge_value(agg_family_badge, family_sum)
                 _set_badge_value(agg_superfamily_badge, superfamily_sum)
             else:
+                disp_subclass = disp_class = disp_family = disp_superfamily = "--"
                 agg_subclass_name.set_text("--")
                 agg_class_name.set_text("--")
                 agg_family_name.set_text("--")
@@ -560,8 +622,10 @@ def add_mnpflex_section(launcher: Any, sample_dir: Path, sample_id: str) -> None
                 _set_badge_value(agg_superfamily_badge, None)
 
             hierarchy = classifier_summary.get("summary_hierarchical", []) or []
-            hierarchy_table.rows = _extract_hierarchy_rows(hierarchy)
+            hierarchy_rows = _extract_hierarchy_rows(hierarchy)
+            hierarchy_table.rows = hierarchy_rows
             hierarchy_table.update()
+            has_hierarchical_summary = len(hierarchy_rows) > 0
             flat = _flatten_hierarchy(hierarchy)
             if flat:
                 best_score, best_path = max(flat, key=lambda x: x[0] or 0)
@@ -570,6 +634,25 @@ def add_mnpflex_section(launcher: Any, sample_dir: Path, sample_id: str) -> None
             else:
                 top_path_value.set_text("--")
                 _set_badge_value(top_path_badge, None)
+
+            if has_hierarchical_summary:
+                no_classification_notice.set_visibility(False)
+                main_aggregates_section.set_visibility(True)
+                expansion_aggregates_container.set_visibility(False)
+            else:
+                no_classification_notice.set_visibility(True)
+                main_aggregates_section.set_visibility(False)
+                expansion_aggregates_container.set_visibility(True)
+                agg_subclass_name_exp.set_text(disp_subclass)
+                agg_class_name_exp.set_text(disp_class)
+                agg_family_name_exp.set_text(disp_family)
+                agg_superfamily_name_exp.set_text(disp_superfamily)
+                _set_badge_value(agg_subclass_badge_exp, subclass_sum if scores else None)
+                _set_badge_value(agg_class_badge_exp, class_sum if scores else None)
+                _set_badge_value(agg_family_badge_exp, family_sum if scores else None)
+                _set_badge_value(
+                    agg_superfamily_badge_exp, superfamily_sum if scores else None
+                )
 
             if summary_path and summary_path.exists():
                 updated = time.strftime(

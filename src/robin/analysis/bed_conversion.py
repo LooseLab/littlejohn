@@ -44,13 +44,6 @@ _LOGGER = logging.getLogger("robin.analysis.bed_conversion")
 # Cache CPGs master file path across instances
 _CPGS_MASTER_FILE_CACHE: Optional[str] = None
 
-# Fallback search paths for the CPGs master file
-_CPGS_POSSIBLE_PATHS = (
-    "sturg_nanodx_cpgs_0125.bed.gz",
-    "data/sturg_nanodx_cpgs_0125.bed.gz",
-    "/usr/local/share/sturg_nanodx_cpgs_0125.bed.gz",
-)
-
 
 @dataclass
 class BedConversionMetadata:
@@ -93,37 +86,26 @@ class BedConversionAnalysis:
 
     def _find_cpgs_master_file(self) -> str:
         """Find the parquet filter file (CPGs to retain) from robin resources.
-        Prefers parquet_filter.txt; falls back to sturg_nanodx_cpgs_0125.bed.gz."""
+        Only parquet_filter.txt is used; no fallback to other files."""
         global _CPGS_MASTER_FILE_CACHE
         if _CPGS_MASTER_FILE_CACHE is not None:
             return _CPGS_MASTER_FILE_CACHE
 
-        if resources is not None:
-            try:
-                resources_dir = os.path.dirname(os.path.abspath(resources.__file__))
-                # Prefer parquet_filter.txt
-                parquet_filter = os.path.join(resources_dir, "parquet_filter.txt")
-                if os.path.exists(parquet_filter):
-                    _CPGS_MASTER_FILE_CACHE = parquet_filter
-                    return _CPGS_MASTER_FILE_CACHE
-                # Fallback to legacy file
-                cpgs_path = os.path.join(resources_dir, "sturg_nanodx_cpgs_0125.bed.gz")
-                if os.path.exists(cpgs_path):
-                    _CPGS_MASTER_FILE_CACHE = cpgs_path
-                    return _CPGS_MASTER_FILE_CACHE
-            except Exception:
-                pass
+        if resources is None:
+            raise FileNotFoundError(
+                "robin.resources not available; cannot locate parquet_filter.txt"
+            )
 
-        # Fallback paths
-        for path in _CPGS_POSSIBLE_PATHS:
-            if os.path.exists(path):
-                _CPGS_MASTER_FILE_CACHE = path
-                return _CPGS_MASTER_FILE_CACHE
+        resources_dir = os.path.dirname(os.path.abspath(resources.__file__))
+        parquet_filter = os.path.join(resources_dir, "parquet_filter.txt")
+        if not os.path.exists(parquet_filter):
+            raise FileNotFoundError(
+                f"parquet_filter.txt not found at {parquet_filter}. "
+                "Bed conversion requires parquet_filter.txt in robin resources."
+            )
 
-        # If not found, create a placeholder (this will cause an error later)
-        logger = logging.getLogger("robin.analysis.bed_conversion")
-        logger.warning("Parquet filter file not found, will use placeholder")
-        return "sturg_nanodx_cpgs_0125.bed.gz"
+        _CPGS_MASTER_FILE_CACHE = parquet_filter
+        return _CPGS_MASTER_FILE_CACHE
 
     def _get_next_file_number(self) -> int:
         """Get the next file number for incremental naming"""

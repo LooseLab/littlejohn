@@ -356,7 +356,16 @@ class ClassificationSection(ReportSection):
                 summary = None
             classifier_summary = (summary or {}).get("classifier_summary", {}) or {}
             hierarchy = classifier_summary.get("summary_hierarchical", []) or []
-            if hierarchy:
+            if not hierarchy and summary and classifier_summary.get("scores"):
+                self.elements.append(
+                    Paragraph(
+                        "MNP-Flex: This is not a confirmed classification. No hierarchical "
+                        "summary is available from the classifier.",
+                        self.styles.styles["Warning"],
+                    )
+                )
+                self.elements.append(Spacer(1, 12))
+            elif hierarchy:
                 self.elements.append(
                     Paragraph("MNP-Flex Hierarchical Summary", self.styles.styles["Heading3"])
                 )

@@ -109,6 +109,8 @@ class MNPFlexSection(ReportSection):
         mgmt = summary.get("mgmt", {}) or {}
         classifier_summary = summary.get("classifier_summary", {}) or {}
         classifier = classifier_summary.get("classifier", {}) or {}
+        hierarchy = classifier_summary.get("summary_hierarchical", []) or []
+        has_hierarchical_summary = len(hierarchy) > 0
 
         # Summary section entry
         self.summary_elements.append(
@@ -121,6 +123,11 @@ class MNPFlexSection(ReportSection):
             f"<b>MGMT status</b>: {mgmt.get('status', 'Unknown')}<br/>"
             f"<b>MGMT average</b>: {mgmt.get('average', 'N/A')}"
         )
+        if not has_hierarchical_summary:
+            summary_card += (
+                "<br/><b>Note</b>: No hierarchical summary available — "
+                "this is not a confirmed classification."
+            )
         self.add_summary_card(summary_card)
 
         # Main section header
@@ -149,8 +156,18 @@ class MNPFlexSection(ReportSection):
         self.elements.append(Spacer(1, 8))
 
         # Hierarchical summary
-        hierarchy = classifier_summary.get("summary_hierarchical", []) or []
         flat = self._flatten_hierarchy(hierarchy)
+
+        if not has_hierarchical_summary:
+            self.elements.append(
+                Paragraph(
+                    "This is not a confirmed classification. No hierarchical summary "
+                    "is available from the classifier.",
+                    self.styles.styles["Warning"],
+                )
+            )
+            self.elements.append(Spacer(1, 10))
+
         if flat:
             best_score, best_path = max(flat, key=lambda x: x[0] or 0)
             self.elements.append(
@@ -224,6 +241,14 @@ class MNPFlexSection(ReportSection):
                 ["Superfamily", top_superfamily or "N/A", self._format_score(superfamily_sum)],
             ]
             self.elements.append(Paragraph("Aggregate scores for top entry", self.styles.styles["Heading3"]))
+            if not has_hierarchical_summary:
+                self.elements.append(
+                    Paragraph(
+                        "For reference only — not a confirmed classification.",
+                        self.styles.styles["Smaller"],
+                    )
+                )
+                self.elements.append(Spacer(1, 4))
             self.elements.append(self.create_table(agg_rows))
             self.elements.append(Spacer(1, 8))
 

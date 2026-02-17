@@ -35,6 +35,7 @@ warnings.filterwarnings(
 )
 
 import os
+import threading
 import time
 import tempfile
 import pickle
@@ -3451,6 +3452,163 @@ class RayFileWatcher(FileSystemEventHandler):
 # Global coordinator reference for external access
 _GLOBAL_COORDINATOR = None
 
+# Global observer and watcher for adding paths at runtime (GUI "Add Folder to Watch")
+_GLOBAL_OBSERVER = None
+_GLOBAL_WATCHER = None
+_GLOBAL_WATCH_CONTEXT: Optional[Dict[str, Any]] = None
+# Maps normalized path string -> ObservedWatch for add/remove
+_GLOBAL_WATCHED_PATHS: Dict[str, Any] = {}
+
+
+def get_watched_paths() -> List[str]:
+    """Return list of currently watched directory paths (normalized)."""
+    global _GLOBAL_WATCHED_PATHS
+    return sorted(_GLOBAL_WATCHED_PATHS.keys())
+
+
+def remove_watch_path(path_to_remove: str) -> Tuple[bool, str]:
+    """
+    Remove a directory from the workflow's watch list.
+
+    Returns:
+        Tuple of (success: bool, message: str)
+    """
+    global _GLOBAL_OBSERVER, _GLOBAL_WATCHED_PATHS
+
+    if _GLOBAL_OBSERVER is None:
+        return False, "No workflow observer found. Is a Ray workflow with watch enabled running?"
+
+    pth = Path(path_to_remove).resolve()
+    path_key = str(pth)
+
+    if path_key not in _GLOBAL_WATCHED_PATHS:
+        return False, f"Path is not being watched: {path_to_remove}"
+
+    watch = _GLOBAL_WATCHED_PATHS[path_key]
+    try:
+        _GLOBAL_OBSERVER.unschedule(watch)
+        del _GLOBAL_WATCHED_PATHS[path_key]
+        return True, f"Removed watch path: {path_to_remove}"
+    except Exception as e:
+        return False, f"Failed to remove watch: {e}"
+
+
+def _path_overlaps_work_dir(candidate: Path, work_dir: Optional[str]) -> bool:
+    """
+    Return True if candidate path overlaps with work directory (should reject).
+
+    Rejects when:
+    - candidate equals work_dir
+    - candidate is inside work_dir (watching our own output)
+    - work_dir is inside candidate (would watch work_dir and its outputs)
+    """
+    if not work_dir:
+        return False
+    try:
+        wd = Path(work_dir).resolve()
+        cand = candidate.resolve()
+        if cand == wd:
+            return True
+        # Reject if candidate is inside work_dir (watching our own output)
+        cand.relative_to(wd)
+        return True
+    except ValueError:
+        pass
+    try:
+        wd = Path(work_dir).resolve()
+        cand = candidate.resolve()
+        # Reject if work_dir is inside candidate (would watch work_dir)
+        wd.relative_to(cand)
+        return True
+    except ValueError:
+        pass
+    return False
+
+
+def add_watch_path(new_path: str) -> Tuple[bool, str]:
+    """
+    Add a directory to the running workflow's watch list.
+
+    Schedules the path for file watching and submits existing BAM files for processing.
+    Uses the same plan, work_dir, panel, and patterns as the original workflow.
+
+    Returns:
+        Tuple of (success: bool, message: str)
+    """
+    global _GLOBAL_COORDINATOR, _GLOBAL_OBSERVER, _GLOBAL_WATCHER, _GLOBAL_WATCH_CONTEXT, _GLOBAL_WATCHED_PATHS
+
+    coord = get_coordinator_sync()
+    if coord is None:
+        return False, "No workflow coordinator found. Is a Ray workflow running?"
+
+    if _GLOBAL_WATCH_CONTEXT is None:
+        return False, "Workflow watch context not available (watch may be disabled)."
+
+    pth = Path(new_path).resolve()
+    if not pth.exists():
+        return False, f"Path does not exist: {new_path}"
+    if not pth.is_dir():
+        return False, f"Path is not a directory: {new_path}"
+
+    ctx = _GLOBAL_WATCH_CONTEXT
+    plan = ctx.get("plan") or []
+    work_dir = ctx.get("work_dir")
+
+    # Reject paths that overlap with work directory (would watch already-analysed output)
+    if _path_overlaps_work_dir(pth, work_dir):
+        return False, (
+            f"Cannot watch '{new_path}': it overlaps with the work directory. "
+            "Watched folders must not contain or be inside the analysis output directory."
+        )
+    patterns = ctx.get("patterns") or ["*.bam"]
+    ignore_patterns = ctx.get("ignore_patterns") or []
+    recursive = ctx.get("recursive", True)
+
+    # Schedule for watching if observer is active
+    path_key = str(pth)
+    if path_key in _GLOBAL_WATCHED_PATHS:
+        return False, f"Path is already being watched: {new_path}"
+
+    if _GLOBAL_OBSERVER is not None and _GLOBAL_WATCHER is not None:
+        try:
+            watch = _GLOBAL_OBSERVER.schedule(_GLOBAL_WATCHER, str(pth), recursive=recursive)
+            _GLOBAL_WATCHED_PATHS[path_key] = watch
+        except Exception as e:
+            return False, f"Failed to schedule watch: {e}"
+
+    # Submit existing paths for processing (run in a thread to avoid event loop conflict
+    # with NiceGUI or other async frameworks already running an event loop)
+    _submit_error: List[Optional[Exception]] = [None]
+
+    def _run_submit() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(
+                submit_existing_paths(
+                    coord,
+                    [str(pth)],
+                    plan,
+                    patterns=patterns,
+                    ignore_patterns=ignore_patterns,
+                    recursive=recursive,
+                    work_dir=work_dir,
+                )
+            )
+        except Exception as e:
+            _submit_error[0] = e
+        finally:
+            loop.close()
+
+    thread = threading.Thread(target=_run_submit)
+    thread.start()
+    thread.join()
+
+    if _submit_error[0] is not None:
+        return False, f"Failed to submit existing files: {_submit_error[0]}"
+
+    return True, f"Added watch path: {new_path}"
+
 
 async def _get_coordinator():
     """Get the global coordinator reference for external job submission."""
@@ -3503,7 +3661,7 @@ async def run(
     center: str = None,
     enable_batching: bool = True,
 ):
-    global GLOBAL_LOG_LEVEL
+    global GLOBAL_LOG_LEVEL, _GLOBAL_OBSERVER, _GLOBAL_WATCHER, _GLOBAL_WATCH_CONTEXT, _GLOBAL_WATCHED_PATHS
     GLOBAL_LOG_LEVEL = (log_level or "INFO").upper()
 
     # Configure Ray logging to reduce verbose output
@@ -3843,8 +4001,20 @@ async def run(
         )
         for p in paths:
             if Path(p).is_dir():
-                observer.schedule(watcher, p, recursive=recursive)
+                watch = observer.schedule(watcher, p, recursive=recursive)
+                _GLOBAL_WATCHED_PATHS[str(Path(p).resolve())] = watch
         observer.start()
+
+        # Store globally for GUI "Add Folder to Watch"
+        _GLOBAL_OBSERVER = observer
+        _GLOBAL_WATCHER = watcher
+        _GLOBAL_WATCH_CONTEXT = {
+            "plan": plan,
+            "work_dir": work_dir,
+            "patterns": patterns,
+            "ignore_patterns": ignore_patterns,
+            "recursive": recursive,
+        }
 
     try:
         if tasks:
@@ -3894,7 +4064,13 @@ async def run(
             observer.stop()
             observer.join()
             print("[SHUTDOWN] File observer stopped")
-        
+
+        # Clear global watch state
+        _GLOBAL_OBSERVER = None
+        _GLOBAL_WATCHER = None
+        _GLOBAL_WATCH_CONTEXT = None
+        _GLOBAL_WATCHED_PATHS.clear()
+
         # Final cleanup: ensure Ray is properly shut down
         try:
             import ray

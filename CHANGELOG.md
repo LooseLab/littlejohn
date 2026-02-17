@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Dedicated "Manage watched folders" page at `/watched_folders` (replaces modal); accessible via link from the welcome page.
+- Loading modal when adding a watched folder: shows "Adding folder..." with spinner and closes automatically on success or error.
+- Path overlap validation in `add_watch_path`: rejects paths that equal, contain, or are inside the work directory to prevent watching already-analysed output.
 - `parquet_filter.txt` as preferred CpG filter for parquet creation (falls back to `sturg_nanodx_cpgs_0125.bed.gz` when absent).
 - `scripts/compare_mgmt_parquet_methylation.py` to compare MGMT methylation counts between bed and parquet for validation.
 - `METHYLATION_EXTRACTION_COMPARISON.md` documenting differences between MNP-Flex (parquet) and MGMT (bedmethyl) methylation extraction, including coordinate handling and BAM set divergence.

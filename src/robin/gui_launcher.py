@@ -1369,6 +1369,13 @@ class GUILauncher:
                 _setup_global_resources()
                 self._create_sample_details_page(sample_id)
 
+            # Watched folders management page
+            @ui.page("/watched_folders")
+            def watched_folders_page():
+                """Page for managing watched folders."""
+                _setup_global_resources()
+                self._create_watched_folders_page()
+
             # Download API endpoint
             @ui.page("/api/download/{sample_id}/{filename}")
             def download_file(sample_id: str, filename: str):
@@ -1544,11 +1551,11 @@ class GUILauncher:
                             ui.link("Open Workflow Monitor", "/robin").classes(
                                 "bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors text-center"
                             )
-                            ui.button(
-                                "Launch New Workflow",
-                                on_click=lambda: self._launch_workflow_button_clicked(),
+                            ui.link(
+                                "Manage watched folders",
+                                "/watched_folders",
                             ).classes(
-                                "bg-green-600 hover:bg-green-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors"
+                                "bg-green-600 hover:bg-green-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors text-center"
                             )
                             ui.link(
                                 "View Documentation",
@@ -5779,9 +5786,169 @@ class GUILauncher:
         except Exception:
             pass
 
-    def _launch_workflow_button_clicked(self):
-        """Handle launch workflow button click."""
-        ui.notify("Launch workflow functionality not implemented yet", type="info")
+    def _create_watched_folders_page(self):
+        """Create the watched folders management page."""
+        try:
+            from robin.workflow_ray import (
+                add_watch_path,
+                remove_watch_path,
+                get_watched_paths,
+            )
+        except ImportError:
+            with theme.frame(
+                "R.O.B.I.N - Watched Folders",
+                smalltitle="Watched Folders",
+                batphone=False,
+                center=self.center,
+                setup_notifications=self._setup_notification_system,
+            ):
+                ui.notify("Manage folders requires Ray workflow. Are you running with --use-ray?", type="negative")
+                ui.label("Manage folders requires Ray workflow. Are you running with --use-ray?").classes(
+                    "text-red-600 p-4"
+                )
+            return
+
+        with theme.frame(
+            "R.O.B.I.N - Watched Folders",
+            smalltitle="Watched Folders",
+            batphone=False,
+            center=self.center,
+            setup_notifications=self._setup_notification_system,
+        ):
+            with ui.column().classes("w-full p-4 gap-4 max-w-2xl mx-auto"):
+                with ui.card().classes("w-full p-6"):
+                    ui.label("Manage watched folders").classes("text-xl font-semibold mb-4")
+                    ui.label(
+                        "Add or remove directories containing BAM files. "
+                        "Watched folders are monitored for new files and existing files are submitted for processing."
+                    ).classes("text-sm text-gray-600 mb-4")
+
+                    # Current watched paths with remove buttons
+                    watched_container = ui.column().classes("w-full gap-2 mb-4")
+                    with watched_container:
+                        paths = get_watched_paths()
+                        if paths:
+                            ui.label("Currently watched:").classes("text-sm font-medium")
+                            for p in paths:
+                                with ui.row().classes("w-full items-center gap-2 p-2 bg-gray-100 dark:bg-gray-800 rounded"):
+                                    ui.label(p).classes("text-sm flex-1 break-all")
+                                    ui.button(
+                                        "Remove",
+                                        on_click=lambda path=p: self._do_remove_folder(
+                                            path, watched_container, remove_watch_path, get_watched_paths
+                                        ),
+                                    ).props("flat color=negative size=sm")
+                        else:
+                            ui.label("No folders currently watched.").classes("text-sm text-gray-500 italic")
+
+                    ui.separator()
+                    ui.label("Add folder:").classes("text-sm font-medium mt-2 mb-2")
+                    with ui.row().classes("w-full gap-2 items-end"):
+                        path_input = ui.input(
+                            placeholder="e.g. /data/incoming/new_batch",
+                            label="Folder path",
+                        ).classes("flex-1")
+
+                        async def pick_folder():
+                            from robin.gui.components.folder_picker import local_folder_picker
+
+                            watched = get_watched_paths()
+                            start = (
+                                watched[0]
+                                if watched
+                                else (self.monitored_directory or str(Path.home()))
+                            )
+                            picker = local_folder_picker(start, upper_limit=None)
+                            result = await picker
+                            if result and len(result) > 0:
+                                path_input.value = result[0]
+
+                        ui.button("Browse", on_click=pick_folder).classes("mb-0")
+
+                    if self.monitored_directory:
+                        with ui.column().classes("w-full mt-2"):
+                            ui.label("Work directory:").classes("text-xs text-gray-500")
+                            ui.label(self.monitored_directory).classes("text-xs text-gray-600 break-all")
+
+                    async def do_add_folder():
+                        path_val = (path_input.value or "").strip()
+                        if not path_val:
+                            ui.notify("Please enter a folder path", type="warning")
+                            return
+                        with ui.dialog().props("persistent").classes("w-full max-w-sm") as add_dialog:
+                            with ui.card().classes("p-6"):
+                                with ui.row().classes("items-center gap-3"):
+                                    ui.spinner(size="lg")
+                                    ui.label("Adding folder...").classes("text-lg")
+                        add_dialog.open()
+                        try:
+                            await self._do_add_folder(
+                                path_input=path_input,
+                                add_watch_path=add_watch_path,
+                                watched_container=watched_container,
+                                get_watched_paths=get_watched_paths,
+                                remove_watch_path=remove_watch_path,
+                            )
+                        finally:
+                            add_dialog.close()
+
+                    ui.button("Add folder", on_click=do_add_folder).classes("bg-green-600 mt-4")
+
+    async def _do_add_folder(
+        self,
+        path_input,
+        add_watch_path,
+        watched_container=None,
+        get_watched_paths=None,
+        remove_watch_path=None,
+    ):
+        """Validate and add the folder path to the workflow watch (non-blocking)."""
+        path_val = (path_input.value or "").strip()
+        if not path_val:
+            ui.notify("Please enter a folder path", type="warning")
+            return
+
+        try:
+            from nicegui import run as ng_run
+            success, message = await ng_run.io_bound(add_watch_path, path_val)
+        except ImportError:
+            success, message = add_watch_path(path_val)
+
+        if success:
+            ui.notify(message, type="positive")
+            path_input.value = ""
+            if watched_container is not None and get_watched_paths is not None and remove_watch_path is not None:
+                self._refresh_watched_list(watched_container, remove_watch_path, get_watched_paths)
+        else:
+            ui.notify(message, type="negative")
+
+    def _do_remove_folder(self, path, watched_container, remove_watch_path, get_watched_paths):
+        """Remove a folder from the watch list."""
+        success, message = remove_watch_path(path)
+        if success:
+            ui.notify(message, type="positive")
+            self._refresh_watched_list(watched_container, remove_watch_path, get_watched_paths)
+        else:
+            ui.notify(message, type="negative")
+
+    def _refresh_watched_list(self, watched_container, remove_watch_path, get_watched_paths):
+        """Refresh the list of watched paths in the dialog."""
+        watched_container.clear()
+        with watched_container:
+            paths = get_watched_paths()
+            if paths:
+                ui.label("Currently watched:").classes("text-sm font-medium")
+                for p in paths:
+                    with ui.row().classes("w-full items-center gap-2 p-2 bg-gray-100 dark:bg-gray-800 rounded"):
+                        ui.label(p).classes("text-sm flex-1 break-all")
+                        ui.button(
+                            "Remove",
+                            on_click=lambda path=p: self._do_remove_folder(
+                                path, watched_container, remove_watch_path, get_watched_paths
+                            ),
+                        ).props("flat color=negative size=sm")
+            else:
+                ui.label("No folders currently watched.").classes("text-sm text-gray-500 italic")
 
     def stop_gui(self):
         """Stop the GUI thread."""
