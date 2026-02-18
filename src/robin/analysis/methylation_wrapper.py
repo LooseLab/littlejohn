@@ -66,6 +66,34 @@ def _find_cli_or_raise() -> str:
     return cli
 
 
+def has_bam_index(bam_path: str) -> bool:
+    """
+    Check if a BAM file has a valid index (.bai or .csi) that supports fetch.
+    Returns False if the file has no index or the index is invalid.
+    """
+    import os
+
+    bai_path = f"{bam_path}.bai"
+    csi_path = f"{bam_path}.csi"
+    if not os.path.exists(bai_path) and not os.path.exists(csi_path):
+        return False
+    try:
+        import pysam
+
+        with pysam.AlignmentFile(bam_path, "rb") as bam:
+            if hasattr(bam, "has_index") and not bam.has_index:
+                return False
+            if not bam.references:
+                return False
+            # Actually try a fetch to ensure index works
+            first_ref = bam.references[0]
+            ref_len = bam.get_reference_length(first_ref) or 1000
+            list(bam.fetch(first_ref, 0, min(1000, ref_len)))
+            return True
+    except Exception:
+        return False
+
+
 def _choose_main_axis(fig: Figure):
     axes = [ax for ax in getattr(fig, "axes", []) if hasattr(ax, "get_xlim")]
     if not axes:
@@ -133,10 +161,13 @@ def locus_figure(
     import os
     import pysam
     import logging
-    
+
+    if not has_bam_index(bam_path):
+        raise RuntimeError(
+            f"BAM file is not indexed or index is invalid: {bam_path}. "
+            f"Index file (.bai or .csi) not found or cannot be used for fetch."
+        )
     bai_path = f"{bam_path}.bai"
-    if not os.path.exists(bai_path):
-        raise RuntimeError(f"BAM file is not indexed: {bam_path}. Index file (.bai) not found.")
     
     # Check if index file has content (not empty)
     try:

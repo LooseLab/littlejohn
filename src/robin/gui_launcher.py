@@ -5881,18 +5881,27 @@ class GUILauncher:
                                     ui.spinner(size="lg")
                                     ui.label("Adding folder...").classes("text-lg")
                         add_dialog.open()
-                        try:
-                            await self._do_add_folder(
-                                path_input=path_input,
-                                add_watch_path=add_watch_path,
-                                watched_container=watched_container,
-                                get_watched_paths=get_watched_paths,
-                                remove_watch_path=remove_watch_path,
-                            )
-                        finally:
-                            add_dialog.close()
+                        # Close modal immediately before long-running add to avoid
+                        # "client has been deleted" when user navigates away during add
+                        add_dialog.close()
+                        self._safe_notify("Adding folder...", "info")
+                        await self._do_add_folder(
+                            path_input=path_input,
+                            add_watch_path=add_watch_path,
+                            watched_container=watched_container,
+                            get_watched_paths=get_watched_paths,
+                            remove_watch_path=remove_watch_path,
+                        )
 
                     ui.button("Add folder", on_click=do_add_folder).classes("bg-green-600 mt-4")
+
+    def _safe_notify(self, message: str, type_: str = "info"):
+        """Notify only if the client context is still valid (avoids 'client deleted' errors)."""
+        try:
+            ui.notify(message, type=type_)
+        except RuntimeError as e:
+            if "deleted" not in str(e).lower():
+                raise
 
     async def _do_add_folder(
         self,
@@ -5905,7 +5914,7 @@ class GUILauncher:
         """Validate and add the folder path to the workflow watch (non-blocking)."""
         path_val = (path_input.value or "").strip()
         if not path_val:
-            ui.notify("Please enter a folder path", type="warning")
+            self._safe_notify("Please enter a folder path", "warning")
             return
 
         try:
@@ -5915,12 +5924,16 @@ class GUILauncher:
             success, message = add_watch_path(path_val)
 
         if success:
-            ui.notify(message, type="positive")
+            self._safe_notify(message, "positive")
             path_input.value = ""
             if watched_container is not None and get_watched_paths is not None and remove_watch_path is not None:
-                self._refresh_watched_list(watched_container, remove_watch_path, get_watched_paths)
+                try:
+                    self._refresh_watched_list(watched_container, remove_watch_path, get_watched_paths)
+                except RuntimeError as e:
+                    if "deleted" not in str(e).lower():
+                        raise
         else:
-            ui.notify(message, type="negative")
+            self._safe_notify(message, "negative")
 
     def _do_remove_folder(self, path, watched_container, remove_watch_path, get_watched_paths):
         """Remove a folder from the watch list."""
