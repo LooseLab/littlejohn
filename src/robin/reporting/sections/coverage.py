@@ -270,6 +270,40 @@ class CoverageSection(ReportSection):
             buf.seek(0)
             return buf
 
+    def _get_target_coverage_outliers(self):
+        """Identify coverage outliers (gains/losses) per chromosome for table display."""
+        if not hasattr(self, "target_coverage_df") or self.target_coverage_df.empty:
+            return []
+        df = self.target_coverage_df.copy()
+        df["coverage"] = df["coverage"].round(2)
+        sorted_chroms = sorted(
+            df["chrom"].unique(), key=natsort.natsort_keygen()
+        )
+        rows = []
+        for chrom in sorted_chroms:
+            chrom_data = df[df["chrom"] == chrom]
+            if len(chrom_data) < 4:
+                continue
+            Q1 = chrom_data["coverage"].quantile(0.25)
+            Q3 = chrom_data["coverage"].quantile(0.75)
+            IQR = Q3 - Q1
+            lower_bound = Q1 - 1.5 * IQR
+            upper_bound = Q3 + 1.5 * IQR
+            outliers = chrom_data[
+                (chrom_data["coverage"] < lower_bound)
+                | (chrom_data["coverage"] > upper_bound)
+            ]
+            for _, out in outliers.iterrows():
+                cov = out["coverage"]
+                event_type = "Gain" if cov > upper_bound else "Loss"
+                rows.append({
+                    "chrom": chrom,
+                    "gene": out["name"],
+                    "coverage": cov,
+                    "type": event_type,
+                })
+        return rows
+
     def _create_target_boxplot(self):
         """Create a boxplot showing coverage distribution for targets."""
         try:
@@ -311,39 +345,7 @@ class CoverageSection(ReportSection):
                 plt.setp(bp["medians"], color="#E74C3C")
                 plt.setp(bp["fliers"], marker="o", markerfacecolor="#C0392B")
 
-                # Function to identify outliers for a chromosome
-                def identify_outliers(chrom_data):
-                    Q1 = chrom_data["coverage"].quantile(0.25)
-                    Q3 = chrom_data["coverage"].quantile(0.75)
-                    IQR = Q3 - Q1
-                    lower_bound = Q1 - 1.5 * IQR
-                    upper_bound = Q3 + 1.5 * IQR
-                    outliers = chrom_data[
-                        (chrom_data["coverage"] < lower_bound)
-                        | (chrom_data["coverage"] > upper_bound)
-                    ]
-                    return outliers
-
-                # Add outlier labels
-                for idx, chrom in enumerate(sorted_chroms, 1):
-                    chrom_data = self.target_coverage_df[
-                        self.target_coverage_df["chrom"] == chrom
-                    ]
-                    outliers = identify_outliers(chrom_data)
-
-                    for _, outlier in outliers.iterrows():
-                        # Add label with gene name and coverage
-                        label = f"{outlier['name']} ({outlier['coverage']:.1f}x)"
-                        plt.annotate(
-                            label,
-                            xy=(idx, outlier["coverage"]),
-                            xytext=(5, 5),
-                            textcoords="offset points",
-                            fontsize=8,
-                            rotation=45,
-                            ha="left",
-                            va="bottom",
-                        )
+                # Outlier labels removed - shown in table below for readability
 
                 # Customize plot
                 plt.xlabel("Chromosome")
@@ -380,7 +382,7 @@ class CoverageSection(ReportSection):
         self.elements.append(
             Paragraph("Coverage Analysis", self.styles.styles["Heading2"])
         )
-        self.elements.append(Spacer(1, 12))
+        self.elements.append(Spacer(1, 6))
         self.add_coverage_summary()
 
         self.add_detailed_coverage()
@@ -461,7 +463,7 @@ class CoverageSection(ReportSection):
             summary_style,
         )
         self.elements.append(overview)
-        self.elements.append(Spacer(1, 0.1 * inch))
+        self.elements.append(Spacer(1, 4))
 
         # Create summary table with key metrics
         if hasattr(self, "coverage_data") and self.coverage_data is not None:
@@ -496,7 +498,7 @@ class CoverageSection(ReportSection):
             )
         )
         self.elements.append(table)
-        self.elements.append(Spacer(1, 0.2 * inch))
+        self.elements.append(Spacer(1, 6))
 
         # Add quality thresholds legend
         legend_style = ParagraphStyle(
@@ -542,6 +544,52 @@ class CoverageSection(ReportSection):
             if box_buf and box_buf.getvalue():
                 box_plot = Image(box_buf, width=6 * inch, height=3 * inch)
                 self.elements.append(box_plot)
+                # Add outliers table (replaces unreadable plot labels)
+                outliers = self._get_target_coverage_outliers()
+                if outliers:
+                    try:
+                        self.export_frames["coverage_outliers"] = pd.DataFrame(outliers)
+                    except Exception:
+                        pass
+                    self.elements.append(Spacer(1, 4))
+                    self.elements.append(
+                        Paragraph(
+                            "Coverage outliers (potential gains/losses)",
+                            ParagraphStyle(
+                                "CoverageOutliersTitle",
+                                parent=self.styles.styles["Normal"],
+                                fontSize=9,
+                                fontName="Helvetica-Bold",
+                                spaceAfter=4,
+                            ),
+                        )
+                    )
+                    table_data = [["Chromosome", "Gene", "Coverage", "Type"]]
+                    for o in outliers:
+                        table_data.append([
+                            o["chrom"],
+                            o["gene"],
+                            f"{o['coverage']:.1f}x",
+                            o["type"],
+                        ])
+                    outliers_table = self.create_table(
+                        table_data,
+                        repeat_rows=1,
+                        auto_col_width=True,
+                        compact=True,
+                        font_size=9,
+                    )
+                    outliers_table.setStyle(
+                        TableStyle([
+                            *self.MODERN_TABLE_STYLE._cmds,
+                            ("ALIGN", (2, 1), (2, -1), "RIGHT"),
+                            ("ALIGN", (3, 1), (3, -1), "CENTER"),
+                            ("TOPPADDING", (0, 0), (-1, -1), 4),
+                            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                        ])
+                    )
+                    self.elements.append(outliers_table)
+                    self.elements.append(Spacer(1, 6))
             else:
                 logger.warning("Skipping box plot - invalid buffer")
 
@@ -559,19 +607,35 @@ class CoverageSection(ReportSection):
         self.elements.append(
             Paragraph("Coverage Distribution Analysis", self.styles.styles["Heading3"])
         )
-        self.elements.append(Spacer(1, 0.1 * inch))
+        self.elements.append(Spacer(1, 4))
 
-        # Create table data for statistics
+        # Create table data for statistics (with safe formatting for missing values)
+        def _fmt(val, fmt_str: str, default: str = "N/A"):
+            if val is None or (isinstance(val, str) and val == "N/A"):
+                return default
+            try:
+                return fmt_str.format(float(val))
+            except (TypeError, ValueError):
+                return default
+
+        median = self.distribution_data.get("median")
+        mean = self.distribution_data.get("mean")
+        min_cov = self.distribution_data.get("min")
+        max_cov = self.distribution_data.get("max")
+        above_30 = self.distribution_data.get("above_30x")
+        above_20 = self.distribution_data.get("above_20x")
+        above_10 = self.distribution_data.get("above_10x")
+
         stats_data = [
-            ["Median Coverage", f"{self.distribution_data.get('median', 'N/A'):.2f}x"],
-            ["Mean Coverage", f"{self.distribution_data.get('mean', 'N/A'):.2f}x"],
+            ["Median Coverage", _fmt(median, "{:.2f}x")],
+            ["Mean Coverage", _fmt(mean, "{:.2f}x")],
             [
                 "Coverage Range",
-                f"{self.distribution_data.get('min', 'N/A'):.2f}x - {self.distribution_data.get('max', 'N/A'):.2f}x",
+                f"{_fmt(min_cov, '{:.2f}x')} - {_fmt(max_cov, '{:.2f}x')}",
             ],
-            ["Regions ≥30x", f"{self.distribution_data.get('above_30x', 'N/A'):.1f}%"],
-            ["Regions ≥20x", f"{self.distribution_data.get('above_20x', 'N/A'):.1f}%"],
-            ["Regions ≥10x", f"{self.distribution_data.get('above_10x', 'N/A'):.1f}%"],
+            ["Regions >=30x", _fmt(above_30, "{:.1f}%")],
+            ["Regions >=20x", _fmt(above_20, "{:.1f}%")],
+            ["Regions >=10x", _fmt(above_10, "{:.1f}%")],
         ]
 
         # Create and style the table
@@ -587,7 +651,7 @@ class CoverageSection(ReportSection):
         )
 
         self.elements.append(stats_table)
-        self.elements.append(Spacer(1, 0.2 * inch))
+        self.elements.append(Spacer(1, 6))
 
     def _get_coverage_quality(self, coverage):
         """Determine coverage quality level based on depth."""

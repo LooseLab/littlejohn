@@ -48,6 +48,24 @@ class MNPFlexSection(ReportSection):
         except Exception:
             return "--"
 
+    def _format_mgmt_value(self, value: Any, decimals: int = 1) -> str:
+        """Format MGMT/percentage values with sensible rounding."""
+        if value is None:
+            return "N/A"
+        try:
+            return f"{float(value):.{decimals}f}"
+        except (TypeError, ValueError):
+            return str(value)
+
+    def _format_coverage_value(self, value: Any) -> str:
+        """Format coverage values with 2 decimal places."""
+        if value is None:
+            return "N/A"
+        try:
+            return f"{float(value):.2f}"
+        except (TypeError, ValueError):
+            return str(value)
+
     def _collect_descriptions(self, node: Dict[str, Any]) -> str:
         descriptions: List[str] = []
         desc = (node.get("description") or "").strip()
@@ -112,23 +130,8 @@ class MNPFlexSection(ReportSection):
         hierarchy = classifier_summary.get("summary_hierarchical", []) or []
         has_hierarchical_summary = len(hierarchy) > 0
 
-        # Summary section entry
-        self.summary_elements.append(
-            Paragraph("MNP-Flex Summary", self.styles.styles["Heading3"])
-        )
-        summary_card = (
-            f"<b>QC status</b>: {qc.get('status', 'Unknown')}<br/>"
-            f"<b>Average coverage</b>: {qc.get('avg_coverage', 'N/A')}<br/>"
-            f"<b>Missing sites</b>: {qc.get('missing_site_count', 'N/A')}<br/>"
-            f"<b>MGMT status</b>: {mgmt.get('status', 'Unknown')}<br/>"
-            f"<b>MGMT average</b>: {mgmt.get('average', 'N/A')}"
-        )
-        if not has_hierarchical_summary:
-            summary_card += (
-                "<br/><b>Note</b>: No hierarchical summary available — "
-                "this is not a confirmed classification."
-            )
-        self.add_summary_card(summary_card)
+        # Summary card removed - MNP-Flex legend now appears as table legend
+        # in ClassificationSection (with MNP-Flex Hierarchical Summary)
 
         # Main section header
         self.add_section_header("MNP-Flex")
@@ -142,18 +145,18 @@ class MNPFlexSection(ReportSection):
                 self.styles.styles["Normal"],
             )
         )
-        self.elements.append(Spacer(1, 6))
+        self.elements.append(Spacer(1, 4))
 
         # QC / MGMT summary
         summary_text = (
             f"<b>QC status</b>: {qc.get('status', 'Unknown')}<br/>"
-            f"<b>Average coverage</b>: {qc.get('avg_coverage', 'N/A')}<br/>"
+            f"<b>Average coverage</b>: {self._format_coverage_value(qc.get('avg_coverage'))}<br/>"
             f"<b>Missing sites</b>: {qc.get('missing_site_count', 'N/A')}<br/>"
             f"<b>MGMT status</b>: {mgmt.get('status', 'Unknown')}<br/>"
-            f"<b>MGMT average</b>: {mgmt.get('average', 'N/A')}"
+            f"<b>MGMT average</b>: {self._format_mgmt_value(mgmt.get('average'))}"
         )
         self.elements.append(Paragraph(summary_text, self.styles.styles["Normal"]))
-        self.elements.append(Spacer(1, 8))
+        self.elements.append(Spacer(1, 4))
 
         # Hierarchical summary
         flat = self._flatten_hierarchy(hierarchy)
@@ -166,7 +169,7 @@ class MNPFlexSection(ReportSection):
                     self.styles.styles["Warning"],
                 )
             )
-            self.elements.append(Spacer(1, 10))
+            self.elements.append(Spacer(1, 6))
 
         if flat:
             best_score, best_path = max(flat, key=lambda x: x[0] or 0)
@@ -177,7 +180,7 @@ class MNPFlexSection(ReportSection):
                     self.styles.styles["Normal"],
                 )
             )
-            self.elements.append(Spacer(1, 6))
+            self.elements.append(Spacer(1, 4))
 
         if hierarchy:
             hierarchy_rows = [
@@ -192,7 +195,7 @@ class MNPFlexSection(ReportSection):
                     ]
                 )
             self.elements.append(self.create_table(hierarchy_rows))
-            self.elements.append(Spacer(1, 10))
+            self.elements.append(Spacer(1, 6))
 
         # Top 10 classifier scores
         scores = classifier_summary.get("scores") or []
@@ -219,7 +222,7 @@ class MNPFlexSection(ReportSection):
                 )
             self.elements.append(Paragraph("Top 10 classifier scores", self.styles.styles["Heading3"]))
             self.elements.append(self.create_table(top_rows))
-            self.elements.append(Spacer(1, 8))
+            self.elements.append(Spacer(1, 4))
 
             # Aggregate scores for top entry
             top_ref = (top[0].get("reference_group") or {})
@@ -250,7 +253,7 @@ class MNPFlexSection(ReportSection):
                 )
                 self.elements.append(Spacer(1, 4))
             self.elements.append(self.create_table(agg_rows))
-            self.elements.append(Spacer(1, 8))
+            self.elements.append(Spacer(1, 4))
 
         # Plots (if available)
         plot_specs = [

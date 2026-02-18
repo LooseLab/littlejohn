@@ -97,7 +97,7 @@ class RunDataSection(ReportSection):
         self.elements.append(
             Paragraph("Run Data Summary", self.styles.styles["Heading1"])
         )
-        self.elements.append(Spacer(1, 12))
+        self.elements.append(Spacer(1, 6))
 
         # Get master data
         masterdf = self.report.masterdf
@@ -127,7 +127,7 @@ class RunDataSection(ReportSection):
             self.elements.append(
                 self._create_info_table(sample_info, "Sample Information")
             )
-            self.elements.append(Spacer(1, 12))
+            self.elements.append(Spacer(1, 6))
 
             # Run Statistics
             stats_info = [
@@ -160,7 +160,7 @@ class RunDataSection(ReportSection):
                 ),
             ]
             self.elements.append(self._create_info_table(stats_info, "Run Statistics"))
-            self.elements.append(Spacer(1, 12))
+            self.elements.append(Spacer(1, 6))
 
         except Exception as e:
             logger.error(f"Error generating run data section: {str(e)}")

@@ -75,6 +75,7 @@ dependencies = [
     "tomli-w",
     "packaging",
     "plotly",
+    "seaborn",
     "svglib",
     "geocoder",
     "cnv_from_bam",

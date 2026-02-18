@@ -130,26 +130,26 @@ class ReportStyles:
                 self.styles[style_name].allowOrphans = 0
             elif style_name == "Heading1":
                 self.styles[style_name].fontName = bold_font
-                self.styles[style_name].fontSize = 16  # Enhanced from 14
-                self.styles[style_name].leading = 24  # M3 leading ratio
-                self.styles[style_name].spaceAfter = 12
-                self.styles[style_name].spaceBefore = 6
+                self.styles[style_name].fontSize = 16
+                self.styles[style_name].leading = 24
+                self.styles[style_name].spaceAfter = 6
+                self.styles[style_name].spaceBefore = 4
                 self.styles[style_name].textColor = self.COLORS["primary"]
                 self.styles[style_name].allowWidows = 0
                 self.styles[style_name].allowOrphans = 0
             elif style_name == "Heading2":
                 self.styles[style_name].fontName = medium_font
-                self.styles[style_name].fontSize = 14  # Enhanced from 12
-                self.styles[style_name].leading = 20  # M3 leading ratio
-                self.styles[style_name].spaceAfter = 10
-                self.styles[style_name].spaceBefore = 5
+                self.styles[style_name].fontSize = 14
+                self.styles[style_name].leading = 20
+                self.styles[style_name].spaceAfter = 6
+                self.styles[style_name].spaceBefore = 4
                 self.styles[style_name].textColor = self.COLORS["secondary"]
                 self.styles[style_name].allowWidows = 0
                 self.styles[style_name].allowOrphans = 0
-            else:  # Normal
+            else:  # Normal - body text throughout report
                 self.styles[style_name].fontName = base_font
-                self.styles[style_name].fontSize = 11  # Enhanced from 9
-                self.styles[style_name].leading = 16  # M3 leading ratio
+                self.styles[style_name].fontSize = 10
+                self.styles[style_name].leading = 14
                 self.styles[style_name].spaceBefore = 3
                 self.styles[style_name].spaceAfter = 3
                 self.styles[style_name].textColor = self.COLORS["on_surface"]
@@ -186,19 +186,19 @@ class ReportStyles:
                 "spaceBefore": 2,
             },
             "SummaryCard": {
-                "fontSize": 12,  # Enhanced from 11
-                "leading": 18,  # M3 leading ratio
+                "fontSize": 10,  # Body text
+                "leading": 14,
                 "textColor": self.COLORS["on_surface"],
                 "backColor": self.COLORS["surface"],
                 "borderColor": self.COLORS["outline_variant"],
                 "borderWidth": 1,
-                "borderPadding": 12,  # Enhanced from 8
-                "spaceBefore": 12,  # Enhanced from 8
-                "spaceAfter": 12,  # Enhanced from 8
+                "borderPadding": 12,
+                "spaceBefore": 12,
+                "spaceAfter": 12,
                 "bulletIndent": 0,
-                "leftIndent": 12,  # Enhanced from 8
-                "rightIndent": 12,  # Enhanced from 8
-                "fontName": medium_font,
+                "leftIndent": 12,
+                "rightIndent": 12,
+                "fontName": base_font,
                 "allowWidows": 0,
                 "allowOrphans": 0,
                 "wordWrap": "CJK",
@@ -214,12 +214,12 @@ class ReportStyles:
                 "fontName": bold_font,
             },
             "Caption": {
-                "fontSize": 10,  # Enhanced from 9
-                "leading": 14,  # M3 leading ratio
+                "fontSize": 10,
+                "leading": 14,
                 "textColor": self.COLORS["on_surface_variant"],
                 "alignment": 1,
-                "spaceBefore": 6,  # Enhanced from 4
-                "spaceAfter": 16,  # Enhanced from 12
+                "spaceBefore": 2,
+                "spaceAfter": 4,
                 "fontName": base_font,
             },
             "MonoText": {
@@ -253,12 +253,12 @@ class ReportStyles:
                 "allowOrphans": 0,
             },
             "HeadlineLarge": {
-                "fontSize": 20,  # Enhanced from 18
-                "leading": 28,  # M3 leading ratio
+                "fontSize": 20,
+                "leading": 28,
                 "textColor": self.COLORS["on_surface"],
                 "fontName": bold_font,
-                "spaceAfter": 16,  # Enhanced from 12
-                "spaceBefore": 8,  # Enhanced from 6
+                "spaceAfter": 8,
+                "spaceBefore": 4,
                 "allowWidows": 0,
                 "allowOrphans": 0,
             },
@@ -281,39 +281,6 @@ class ReportStyles:
                 "spaceBefore": 5,  # Enhanced from 4
                 "allowWidows": 0,
                 "allowOrphans": 0,
-            },
-            "BodyLarge": {
-                "fontSize": 12,  # Enhanced from 11
-                "leading": 18,  # M3 leading ratio
-                "textColor": self.COLORS["on_surface"],
-                "fontName": base_font,
-                "spaceAfter": 8,  # Enhanced from 6
-                "spaceBefore": 4,  # Enhanced from 3
-                "allowWidows": 0,
-                "allowOrphans": 0,
-                "wordWrap": "CJK",
-            },
-            "BodyMedium": {
-                "fontSize": 11,  # Enhanced from 10
-                "leading": 16,  # M3 leading ratio
-                "textColor": self.COLORS["on_surface"],
-                "fontName": base_font,
-                "spaceAfter": 6,  # Enhanced from 4
-                "spaceBefore": 3,  # Enhanced from 2
-                "allowWidows": 0,
-                "allowOrphans": 0,
-                "wordWrap": "CJK",
-            },
-            "BodySmall": {
-                "fontSize": 10,  # Enhanced from 9
-                "leading": 14,  # M3 leading ratio
-                "textColor": self.COLORS["on_surface_variant"],
-                "fontName": base_font,
-                "spaceAfter": 4,  # Enhanced from 3
-                "spaceBefore": 2,  # Enhanced from 1
-                "allowWidows": 0,
-                "allowOrphans": 0,
-                "wordWrap": "CJK",
             },
             "LabelLarge": {
                 "fontSize": 10,
@@ -431,17 +398,18 @@ class ReportStyles:
                 "wordWrap": "CJK",
             },
             "InfoCard": {
-                "fontSize": 11,
-                "leading": 16,
+                # Body text (10pt) for compact header box
+                "fontSize": 10,
+                "leading": 14,
                 "textColor": self.COLORS["on_surface"],
                 "backColor": self.COLORS["primary_container"],
                 "borderColor": self.COLORS["primary"],
                 "borderWidth": 1,
-                "borderPadding": 12,
-                "spaceBefore": 12,
-                "spaceAfter": 12,
-                "leftIndent": 12,
-                "rightIndent": 12,
+                "borderPadding": 6,
+                "spaceBefore": 6,
+                "spaceAfter": 6,
+                "leftIndent": 6,
+                "rightIndent": 6,
                 "fontName": base_font,
                 "allowWidows": 0,
                 "allowOrphans": 0,
@@ -521,19 +489,19 @@ class ReportStyles:
                 ("TEXTCOLOR", (0, 0), (-1, 0), self.COLORS["on_primary"]),
                 ("FONTNAME", (0, 0), (-1, 0), bold_font),
                 ("FONTSIZE", (0, 0), (-1, 0), 11),
-                ("TOPPADDING", (0, 0), (-1, 0), 14),
-                ("BOTTOMPADDING", (0, 0), (-1, 0), 14),
+                ("TOPPADDING", (0, 0), (-1, 0), 8),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
                 ("LINEBELOW", (0, 0), (-1, 0), 3, self.COLORS["primary"]),
                 # Body styling with alternating row colors
                 ("BACKGROUND", (0, 1), (-1, -1), self.COLORS["surface"]),
                 ("TEXTCOLOR", (0, 1), (-1, -1), self.COLORS["on_surface"]),
                 ("FONTNAME", (0, 1), (-1, -1), base_font),
                 ("FONTSIZE", (0, 1), (-1, -1), 10),
-                ("TOPPADDING", (0, 1), (-1, -1), 10),
-                ("BOTTOMPADDING", (0, 1), (-1, -1), 10),
-                # Enhanced padding and alignment
-                ("LEFTPADDING", (0, 0), (-1, -1), 18),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 18),
+                ("TOPPADDING", (0, 1), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 1), (-1, -1), 6),
+                # Padding and alignment
+                ("LEFTPADDING", (0, 0), (-1, -1), 12),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 12),
                 ("ALIGN", (0, 0), (-1, -1), "LEFT"),
                 # Subtle alternating row backgrounds for better readability
                 (
@@ -547,7 +515,7 @@ class ReportStyles:
             ]
         )
 
-        # Enhanced compact table style for dense data
+        # Compact table style for dense data
         self.COMPACT_TABLE_STYLE = TableStyle(
             [
                 # Header styling with secondary color theme
@@ -555,19 +523,19 @@ class ReportStyles:
                 ("TEXTCOLOR", (0, 0), (-1, 0), self.COLORS["on_secondary"]),
                 ("FONTNAME", (0, 0), (-1, 0), bold_font),
                 ("FONTSIZE", (0, 0), (-1, 0), 10),
-                ("TOPPADDING", (0, 0), (-1, 0), 10),
-                ("BOTTOMPADDING", (0, 0), (-1, 0), 10),
+                ("TOPPADDING", (0, 0), (-1, 0), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 6),
                 ("LINEBELOW", (0, 0), (-1, 0), 2, self.COLORS["secondary"]),
                 # Body styling with subtle alternating rows
                 ("BACKGROUND", (0, 1), (-1, -1), self.COLORS["surface"]),
                 ("TEXTCOLOR", (0, 1), (-1, -1), self.COLORS["on_surface"]),
                 ("FONTNAME", (0, 1), (-1, -1), base_font),
                 ("FONTSIZE", (0, 1), (-1, -1), 9),
-                ("TOPPADDING", (0, 1), (-1, -1), 8),
-                ("BOTTOMPADDING", (0, 1), (-1, -1), 8),
-                # Enhanced padding and alignment
-                ("LEFTPADDING", (0, 0), (-1, -1), 14),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 14),
+                ("TOPPADDING", (0, 1), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 1), (-1, -1), 5),
+                # Padding and alignment
+                ("LEFTPADDING", (0, 0), (-1, -1), 10),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 10),
                 ("ALIGN", (0, 0), (-1, -1), "LEFT"),
                 # Subtle alternating row backgrounds
                 (
@@ -589,18 +557,18 @@ class ReportStyles:
                 ("TEXTCOLOR", (0, 0), (-1, 0), self.COLORS["on_primary"]),
                 ("FONTNAME", (0, 0), (-1, 0), bold_font),
                 ("FONTSIZE", (0, 0), (-1, 0), 11),
-                ("TOPPADDING", (0, 0), (-1, 0), 14),
-                ("BOTTOMPADDING", (0, 0), (-1, 0), 14),
+                ("TOPPADDING", (0, 0), (-1, 0), 8),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
                 # Body styling
                 ("BACKGROUND", (0, 1), (-1, -1), self.COLORS["surface"]),
                 ("TEXTCOLOR", (0, 1), (-1, -1), self.COLORS["on_surface"]),
                 ("FONTNAME", (0, 1), (-1, -1), base_font),
                 ("FONTSIZE", (0, 1), (-1, -1), 10),
-                ("TOPPADDING", (0, 1), (-1, -1), 10),
-                ("BOTTOMPADDING", (0, 1), (-1, -1), 10),
+                ("TOPPADDING", (0, 1), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 1), (-1, -1), 6),
                 # Padding and alignment
-                ("LEFTPADDING", (0, 0), (-1, -1), 18),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 18),
+                ("LEFTPADDING", (0, 0), (-1, -1), 12),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 12),
                 ("ALIGN", (0, 0), (-1, -1), "LEFT"),
                 # Border
                 ("BOX", (0, 0), (-1, -1), 1, self.COLORS["outline"]),

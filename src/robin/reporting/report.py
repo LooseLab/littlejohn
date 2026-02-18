@@ -175,17 +175,17 @@ class RobinReport:
             logger.info("Starting report generation")
             self._emit_progress("initializing", "Initializing report generation...", 0.0)
 
-            # Add summary section header with enhanced M3 typography
+            # Add summary section header (Heading 1 level)
             self.elements_summary.insert(
                 0,
                 Paragraph(
-                    f"Summary - {self.sample_id}", self.styles.styles["DisplayMedium"]
+                    f"Summary - {self.sample_id}", self.styles.styles["Heading1"]
                 ),
             )
 
             # Add enhanced summary card with M3 styling
             summary_card_content = f"""
-            <b>ROBIN Analysis Report</b><br/>
+            ROBIN Analysis Report<br/>
             Sample ID: {self.sample_id}<br/>
             Centre ID: {self.centreID if self.centreID else 'Not specified'}<br/>
             Report Type: {report_type.title()}<br/>
@@ -194,7 +194,7 @@ class RobinReport:
             self.elements_summary.insert(
                 1, Paragraph(summary_card_content, self.styles.styles["InfoCard"])
             )
-            self.elements_summary.insert(2, Spacer(1, 16))
+            self.elements_summary.insert(2, Spacer(1, 8))
 
             # Process each section
             total_sections = len(self.sections)
@@ -246,7 +246,7 @@ class RobinReport:
                     1,
                     Paragraph("Detailed Analysis", self.styles.styles["HeadlineLarge"]),
                 )
-                self.elements.insert(2, Spacer(1, 16))  # Enhanced spacing
+                self.elements.insert(2, Spacer(1, 8))
 
             # Add page break before end of report elements
             if self.end_of_report_elements:
@@ -289,7 +289,7 @@ class RobinReport:
             self.end_of_report_elements.append(
                 Paragraph(success_content, self.styles.styles["Success"])
             )
-            self.end_of_report_elements.append(Spacer(1, 12))
+            self.end_of_report_elements.append(Spacer(1, 6))
 
             # Optionally export CSV/XLSX/ZIP
             if export_csv_dir:

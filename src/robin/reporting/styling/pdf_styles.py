@@ -43,8 +43,8 @@ class PDFStyleUtils:
             return [Spacer(1, 8), Paragraph(text, fallback_styles["Heading2"])]
 
     @staticmethod
-    def create_body_text(text, style_name="BodyLarge", styles_dict=None):
-        """Create body text with M3 typography."""
+    def create_body_text(text, style_name="Normal", styles_dict=None):
+        """Create body text (10pt)."""
         if styles_dict and style_name in styles_dict:
             return Paragraph(text, styles_dict[style_name])
         else:
@@ -117,8 +117,8 @@ class PDFStyleUtils:
 
         # Add content
         if isinstance(content, str):
-            if styles_dict and "BodyMedium" in styles_dict:
-                elements.append(Paragraph(content, styles_dict["BodyMedium"]))
+            if styles_dict and "Normal" in styles_dict:
+                elements.append(Paragraph(content, styles_dict["Normal"]))
             else:
                 # Fallback to default style
                 from reportlab.lib.styles import getSampleStyleSheet
@@ -128,9 +128,9 @@ class PDFStyleUtils:
         elif isinstance(content, list):
             for item in content:
                 if isinstance(item, str):
-                    if styles_dict and "BodyMedium" in styles_dict:
+                    if styles_dict and "Normal" in styles_dict:
                         elements.append(
-                            Paragraph(f"• {item}", styles_dict["BodyMedium"])
+                            Paragraph(f"• {item}", styles_dict["Normal"])
                         )
                     else:
                         # Fallback to default style
@@ -303,7 +303,7 @@ class PDFStyleUtils:
         return elements
 
     @staticmethod
-    def create_bullet_list(items, style_name="BodyMedium", styles_dict=None):
+    def create_bullet_list(items, style_name="Normal", styles_dict=None):
         """Create a bulleted list with consistent spacing."""
         elements = []
         for item in items:
@@ -323,7 +323,7 @@ class PDFStyleUtils:
         return elements
 
     @staticmethod
-    def create_numbered_list(items, style_name="BodyMedium", styles_dict=None):
+    def create_numbered_list(items, style_name="Normal", styles_dict=None):
         """Create a numbered list with consistent spacing."""
         elements = []
         for i, item in enumerate(items, 1):

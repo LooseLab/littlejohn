@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `robin utils mgmt` command to summarize MGMT CpG site methylation counts from `mgmt_sorted.bam` outputs.
 
 ### Changed
+- **Report layout and typography:**
+  - **Classification:** Methylation classification plots now use seaborn for improved styling; plots show top 3 classes with larger fonts and thicker lines. Detailed classification tables use a 2-column layout (Sturgeon|NanoDX, PanNanoDX|Random Forest) with compact styling and top 10 predictions.
+  - **CNV:** Summary and event tables use compact styling with unified 9pt font. Chromosome Arm Events and CNV Events Containing Genes tables are displayed side-by-side in two columns. Arm/Region columns widened to prevent text wrapping (e.g. "p-arm"). Increased cell padding and line spacing for readability.
+  - **Coverage:** Removed overlapping outlier labels from the "Coverage Distribution by Chromosome" box plot. Added a "Coverage outliers (potential gains/losses)" table below the plot with Chromosome, Gene, Coverage, and Type (Gain/Loss) columns.
+  - **Base:** `create_table()` now supports `compact`, `font_size`, and improved leading for consistent table typography across sections.
 - Parquet filter loading: `.txt` files (e.g. `parquet_filter.txt`) are treated as 1-based Illumina coordinates and converted to 0-based for BED/PyRanges; fixes off-by-one in CpG site filtering.
 - Parquet filter cache: distinct cache suffix (`_1based`) for `.txt` filters to avoid stale data after coordinate conversion change.
 - Parquet filter format: support for header row and whitespace-separated columns in `parquet_filter.txt`.
@@ -37,7 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Command-line progress output supports Rich styling; updating the installation is required to enable Rich functionality.
 
 ### Dependencies
-- Added snpEff and SnpSift for SNP annotation.
+- Added seaborn for methylation classification plot styling.
 - Added Rich for enhanced CLI progress and styled output (requires updating installation).
 
 ## [0.0.2] - 2024-12-19

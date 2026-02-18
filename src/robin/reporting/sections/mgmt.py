@@ -242,7 +242,7 @@ class MGMTSection(ReportSection):
             self.elements.append(
                 Paragraph("MGMT Promoter Methylation", self.styles.styles["Heading2"])
             )
-            self.elements.append(Spacer(1, 12))
+            self.elements.append(Spacer(1, 4))
 
             # Extract key metrics
             methylation_status = (
@@ -336,7 +336,7 @@ class MGMTSection(ReportSection):
             )
 
             self.elements.append(summary_table)
-            self.elements.append(Spacer(1, 6))  # Reduced spacing
+            self.elements.append(Spacer(1, 4))  # Reduced spacing
 
             # Add explanation text in a more compact format
             self.elements.append(
@@ -352,7 +352,7 @@ class MGMTSection(ReportSection):
                     ),
                 )
             )
-            self.elements.append(Spacer(1, 6))  # Reduced spacing
+            self.elements.append(Spacer(1, 4))  # Reduced spacing
 
             # Try to get CpG sites data from CSV file first, then fall back to BED file
             # First, try to load from CSV file if it exists
@@ -399,7 +399,7 @@ class MGMTSection(ReportSection):
                         "MGMT CpG Site Methylation Data", self.styles.styles["Heading3"]
                     )
                 )
-                self.elements.append(Spacer(1, 6))
+                self.elements.append(Spacer(1, 4))
 
                 # Create table header - include methylation counts if available
                 has_meth_counts = "Forward_Methylated_Count" in specific_sites.columns
@@ -529,7 +529,7 @@ class MGMTSection(ReportSection):
                     )
                 )
                 self.elements.append(cpg_table)
-                self.elements.append(Spacer(1, 6))  # Reduced spacing
+                self.elements.append(Spacer(1, 4))  # Reduced spacing
 
                 # Add average methylation in a more compact format
                 avg_methylation = specific_sites["Methylation_Percentage"].mean()
@@ -545,7 +545,7 @@ class MGMTSection(ReportSection):
                         ),
                     )
                 )
-                self.elements.append(Spacer(1, 6))  # Reduced spacing
+                self.elements.append(Spacer(1, 4))  # Reduced spacing
 
             # Add file sources information in a more compact format
             if last_seen == 999999:  # Final file
@@ -608,7 +608,7 @@ class MGMTSection(ReportSection):
             )
 
             self.elements.append(sources_table)
-            self.elements.append(Spacer(1, 6))  # Reduced spacing
+            self.elements.append(Spacer(1, 4))  # Reduced spacing
 
             # Try to add the methylation plot
             plot_added = False
@@ -719,12 +719,12 @@ class MGMTSection(ReportSection):
             summary_row = {
                 "Status": methylation_status,
                 "AveragePercent": (
-                    float(methylation_average)
+                    round(float(methylation_average), 2)
                     if methylation_average is not None
                     else None
                 ),
                 "PredictionScorePercent": (
-                    float(prediction_score) if prediction_score is not None else None
+                    round(float(prediction_score), 2) if prediction_score is not None else None
                 ),
                 "ResultsFile": "final_mgmt.csv" if last_seen == 999999 else (f"{last_seen}_mgmt.csv" if last_seen else None),
                 "PlotFile": "final_mgmt.png" if last_seen == 999999 else (f"{last_seen}_mgmt.png" if last_seen else None),
