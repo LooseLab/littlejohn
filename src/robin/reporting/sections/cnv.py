@@ -870,15 +870,16 @@ class CNVSection(ReportSection):
                 self.elements.append(whole_chr_table)
                 self.elements.append(Spacer(1, 4))
 
-            # Build arm and gene event blocks for 2-column layout
-            block_width = self.report.doc.width / 2
-            arm_block_width = block_width
-            gene_block_width = block_width
+            # Build arm and gene event tables. Always stack vertically (never nested
+            # side-by-side) so each table can split across pages. Nested tables
+            # cannot split and cause LayoutError when content exceeds frame height.
             arm_col_widths = [inch * x for x in [0.35, 0.55, 0.5, 0.5, 0.8]]
             gene_col_widths = [inch * x for x in [0.35, 0.65, 0.45, 0.45, 1.2]]
 
-            arm_block = None
-            gene_block = None
+            arm_header = None
+            arm_table = None
+            gene_header = None
+            gene_events_table = None
 
             if arm_events:
                 arm_data = [["Chr", "Arm", "State", "Mean CNV", "Proportion Affected"]]
@@ -914,17 +915,6 @@ class CNVSection(ReportSection):
                         spaceAfter=4,
                     ),
                 )
-                arm_block = Table(
-                    [[arm_header], [arm_table]],
-                    colWidths=[arm_block_width],
-                )
-                arm_block.setStyle(
-                    TableStyle([
-                        ("TOPPADDING", (0, 0), (-1, -1), 0),
-                        ("BOTTOMPADDING", (0, 0), (-1, 0), 4),
-                        ("BOTTOMPADDING", (0, 1), (-1, -1), 0),
-                    ])
-                )
 
             if gene_containing_events:
                 gene_events_data = [["Chr", "Region", "State", "Mean CNV", "Genes"]]
@@ -959,35 +949,16 @@ class CNVSection(ReportSection):
                         spaceAfter=4,
                     ),
                 )
-                gene_block = Table(
-                    [[gene_header], [gene_events_table]],
-                    colWidths=[gene_block_width],
-                )
-                gene_block.setStyle(
-                    TableStyle([
-                        ("TOPPADDING", (0, 0), (-1, -1), 0),
-                        ("BOTTOMPADDING", (0, 0), (-1, 0), 4),
-                        ("BOTTOMPADDING", (0, 1), (-1, -1), 0),
-                    ])
-                )
 
-            # Place arm and gene tables side by side when both exist
-            if arm_block and gene_block:
-                grid_table = Table(
-                    [[arm_block, gene_block]],
-                    colWidths=[block_width, block_width],
-                )
-                grid_table.setStyle(
-                    TableStyle([
-                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                        ("LEFTPADDING", (1, 0), (1, -1), 8),
-                    ])
-                )
-                self.elements.append(grid_table)
-            elif arm_block:
-                self.elements.append(arm_block)
-            elif gene_block:
-                self.elements.append(gene_block)
+            # Stack vertically as separate flowables so each table can split across pages
+            if arm_header is not None:
+                self.elements.append(arm_header)
+                self.elements.append(arm_table)
+            if gene_header is not None:
+                if arm_header is not None:
+                    self.elements.append(Spacer(1, 8))
+                self.elements.append(gene_header)
+                self.elements.append(gene_events_table)
 
             # Add note about detailed view
             self.elements.append(

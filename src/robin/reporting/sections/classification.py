@@ -121,13 +121,26 @@ class ClassificationSection(ReportSection):
                 var_name="Class",
                 value_name="Confidence",
             )
-            # Truncate long labels for legend readability
-            plot_df["Class"] = plot_df["Class"].apply(
-                lambda c: c if len(c) <= 20 else c[:17] + "..."
-            )
+            # Truncate long labels for legend readability, ensuring no collisions
+            # (e.g. "Embryonal - MB G3" and "Embryonal - MB G3G4 - G3" both become
+            # "Embryonal - MB G3..." if truncated naively, merging distinct classes)
+            unique_classes = plot_df["Class"].unique()
+            truncated_map = {}
+            for c in unique_classes:
+                base = c if len(c) <= 20 else c[:17] + "..."
+                # Ensure uniqueness: if collision, extend until distinct
+                out = base
+                while out in truncated_map.values() and out != c:
+                    if len(c) <= len(out) + 3:
+                        out = c  # Use full name to avoid collision
+                        break
+                    out = c[: min(len(out) + 4, len(c))] + ("..." if len(c) > 20 else "")
+                truncated_map[c] = out
+            plot_df["Class"] = plot_df["Class"].map(truncated_map)
 
-            # Seaborn color palette - distinct, accessible colors
-            palette = sns.color_palette("husl", n_colors=len(top_classes))
+            # Palette must match actual number of hue levels (avoids seaborn warning)
+            n_hue = plot_df["Class"].nunique()
+            palette = sns.color_palette("husl", n_colors=n_hue)
 
             # Create plot with seaborn (use context to avoid affecting other report plots)
             with sns.axes_style("whitegrid"):
