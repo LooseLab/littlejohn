@@ -1475,17 +1475,34 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             with target_coverage_time_chart_state["container"]:
                                 ui.label("No data available in target_coverage_time.csv").classes("text-gray-600")
                         return
+                    if not {'chrom', 'startpos', 'endpos', 'name'}.issubset(df.columns):
+                        if target_coverage_time_chart_state["container"]:
+                            with target_coverage_time_chart_state["container"]:
+                                ui.label("target_coverage_time.csv missing chrom/startpos/endpos/name columns").classes("text-gray-600")
+                        return
                     
                     # Convert timestamp to datetime (milliseconds to datetime)
                     df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
                     
+                    # Create unique target identifier (chrom, startpos, endpos) - distinguishes multiple regions with same gene name
+                    df['target_key'] = df.apply(
+                        lambda r: (str(r['chrom']), int(r['startpos']), int(r['endpos'])),
+                        axis=1
+                    )
+                    # Build display labels: include chromosome and position (Mb) when gene name appears multiple times
+                    name_counts = df.groupby('name').size()
+                    def _target_label(row):
+                        name = row['name']
+                        chrom = str(row['chrom'])
+                        start_mb = row['startpos'] / 1e6
+                        if name_counts.get(name, 0) > 1:
+                            return f"{name} ({chrom} {start_mb:.2f} Mb)"
+                        return f"{name} ({chrom} {start_mb:.2f} Mb)"
+                    df['target_label'] = df.apply(_target_label, axis=1)
+                    
                     # Calculate mean coverage per timepoint
                     mean_coverage = df.groupby('timestamp')['coverage'].mean().reset_index()
                     mean_coverage['datetime'] = pd.to_datetime(mean_coverage['timestamp'], unit='ms')
-                    
-                    # Calculate mean reads_per_length per timepoint
-                    mean_reads_per_length = df.groupby('timestamp')['reads_per_length'].mean().reset_index()
-                    mean_reads_per_length['datetime'] = pd.to_datetime(mean_reads_per_length['timestamp'], unit='ms')
                     
                     # Detect outliers using standard deviation method (Z-score)
                     def detect_outliers_sd(series, num_sd=2.0):
@@ -1535,7 +1552,11 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         outlier_points = timepoint_data[outlier_mask]
                         
                         for _, row in outlier_points.iterrows():
+                            tk = row['target_key']
+                            tk = (str(tk[0]), int(tk[1]), int(tk[2])) if isinstance(tk, (list, tuple)) else (str(row['chrom']), int(row['startpos']), int(row['endpos']))
                             outliers.append({
+                                'target_key': tk,
+                                'target_label': row['target_label'],
                                 'gene': row['name'],
                                 'timestamp': row['timestamp'],
                                 'datetime': row['datetime'],
@@ -1549,10 +1570,18 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     
                     outliers_df = pd.DataFrame(outliers) if outliers else pd.DataFrame()
                     
-                    # Identify unique outlier genes (genes that are outliers at any timepoint)
-                    outlier_genes = set()
+                    # Identify unique outlier targets (regions that are outliers at any timepoint)
+                    outlier_targets = []
                     if not outliers_df.empty:
-                        outlier_genes = set(outliers_df['gene'].unique())
+                        # Preserve order: (target_key, target_label) for consistent display
+                        seen = set()
+                        for _, row in outliers_df.iterrows():
+                            key = row['target_key']
+                            if isinstance(key, (list, tuple)):
+                                key = tuple(key)
+                            if key not in seen:
+                                seen.add(key)
+                                outlier_targets.append((key, row['target_label']))
                     
                     try:
                         outlier_limit = int(outlier_limit_state["value"])
@@ -1567,68 +1596,64 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         for ts, cov in zip(mean_coverage['timestamp'], mean_coverage['coverage'])
                     ]
                     
-                    # Mean reads_per_length series
-                    mean_reads_data = [
-                        [int(ts), float(rpl)] 
-                        for ts, rpl in zip(mean_reads_per_length['timestamp'], mean_reads_per_length['reads_per_length'])
-                    ]
-                    
-                    # Plot full time series profiles for outlier genes
+                    # Plot full time series profiles for outlier targets (one line per region)
                     outlier_gene_series = []
-                    sorted_outlier_genes = []  # Initialize for use in legend
-                    if outlier_genes:
-                        # Get color palette for outlier genes
+                    sorted_outlier_labels = []
+                    if outlier_targets:
+                        # Sort by max coverage (prioritize high outliers)
+                        target_max_cov = df.groupby('target_key')['coverage'].max()
+                        def _sort_key(item):
+                            key, _ = item
+                            k = tuple(key) if isinstance(key, (list, tuple)) else key
+                            return target_max_cov.get(k, 0)
+                        outlier_targets_sorted = sorted(
+                            outlier_targets,
+                            key=_sort_key,
+                            reverse=True
+                        )
+                        targets_to_plot = outlier_targets_sorted[:outlier_limit]
+                        sorted_outlier_labels = [label for _, label in targets_to_plot]
+                        
                         import colorsys
-                        num_outliers = len(outlier_genes)
+                        num_outliers = len(targets_to_plot)
                         colors = []
                         for i in range(num_outliers):
                             hue = i / max(num_outliers, 1)
                             rgb = colorsys.hsv_to_rgb(hue, 0.8, 0.9)
                             colors.append(f"rgb({int(rgb[0]*255)},{int(rgb[1]*255)},{int(rgb[2]*255)})")
                         
-                        # Sort outlier genes by maximum coverage (to prioritize high outliers)
-                        outlier_gene_max_coverage = df[df['name'].isin(outlier_genes)].groupby('name')['coverage'].max().sort_values(ascending=False)
-                        sorted_outlier_genes = outlier_gene_max_coverage.index.tolist()
-                        
-                        # Limit outlier genes to avoid clutter
-                        genes_to_plot = sorted_outlier_genes[:outlier_limit]
-                        
-                        for idx, gene in enumerate(genes_to_plot):
-                            gene_data = df[df['name'] == gene].copy()
-                            if len(gene_data) < 2:  # Need at least 2 points for a line
+                        for idx, (target_key, target_label) in enumerate(targets_to_plot):
+                            key = tuple(target_key) if isinstance(target_key, (list, tuple)) else target_key
+                            mask = (
+                                (df['chrom'].astype(str) == str(key[0])) &
+                                (df['startpos'] == key[1]) &
+                                (df['endpos'] == key[2])
+                            )
+                            target_data = df[mask].copy()
+                            if len(target_data) < 2:
                                 continue
-                            
-                            # Sort by timestamp
-                            gene_data = gene_data.sort_values('timestamp')
-                            
-                            # Prepare time series data
-                            gene_series_data = [
-                                [int(ts), float(cov)] 
-                                for ts, cov in zip(gene_data['timestamp'], gene_data['coverage'])
+                            target_data = target_data.sort_values('timestamp')
+                            series_data = [
+                                [int(ts), float(cov)]
+                                for ts, cov in zip(target_data['timestamp'], target_data['coverage'])
                             ]
-                            
-                            # Determine if this is primarily a high or low outlier
-                            is_high_outlier = outliers_df[outliers_df['gene'] == gene]['type'].value_counts().get('high', 0) > \
-                                             outliers_df[outliers_df['gene'] == gene]['type'].value_counts().get('low', 0)
-                            
+                            out_sub = outliers_df[
+                                (outliers_df['target_key'].apply(
+                                    lambda x: tuple(x) if isinstance(x, (list, tuple)) else x
+                                ) == key)
+                            ]
+                            is_high = out_sub['type'].value_counts().get('high', 0) > out_sub['type'].value_counts().get('low', 0)
                             outlier_gene_series.append({
-                                "name": gene,
+                                "name": target_label,
                                 "type": "line",
                                 "smooth": True,
-                                "data": gene_series_data,
-                                "yAxisIndex": 0,
+                                "data": series_data,
                                 "symbol": "none",
                                 "itemStyle": {"color": colors[idx % len(colors)]},
-                                "lineStyle": {"width": 2, "type": "dashed" if not is_high_outlier else "solid"},
-                                "label": {
-                                    "show": False
-                                },
-                                "labelLayout": {
-                                    "hideOverlap": True
-                                },
-                                "emphasis": {
-                                    "focus": "series"
-                                }
+                                "lineStyle": {"width": 2, "type": "dashed" if not is_high else "solid"},
+                                "label": {"show": False},
+                                "labelLayout": {"hideOverlap": True},
+                                "emphasis": {"focus": "series"}
                             })
                     
                     # Create/update chart
@@ -1642,7 +1667,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         # Summary statistics
                         with ui.row().classes("w-full mb-4 gap-4"):
                             ui.label(f"Total timepoints: {len(mean_coverage)}").classes("text-sm")
-                            ui.label(f"Total targets: {len(df['name'].unique())}").classes("text-sm")
+                            ui.label(f"Total targets: {len(df['target_key'].unique())}").classes("text-sm")
                             ui.label(f"Outliers detected: {len(outliers_df)}").classes("text-sm")
                         
                         # Chart
@@ -1657,9 +1682,23 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             "tooltip": {
                                 "trigger": "axis",
                                 "axisPointer": {"type": "cross"},
+                                ":formatter": (
+                                    "(params) => {"
+                                    "  const to2sf = (x) => {"
+                                    "    if (x == null || !Number.isFinite(x)) return '-';"
+                                    "    if (x === 0) return '0';"
+                                    "    return parseFloat(Number(x).toPrecision(2));"
+                                    "  };"
+                                    "  const pts = Array.isArray(params) ? params : [params];"
+                                    "  return pts.map(p => {"
+                                    "    const val = Array.isArray(p.value) ? p.value[1] : p.value;"
+                                    "    return (p.marker || '') + ' ' + p.seriesName + ': ' + to2sf(val);"
+                                    "  }).join('<br/>');"
+                                    "}"
+                                ),
                             },
                             "legend": {
-                                "data": ["Mean Coverage", "Mean Reads per Length"] + (sorted_outlier_genes[:outlier_limit] if outlier_genes else []),
+                                "data": ["Mean Coverage"] + sorted_outlier_labels,
                                 "left": 10,
                                 "top": 40,
                                 "orient": "vertical",
@@ -1679,39 +1718,19 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 "name": "Time",
                                 "nameGap": 30,
                             },
-                            "yAxis": [
-                                {
-                                    "type": "value",
-                                    "name": "Mean Coverage",
-                                    "nameGap": 50,
-                                    "position": "left",
-                                },
-                                {
-                                    "type": "value",
-                                    "name": "Mean Reads per Length",
-                                    "nameGap": 50,
-                                    "position": "right",
-                                }
-                            ],
+                            "yAxis": {
+                                "type": "value",
+                                "name": "Mean Coverage",
+                                "nameGap": 50,
+                            },
                             "series": [
                                 {
                                     "name": "Mean Coverage",
                                     "type": "line",
                                     "smooth": True,
                                     "data": mean_coverage_data,
-                                    "yAxisIndex": 0,
                                     "symbol": "none",
                                     "itemStyle": {"color": "#5470c6"},
-                                    "lineStyle": {"width": 2},
-                                },
-                                {
-                                    "name": "Mean Reads per Length",
-                                    "type": "line",
-                                    "smooth": True,
-                                    "data": mean_reads_data,
-                                    "yAxisIndex": 1,
-                                    "symbol": "none",
-                                    "itemStyle": {"color": "#91cc75"},
                                     "lineStyle": {"width": 2},
                                 },
                             ] + outlier_gene_series,
@@ -1719,10 +1738,10 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         
                         target_coverage_time_chart_state["chart"] = ui.echart(chart_config).classes("w-full h-96")
                         
-                        # Show summary of outlier genes
-                        if outlier_genes:
-                            outlier_count = len(outlier_genes)
-                            ui.label(f"Showing profiles for {min(outlier_count, outlier_limit)} outlier genes (out of {outlier_count} total)").classes("text-sm text-gray-600 mt-2")
+                        # Show summary of outlier targets
+                        if outlier_targets:
+                            outlier_count = len(outlier_targets)
+                            ui.label(f"Showing profiles for {min(outlier_count, outlier_limit)} outlier targets (out of {outlier_count} total)").classes("text-sm text-gray-600 mt-2")
                         else:
                             ui.label("No significant outliers detected.").classes("text-gray-600 mt-2")
                 
@@ -1921,22 +1940,29 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     # Sort by position for better visualization
                     chrom_data = chrom_data.sort_values("startpos")
                     
-                    # Create scatter plot data
+                    # Build unique display labels for genes that appear multiple times (same name, different regions)
+                    name_counts = chrom_data["name"].value_counts()
                     scatter_data = []
                     for _, row in chrom_data.iterrows():
-                        scatter_data.append([
-                            row["name"],
-                            row["coverage"],
-                            row["startpos"],
-                            row["endpos"]
-                        ])
+                        name = row["name"]
+                        if name_counts.get(name, 0) > 1:
+                            # Append position (in Mb) to distinguish duplicate gene regions
+                            start_mb = row["startpos"] / 1e6
+                            end_mb = row["endpos"] / 1e6
+                            if abs(end_mb - start_mb) < 0.01:
+                                label = f"{name} ({start_mb:.2f} Mb)"
+                            else:
+                                label = f"{name} ({start_mb:.2f}-{end_mb:.2f} Mb)"
+                        else:
+                            label = name
+                        scatter_data.append([label, row["coverage"], row["startpos"], row["endpos"]])
                     
                     # Update chart to show scatter plot
                     target_boxplot.options["title"]["text"] = f"Gene Coverage - {chromosome}"
-                    target_boxplot.options["title"]["subtext"] = f"{len(scatter_data)} genes"
+                    target_boxplot.options["title"]["subtext"] = f"{len(scatter_data)} targets"
                     
-                    # Update x-axis to show gene names
-                    gene_names = chrom_data["name"].tolist()
+                    # Update x-axis to show gene names (with position when duplicated)
+                    gene_names = [d[0] for d in scatter_data]
                     target_boxplot.options["xAxis"]["data"] = gene_names
                     target_boxplot.options["xAxis"]["axisLabel"]["rotate"] = 45
                     target_boxplot.options["xAxis"]["axisLabel"]["interval"] = 0
@@ -1970,7 +1996,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 "fontSize": 10
                             },
                             "tooltip": {
-                                "formatter": "function(params) { const data = params.data; return `Gene: ${data[0]}<br/>Coverage: ${data[1].toFixed(2)}x<br/>Position: ${data[2].toLocaleString()}-${data[3].toLocaleString()}`; }"
+                                ":formatter": "function(params) { const data = params.data; return 'Gene: ' + data[0] + '<br/>Coverage: ' + Number(data[1]).toFixed(2) + 'x<br/>Position: ' + data[2].toLocaleString() + '-' + data[3].toLocaleString(); }"
                             }
                         }
                     ]
@@ -2173,6 +2199,12 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         "field": "coverage",
                         "sortable": True,
                     },
+                    {
+                        "name": "outlier_status",
+                        "label": "Outlier (mean ± 2 SD)",
+                        "field": "outlier_status",
+                        "sortable": True,
+                    },
                 ],
                 rows=[],
                 pagination=20,
@@ -2192,6 +2224,15 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
     <q-badge :color="props.value >= 30 ? 'green' : props.value >= 20 ? 'blue' : props.value >= 10 ? 'orange' : 'red'">
         {{ Number(props.value).toFixed(2) }}
     </q-badge>
+    </q-td>
+    """,
+            )
+            target_cov_table.add_slot(
+                "body-cell-outlier_status",
+                """
+    <q-td key="outlier_status" :props="props">
+    <span v-if="props.value">{{ props.value }}</span>
+    <span v-else class="text-gray-400">—</span>
     </q-td>
     """,
             )
@@ -5688,9 +5729,31 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 dfx["length"] = (dfx["endpos"] - dfx["startpos"] + 1).astype(float)
                 dfx["coverage"] = dfx["bases"] / dfx["length"]
             dfx["coverage"] = dfx["coverage"].astype(float).round(2)
-            rows = dfx[["chrom", "startpos", "endpos", "name", "coverage"]].to_dict(
-                orient="records"
-            )
+
+            # Compute outlier status using 2 SD method (matches Target Coverage Over Time plot)
+            outlier_status = []
+            if len(dfx) >= 3:
+                mean_cov = dfx["coverage"].mean()
+                std_cov = dfx["coverage"].std()
+                if std_cov > 0:
+                    lower = mean_cov - 2.0 * std_cov
+                    upper = mean_cov + 2.0 * std_cov
+                    for cov in dfx["coverage"]:
+                        if cov > upper:
+                            outlier_status.append("High")
+                        elif cov < lower:
+                            outlier_status.append("Low")
+                        else:
+                            outlier_status.append("")
+                else:
+                    outlier_status = [""] * len(dfx)
+            else:
+                outlier_status = [""] * len(dfx)
+
+            dfx["outlier_status"] = outlier_status
+            rows = dfx[
+                ["chrom", "startpos", "endpos", "name", "coverage", "outlier_status"]
+            ].to_dict(orient="records")
             target_cov_table.rows = rows
             target_cov_table.update()
         except Exception as e:
