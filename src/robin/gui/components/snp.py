@@ -4,6 +4,7 @@ from typing import Any, Dict, List
 from pathlib import Path
 import logging
 import json
+from robin.analysis.snp_processing import parse_vcf
 
 try:
     from nicegui import ui
@@ -367,4 +368,268 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
         )
 
         for col in snp_table.columns:
+            col["sortable"] = True
+
+    # INDEL table for More Details page.
+    indel_vcf = clair3_dir / "snpsift_indel_output.vcf"
+    with ui.card().classes("w-full"):
+        ui.label("INDEL Analysis").classes("text-lg font-semibold text-blue-800")
+        ui.separator().classes().style("border: 1px solid var(--md-primary)")
+
+        if not indel_vcf.exists():
+            ui.label(
+                "INDEL VCF was not found. Run SNP analysis to generate INDEL output."
+            ).classes("text-body-medium text-gray-600")
+            return
+
+        indel_df = parse_vcf(indel_vcf)
+        if indel_df is None:
+            ui.label("Could not parse INDEL VCF data. Check logs for details.").classes(
+                "text-body-medium text-red-600"
+            )
+            return
+
+        if indel_df.empty:
+            ui.label("No INDEL variants were found.").classes("text-body-medium text-gray-600")
+            return
+
+        indel_column_lookup = {
+            str(field): {
+                "name": str(field),
+                "label": str(field).replace("_", " "),
+                "field": str(field),
+                "sortable": True,
+            }
+            for field in indel_df.columns
+        }
+        indel_visible_fields = [
+            field for field in preferred_display_fields if field in indel_column_lookup
+        ]
+        if not indel_visible_fields:
+            indel_visible_fields = list(indel_column_lookup.keys())[:12]
+
+        indel_display_columns = [
+            indel_column_lookup[field].copy() for field in indel_visible_fields
+        ]
+        if "details" not in {col.get("field") for col in indel_display_columns}:
+            indel_display_columns.append(
+                {
+                    "name": "details",
+                    "label": "Details",
+                    "field": "details",
+                    "sortable": False,
+                }
+            )
+        if "action" not in {col.get("field") for col in indel_display_columns}:
+            indel_display_columns.append(
+                {
+                    "name": "action",
+                    "label": "View in IGV",
+                    "field": "action",
+                    "sortable": False,
+                }
+            )
+
+        indel_full_row_lookup: Dict[str, Dict[str, Any]] = {}
+        indel_rows_all: List[Dict[str, Any]] = []
+        indel_rows_pathogenic: List[Dict[str, Any]] = []
+        indel_regions_map: Dict[str, Dict[str, int]] = {}
+
+        def _compact_indel_row(row: Dict[str, Any], row_id: str) -> Dict[str, Any]:
+            compact: Dict[str, Any] = {}
+            for field in indel_visible_fields:
+                value = row.get(field, "")
+                text = "" if value is None else str(value)
+                if field in wide_fields and len(text) > max_field_length:
+                    text = f"{text[:max_field_length - 1]}..."
+                compact[field] = text
+            compact["details"] = " "
+            compact["action"] = " "
+            compact["__row_id"] = row_id
+            return compact
+
+        for idx, record in enumerate(indel_df.to_dict("records")):
+            formatted_full: Dict[str, Any] = {}
+            for field in indel_df.columns:
+                value = record.get(field)
+                if value is None:
+                    formatted_full[str(field)] = ""
+                elif isinstance(value, bool):
+                    formatted_full[str(field)] = "Yes" if value else "No"
+                else:
+                    formatted_full[str(field)] = str(value)
+
+            pathogenic_value = record.get("is_pathogenic", False)
+            if isinstance(pathogenic_value, str):
+                pathogenic_bool = pathogenic_value.upper() in {"YES", "TRUE", "1"}
+            else:
+                pathogenic_bool = bool(pathogenic_value)
+
+            formatted_full["is_pathogenic"] = "Yes" if pathogenic_bool else "No"
+            row_id = (
+                f"{formatted_full.get('CHROM', '')}:{formatted_full.get('POS', '')}:{idx}"
+            )
+            indel_full_row_lookup[row_id] = formatted_full
+            compact_row = _compact_indel_row(formatted_full, row_id)
+            indel_rows_all.append(compact_row)
+
+            if pathogenic_bool:
+                indel_rows_pathogenic.append(dict(compact_row))
+                chrom = formatted_full.get("CHROM")
+                pos_text = str(formatted_full.get("POS", "")).replace(",", "")
+                try:
+                    pos = int(pos_text)
+                    if chrom:
+                        indel_regions_map[f"{chrom}:{pos}"] = {
+                            "chrom": str(chrom),
+                            "pos": pos,
+                        }
+                except (TypeError, ValueError):
+                    pass
+
+        with ui.row().classes("w-full gap-4 mb-4"):
+            ui.label(f"Total Variants: {len(indel_rows_all)}").classes(
+                "text-body-medium font-semibold"
+            )
+            if indel_rows_pathogenic:
+                ui.label(f"Pathogenic Variants: {len(indel_rows_pathogenic)}").classes(
+                    "text-body-medium font-semibold text-red-600"
+                )
+
+        from robin.gui.theme import styled_table
+
+        _, indel_table = styled_table(
+            columns=indel_display_columns,
+            rows=indel_rows_all,
+            pagination=25,
+            class_size="table-xs",
+        )
+
+        with indel_table.add_slot("top-left"):
+            indel_pathogenic_filter = ui.switch(
+                "Show pathogenic variants only",
+                value=False,
+            )
+
+        with indel_table.add_slot("top-right"):
+            with ui.input(placeholder="Search INDELs...").props("type=search").bind_value(
+                indel_table, "filter"
+            ).add_slot("append"):
+                ui.icon("search")
+
+        with ui.dialog() as indel_details_dialog, ui.card().classes(
+            "w-[95vw] max-w-6xl max-h-[85vh] overflow-auto"
+        ):
+            ui.label("INDEL Details").classes("text-lg font-semibold")
+            ui.separator()
+            indel_details_container = ui.column().classes("w-full gap-2")
+            with ui.row().classes("w-full justify-end pt-2"):
+                ui.button("Close", on_click=indel_details_dialog.close).props("color=primary")
+
+        def show_indel_details(row_id: str) -> None:
+            row_data = indel_full_row_lookup.get(row_id)
+            if not row_data:
+                ui.notify("INDEL details not found.", type="warning")
+                return
+            indel_details_container.clear()
+            detail_fields = [
+                "CHROM",
+                "POS",
+                "ID",
+                "REF",
+                "ALT",
+                "Gene_Name",
+                "HGVS.c",
+                "HGVS.p",
+                "Annotation",
+                "Annotation_Impact",
+                "CLNSIG",
+                "FILTER",
+                "QUAL",
+                "GT",
+            ]
+            ui_only_fields = {"action", "details", "__row_id"}
+            ordered_fields = detail_fields + sorted(
+                [
+                    k
+                    for k in row_data.keys()
+                    if k not in detail_fields and k not in ui_only_fields
+                ]
+            )
+            with indel_details_container:
+                for field in ordered_fields:
+                    value = row_data.get(field, "")
+                    if value in (None, ""):
+                        continue
+                    with ui.row().classes("w-full items-start gap-2"):
+                        ui.label(f"{field}:").classes("text-xs font-semibold min-w-[180px]")
+                        ui.label(str(value)).classes("text-xs whitespace-pre-wrap break-all flex-1")
+            indel_details_dialog.open()
+
+        indel_table.add_slot(
+            "body-cell-details",
+            """
+<q-td key="details" :props="props">
+  <q-btn
+    icon="description"
+    size="sm"
+    dense
+    flat
+    color="secondary"
+    @click="$parent.$emit('indel-show-details', props.row.__row_id)"
+    title="Show full details"
+  />
+</q-td>
+""",
+        )
+
+        indel_table.add_slot(
+            "body-cell-action",
+            """
+<q-td key="action" :props="props">
+  <q-btn
+    v-if="props.row.is_pathogenic === 'Yes'"
+    icon="visibility"
+    size="sm"
+    dense
+    flat
+    color="primary"
+    @click="$parent.$emit('indel-view-igv', props.row.CHROM + ':' + props.row.POS)"
+    title="View in IGV"
+  />
+</q-td>
+""",
+        )
+
+        def on_indel_view_igv(e):
+            try:
+                indel_key = e.args if isinstance(e.args, str) else getattr(e, "args", None)
+                if not indel_key:
+                    return
+                region_data = indel_regions_map.get(indel_key)
+                if region_data:
+                    navigate_igv_to_snp(region_data["chrom"], region_data["pos"])
+            except Exception as ex:
+                logger.debug(f"Error handling INDEL IGV view: {ex}")
+
+        def on_indel_show_details(e):
+            try:
+                row_id = e.args if isinstance(e.args, str) else getattr(e, "args", None)
+                if row_id:
+                    show_indel_details(row_id)
+            except Exception as ex:
+                logger.debug(f"Error handling INDEL details view: {ex}")
+
+        indel_table.on("indel-view-igv", on_indel_view_igv)
+        indel_table.on("indel-show-details", on_indel_show_details)
+
+        def apply_indel_pathogenic_filter(value: bool) -> None:
+            indel_table.rows = indel_rows_pathogenic if value else indel_rows_all
+            indel_table.update()
+
+        indel_pathogenic_filter.on(
+            "update:model-value", lambda e: apply_indel_pathogenic_filter(bool(e.args))
+        )
+
+        for col in indel_table.columns:
             col["sortable"] = True
