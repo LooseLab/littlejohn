@@ -3118,6 +3118,28 @@ def run_snp_analysis(
             logger.info("Annotation-only mode enabled; skipping existing output shortcut.")
         elif not force_regenerate and all(os.path.exists(f) for f in snp_output_files):
             logger.info(f"SNP analysis already present in {clair_dir}")
+            logger.info("Rebuilding SNP display JSON from existing snpsift output.")
+            try:
+                snp_display_vcf = Path(clair_dir) / "snpsift_output.vcf"
+                snp_display_path = Path(clair_dir) / "snpsift_output_display.json"
+                if snp_display_vcf.exists():
+                    snp_display = build_snp_display_data(snp_display_vcf)
+                    if snp_display is not None:
+                        with snp_display_path.open("w", encoding="utf-8") as f_out:
+                            json.dump(snp_display, f_out)
+                        logger.info(
+                            f"SNP display data refreshed at {snp_display_path}"
+                        )
+                    else:
+                        logger.warning(
+                            "Could not regenerate SNP display data from existing VCF."
+                        )
+                else:
+                    logger.warning(
+                        "snpsift_output.vcf not found while refreshing display JSON."
+                    )
+            except Exception as display_exc:
+                logger.warning(f"Failed to refresh SNP display JSON: {display_exc}")
             return clair_dir
 
         logger.info("STEP 3: Checking for required input files")
@@ -3464,7 +3486,7 @@ def run_snp_analysis(
                     f"/opt/bin/run_clairs_to "
                     f"--tumor_bam_fn {container_bamfile} "
                     f"--ref_fn {container_reference} "
-                    f"--threads 4 "
+                    f"--threads 8 "
                     f"--remove_intermediate_dir "
                     f"--platform ont_r10_guppy_hac_5khz "
                     f"--output_dir {region_output} "

@@ -83,7 +83,10 @@ def parse_vcf(vcf_path: Path) -> Optional[pd.DataFrame]:
             return None
 
         header = "CHROM POS ID REF ALT QUAL FILTER INFO FORMAT GT".split()
-        vcf = pd.read_csv(vcf_path, delimiter="\t", comment="#", names=header)
+        # Do not use pandas `comment="#"` here: INFO values can legally contain '#'
+        # (e.g. ClinVar IDs like UniProtKB:...#VAR_...), which truncates lines.
+        vcf = pd.read_csv(vcf_path, delimiter="\t", names=header, dtype=str)
+        vcf = vcf[~vcf["CHROM"].str.startswith("#", na=False)]
 
         if len(vcf) == 0:
             logger.info(f"VCF file is empty: {vcf_path}")

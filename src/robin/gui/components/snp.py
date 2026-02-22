@@ -128,6 +128,83 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
     """
     ui.run_javascript(js_init_snp_regions, timeout=5.0)
 
+    # Keep the SNP table readable by showing a concise default column set.
+    preferred_display_fields = [
+        "CHROM",
+        "POS",
+        "REF",
+        "ALT",
+        "Gene_Name",
+        "HGVS.p",
+        "Annotation",
+        "Annotation_Impact",
+        "CLNSIG",
+        "FILTER",
+        "QUAL",
+        "GT",
+        "is_pathogenic",
+        "details",
+        "action",
+    ]
+    wide_fields = {"Gene_Name", "Annotation", "HGVS.p", "CLNSIG"}
+    max_field_length = 80
+
+    column_lookup = {
+        col.get("field"): col for col in columns if isinstance(col, dict) and col.get("field")
+    }
+
+    visible_fields = [
+        field for field in preferred_display_fields if field in column_lookup
+    ]
+    if not visible_fields:
+        visible_fields = [
+            col.get("field") for col in columns[:12] if isinstance(col, dict) and col.get("field")
+        ]
+
+    display_columns = [column_lookup[field].copy() for field in visible_fields]
+    if "details" not in {col.get("field") for col in display_columns}:
+        display_columns.append(
+            {
+                "name": "details",
+                "label": "Details",
+                "field": "details",
+                "sortable": False,
+            }
+        )
+    if "action" not in {col.get("field") for col in display_columns}:
+        display_columns.append(
+            {
+                "name": "action",
+                "label": "View in IGV",
+                "field": "action",
+                "sortable": False,
+            }
+        )
+
+    def _compact_row(row: Dict[str, Any], row_id: str) -> Dict[str, Any]:
+        compact: Dict[str, Any] = {}
+        for field in visible_fields:
+            value = row.get(field, "")
+            text = "" if value is None else str(value)
+            if field in wide_fields and len(text) > max_field_length:
+                text = f"{text[:max_field_length - 1]}..."
+            compact[field] = text
+        compact["details"] = " "
+        compact["action"] = " "
+        compact["__row_id"] = row_id
+        return compact
+
+    full_row_lookup: Dict[str, Dict[str, Any]] = {}
+    display_rows_all: List[Dict[str, Any]] = []
+    for idx, row in enumerate(rows_all):
+        row_id = f"{row.get('CHROM', '')}:{row.get('POS', '')}:{idx}"
+        full_row_lookup[row_id] = row
+        display_rows_all.append(_compact_row(row, row_id))
+
+    display_rows_pathogenic = [
+        row for row in display_rows_all if row.get("is_pathogenic") == "Yes"
+    ]
+
     with ui.card().classes("w-full"):
         ui.label("SNP Analysis").classes("text-lg font-semibold text-blue-800")
         ui.separator().classes().style("border: 1px solid var(--md-primary)")
@@ -144,8 +221,8 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
         from robin.gui.theme import styled_table
 
         table_container, snp_table = styled_table(
-            columns=columns,
-            rows=rows_all,
+            columns=display_columns,
+            rows=display_rows_all,
             pagination=25,
             class_size="table-xs",
         )
@@ -162,8 +239,81 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
             ).add_slot("append"):
                 ui.icon("search")
 
-        if any(col.get("field") == "action" for col in columns):
+        if any(col.get("field") in {"action", "details"} for col in display_columns):
             try:
+                with ui.dialog() as details_dialog, ui.card().classes(
+                    "w-[95vw] max-w-6xl max-h-[85vh] overflow-auto"
+                ):
+                    ui.label("Variant Details").classes("text-lg font-semibold")
+                    ui.separator()
+                    details_container = ui.column().classes("w-full gap-2")
+                    with ui.row().classes("w-full justify-end pt-2"):
+                        ui.button("Close", on_click=details_dialog.close).props(
+                            "color=primary"
+                        )
+
+                def show_variant_details(row_id: str) -> None:
+                    row_data = full_row_lookup.get(row_id)
+                    if not row_data:
+                        ui.notify("Variant details not found.", type="warning")
+                        return
+
+                    details_container.clear()
+                    detail_fields = [
+                        "CHROM",
+                        "POS",
+                        "ID",
+                        "REF",
+                        "ALT",
+                        "Gene_Name",
+                        "HGVS.c",
+                        "HGVS.p",
+                        "Annotation",
+                        "Annotation_Impact",
+                        "CLNSIG",
+                        "FILTER",
+                        "QUAL",
+                        "GT",
+                    ]
+                    ui_only_fields = {"action", "details", "__row_id"}
+                    ordered_fields = detail_fields + sorted(
+                        [
+                            k
+                            for k in row_data.keys()
+                            if k not in detail_fields and k not in ui_only_fields
+                        ]
+                    )
+                    with details_container:
+                        for field in ordered_fields:
+                            value = row_data.get(field, "")
+                            if value is None or str(value) == "":
+                                continue
+                            with ui.row().classes("w-full items-start gap-2"):
+                                ui.label(f"{field}:").classes(
+                                    "text-xs font-semibold min-w-[180px]"
+                                )
+                                ui.label(str(value)).classes(
+                                    "text-xs whitespace-pre-wrap break-all flex-1"
+                                )
+                    details_dialog.open()
+
+                snp_table.add_slot(
+                    "body-cell-details",
+                    """
+<q-td key="details" :props="props">
+  <q-btn
+    icon="description"
+    size="sm"
+    dense
+    flat
+    color="secondary"
+    @click="$parent.$emit('snp-show-details', props.row.__row_id)"
+    title="Show full details"
+  />
+</q-td>
+""",
+                )
+
                 snp_table.add_slot(
                     "body-cell-action",
                     """
@@ -193,12 +343,23 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
                     except Exception as ex:
                         logger.debug(f"Error handling SNP IGV view: {ex}")
 
+                def on_snp_show_details(e):
+                    try:
+                        row_id = (
+                            e.args if isinstance(e.args, str) else getattr(e, "args", None)
+                        )
+                        if row_id:
+                            show_variant_details(row_id)
+                    except Exception as ex:
+                        logger.debug(f"Error handling SNP details view: {ex}")
+
                 snp_table.on("snp-view-igv", on_snp_view_igv)
+                snp_table.on("snp-show-details", on_snp_show_details)
             except Exception as ex:
                 logger.warning(f"Could not add action button slot: {ex}")
 
         def apply_pathogenic_filter(value: bool) -> None:
-            snp_table.rows = rows_pathogenic if value else rows_all
+            snp_table.rows = display_rows_pathogenic if value else display_rows_all
             snp_table.update()
 
         pathogenic_filter.on(
