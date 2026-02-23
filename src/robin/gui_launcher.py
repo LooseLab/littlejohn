@@ -1797,8 +1797,7 @@ class GUILauncher:
   <q-btn-group>
     <q-btn color=\"primary\" size=\"sm\" label=\"View\"
            @click=\"$parent.$emit('action', props.row.sample_id)\" />
-    <q-btn v-if=\"props.row.origin === 'Complete' || props.row.origin === 'Pre-existing'\"
-           color=\"secondary\" size=\"sm\" label=\"Finalize\" icon=\"merge_type\"
+  <q-btn color=\"secondary\" size=\"sm\" label=\"Finalize\" icon=\"merge_type\"
            @click=\"$parent.$emit('finalize-target', props.row.sample_id)\" />
   </q-btn-group>
 </q-td>

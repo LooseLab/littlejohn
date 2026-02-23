@@ -3057,6 +3057,7 @@ def run_snp_analysis(
     reference: Optional[str] = None,
     annotation_only: bool = False,
     annotation_verbose: bool = False,
+    target_panel: Optional[str] = None,
 ) -> str:
     """
     Run SNP analysis using Clair3 for a sample.
@@ -3074,6 +3075,7 @@ def run_snp_analysis(
         force_regenerate: If True, force recreation even if output exists
         annotation_only: If True, run only the snpEff/SnpSift annotation steps
         annotation_verbose: If True, run annotation steps with verbose logging enabled
+        target_panel: Target panel name used to resolve full target BED file
 
     Returns:
         The path to the output directory containing SNP results (empty string on failure)
@@ -3084,13 +3086,14 @@ def run_snp_analysis(
     logger.info("ENTERING run_snp_analysis function")
     logger.info(
         "Parameters: sample_dir=%s, threads=%s, force_regenerate=%s, "
-        "reference=%s, annotation_only=%s, annotation_verbose=%s",
+        "reference=%s, annotation_only=%s, annotation_verbose=%s, target_panel=%s",
         sample_dir,
         threads,
         force_regenerate,
         reference,
         annotation_only,
         annotation_verbose,
+        target_panel,
     )
 
     # Also log to stderr to make sure we see it
@@ -3144,14 +3147,62 @@ def run_snp_analysis(
 
         logger.info("STEP 3: Checking for required input files")
         target_bam = os.path.join(sample_dir, "target.bam")
-        targets_bed = os.path.join(sample_dir, "targets_exceeding_threshold.bed")
+        threshold_targets_bed = os.path.join(sample_dir, "targets_exceeding_threshold.bed")
+        targets_bed = threshold_targets_bed
         output_snv_vcf = os.path.join(clair_dir, "output_done.vcf.gz")
         output_indel_vcf = os.path.join(clair_dir, "output_indel_done.vcf.gz")
+
+        def resolve_full_targets_bed() -> str:
+            # 1) Prefer target panel BED from resources when panel is known.
+            if target_panel:
+                if target_panel == "rCNS2":
+                    bed_filename = "rCNS2_panel_name_uniq.bed"
+                elif target_panel == "AML":
+                    bed_filename = "AML_panel_name_uniq.bed"
+                elif target_panel == "PanCan":
+                    bed_filename = "PanCan_panel_name_uniq.bed"
+                else:
+                    bed_filename = f"{target_panel}_panel_name_uniq.bed"
+
+                panel_paths = []
+                if resources is not None:
+                    try:
+                        panel_paths.append(
+                            os.path.join(
+                                os.path.dirname(os.path.abspath(resources.__file__)),
+                                bed_filename,
+                            )
+                        )
+                    except Exception:
+                        pass
+                panel_paths.extend(
+                    [bed_filename, f"data/{bed_filename}", f"/usr/local/share/{bed_filename}"]
+                )
+                for path in panel_paths:
+                    if os.path.exists(path):
+                        return path
+
+            # 2) Fall back to sample-specific master BED if available.
+            try:
+                import glob
+
+                bed_dir = os.path.join(sample_dir, "bed_files")
+                if os.path.isdir(bed_dir):
+                    master_bed_files = glob.glob(os.path.join(bed_dir, "master_*.bed"))
+                    if master_bed_files:
+                        return max(master_bed_files, key=os.path.getmtime)
+            except Exception as e:
+                logger.debug(f"Error resolving master BED from sample bed_files/: {e}")
+
+            # 3) Final fallback: legacy threshold BED.
+            return threshold_targets_bed
 
         logger.info("CHECKING INPUT FILES FOR CLAIR3")
         logger.info(f"  Sample directory: {sample_dir}")
         logger.info(f"  Target BAM path: {target_bam}")
-        logger.info(f"  Targets BED path: {targets_bed}")
+        targets_bed = resolve_full_targets_bed()
+        logger.info(f"  Threshold BED path: {threshold_targets_bed}")
+        logger.info(f"  Targets BED path selected for ClairS: {targets_bed}")
         logger.info(f"  Reference path: {reference}")
 
         if annotation_only:
@@ -3172,7 +3223,7 @@ def run_snp_analysis(
                 return ""
 
             if not os.path.exists(targets_bed):
-                logger.error(f"targets_exceeding_threshold.bed not found: {targets_bed}")
+                logger.error(f"Target BED file not found: {targets_bed}")
                 return ""
 
         # Check for reference genome
@@ -3362,16 +3413,18 @@ def run_snp_analysis(
 
             host_config = client.api.create_host_config(binds=volume_bindings)
 
-            # Function to split BED file into manageable regions
-            def split_bed_into_regions(bed_file, max_region_size=150000000):
-                """Split BED file into efficient regions up to max_region_size bases"""
-                regions = []
+            # Function to split BED file into manageable chunks.
+            # Chunks can include multiple chromosomes, constrained by covered genomic span.
+            def split_bed_into_chunks(bed_file, max_chunk_size=150000000):
+                """Split BED entries into chunks up to max_chunk_size covered genomic span."""
+                chunks = []
                 try:
                     # Read all BED entries and sort them
                     bed_entries = []
                     with open(bed_file, "r") as f:
                         for line_num, line in enumerate(f, 1):
-                            line = line.strip()
+                            raw_line = line.rstrip("\n")
+                            line = raw_line.strip()
                             if not line or line.startswith("#"):
                                 continue
 
@@ -3385,117 +3438,122 @@ def run_snp_analysis(
                             chrom = parts[0]
                             start = int(parts[1])
                             end = int(parts[2])
-                            bed_entries.append((chrom, start, end))
+                            if end <= start:
+                                continue
+                            entry_len = end - start
+                            bed_entries.append((chrom, start, end, raw_line, entry_len))
 
                     # Sort by chromosome and start position
                     bed_entries.sort(key=lambda x: (x[0], x[1]))
 
-                    # Group into efficient regions
-                    current_chrom = None
-                    current_start = None
-                    current_end = None
+                    def covered_span(chrom_bounds):
+                        # Sum per-chromosome spans so sparse targets cannot inflate a chunk indefinitely.
+                        return sum((end - start) for start, end in chrom_bounds.values())
 
-                    for chrom, start, end in bed_entries:
-                        if chrom != current_chrom:
-                            # New chromosome, start new region
-                            if current_chrom is not None:
-                                regions.append(
-                                    f"{current_chrom}:{current_start+1}-{current_end}"
-                                )
-                            current_chrom = chrom
-                            current_start = start
-                            current_end = end
-                        elif end - current_start <= max_region_size:
-                            # Can extend current region
-                            current_end = end
+                    current_chunk = []
+                    current_bounds = {}
+
+                    for chrom, start, end, raw_line, entry_len in bed_entries:
+                        projected_bounds = dict(current_bounds)
+                        if chrom in projected_bounds:
+                            prev_start, prev_end = projected_bounds[chrom]
+                            projected_bounds[chrom] = (min(prev_start, start), max(prev_end, end))
                         else:
-                            # Current region would exceed max size, start new one
-                            regions.append(
-                                f"{current_chrom}:{current_start+1}-{current_end}"
-                            )
-                            current_start = start
-                            current_end = end
+                            projected_bounds[chrom] = (start, end)
 
-                    # Add final region
-                    if current_chrom is not None:
-                        regions.append(
-                            f"{current_chrom}:{current_start+1}-{current_end}"
-                        )
+                        if current_chunk and covered_span(projected_bounds) > max_chunk_size:
+                            chunks.append(current_chunk)
+                            current_chunk = []
+                            current_bounds = {}
+
+                        if chrom in current_bounds:
+                            prev_start, prev_end = current_bounds[chrom]
+                            current_bounds[chrom] = (min(prev_start, start), max(prev_end, end))
+                        else:
+                            current_bounds[chrom] = (start, end)
+                        current_chunk.append((chrom, start, end, raw_line, entry_len))
+
+                    if current_chunk:
+                        chunks.append(current_chunk)
 
                     logger.info(
-                        f"Combined BED entries into {len(regions)} efficient regions (max size: {max_region_size:,} bases)"
+                        f"Combined BED entries into {len(chunks)} chunks (max chunk size: {max_chunk_size:,} bases)"
                     )
-                    return regions
+                    return chunks
                 except Exception as e:
-                    logger.error(f"Error splitting BED file: {e}")
+                    logger.error(f"Error splitting BED file into chunks: {e}")
                     return []
 
-            # Split BED file into regions (larger chunk size to reduce splits)
-            logger.info("Splitting BED file into efficient regions...")
-            regions = split_bed_into_regions(targets_bed, max_region_size=500000000)
+            # Default to region-split mode to keep INDEL calling memory usage bounded.
+            # Set ROBIN_CLAIRS_SPLIT_REGIONS=0 to force single-pass mode.
+            split_regions_env = os.environ.get("ROBIN_CLAIRS_SPLIT_REGIONS")
+            if split_regions_env is None:
+                use_split_regions = True
+            else:
+                use_split_regions = split_regions_env.lower() in ("1", "true", "yes", "on")
 
-            if not regions:
-                logger.error("Failed to split BED file into regions")
-                return ""
+            if use_split_regions:
+                logger.info(
+                    "Using region-split ClairS mode (recommended for INDEL memory stability)."
+                )
+                chunked_entries = split_bed_into_chunks(targets_bed, max_chunk_size=250000000)
+                if not chunked_entries:
+                    logger.error("Failed to split BED file into chunks")
+                    return ""
+                chunk_bed_dir = os.path.join(clair_dir, "chunk_beds")
+                os.makedirs(chunk_bed_dir, exist_ok=True)
 
-            logger.info(
-                f"Processing {len(regions)} efficient regions: {regions[:5]}{'...' if len(regions) > 5 else ''}"
-            )
+                regions = []
+                for i, chunk in enumerate(chunked_entries, 1):
+                    chunk_host_bed = os.path.join(chunk_bed_dir, f"region_{i}.bed")
+                    with open(chunk_host_bed, "w") as f_out:
+                        for _, _, _, raw_line, _ in chunk:
+                            f_out.write(raw_line + "\n")
 
-            # Log region sizes for efficiency analysis
-            total_bases = 0
-            for i, region in enumerate(regions):
-                try:
-                    chrom_part, pos_part = region.split(":")
-                    start_end = pos_part.split("-")
-                    start = int(start_end[0]) - 1  # Convert back to 0-based
-                    end = int(start_end[1])
-                    region_size = end - start
-                    total_bases += region_size
-                    logger.info(
-                        f"Region {i+1}: {region} (size: {region_size:,} bases)"
+                    first_chrom, first_start = chunk[0][0], chunk[0][1]
+                    last_chrom, last_end = chunk[-1][0], chunk[-1][2]
+                    chrom_bounds = {}
+                    for chrom, start, end, _, _ in chunk:
+                        if chrom in chrom_bounds:
+                            prev_start, prev_end = chrom_bounds[chrom]
+                            chrom_bounds[chrom] = (min(prev_start, start), max(prev_end, end))
+                        else:
+                            chrom_bounds[chrom] = (start, end)
+                    span_bases = sum((end - start) for start, end in chrom_bounds.values())
+                    label = f"{first_chrom}:{first_start+1}-{last_end}"
+                    if first_chrom != last_chrom:
+                        label = f"{first_chrom}:{first_start+1}..{last_chrom}:{last_end}"
+
+                    regions.append(
+                        {
+                            "label": label,
+                            "bed_container": f"{container_output}/chunk_beds/region_{i}.bed",
+                            "is_split": True,
+                            "span_bases": span_bases,
+                        }
                     )
-                except Exception as e:
-                    logger.warning(f"Could not parse region size for {region}: {e}")
-
-            logger.info(
-                f"Total bases to process: {total_bases:,} across {len(regions)} regions"
-            )
-            logger.info(f"Average region size: {total_bases // len(regions):,} bases")
+                    logger.info(
+                        f"Chunk {i}: {label} (entries: {len(chunk)}, span: {span_bases:,} bases)"
+                    )
+            else:
+                logger.info(
+                    "Running ClairS in single-pass mode over full BED."
+                )
+                logger.info(
+                    "Set ROBIN_CLAIRS_SPLIT_REGIONS=1 to re-enable region-splitting mode."
+                )
+                regions = [
+                    {
+                        "label": "full_target_bed",
+                        "bed_container": container_bedfile,
+                        "is_split": False,
+                        "span_bases": None,
+                    }
+                ]
 
             # Process each region separately (or single pass)
             all_snv_vcfs = []
             all_indel_vcfs = []
-
-            for i, region in enumerate(regions):
-                region_label = (
-                    region if region is not None else "full_target_bed"
-                )
-                logger.info(f"Processing region {i+1}/{len(regions)}: {region_label}")
-                print(
-                    f"Processing region {i+1}/{len(regions)}: {region_label} - PRINT STATEMENT"
-                )
-                # Create region-specific output directory
-                if region is None:
-                    region_output = container_output
-                else:
-                    region_output = f"{container_output}/region_{i+1}"
-
-                # Build Clair3 command for this region or full pass
-                command = (
-                    f"/opt/bin/run_clairs_to "
-                    f"--tumor_bam_fn {container_bamfile} "
-                    f"--ref_fn {container_reference} "
-                    f"--threads 8 "
-                    f"--remove_intermediate_dir "
-                    f"--platform ont_r10_guppy_hac_5khz "
-                    f"--output_dir {region_output} "
-                    f"-b {container_bedfile} "
-                    f"--chunk_size 5000000 "
-                    f"--disable_intermediate_phasing "
-                )
-                if region is not None:
-                    command += f"--region {region}"
 
             logger.info(f"Container input BAM: {container_bamfile}")
             logger.info(f"Container input BED: {container_bedfile}")
@@ -3564,30 +3622,32 @@ def run_snp_analysis(
                 logger.info("psutil not available, skipping resource logging")
 
             # Process each region
-            for i, region in enumerate(regions):
-                region_label = region
+            for i, region_spec in enumerate(regions):
+                region_label = region_spec["label"]
                 print(
                     f"Processing region {i+1}/{len(regions)}: {region_label} - PRINT STATEMENT"
                 )
                 logger.info(f"Processing region {i+1}/{len(regions)}: {region_label}")
 
                 # Create region-specific output directory
-                region_output = f"{container_output}/region_{i+1}"
+                if region_spec["is_split"]:
+                    region_output = f"{container_output}/region_{i+1}"
+                else:
+                    region_output = container_output
 
                 # Build Clair3 command for this region
                 command = (
                     f"/opt/bin/run_clairs_to "
                     f"--tumor_bam_fn {container_bamfile} "
                     f"--ref_fn {container_reference} "
-                    f"--threads 4 "
+                    f"--threads {threads} "
                     f"--remove_intermediate_dir "
                     f"--platform ont_r10_guppy_hac_5khz "
                     f"--output_dir {region_output} "
-                    f"-b {container_bedfile} "
+                    f"-b {region_spec['bed_container']} "
                     f"--chunk_size 5000000 "
                     f"--disable_intermediate_phasing "
                 )
-                command += f"--region {region}"
 
                 logger.info(f"Running Clair3 command for region {i+1}: {command}")
 
@@ -3613,9 +3673,31 @@ def run_snp_analysis(
                 # Wait for completion
                 result = client.api.wait(container=container.get("Id"))
                 if result["StatusCode"] != 0:
+                    status_code = result.get("StatusCode")
+                    container_id = container.get("Id")
+
+                    # Classify abnormal termination (OOM/SIGKILL/SIGTERM) for clearer diagnostics.
+                    oom_killed = False
+                    kill_reason = None
+                    try:
+                        inspect_data = client.api.inspect_container(container=container_id)
+                        state = inspect_data.get("State", {}) if inspect_data else {}
+                        oom_killed = bool(state.get("OOMKilled", False))
+                    except Exception as inspect_exc:
+                        logger.debug(
+                            f"Could not inspect Clair3 container state for region {i+1}: {inspect_exc}"
+                        )
+
+                    if oom_killed:
+                        kill_reason = "oom_killed"
+                    elif status_code == 137:
+                        kill_reason = "sigkill_or_oom"
+                    elif status_code == 143:
+                        kill_reason = "sigterm"
+
                     # Get detailed error logs before removing container
                     error_logs = client.api.logs(
-                        container=container.get("Id"), stderr=True, stdout=False
+                        container=container_id, stderr=True, stdout=False
                     )
                     error_details = error_logs.decode().strip()
                     if error_details:
@@ -3623,7 +3705,7 @@ def run_snp_analysis(
 
                     # Also get stdout logs for context
                     stdout_logs = client.api.logs(
-                        container=container.get("Id"), stdout=True, stderr=False
+                        container=container_id, stdout=True, stderr=False
                     )
                     stdout_details = stdout_logs.decode().strip()
                     if stdout_details:
@@ -3631,17 +3713,31 @@ def run_snp_analysis(
                             f"Clair3 region {i+1} stdout logs: {stdout_details}"
                         )
 
+                    if kill_reason is not None:
+                        logger.error(
+                            "Clair3 region %s terminated abnormally (%s, exit=%s). "
+                            "This is often memory pressure (especially for oom_killed/sigkill_or_oom). "
+                            "Consider lowering threads or reducing chunk span.",
+                            i + 1,
+                            kill_reason,
+                            status_code,
+                        )
+
                     logger.warning(
-                        f"Clair3 region {i+1} failed with status code {result['StatusCode']}, skipping this region"
+                        f"Clair3 region {i+1} failed with status code {status_code}, skipping this region"
                     )
                     continue
 
                 # Clean up container
                 client.api.remove_container(container=container.get("Id"))
 
-                # Check if output files were created for this region
-                region_snv = f"{clair_dir}/region_{i+1}/snv.vcf.gz"
-                region_indel = f"{clair_dir}/region_{i+1}/indel.vcf.gz"
+                # Check if output files were created for this region/pass
+                if region_spec["is_split"]:
+                    region_snv = f"{clair_dir}/region_{i+1}/snv.vcf.gz"
+                    region_indel = f"{clair_dir}/region_{i+1}/indel.vcf.gz"
+                else:
+                    region_snv = f"{clair_dir}/snv.vcf.gz"
+                    region_indel = f"{clair_dir}/indel.vcf.gz"
 
                 if os.path.exists(region_snv):
                     all_snv_vcfs.append(region_snv)
@@ -3657,33 +3753,49 @@ def run_snp_analysis(
                         f"Region {i+1} INDEL output not found: {region_indel}"
                     )
 
-            # Merge all region outputs
-            logger.info(
-                f"Merging {len(all_snv_vcfs)} SNV VCF files and {len(all_indel_vcfs)} INDEL VCF files..."
-            )
-
-            if all_snv_vcfs:
-                # Merge SNV VCFs
-                merged_snv = f"{clair_dir}/merged_snv.vcf.gz"
-                merge_vcf_files(all_snv_vcfs, merged_snv, "SNV")
-                shutil.copy2(merged_snv, f"{clair_dir}/output_done.vcf.gz")
-                logger.info(f"Merged SNV VCFs into: {clair_dir}/output_done.vcf.gz")
-            else:
-                logger.error("No SNV VCF files were successfully created")
-                return ""
-
-            if all_indel_vcfs:
-                # Merge INDEL VCFs
-                merged_indel = f"{clair_dir}/merged_indel.vcf.gz"
-                merge_vcf_files(all_indel_vcfs, merged_indel, "INDEL")
-                shutil.copy2(merged_indel, f"{clair_dir}/output_indel_done.vcf.gz")
+            if use_split_regions:
+                # Merge all split-region outputs
                 logger.info(
-                    f"Merged INDEL VCFs into: {clair_dir}/output_indel_done.vcf.gz"
+                    f"Merging {len(all_snv_vcfs)} SNV VCF files and {len(all_indel_vcfs)} INDEL VCF files..."
                 )
-            else:
-                logger.warning("No INDEL VCF files were successfully created")
 
-            logger.info("Clair3 pipeline completed successfully for all regions")
+                if all_snv_vcfs:
+                    merged_snv = f"{clair_dir}/merged_snv.vcf.gz"
+                    merge_vcf_files(all_snv_vcfs, merged_snv, "SNV")
+                    shutil.copy2(merged_snv, f"{clair_dir}/output_done.vcf.gz")
+                    logger.info(f"Merged SNV VCFs into: {clair_dir}/output_done.vcf.gz")
+                else:
+                    logger.error("No SNV VCF files were successfully created")
+                    return ""
+
+                if all_indel_vcfs:
+                    merged_indel = f"{clair_dir}/merged_indel.vcf.gz"
+                    merge_vcf_files(all_indel_vcfs, merged_indel, "INDEL")
+                    shutil.copy2(merged_indel, f"{clair_dir}/output_indel_done.vcf.gz")
+                    logger.info(
+                        f"Merged INDEL VCFs into: {clair_dir}/output_indel_done.vcf.gz"
+                    )
+                else:
+                    logger.warning("No INDEL VCF files were successfully created")
+                logger.info("Clair3 pipeline completed successfully for all regions")
+            else:
+                # Single-pass output normalization (no merge step needed).
+                single_snv = f"{clair_dir}/snv.vcf.gz"
+                single_indel = f"{clair_dir}/indel.vcf.gz"
+                if not os.path.exists(single_snv):
+                    logger.error(f"Single-pass SNV output not found: {single_snv}")
+                    return ""
+                shutil.copy2(single_snv, f"{clair_dir}/output_done.vcf.gz")
+                logger.info(f"Single-pass SNV output copied to: {clair_dir}/output_done.vcf.gz")
+
+                if os.path.exists(single_indel):
+                    shutil.copy2(single_indel, f"{clair_dir}/output_indel_done.vcf.gz")
+                    logger.info(
+                        f"Single-pass INDEL output copied to: {clair_dir}/output_indel_done.vcf.gz"
+                    )
+                else:
+                    logger.warning(f"Single-pass INDEL output not found: {single_indel}")
+                logger.info("Clair3 pipeline completed successfully in single-pass mode")
 
 
         if annotation_only:
@@ -3809,10 +3921,12 @@ def run_snp_analysis(
                 logger.error(f"snpEff output file does not exist: {snpeff_out}")
 
             try:
-                from robin import resources
+                # Use an alias to avoid shadowing module-level `resources`.
+                from robin import resources as robin_resources
 
                 clinvar_path = os.path.join(
-                    os.path.dirname(os.path.abspath(resources.__file__)), "clinvar.vcf"
+                    os.path.dirname(os.path.abspath(robin_resources.__file__)),
+                    "clinvar.vcf",
                 )
 
                 logger.info(f"Looking for ClinVar file at: {clinvar_path}")
@@ -4264,6 +4378,22 @@ def snp_analysis_handler(job, work_dir: Optional[str] = None) -> None:
         reference = job.context.metadata.get("reference")
         annotation_only = job.context.metadata.get("annotation_only", False)
         annotation_verbose = job.context.metadata.get("annotation_verbose", False)
+        target_panel = job.context.metadata.get("target_panel")
+        if not target_panel:
+            try:
+                master_csv = os.path.join(sample_dir, "master.csv")
+                if os.path.exists(master_csv):
+                    import csv
+
+                    with open(master_csv, "r", newline="") as fh:
+                        reader = csv.DictReader(fh)
+                        first_row = next(reader, None)
+                        if first_row:
+                            panel = first_row.get("analysis_panel", "").strip()
+                            if panel:
+                                target_panel = panel
+            except Exception:
+                pass
 
         # Debug logging for reference genome
         logger.info("=== SNP ANALYSIS HANDLER DEBUGGING ===")
@@ -4272,6 +4402,7 @@ def snp_analysis_handler(job, work_dir: Optional[str] = None) -> None:
         logger.info(f"Extracted reference: {reference}")
         logger.info(f"Annotation-only: {annotation_only}")
         logger.info(f"Annotation-verbose: {annotation_verbose}")
+        logger.info(f"Target panel: {target_panel}")
         logger.info("=== END SNP ANALYSIS HANDLER DEBUGGING ===")
 
         if force_regenerate:
@@ -4290,7 +4421,7 @@ def snp_analysis_handler(job, work_dir: Optional[str] = None) -> None:
         logger.info("ABOUT TO CALL run_snp_analysis function")
         logger.info(
             "Calling run_snp_analysis with: sample_dir=%s, threads=%s, "
-            "force_regenerate=%s, reference=%s, annotation_only=%s, annotation_verbose=%s"
+            "force_regenerate=%s, reference=%s, annotation_only=%s, annotation_verbose=%s, target_panel=%s"
             % (
                 sample_dir,
                 threads,
@@ -4298,6 +4429,7 @@ def snp_analysis_handler(job, work_dir: Optional[str] = None) -> None:
                 reference,
                 annotation_only,
                 annotation_verbose,
+                target_panel,
             )
         )
 
@@ -4308,6 +4440,7 @@ def snp_analysis_handler(job, work_dir: Optional[str] = None) -> None:
             reference=reference,
             annotation_only=annotation_only,
             annotation_verbose=annotation_verbose,
+            target_panel=target_panel,
         )
 
         logger.info(f"run_snp_analysis returned: {output_dir}")

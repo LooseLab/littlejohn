@@ -119,6 +119,13 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
         if snp_key in snp_regions_map:
             snp_data = snp_regions_map[snp_key]
             navigate_igv_to_snp(snp_data["chrom"], snp_data["pos"])
+            return
+        # Fallback for non-pathogenic rows that are not in snp_regions_map.
+        try:
+            chrom, pos_str = snp_key.split(":", 1)
+            navigate_igv_to_snp(chrom, int(str(pos_str).replace(",", "")))
+        except (TypeError, ValueError):
+            logger.debug(f"Invalid SNP key for IGV navigation: {snp_key}")
 
     js_init_snp_regions = f"""
         (function() {{
@@ -202,10 +209,6 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
         full_row_lookup[row_id] = row
         display_rows_all.append(_compact_row(row, row_id))
 
-    display_rows_pathogenic = [
-        row for row in display_rows_all if row.get("is_pathogenic") == "Yes"
-    ]
-
     with ui.card().classes("w-full"):
         ui.label("SNP Analysis").classes("text-lg font-semibold text-blue-800")
         ui.separator().classes().style("border: 1px solid var(--md-primary)")
@@ -227,18 +230,6 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
             pagination=25,
             class_size="table-xs",
         )
-
-        with snp_table.add_slot("top-left"):
-            pathogenic_filter = ui.switch(
-                "Show pathogenic variants only",
-                value=False,
-            )
-
-        with snp_table.add_slot("top-right"):
-            with ui.input(placeholder="Search SNPs...").props("type=search").bind_value(
-                snp_table, "filter"
-            ).add_slot("append"):
-                ui.icon("search")
 
         if any(col.get("field") in {"action", "details"} for col in display_columns):
             try:
@@ -320,7 +311,6 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
                     """
 <q-td key="action" :props="props">
   <q-btn 
-    v-if="props.row.is_pathogenic === 'Yes'"
     icon="visibility" 
     size="sm" 
     dense 
@@ -358,14 +348,6 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
                 snp_table.on("snp-show-details", on_snp_show_details)
             except Exception as ex:
                 logger.warning(f"Could not add action button slot: {ex}")
-
-        def apply_pathogenic_filter(value: bool) -> None:
-            snp_table.rows = display_rows_pathogenic if value else display_rows_all
-            snp_table.update()
-
-        pathogenic_filter.on(
-            "update:model-value", lambda e: apply_pathogenic_filter(bool(e.args))
-        )
 
         for col in snp_table.columns:
             col["sortable"] = True
@@ -505,18 +487,6 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
             class_size="table-xs",
         )
 
-        with indel_table.add_slot("top-left"):
-            indel_pathogenic_filter = ui.switch(
-                "Show pathogenic variants only",
-                value=False,
-            )
-
-        with indel_table.add_slot("top-right"):
-            with ui.input(placeholder="Search INDELs...").props("type=search").bind_value(
-                indel_table, "filter"
-            ).add_slot("append"):
-                ui.icon("search")
-
         with ui.dialog() as indel_details_dialog, ui.card().classes(
             "w-[95vw] max-w-6xl max-h-[85vh] overflow-auto"
         ):
@@ -588,7 +558,6 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
             """
 <q-td key="action" :props="props">
   <q-btn
-    v-if="props.row.is_pathogenic === 'Yes'"
     icon="visibility"
     size="sm"
     dense
@@ -601,14 +570,24 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
 """,
         )
 
+        def navigate_to_indel_region(indel_key: str) -> None:
+            region_data = indel_regions_map.get(indel_key)
+            if region_data:
+                navigate_igv_to_snp(region_data["chrom"], region_data["pos"])
+                return
+            # Fallback for non-pathogenic INDEL rows.
+            try:
+                chrom, pos_str = indel_key.split(":", 1)
+                navigate_igv_to_snp(chrom, int(str(pos_str).replace(",", "")))
+            except (TypeError, ValueError):
+                logger.debug(f"Invalid INDEL key for IGV navigation: {indel_key}")
+
         def on_indel_view_igv(e):
             try:
                 indel_key = e.args if isinstance(e.args, str) else getattr(e, "args", None)
                 if not indel_key:
                     return
-                region_data = indel_regions_map.get(indel_key)
-                if region_data:
-                    navigate_igv_to_snp(region_data["chrom"], region_data["pos"])
+                navigate_to_indel_region(indel_key)
             except Exception as ex:
                 logger.debug(f"Error handling INDEL IGV view: {ex}")
 
@@ -622,14 +601,6 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
 
         indel_table.on("indel-view-igv", on_indel_view_igv)
         indel_table.on("indel-show-details", on_indel_show_details)
-
-        def apply_indel_pathogenic_filter(value: bool) -> None:
-            indel_table.rows = indel_rows_pathogenic if value else indel_rows_all
-            indel_table.update()
-
-        indel_pathogenic_filter.on(
-            "update:model-value", lambda e: apply_indel_pathogenic_filter(bool(e.args))
-        )
 
         for col in indel_table.columns:
             col["sortable"] = True
