@@ -31,8 +31,12 @@ from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 import os
+import secrets
+import sys
 import json
 import pickle
+import getpass
+from urllib.parse import quote
 
 from robin.gui import theme, images
 
@@ -76,6 +80,169 @@ try:
 except ImportError:
     ui = None
     app = None
+
+try:
+    from fastapi import Request
+    from fastapi.responses import RedirectResponse
+    from starlette.middleware.base import BaseHTTPMiddleware
+except ImportError:  # pragma: no cover
+    Request = None
+    RedirectResponse = None
+    BaseHTTPMiddleware = object
+
+try:
+    from argon2 import PasswordHasher
+    from argon2.exceptions import VerifyMismatchError, InvalidHashError
+except ImportError:  # pragma: no cover
+    PasswordHasher = None
+    VerifyMismatchError = Exception
+    InvalidHashError = Exception
+
+
+def _get_gui_password_hash_path() -> Path:
+    """Return path to the file where the GUI password hash is stored."""
+    if os.name == "nt":
+        base = Path(os.environ.get("APPDATA", os.path.expanduser("~")))
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")))
+    return base / "robin" / "gui_password_hash"
+
+
+def ensure_gui_password_set() -> bool:
+    """Prompt for GUI password at startup: set (twice) if no hash exists, else verify once.
+
+    Uses getpass so the password is not echoed. Returns True if the GUI may start,
+    False otherwise (caller should exit). Requires a TTY to set a new password.
+    """
+    if PasswordHasher is None:
+        logging.error("argon2-cffi is required for GUI password hashing. Install it with: pip install argon2-cffi")
+        return False
+
+    path = _get_gui_password_hash_path()
+    hasher = PasswordHasher()
+
+    if path.exists():
+        try:
+            stored = path.read_text().strip()
+        except OSError as e:
+            logging.error("Could not read GUI password hash file: %s", e)
+            return False
+        if not stored:
+            logging.error("GUI password hash file is empty. Delete it and run again to set a new password.")
+            return False
+        if sys.stdin.isatty():
+            try:
+                pwd = getpass.getpass("GUI password: ")
+            except (EOFError, KeyboardInterrupt):
+                return False
+            try:
+                hasher.verify(stored, pwd)
+            except VerifyMismatchError:
+                print("Invalid password.", file=sys.stderr)
+                return False
+        return True
+
+    if not sys.stdin.isatty():
+        print(
+            "No GUI password has been set. Run ROBIN from a terminal to set the password (you will be prompted twice).",
+            file=sys.stderr,
+        )
+        return False
+
+    try:
+        pwd1 = getpass.getpass("Set GUI password: ")
+        pwd2 = getpass.getpass("Confirm GUI password: ")
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+    if pwd1 != pwd2:
+        print("Passwords do not match.", file=sys.stderr)
+        return False
+    if not pwd1:
+        print("Password cannot be empty.", file=sys.stderr)
+        return False
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(hasher.hash(pwd1), encoding="utf-8")
+    except OSError as e:
+        logging.error("Could not write GUI password hash file: %s", e)
+        return False
+    return True
+
+
+def set_gui_password_interactive() -> bool:
+    """Interactive prompt to set or replace the GUI password (e.g. from `robin password set`).
+
+    Uses getpass for all password input; nothing is echoed. If a password already exists,
+    asks whether to replace it (no existing password required). Returns True on success.
+    """
+    if PasswordHasher is None:
+        print(
+            "argon2-cffi is required. Install it with: pip install argon2-cffi",
+            file=sys.stderr,
+        )
+        return False
+
+    console = None
+    rich_confirm = None
+    try:  # Use rich if available for nicer prompts/output
+        from rich.console import Console  # type: ignore
+        from rich.prompt import Confirm as RichConfirm  # type: ignore
+
+        console = Console()
+        rich_confirm = RichConfirm
+    except Exception:  # pragma: no cover
+        console = None
+        rich_confirm = None
+
+    def _echo(message: str, style: str = "") -> None:
+        if console is not None and style:
+            console.print(f"[{style}]{message}[/{style}]")
+        elif console is not None:
+            console.print(message)
+        else:
+            print(message)
+
+    path = _get_gui_password_hash_path()
+    hasher = PasswordHasher()
+
+    if path.exists():
+        try:
+            if rich_confirm is not None:
+                replace = rich_confirm.ask(
+                    "A password is already set. Replace it?", default=False
+                )
+            else:
+                reply = input("A password is already set. Replace it? [y/N]: ").strip().lower()
+                replace = reply in ("y", "yes")
+        except (EOFError, KeyboardInterrupt):
+            return False
+        if not replace:
+            return False
+
+    try:
+        pwd1 = getpass.getpass("New GUI password: ")
+        pwd2 = getpass.getpass("Confirm new GUI password: ")
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+    if pwd1 != pwd2:
+        _echo("Passwords do not match.", style="bold red")
+        return False
+    if not pwd1:
+        _echo("Password cannot be empty.", style="bold red")
+        return False
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(hasher.hash(pwd1), encoding="utf-8")
+    except OSError as e:
+        _echo(f"Could not write password file: {e}", style="bold red")
+        return False
+
+    _echo("GUI password updated successfully.", style="bold green")
+    return True
 
 
 class UpdateType(Enum):
@@ -159,7 +326,10 @@ class GUILauncher:
         self.monitored_directory = ""
         self.reload = reload
         self.center = None  # Center ID for the analysis
-        
+        self._auth_middleware_registered = False
+        self._unrestricted_page_routes = {"/login"}
+        self._password_hash: Optional[str] = None  # cached after first read
+
         # Sample status transition timeout (in seconds)
         # Change to 60 for testing (1 minute), 3600 for production (60 minutes)
         self.completion_timeout_seconds = 60  # Set to 3600 for production
@@ -231,6 +401,79 @@ class GUILauncher:
         self._cnv_state: Dict[str, Dict[str, Any]] = {}
         # Cache last seen queue status so we can populate immediately on page creation
         self._last_queue_status: Dict[str, Any] = {}
+
+    def _is_authenticated(self) -> bool:
+        """Return True when the current browser session is authenticated for this server run.
+
+        Requires both authenticated flag and matching _auth_generation so that persisted
+        user storage from a previous server run (or before a password reset) is invalid.
+        """
+        if not app:
+            return False
+        gen = app.storage.general.get("_auth_generation")
+        return bool(
+            app.storage.user.get("authenticated", False)
+            and gen is not None
+            and app.storage.user.get("_auth_generation") == gen
+        )
+
+    def _register_auth_middleware(self) -> None:
+        """Register request middleware that protects all GUI pages."""
+        if self._auth_middleware_registered:
+            return
+        if app is None or BaseHTTPMiddleware is object:
+            return
+
+        # Invalidate any persisted auth from previous runs: each server run gets a new token.
+        try:
+            app.storage.general["_auth_generation"] = secrets.token_hex(16)
+        except Exception:
+            pass
+
+        unrestricted_page_routes = set(self._unrestricted_page_routes)
+
+        @app.add_middleware
+        class AuthMiddleware(BaseHTTPMiddleware):
+            async def dispatch(self, request: Request, call_next):
+                path = request.url.path
+                if path.startswith("/_nicegui") or path in unrestricted_page_routes:
+                    return await call_next(request)
+                gen = app.storage.general.get("_auth_generation")
+                if not app.storage.user.get("authenticated", False) or gen is None or app.storage.user.get("_auth_generation") != gen:
+                    requested_path = path
+                    if request.url.query:
+                        requested_path = f"{requested_path}?{request.url.query}"
+                    redirect_to = quote(requested_path, safe="/?=&")
+                    return RedirectResponse(url=f"/login?redirect_to={redirect_to}")
+                return await call_next(request)
+
+        self._auth_middleware_registered = True
+
+    def _get_password_hash(self) -> Optional[str]:
+        """Read and cache the stored password hash from the config file."""
+        if self._password_hash is not None:
+            return self._password_hash
+        path = _get_gui_password_hash_path()
+        if not path.exists():
+            return None
+        try:
+            self._password_hash = path.read_text(encoding="utf-8").strip()
+            return self._password_hash if self._password_hash else None
+        except OSError:
+            return None
+
+    def _verify_password(self, candidate: str) -> bool:
+        """Verify the candidate password against the stored Argon2 hash."""
+        if not candidate or PasswordHasher is None:
+            return False
+        stored = self._get_password_hash()
+        if not stored:
+            return False
+        try:
+            PasswordHasher().verify(stored, candidate)
+            return True
+        except (VerifyMismatchError, InvalidHashError):
+            return False
 
     # ========== Master Record System Methods ==========
     
@@ -609,6 +852,10 @@ class GUILauncher:
         """
         if ui is None:
             logging.error("NiceGUI is not available")
+            return False
+
+        if not ensure_gui_password_set():
+            logging.error("GUI password check failed. Cannot start GUI.")
             return False
 
         self.workflow_runner = workflow_runner
@@ -1309,6 +1556,57 @@ class GUILauncher:
         try:
             # Set thread name for identification
             threading.current_thread().name = "robin-GUI-Thread"
+            self._register_auth_middleware()
+
+            @ui.page("/login")
+            def login_page(redirect_to: str = "/"):
+                """Authenticate user session before allowing access."""
+                if self._is_authenticated():
+                    safe_target = redirect_to if redirect_to and redirect_to != "/login" else "/"
+                    return RedirectResponse(safe_target)
+
+                def try_login() -> None:
+                    if self._verify_password(password.value):
+                        app.storage.user.update({
+                            "authenticated": True,
+                            "_auth_generation": app.storage.general.get("_auth_generation"),
+                        })
+                        safe_target = (
+                            redirect_to if redirect_to and redirect_to != "/login" else "/"
+                        )
+                        ui.navigate.to(safe_target)
+                    else:
+                        ui.notify("Incorrect password", type="negative")
+
+                _setup_global_resources()
+                with theme.frame(
+                    "<strong>R</strong>apid nanop<strong>O</strong>re <strong>B</strong>rain intraoperat<strong>I</strong>ve classificatio<strong>N</strong>",
+                    smalltitle="<strong>R.O.B.I.N</strong>",
+                    batphone=False,
+                    center=self.center,
+                ):
+                    with ui.column().classes("w-full min-h-[70vh] items-center justify-center"):
+                        with ui.card().classes("w-full max-w-md shadow-lg rounded-xl"):
+                            with ui.column().classes("w-full p-8 gap-3"):
+                                ui.label("ROBIN Login").classes(
+                                    "text-2xl font-semibold text-center"
+                                )
+                                ui.label("Enter password to continue").classes(
+                                    "text-sm text-gray-600 text-center"
+                                )
+                                password = (
+                                    ui.input(
+                                        "Password",
+                                        password=True,
+                                        password_toggle_button=True,
+                                    )
+                                    .props("autocomplete=current-password")
+                                    .classes("w-full")
+                                    .on("keydown.enter", try_login)
+                                )
+                                ui.button(
+                                    "Log in", on_click=try_login
+                                ).classes("w-full bg-primary text-white rounded-md")
 
             # Create the main workflow monitor page
             @ui.page("/")
@@ -1796,7 +2094,7 @@ class GUILauncher:
 <q-td key=\"actions\" :props=\"props\">
   <q-btn-group>
     <q-btn color=\"primary\" size=\"sm\" label=\"View\"
-           @click=\"$parent.$emit('action', props.row.sample_id)\" />
+           :href=\"'/live_data/' + encodeURIComponent(props.row.sample_id)\" />
   <q-btn color=\"secondary\" size=\"sm\" label=\"Finalize\" icon=\"merge_type\"
            @click=\"$parent.$emit('finalize-target', props.row.sample_id)\" />
   </q-btn-group>
@@ -1840,19 +2138,6 @@ class GUILauncher:
               @update:model-value=\"$parent.$emit('export-toggled', { id: props.row.sample_id, value: $event })\" />
 </q-td>
 """,
-                        )
-                    except Exception:
-                        pass
-                    
-                    # Handle action emitted from table slot
-                    try:
-                        self.samples_table.on(
-                            "action",
-                            lambda e: (
-                                ui.navigate.to(f"/live_data/{e.args}")
-                                if isinstance(getattr(e, "args", None), str)
-                                else ui.notify("Invalid button payload", type="warning")
-                            ),
                         )
                     except Exception:
                         pass

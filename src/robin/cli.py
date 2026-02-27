@@ -425,6 +425,25 @@ def _iter_mgmt_bams(root: Path, recursive: bool) -> Iterable[Path]:
 
 
 @main.group()
+def password() -> None:
+    """Manage the GUI login password (stored as a hash)."""
+    pass
+
+
+@password.command("set")
+def password_set() -> None:
+    """Set or replace the GUI password. Prompts twice for confirmation; input is never echoed."""
+    try:
+        from robin.gui_launcher import set_gui_password_interactive
+    except ImportError as e:
+        click.echo(f"GUI password module not available: {e}", err=True)
+        sys.exit(1)
+    if not set_gui_password_interactive():
+        sys.exit(1)
+    click.echo("GUI password set successfully.")
+
+
+@main.group()
 def utils() -> None:
     """Utility helpers for inspecting robin outputs."""
     pass

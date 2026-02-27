@@ -179,7 +179,6 @@ robin workflow ~/data/bam_files \
   --log-level INFO
 ```
 
-
 ## Known Issues
 
 1. Currently SNP calling is not enabled in this version of ROBIN. It will be re-enabled in the near future.
