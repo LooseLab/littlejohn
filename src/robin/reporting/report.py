@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 class RobinReport:
     """Main class for generating ROBIN PDF reports."""
 
-    def __init__(self, filename, output, center: str, progress_callback=None, workflow_steps=None):
+    def __init__(self, filename, output, center: str, progress_callback=None, workflow_steps=None, patient_identifiers=None):
         """Initialize the report generator.
 
         Args:
@@ -30,6 +30,7 @@ class RobinReport:
             center: Center ID running the analysis
             progress_callback: Optional callback function for progress updates
             workflow_steps: Optional list of workflow steps to determine which sections to include
+            patient_identifiers: Optional dict with first_name, last_name, dob, nhs_number for inclusion in report
         """
         self.filename = filename
         self.output = output
@@ -37,6 +38,7 @@ class RobinReport:
         self.sample_id = os.path.basename(os.path.normpath(output))
         self.progress_callback = progress_callback
         self.workflow_steps = workflow_steps
+        self.patient_identifiers = patient_identifiers
 
         # Handle filename with None prefix
         if filename.startswith("None"):
@@ -183,14 +185,29 @@ class RobinReport:
                 ),
             )
 
-            # Add enhanced summary card with M3 styling
-            summary_card_content = f"""
-            ROBIN Analysis Report<br/>
-            Sample ID: {self.sample_id}<br/>
-            Centre ID: {self.centreID if self.centreID else 'Not specified'}<br/>
-            Report Type: {report_type.title()}<br/>
-            Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-            """
+            # Build summary card; add patient identifiers when available
+            summary_lines = [
+                "ROBIN Analysis Report<br/>",
+                f"Sample ID: {self.sample_id}<br/>",
+            ]
+            pi = getattr(self, "patient_identifiers", None)
+            if pi:
+                if pi.get("test_id"):
+                    summary_lines.append(f"Test ID: {pi['test_id']}<br/>")
+                if pi.get("first_name"):
+                    summary_lines.append(f"First name: {pi['first_name']}<br/>")
+                if pi.get("last_name"):
+                    summary_lines.append(f"Last name: {pi['last_name']}<br/>")
+                if pi.get("dob"):
+                    summary_lines.append(f"Date of birth: {pi['dob']}<br/>")
+                if pi.get("nhs_number"):
+                    summary_lines.append(f"Hospital Number: {pi['nhs_number']}<br/>")
+            summary_lines.extend([
+                f"Centre ID: {self.centreID if self.centreID else 'Not specified'}<br/>",
+                f"Report Type: {report_type.title()}<br/>",
+                f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            ])
+            summary_card_content = "\n            ".join(summary_lines)
             self.elements_summary.insert(
                 1, Paragraph(summary_card_content, self.styles.styles["InfoCard"])
             )
@@ -428,6 +445,7 @@ def create_pdf(
     export_zip=False,
     progress_callback=None,
     workflow_steps=None,
+    patient_identifiers=None,
 ):
     """Create a PDF report from ROBIN analysis results.
 
@@ -441,11 +459,16 @@ def create_pdf(
         export_zip: Whether to create ZIP archive
         progress_callback: Optional callback function for progress updates
         workflow_steps: Optional list of workflow steps to determine which sections to include
+        patient_identifiers: Optional dict with first_name, last_name, dob, nhs_number for report
 
     Returns:
         Path to the generated PDF file
     """
-    report = RobinReport(filename, output, center, progress_callback, workflow_steps=workflow_steps)
+    report = RobinReport(
+        filename, output, center, progress_callback,
+        workflow_steps=workflow_steps,
+        patient_identifiers=patient_identifiers,
+    )
     return report.generate_report(
         report_type=report_type,
         export_csv_dir=export_csv_dir,

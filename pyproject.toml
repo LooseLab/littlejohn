@@ -80,6 +80,7 @@ dependencies = [
     "svglib",
     "geocoder",
     "cnv_from_bam",
+    "cryptography>=41.0.0",
 ]
 
 [project.optional-dependencies]

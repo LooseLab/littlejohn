@@ -815,6 +815,10 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, se
                             "View Samples", lambda: ui.navigate.to("/live_data")
                         ).classes("text-body-medium")
                         ui.menu_item(
+                            "Generate Sample ID",
+                            lambda: ui.navigate.to("/sample_id_generator"),
+                        ).classes("text-body-medium")
+                        ui.menu_item(
                             "Activity Monitor",
                             lambda: ui.navigate.to("/robin"),
                         ).classes("text-body-medium")

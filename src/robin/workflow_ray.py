@@ -42,6 +42,7 @@ import pickle
 import uuid
 import asyncio
 import argparse
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple, Callable
 import inspect
@@ -989,6 +990,11 @@ class Coordinator:
         # Batching support
         self.enable_batching = enable_batching
         self.sample_batcher = SampleJobBatcher() if enable_batching else None
+
+        # Work directory (set by set_work_dir(); used for failed_jobs log)
+        self.work_dir: Optional[str] = None
+        # Bounded log of failed job details for tracking and OOM diagnosis (last 5000)
+        self._failed_jobs_log: deque = deque(maxlen=5000)
     
     def _get_csv_buffer_lock(self) -> Optional[asyncio.Lock]:
         """Get or create the CSV buffer lock lazily."""
@@ -1015,6 +1021,30 @@ class Coordinator:
             and not os.getenv("ROBIN_QUEUE_SPOOL_DIR")
         ):
             self.queue_spool_dir = os.path.join(work_dir, ".robin_queue")
+
+    def _write_failed_jobs_file(self) -> Optional[str]:
+        """Write failed jobs log to work_dir/failed_jobs.csv for inspection. Returns path or None."""
+        if not self._failed_jobs_log or not getattr(self, "work_dir", None) or not self.work_dir:
+            return None
+        try:
+            import csv
+            path = os.path.join(self.work_dir, "failed_jobs.csv")
+            os.makedirs(self.work_dir, exist_ok=True)
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(["sample_id", "filepath", "job_type", "is_oom", "error"])
+                for e in self._failed_jobs_log:
+                    w.writerow([
+                        e.get("sample_id", ""),
+                        e.get("filepath", ""),
+                        e.get("job_type", ""),
+                        "yes" if e.get("is_oom") else "no",
+                        (e.get("error") or "").replace("\r", " ").replace("\n", " "),
+                    ])
+            return path
+        except Exception as e:
+            logging.warning(f"Could not write failed_jobs.csv: {e}")
+            return None
 
     def _ensure_spool_dir(self) -> None:
         if not self._spool_enabled or not self.queue_spool_dir:
@@ -2342,6 +2372,33 @@ class Coordinator:
                 self.failed_by_type[job.job_type] = (
                     self.failed_by_type.get(job.job_type, 0) + 1
                 )
+                # Record failed job for tracking and OOM diagnosis
+                try:
+                    err_str = (err or "")[:500]
+                    err_lower = err_str.lower()
+                    is_oom = (
+                        "oom" in err_lower
+                        or "out of memory" in err_lower
+                        or "outofmemory" in err_lower
+                        or "worker killed" in err_lower
+                        or "killed (oom)" in err_lower
+                        or "memory error" in err_lower
+                    )
+                    sid_fail = (
+                        job.context.get_sample_id()
+                        if hasattr(job.context, "get_sample_id")
+                        else "unknown"
+                    )
+                    fp_fail = getattr(job.context, "filepath", "") or ""
+                    self._failed_jobs_log.append({
+                        "sample_id": sid_fail,
+                        "filepath": fp_fail,
+                        "job_type": job.job_type,
+                        "error": err_str,
+                        "is_oom": is_oom,
+                    })
+                except Exception:
+                    pass
 
         # per-sample finish updates
         try:
@@ -2767,6 +2824,9 @@ class Coordinator:
             "running_by_category": running_counts,
             "totals_by_category": totals_counts,
             "samples": samples_payload,
+            # Failed job tracking: last 500 entries for inspection / OOM diagnosis
+            "failed_jobs_list": list(self._failed_jobs_log)[-500:],
+            "oom_count": sum(1 for e in self._failed_jobs_log if e.get("is_oom")),
         }
         
         # Cache the result for future calls
@@ -2802,6 +2862,14 @@ class Coordinator:
             # Stop accepting new jobs
             self._shutdown_requested = True
             print("[SHUTDOWN] Stopped accepting new jobs")
+
+            # Write failed jobs log so user can see which jobs failed (e.g. OOM)
+            try:
+                path = self._write_failed_jobs_file()
+                if path:
+                    print(f"[SHUTDOWN] Wrote failed jobs log: {path}")
+            except Exception as e:
+                print(f"[SHUTDOWN] Warning: Could not write failed jobs log: {e}")
             
             # Finalize target accumulation for all samples with batch BAMs pending merge
             try:
@@ -3240,9 +3308,13 @@ async def tqdm_monitor(coord, continuous: bool = False) -> None:
             ) + int(s.get("waiting_serialized", 0) or 0)
             overall.total = max(overall.total or 0, total_with_waiting) or 0
             overall.n = s["completed"] + s["failed"]
+            fail_str = f"Fail:{s['failed']}"
+            oom = s.get("oom_count", 0)
+            if oom and s["failed"]:
+                fail_str += f" (OOM:{oom})"
             overall.set_postfix_str(
                 f"Act:{s['active_count']} | Done:{s['completed']} | "
-                f"Fail:{s['failed']} | Skip:{s['total_skipped']} | Tot:{s['total_enqueued']}"
+                f"{fail_str} | Skip:{s['total_skipped']} | Tot:{s['total_enqueued']}"
             )
             overall.refresh()
 
@@ -3260,6 +3332,16 @@ async def tqdm_monitor(coord, continuous: bool = False) -> None:
         for b in bars.values():
             b.close()
         overall.close()
+        # Write failed jobs log when run ends so user can inspect (e.g. OOM)
+        try:
+            final = ray.get(coord.stats.remote())
+            if final.get("failed", 0) > 0:
+                path = ray.get(coord._write_failed_jobs_file.remote())
+                if path:
+                    oom = final.get("oom_count", 0)
+                    print(f"\nFailed jobs log: {path} ({final['failed']} failures, {oom} likely OOM)")
+        except Exception:
+            pass
 
 
 def _should_use_rich_progress() -> bool:
@@ -3340,6 +3422,10 @@ async def rich_monitor(coord, continuous: bool = False) -> None:
             total_with_waiting = (
                 s.get("total_enqueued", 0) - s.get("total_skipped", 0)
             ) + int(s.get("waiting_serialized", 0) or 0)
+            fail_detail = f"Fail:{s['failed']}"
+            oom = s.get("oom_count", 0)
+            if oom and s.get("failed"):
+                fail_detail += f" (OOM:{oom})"
             progress.update(
                 overall_id,
                 total=total_with_waiting if total_with_waiting > 0 else None,
@@ -3347,7 +3433,7 @@ async def rich_monitor(coord, continuous: bool = False) -> None:
                 detail=(
                     f"Done:{s['completed'] + s['failed']}/{total_with_waiting} | "
                     f"Act:{s['active_count']} | "
-                    f"Fail:{s['failed']} | Skip:{s['total_skipped']}"
+                    f"{fail_detail} | Skip:{s['total_skipped']}"
                 ),
             )
 
@@ -3361,6 +3447,16 @@ async def rich_monitor(coord, continuous: bool = False) -> None:
             await asyncio.sleep(0.5)
     finally:
         progress.stop()
+        # Write failed jobs log when run ends so user can inspect (e.g. OOM)
+        try:
+            final = ray.get(coord.stats.remote())
+            if final.get("failed", 0) > 0:
+                path = ray.get(coord._write_failed_jobs_file.remote())
+                if path:
+                    oom = final.get("oom_count", 0)
+                    print(f"\nFailed jobs log: {path} ({final['failed']} failures, {oom} likely OOM)")
+        except Exception:
+            pass
 
 
 class RayFileWatcher(FileSystemEventHandler):

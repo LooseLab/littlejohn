@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **GUI authentication:** All GUI routes require login. Unauthenticated users are redirected to a themed `/login` page. Logout is available from the hamburger menu only (styled like the Quit button).
+- **Password stored as Argon2 hash** in `~/.config/robin/gui_password_hash` (or `%APPDATA%/robin/gui_password_hash` on Windows). No plaintext or env-var password.
+- **Password set at GUI startup:** On first run, prompt twice (set + confirm) with hidden input; on later runs, prompt once to verify. Skipped when not a TTY (e.g. headless); users then log in via the web login page.
+- **`robin password set`** CLI to set or replace the GUI password. Asks to replace if a hash already exists; uses Rich for prompts when available. Password input is never echoed.
+- **Session invalidation on server restart:** A per-run auth generation token ensures persisted user storage from a previous run (or before a password reset) is not trusted; users must log in again after restart or password change.
 - Dedicated "Manage watched folders" page at `/watched_folders` (replaces modal); accessible via link from the welcome page.
 - Loading modal when adding a watched folder: shows "Adding folder..." with spinner and closes automatically on success or error.
 - Path overlap validation in `add_watch_path`: rejects paths that equal, contain, or are inside the work directory to prevent watching already-analysed output.
@@ -42,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Command-line progress output supports Rich styling; updating the installation is required to enable Rich functionality.
 
 ### Dependencies
+- Added argon2-cffi for GUI password hashing.
 - Added seaborn for methylation classification plot styling.
 - Added Rich for enhanced CLI progress and styled output (requires updating installation).
 

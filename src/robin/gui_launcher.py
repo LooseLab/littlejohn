@@ -17,10 +17,11 @@ warnings.filterwarnings(
 )
 
 import asyncio
-import threading
-import time
+import hashlib
 import logging
 import queue
+import threading
+import time
 from collections import deque
 import csv
 from datetime import datetime
@@ -74,6 +75,86 @@ COMPLETION_JOB_PATTERNS: Dict[str, List[str]] = {
         "random_forest_summary.csv",
     ],
 }
+
+# Manifest written when a sample ID is generated from Test ID / name / DOB (for matching sequencer data).
+SAMPLE_IDENTIFIER_MANIFEST_FILENAME = "sample_identifier_manifest.json"
+
+
+def _get_test_id_from_manifest(sample_dir: Path) -> str:
+    """Read test_id from sample_identifier_manifest.json in the sample directory if present."""
+    manifest_path = sample_dir / SAMPLE_IDENTIFIER_MANIFEST_FILENAME
+    if not manifest_path.exists():
+        return ""
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return str(data.get("test_id", "") or "").strip()
+    except Exception:
+        return ""
+
+# Salt for deriving encryption key from DOB (fixed so the same DOB always produces the same key).
+_IDENTIFIER_MANIFEST_KEY_SALT = b"robin_sample_manifest_v1"
+
+
+def _derive_key_from_dob(dob: str) -> bytes:
+    """Derive a Fernet key from the date of birth for encrypting manifest fields."""
+    import base64
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    from cryptography.hazmat.primitives import hashes
+
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=_IDENTIFIER_MANIFEST_KEY_SALT,
+        iterations=100_000,
+    )
+    key_bytes = kdf.derive(dob.encode("utf-8"))
+    return base64.urlsafe_b64encode(key_bytes)
+
+
+def _encrypt_identifier_manifest_field(plaintext: str, dob: str) -> str:
+    """Encrypt a string using a key derived from DOB; returns base64-encoded ciphertext."""
+    from cryptography.fernet import Fernet
+
+    key = _derive_key_from_dob(dob)
+    f = Fernet(key)
+    ciphertext = f.encrypt(plaintext.encode("utf-8"))
+    return ciphertext.decode("ascii")
+
+
+def _decrypt_identifier_manifest_field(ciphertext_b64: str, dob: str) -> str:
+    """Decrypt a base64-encoded ciphertext using a key derived from DOB."""
+    from cryptography.fernet import Fernet
+
+    key = _derive_key_from_dob(dob)
+    f = Fernet(key)
+    plaintext = f.decrypt(ciphertext_b64.encode("ascii"))
+    return plaintext.decode("utf-8")
+
+
+def _load_manifest_encrypted_fields(sample_dir: Optional[Path]) -> Optional[Dict[str, str]]:
+    """Load encrypted first_name, last_name, dob, nhs_number (hospital number) from sample_identifier_manifest.json if present."""
+    if not sample_dir or not sample_dir.exists():
+        return None
+    manifest_path = sample_dir / SAMPLE_IDENTIFIER_MANIFEST_FILENAME
+    if not manifest_path.exists():
+        return None
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        fn = data.get("first_name")
+        ln = data.get("last_name")
+        dob_enc = data.get("dob")
+        if fn and ln and dob_enc:
+            out: Dict[str, str] = {"first_name": fn, "last_name": ln, "dob": dob_enc}
+            nhs_enc = data.get("nhs_number")
+            if nhs_enc:
+                out["nhs_number"] = nhs_enc
+            return out
+    except Exception:
+        pass
+    return None
+
 
 try:
     from nicegui import ui, app
@@ -271,8 +352,9 @@ class GUIUpdate:
 @dataclass
 class SampleRecord:
     """Master record for a single sample with all tracked information."""
-    
+
     sample_id: str
+    test_id: str = ""  # From sample_identifier_manifest.json if present; else empty
     origin: str = "Live"  # Live, Pre-existing, or Complete
     run_start: str = ""
     device: str = ""
@@ -294,6 +376,7 @@ class SampleRecord:
         """Convert to dictionary for table rows."""
         return {
             "sample_id": self.sample_id,
+            "test_id": self.test_id,
             "origin": self.origin,
             "run_start": self.run_start,
             "device": self.device,
@@ -666,6 +749,8 @@ class GUILauncher:
                         record.last_seen = time.strftime(
                             "%Y-%m-%d %H:%M:%S", time.localtime(record._last_seen_raw)
                         )
+                        # Load test_id from sample_identifier_manifest.json if present
+                        record.test_id = _get_test_id_from_manifest(sample_dir)
                         
                         # Update origin based on inactivity timeout AND active jobs status
                         prev_origin = record.origin
@@ -795,6 +880,10 @@ class GUILauncher:
                         record.job_types = ",".join(sorted(set(job_types)))
                     else:
                         record.job_types = str(job_types or "")
+                    # Load test_id from sample_identifier_manifest.json if present
+                    if self.monitored_directory:
+                        sample_dir = Path(self.monitored_directory) / sid
+                        record.test_id = _get_test_id_from_manifest(sample_dir)
                     
                     # Update last_seen if this is newer
                     if last_seen > record._last_seen_raw:
@@ -1674,6 +1763,13 @@ class GUILauncher:
                 _setup_global_resources()
                 self._create_watched_folders_page()
 
+            # Sample identifier generator page
+            @ui.page("/sample_id_generator")
+            def sample_id_generator_page():
+                """Page for generating sample identifiers from Test ID, name, and D.O.B."""
+                _setup_global_resources()
+                self._create_sample_id_generator_page()
+
             # Download API endpoint
             @ui.page("/api/download/{sample_id}/{filename}")
             def download_file(sample_id: str, filename: str):
@@ -1856,6 +1952,12 @@ class GUILauncher:
                                 "bg-green-600 hover:bg-green-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors text-center"
                             )
                             ui.link(
+                                "Generate Sample ID",
+                                "/sample_id_generator",
+                            ).classes(
+                                "bg-green-600 hover:bg-green-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors text-center"
+                            )
+                            ui.link(
                                 "View Documentation",
                                 "https://looselab.github.io/ROBIN/",
                             ).classes(
@@ -1972,8 +2074,14 @@ class GUILauncher:
                             },
                             {
                                 "name": "sample_id",
-                                "label": "Sample ID",
+                                "label": "Library ID",
                                 "field": "sample_id",
+                                "sortable": True,
+                            },
+                            {
+                                "name": "test_id",
+                                "label": "Test ID",
+                                "field": "test_id",
                                 "sortable": True,
                             },
                             {
@@ -2974,10 +3082,83 @@ class GUILauncher:
             ui.notify(f"Failed to refresh all plots: {e}", type="negative")
             logging.exception("Failed to refresh all sample plots")
     '''
-    
+
+    def _open_view_identifiers_modal(
+        self, sample_dir: Optional[Path], sample_id: str
+    ) -> None:
+        """Open a modal to enter DOB and view decrypted first name, last name and DOB."""
+        from cryptography.fernet import InvalidToken
+
+        encrypted = _load_manifest_encrypted_fields(sample_dir)
+        with ui.dialog().props("persistent") as dialog, ui.card().classes(
+            "w-full max-w-md p-6"
+        ):
+            ui.label("View patient identifiers").classes("text-h6 font-bold mb-2")
+            ui.label(
+                "Enter the patient's date of birth to reveal first name, last name, DOB and Hospital Number (if stored)."
+            ).classes("text-sm text-gray-600 dark:text-gray-400 mb-4")
+            if not encrypted:
+                ui.label(
+                    "No identifier manifest found for this sample, or it has no encrypted fields."
+                ).classes("text-sm text-amber-600 dark:text-amber-400 mb-4")
+                ui.button("Close", on_click=dialog.close).classes("mt-2")
+                dialog.open()
+                return
+            dob_input = ui.date_input(
+                "Date of birth",
+                value=None,
+            ).classes("w-full mb-4")
+            result_container = ui.column().classes("w-full mt-4 gap-2")
+
+            def on_show() -> None:
+                _v = dob_input.value
+                dob_val = (_v.strftime("%Y-%m-%d") if hasattr(_v, "strftime") else (str(_v).strip() if _v else ""))
+                if not dob_val:
+                    ui.notify("Please enter date of birth.", type="warning")
+                    return
+                result_container.clear()
+                with result_container:
+                    try:
+                        fn = _decrypt_identifier_manifest_field(
+                            encrypted["first_name"], dob_val
+                        )
+                        ln = _decrypt_identifier_manifest_field(
+                            encrypted["last_name"], dob_val
+                        )
+                        dob_plain = _decrypt_identifier_manifest_field(
+                            encrypted["dob"], dob_val
+                        )
+                        ui.label("First name:").classes("font-semibold text-sm")
+                        ui.label(fn or "—").classes("mb-2")
+                        ui.label("Last name:").classes("font-semibold text-sm")
+                        ui.label(ln or "—").classes("mb-2")
+                        ui.label("Date of birth:").classes("font-semibold text-sm")
+                        ui.label(dob_plain or "—").classes("mb-2")
+                        if "nhs_number" in encrypted:
+                            nhs_plain = _decrypt_identifier_manifest_field(
+                                encrypted["nhs_number"], dob_val
+                            )
+                            ui.label("Hospital Number:").classes("font-semibold text-sm")
+                            ui.label(nhs_plain or "—").classes("mb-2")
+                    except InvalidToken:
+                        ui.label("Incorrect date of birth. Please try again.").classes(
+                            "text-red-600 dark:text-red-400"
+                        )
+
+            with ui.row().classes("w-full gap-2 mt-2"):
+                ui.button("Show identifiers", on_click=on_show).props("color=primary")
+                ui.button("Close", on_click=dialog.close)
+        dialog.open()
+
     def _create_sample_detail_page(self, sample_id: str):
         """Create the individual sample detail page."""
-        
+        sample_dir = (
+            Path(self.monitored_directory) / sample_id
+            if self.monitored_directory
+            else None
+        )
+        test_id = _get_test_id_from_manifest(sample_dir) if sample_dir else ""
+
         # Check if this is a page refresh vs navigation
         # Use browser storage to detect if this is a refresh
         is_page_refresh = False
@@ -3007,6 +3188,8 @@ class GUILauncher:
             state: Dict[str, Any] = {
                 "type": "detailed",
                 "export_csv": False,
+                "include_patient_ids": False,
+                "patient_dob": "",
             }
 
             with ui.dialog().props("persistent") as dialog:
@@ -3026,6 +3209,32 @@ class GUILauncher:
                                 value="detailed",
                                 on_change=lambda e: state.update({"type": e.value}),
                             )
+
+                        # Patient identifiers option
+                        with ui.column().classes("mb-4"):
+                            ui.label("Patient identifiers").classes("font-bold mb-2")
+
+                            def on_include_patient_change(e):
+                                state["include_patient_ids"] = bool(e.value)
+                                patient_dob_input.set_visibility(bool(e.value))
+
+                            include_patient_checkbox = ui.checkbox(
+                                "Include patient identifiers in report (first name, last name, DOB, Hospital Number)",
+                                value=False,
+                                on_change=on_include_patient_change,
+                            )
+                            patient_dob_input = ui.date_input(
+                                "Date of birth (required to decrypt)",
+                                value=None,
+                            ).classes("w-full")
+                            patient_dob_input.set_visibility(False)
+                            def _on_patient_dob_change(_):
+                                v = getattr(patient_dob_input, "value", None)
+                                if hasattr(v, "strftime"):
+                                    state["patient_dob"] = v.strftime("%Y-%m-%d")
+                                else:
+                                    state["patient_dob"] = str(v).strip() if v else ""
+                            patient_dob_input.on("update:model-value", _on_patient_dob_change)
 
                         # Disclaimer section
                         with ui.column().classes("mb-4"):
@@ -3052,6 +3261,19 @@ class GUILauncher:
                             "Are you sure you want to generate a report?"
                         ).classes("mb-4")
 
+                        def _capture_dob_and_confirm():
+                            """Capture date picker value into state before closing dialog."""
+                            if state.get("include_patient_ids"):
+                                v = getattr(patient_dob_input, "value", None)
+                                if v is not None:
+                                    if hasattr(v, "strftime"):
+                                        state["patient_dob"] = v.strftime("%Y-%m-%d")
+                                    else:
+                                        state["patient_dob"] = str(v).strip()
+                                else:
+                                    state["patient_dob"] = ""
+                            dialog.submit("Yes")
+
                         # Buttons
                         with ui.row().classes("justify-end gap-2"):
                             ui.button(
@@ -3059,7 +3281,7 @@ class GUILauncher:
                             ).props("flat")
                             ui.button(
                                 "Yes",
-                                on_click=lambda: dialog.submit("Yes"),
+                                on_click=_capture_dob_and_confirm,
                             ).props("color=primary")
                     
                     # Run name below buttons
@@ -3070,6 +3292,49 @@ class GUILauncher:
             dialog_result = await dialog
             if dialog_result != "Yes":
                 return
+
+            # If user requested patient identifiers, decrypt with DOB
+            state["patient_identifiers"] = None
+            if state.get("include_patient_ids"):
+                dob_val = (state.get("patient_dob") or "").strip()
+                if not dob_val:
+                    ui.notify(
+                        "Date of birth required to include patient identifiers. Report will be generated without them.",
+                        type="warning",
+                    )
+                else:
+                    encrypted = _load_manifest_encrypted_fields(sample_dir)
+                    if encrypted:
+                        try:
+                            from cryptography.fernet import InvalidToken
+                            decrypted = {
+                                "first_name": _decrypt_identifier_manifest_field(
+                                    encrypted["first_name"], dob_val
+                                ),
+                                "last_name": _decrypt_identifier_manifest_field(
+                                    encrypted["last_name"], dob_val
+                                ),
+                                "dob": _decrypt_identifier_manifest_field(
+                                    encrypted["dob"], dob_val
+                                ),
+                            }
+                            if "nhs_number" in encrypted:
+                                decrypted["nhs_number"] = _decrypt_identifier_manifest_field(
+                                    encrypted["nhs_number"], dob_val
+                                )
+                            decrypted["sample_id"] = sample_id
+                            decrypted["test_id"] = _get_test_id_from_manifest(sample_dir)
+                            state["patient_identifiers"] = decrypted
+                        except InvalidToken:
+                            ui.notify(
+                                "Incorrect date of birth. Report will be generated without patient identifiers.",
+                                type="warning",
+                            )
+                    else:
+                        ui.notify(
+                            "No identifier manifest found for this sample. Report will be generated without patient identifiers.",
+                            type="info",
+                        )
 
             # Now show the progress dialog
             with ui.dialog().props("persistent") as progress_dialog:
@@ -3231,6 +3496,7 @@ class GUILauncher:
                     export_zip=bool(state.get("export_csv", False)),
                     progress_callback=combined_callback,
                     workflow_steps=self.workflow_steps if hasattr(self, 'workflow_steps') else None,
+                    patient_identifiers=state.get("patient_identifiers"),
                 )
                 
                 # Mark report as completed
@@ -3326,9 +3592,10 @@ class GUILauncher:
                 from robin.gui.report_progress import progress_manager
                 progress_manager.error_report(sample_id, str(e))
                 
+        title_suffix = f" | {test_id}" if test_id else ""
         with theme.frame(
-            f"R.O.B.I.N - Sample {sample_id}",
-            smalltitle=sample_id,
+            f"R.O.B.I.N - Sample {sample_id}{title_suffix}",
+            smalltitle=f"{sample_id}{title_suffix}".strip(),
             batphone=False,
             center=self.center,
             setup_notifications=self._setup_notification_system,
@@ -3367,12 +3634,6 @@ class GUILauncher:
                 redirect_timer.activate()
                 return
 
-            sample_dir = (
-                Path(self.monitored_directory) / sample_id
-                if self.monitored_directory
-                else None
-            )
-
             # Debug visibility: entering sample page and directory availability
             try:
                 ui.notify(f"Opening sample {sample_id}", type="info")
@@ -3396,10 +3657,19 @@ class GUILauncher:
             with ui.card().classes("w-full").style("border: 2px solid var(--md-primary)"):
                 with ui.row().classes("w-full flex justify-between items-center"):
                     with ui.column():
-                        ui.label(f"Sample Details: {sample_id}").classes("text-2xl font-bold")
+                        details_label = f"Library ID: {sample_id}"
+                        if test_id:
+                            details_label += f"  |  Test ID: {test_id}"
+                        ui.label(f"Sample Details: {details_label}").classes("text-2xl font-bold")
                         ui.label("Detailed sample information and analysis results.").classes(
                             "text-sm ml-4 opacity-80"
                         )
+                        ui.button(
+                            "View patient identifiers",
+                            on_click=lambda: self._open_view_identifiers_modal(
+                                sample_dir, sample_id
+                            ),
+                        ).classes("mt-2 text-sm")
                     with ui.column().classes("flex gap-2 items-center"):
                         # Check if target.bam exists to show "More Details" button
                         target_bam_exists = False
@@ -3943,14 +4213,14 @@ class GUILauncher:
 
     def _create_sample_details_page(self, sample_id: str):
         """Create the sample details page with comprehensive information."""
-        
-        # Get sample directory
+        # Get sample directory and test_id from manifest if present
         sample_dir = (
             Path(self.monitored_directory) / sample_id
             if self.monitored_directory
             else None
         )
-        
+        test_id = _get_test_id_from_manifest(sample_dir) if sample_dir else ""
+
         # Check if sample is known
         if self._known_sample_ids and sample_id not in self._known_sample_ids:
             with theme.frame(
@@ -3978,9 +4248,10 @@ class GUILauncher:
             return
         
         # Create the page with theme frame
+        title_suffix = f" | {test_id}" if test_id else ""
         with theme.frame(
-            f"R.O.B.I.N - Sample Details: {sample_id}",
-            smalltitle=f"{sample_id} Details",
+            f"R.O.B.I.N - Sample Details: {sample_id}{title_suffix}",
+            smalltitle=f"{sample_id} Details{title_suffix}".strip(),
             batphone=False,
             center=self.center,
             setup_notifications=self._setup_notification_system,
@@ -3990,10 +4261,19 @@ class GUILauncher:
                 # Header section
                 with ui.row().classes("w-full flex justify-between items-center flex-wrap gap-2 p-4"):
                     with ui.column():
-                        ui.label(f"Sample Details: {sample_id}").classes("text-2xl font-bold")
+                        details_label = f"Library ID: {sample_id}"
+                        if test_id:
+                            details_label += f"  |  Test ID: {test_id}"
+                        ui.label(f"Sample Details: {details_label}").classes("text-2xl font-bold")
                         ui.label("IGV Viewer, sample information and analysis results.").classes(
                             "text-sm ml-4 opacity-80"
                         )
+                        ui.button(
+                            "View patient identifiers",
+                            on_click=lambda: self._open_view_identifiers_modal(
+                                sample_dir, sample_id
+                            ),
+                        ).classes("mt-2 text-sm")
                     with ui.column():
                         ui.button(
                             "Back to Sample", 
@@ -6178,6 +6458,167 @@ class GUILauncher:
                         )
 
                     ui.button("Add folder", on_click=do_add_folder).classes("bg-green-600 mt-4")
+
+    def _save_sample_identifier_manifest(
+        self,
+        sample_id: str,
+        test_id: str,
+        first_name: str,
+        last_name: str,
+        dob: str,
+        nhs_number: str = "",
+    ) -> tuple[bool, str]:
+        """
+        Create the sample output folder and write the identifier manifest.
+        test_id is stored in plain text; first_name, last_name, dob and hospital number (nhs_number)
+        are encrypted with a key derived from the date of birth.
+        Returns (success, message).
+        """
+        if not (self.monitored_directory or "").strip():
+            return False, "No output directory configured (work directory not set)."
+        base = Path(self.monitored_directory)
+        try:
+            sample_dir = base / sample_id
+            sample_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return False, f"Cannot create sample folder: {e}"
+
+        try:
+            first_name_enc = _encrypt_identifier_manifest_field(first_name, dob)
+            last_name_enc = _encrypt_identifier_manifest_field(last_name, dob)
+            dob_enc = _encrypt_identifier_manifest_field(dob, dob)
+            nhs_number_enc = _encrypt_identifier_manifest_field(nhs_number, dob) if nhs_number else ""
+        except Exception as e:
+            return False, f"Encryption failed: {e}"
+
+        manifest: Dict[str, Any] = {
+            "sample_id": sample_id,
+            "test_id": test_id,
+            "first_name": first_name_enc,
+            "last_name": last_name_enc,
+            "dob": dob_enc,
+            "created_utc": datetime.utcnow().isoformat() + "Z",
+        }
+        if nhs_number_enc:
+            manifest["nhs_number"] = nhs_number_enc
+
+        manifest_path = sample_dir / SAMPLE_IDENTIFIER_MANIFEST_FILENAME
+        try:
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                json.dump(manifest, f, indent=2)
+        except OSError as e:
+            return False, f"Cannot write manifest: {e}"
+        return True, f"Manifest saved to {sample_dir}"
+
+    def _create_sample_id_generator_page(self):
+        """Create the page for generating sample identifiers from Test ID, name, and D.O.B."""
+        with theme.frame(
+            "R.O.B.I.N - Generate Sample Identifier",
+            smalltitle="Sample ID Generator",
+            batphone=False,
+            center=self.center,
+            setup_notifications=self._setup_notification_system,
+        ):
+            with ui.column().classes("w-full p-4 gap-4 max-w-2xl mx-auto"):
+                with ui.card().classes("w-full p-6"):
+                    ui.label("Generate Sample Identifier").classes(
+                        "text-xl font-semibold mb-2"
+                    )
+                    ui.label(
+                        "Test ID is required. First Name, Last Name, Date of Birth and Hospital Number are optional. "
+                        "The sample name is the MD5 hash of Test ID, First Name, Last Name and D.O.B (concatenated with a pipe); empty optional fields use an empty string."
+                    ).classes("text-sm text-gray-600 dark:text-gray-400 mb-4")
+
+                    test_id = ui.input(
+                        label="Test ID (required)",
+                        placeholder="e.g. LAB-2024-001",
+                    ).classes("w-full")
+
+                    first_name = ui.input(
+                        label="First Name (optional)",
+                        placeholder="Given name",
+                    ).classes("w-full")
+
+                    last_name = ui.input(
+                        label="Last Name (optional)",
+                        placeholder="Family name",
+                    ).classes("w-full")
+
+                    dob = ui.date_input(
+                        "Date of Birth (optional)",
+                        value=None,
+                    ).classes("w-full")
+
+                    nhs_number = ui.input(
+                        label="Hospital Number (optional)",
+                        placeholder="e.g. 123 456 7890",
+                    ).classes("w-full")
+
+                    result_label = ui.label("").classes(
+                        "text-sm font-mono mt-2 p-3 bg-gray-100 dark:bg-gray-800 rounded break-all"
+                    )
+                    result_label.set_visibility(False)
+                    result_input = ui.input(
+                        label="Generated Sample ID",
+                        placeholder="Click Generate to create an ID",
+                    ).classes("w-full mt-2 font-mono").props("readonly")
+
+                    def generate_sample_id():
+                        _dob_val = dob.value
+                        dob_str = (
+                            _dob_val.strftime("%Y-%m-%d")
+                            if hasattr(_dob_val, "strftime")
+                            else (str(_dob_val).strip() if _dob_val else "")
+                        )
+                        parts = [
+                            (test_id.value or "").strip(),
+                            (first_name.value or "").strip(),
+                            (last_name.value or "").strip(),
+                            dob_str,
+                        ]
+                        if not parts[0]:
+                            ui.notify("Please enter Test ID.", type="warning")
+                            return
+                        test_id_val, first_name_val, last_name_val, dob_val = parts
+                        payload = "|".join(parts)
+                        sample_id = hashlib.md5(payload.encode("utf-8")).hexdigest()
+                        result_input.value = sample_id
+                        result_label.set_text(f"MD5 of: {payload!r}")
+                        result_label.set_visibility(True)
+                        nhs_val = (nhs_number.value or "").strip()
+                        success, msg = self._save_sample_identifier_manifest(
+                            sample_id,
+                            test_id_val,
+                            first_name_val,
+                            last_name_val,
+                            dob_val,
+                            nhs_number=nhs_val,
+                        )
+                        if success:
+                            ui.notify(f"Sample ID generated. {msg}", type="positive")
+                        else:
+                            ui.notify(f"Sample ID generated. {msg}", type="warning")
+
+                    def copy_to_clipboard():
+                        if result_input.value:
+                            ui.run_javascript(
+                                f"navigator.clipboard.writeText({json.dumps(result_input.value)})"
+                            )
+                            ui.notify("Copied to clipboard", type="positive")
+                        else:
+                            ui.notify("Generate an ID first.", type="warning")
+
+                    with ui.row().classes("w-full gap-2 mt-4"):
+                        ui.button(
+                            "Generate Sample ID",
+                            on_click=generate_sample_id,
+                            icon="fingerprint",
+                        ).classes("bg-primary text-white")
+                        ui.button(
+                            "Copy to clipboard",
+                            on_click=copy_to_clipboard,
+                            icon="content_copy",
+                        ).props("flat")
 
     def _safe_notify(self, message: str, type_: str = "info"):
         """Notify only if the client context is still valid (avoids 'client deleted' errors)."""
