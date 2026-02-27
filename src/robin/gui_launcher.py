@@ -6650,7 +6650,12 @@ class GUILauncher:
 
         if success:
             self._safe_notify(message, "positive")
-            path_input.value = ""
+            try:
+                path_input.value = ""
+            except (RuntimeError, Exception) as e:
+                if "deleted" not in str(e).lower() and "client" not in str(e).lower():
+                    raise
+                # Dialog/slot was closed or client disconnected; skip clearing input
             if watched_container is not None and get_watched_paths is not None and remove_watch_path is not None:
                 try:
                     self._refresh_watched_list(watched_container, remove_watch_path, get_watched_paths)

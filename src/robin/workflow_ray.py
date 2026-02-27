@@ -389,22 +389,24 @@ CLASSIFICATION_TYPES: Set[str] = {"sturgeon", "nanodx", "pannanodx", "random_for
 # Job types that must be serialized per sample (no overlap across these types)
 ## Removed per-sample cross-type serialization to allow one job per type globally
 
+# Ray memory is in bytes. 8 GiB per task to reduce OOM.
+_GB = 1024 * 1024 * 1024
 RESOURCE_HINTS: Dict[str, Dict[str, Any]] = {
     # Tune these to your cluster
-    "preprocessing": {"num_cpus": 1, "memory": 1024 * 1024},
-    "bed_conversion": {"num_cpus": 1, "memory": 1024 * 1024},
-    "mgmt": {"num_cpus": 1, "memory": 1024 * 1024},
-    "cnv": {"num_cpus": 1, "memory": 1024 * 1024},  # CNV gets dedicated CPU but only 1 thread
-    "target": {"num_cpus": 1, "memory": 1024 * 1024},
-    "fusion": {"num_cpus": 1, "memory": 1024 * 4 * 1024},
+    "preprocessing": {"num_cpus": 1, "memory": 8 * _GB},
+    "bed_conversion": {"num_cpus": 1, "memory": 8 * _GB},
+    "mgmt": {"num_cpus": 1, "memory": 8 * _GB},
+    "cnv": {"num_cpus": 1, "memory": 8 * _GB},  # CNV gets dedicated CPU but only 1 thread
+    "target": {"num_cpus": 1, "memory": 8 * _GB},
+    "fusion": {"num_cpus": 1, "memory": 8 * _GB},
     # Classifiers do not require GPU by default (CPU-only)
-    "sturgeon": {"num_cpus": 1, "memory": 1024 * 1024},
-    "nanodx": {"num_cpus": 1, "memory": 1024 * 1024},
-    "pannanodx": {"num_cpus": 1, "memory": 1024 * 1024},
-    "random_forest": {"num_cpus": 1, "memory": 1024 * 1024},
-    "igv_bam": {"num_cpus": 1, "memory": 1024 * 1024},
-    "snp_analysis": {"num_cpus": 1, "memory": 1024 * 1024},
-    "target_bam_finalize": {"num_cpus": 1, "memory": 1024 * 1024},
+    "sturgeon": {"num_cpus": 1, "memory": 8 * _GB},
+    "nanodx": {"num_cpus": 1, "memory": 8 * _GB},
+    "pannanodx": {"num_cpus": 1, "memory": 8 * _GB},
+    "random_forest": {"num_cpus": 1, "memory": 8 * _GB},
+    "igv_bam": {"num_cpus": 1, "memory": 8 * _GB},
+    "snp_analysis": {"num_cpus": 1, "memory": 8 * _GB},
+    "target_bam_finalize": {"num_cpus": 1, "memory": 8 * _GB},
 }
 
 # ---------- Sample Job Batcher ----------
@@ -2374,8 +2376,9 @@ class Coordinator:
                 )
                 # Record failed job for tracking and OOM diagnosis
                 try:
-                    err_str = (err or "")[:500]
+                    err_str = (err or "")[:1500]  # Keep more of traceback so root cause is visible
                     err_lower = err_str.lower()
+                    # Ray OOM: worker is killed by raylet; error often says "worker died" / "connection" / "SIGKILL" not "oom"
                     is_oom = (
                         "oom" in err_lower
                         or "out of memory" in err_lower
@@ -2383,6 +2386,12 @@ class Coordinator:
                         or "worker killed" in err_lower
                         or "killed (oom)" in err_lower
                         or "memory error" in err_lower
+                        or "worker died" in err_lower
+                        or "worker unexpectedly exits" in err_lower
+                        or "worker exit" in err_lower
+                        or "sigkill" in err_lower
+                        or "connection error" in err_lower
+                        or "system_error" in err_lower
                     )
                     sid_fail = (
                         job.context.get_sample_id()
