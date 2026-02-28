@@ -876,6 +876,15 @@ class TypeProcessor:
         return ctx
 
 
+def _job_timeout_seconds() -> int:
+    """Per-job timeout in seconds (0 = disabled). From env ROBIN_JOB_TIMEOUT_SECONDS."""
+    try:
+        val = os.environ.get("ROBIN_JOB_TIMEOUT_SECONDS", "0").strip()
+        return max(0, int(val))
+    except (ValueError, TypeError):
+        return 0
+
+
 @ray.remote
 class Coordinator:
     def __init__(
@@ -885,6 +894,7 @@ class Coordinator:
         preset: Optional[str] = None,
         reference: Optional[str] = None,
         enable_batching: bool = True,
+        job_timeout_seconds: int = 0,
     ):
         # dedup maps
         self.pending: Dict[Tuple[str, str], int] = {}
@@ -997,6 +1007,8 @@ class Coordinator:
         self.work_dir: Optional[str] = None
         # Bounded log of failed job details for tracking and OOM diagnosis (last 5000)
         self._failed_jobs_log: deque = deque(maxlen=5000)
+        # Per-job timeout: cancel jobs running longer than this (0 = disabled)
+        self.job_timeout_seconds: int = max(0, int(job_timeout_seconds))
     
     def _get_csv_buffer_lock(self) -> Optional[asyncio.Lock]:
         """Get or create the CSV buffer lock lazily."""
@@ -2626,7 +2638,30 @@ class Coordinator:
                 if not self._inflight:
                     await asyncio.sleep(0.1)
                     continue
+                now = time.time()
+                timeout_sec = getattr(self, "job_timeout_seconds", 0) or 0
+                # Cancel any jobs that have exceeded the per-job timeout
+                if timeout_sec > 0:
+                    for ref, job in list(self._inflight.items()):
+                        start = None
+                        try:
+                            info = self.active.get(job.job_id)
+                            if isinstance(info, dict):
+                                start = info.get("start_time")
+                        except Exception:
+                            pass
+                        if start is not None and (now - start) >= timeout_sec:
+                            try:
+                                ray.cancel(ref)
+                            except Exception:
+                                pass
+                            self._inflight.pop(ref, None)
+                            err_msg = f"Job timed out after {timeout_sec}s"
+                            await self._on_finish(job, False, job.context, err_msg)
                 refs = list(self._inflight.keys())
+                if not refs:
+                    await asyncio.sleep(0.1)
+                    continue
                 ready, _ = ray.wait(refs, num_returns=1, timeout=0.1)
                 for r in ready:
                     job = self._inflight.pop(r, None)
@@ -3296,7 +3331,7 @@ async def tqdm_monitor(coord, continuous: bool = False) -> None:
                 b = bars[q]
                 b.total = max(b.total or 0, total_for_q)
                 b.n = completed_in_q
-                # show up to 2 active jobs
+                # show up to 2 active jobs and full path of current file(s)
                 active_jobs_info = active_by_queue.get(q, [])
                 if active_jobs_info:
                     parts = []
@@ -3306,7 +3341,12 @@ async def tqdm_monitor(coord, continuous: bool = False) -> None:
                         if len(fn) > 25:
                             fn = fn[:22] + "..."
                         parts.append(f"{fn}({j['duration']}s)")
-                    b.set_postfix_str(" | ".join(parts))
+                    postfix = " | ".join(parts)
+                    # Extra line: full path of first active file
+                    full_path = active_jobs_info[0].get("filepath", "").strip()
+                    if full_path:
+                        postfix += "\n  " + full_path
+                    b.set_postfix_str(postfix)
                 else:
                     b.set_postfix_str("")
                 b.refresh()
@@ -3321,10 +3361,23 @@ async def tqdm_monitor(coord, continuous: bool = False) -> None:
             oom = s.get("oom_count", 0)
             if oom and s["failed"]:
                 fail_str += f" (OOM:{oom})"
-            overall.set_postfix_str(
+            overall_postfix = (
                 f"Act:{s['active_count']} | Done:{s['completed']} | "
                 f"{fail_str} | Skip:{s['total_skipped']} | Tot:{s['total_enqueued']}"
             )
+            # Extra line: first active file path from any queue
+            first_active_path = ""
+            for q in order:
+                for j in active_by_queue.get(q, [])[:1]:
+                    fp = (j.get("filepath") or "").strip()
+                    if fp:
+                        first_active_path = fp
+                        break
+                if first_active_path:
+                    break
+            if first_active_path:
+                overall_postfix += "\n  " + first_active_path
+            overall.set_postfix_str(overall_postfix)
             overall.refresh()
 
             # exit condition: only in non-continuous mode (batch). In continuous
@@ -3421,11 +3474,16 @@ async def rich_monitor(coord, continuous: bool = False) -> None:
                         if len(fn) > 25:
                             fn = fn[:22] + "..."
                         parts.append(f"{fn}({j['duration']}s)")
+                detail = " | ".join(parts)
+                # Extra line: full path of first active file
+                full_path = (active_jobs_info[0].get("filepath", "") or "").strip() if active_jobs_info else ""
+                if full_path:
+                    detail += "\n  " + full_path
                 progress.update(
                     task_ids[q],
                     total=total_for_q if total_for_q > 0 else None,
                     completed=completed_in_q,
-                    detail=" | ".join(parts),
+                    detail=detail,
                 )
 
             total_with_waiting = (
@@ -3435,15 +3493,28 @@ async def rich_monitor(coord, continuous: bool = False) -> None:
             oom = s.get("oom_count", 0)
             if oom and s.get("failed"):
                 fail_detail += f" (OOM:{oom})"
+            overall_detail = (
+                f"Done:{s['completed'] + s['failed']}/{total_with_waiting} | "
+                f"Act:{s['active_count']} | "
+                f"{fail_detail} | Skip:{s['total_skipped']}"
+            )
+            # Extra line: first active file path from any queue
+            first_active_path = ""
+            for q in order:
+                for j in active_by_queue.get(q, [])[:1]:
+                    fp = (j.get("filepath") or "").strip()
+                    if fp:
+                        first_active_path = fp
+                        break
+                if first_active_path:
+                    break
+            if first_active_path:
+                overall_detail += "\n  " + first_active_path
             progress.update(
                 overall_id,
                 total=total_with_waiting if total_with_waiting > 0 else None,
                 completed=s["completed"] + s["failed"],
-                detail=(
-                    f"Done:{s['completed'] + s['failed']}/{total_with_waiting} | "
-                    f"Act:{s['active_count']} | "
-                    f"{fail_detail} | Skip:{s['total_skipped']}"
-                ),
+                detail=overall_detail,
             )
 
             if (
@@ -3807,13 +3878,16 @@ async def run(
     except Exception:
         pass
     # Start a fresh coordinator (not detached)
+    job_timeout = _job_timeout_seconds()
+    if job_timeout > 0:
+        logging.info(f"Per-job timeout enabled: jobs running longer than {job_timeout}s will be cancelled (ROBIN_JOB_TIMEOUT_SECONDS)")
     try:
         coord = Coordinator.options(name="robin_coordinator", num_cpus=0).remote(
-            target_panel=target_panel, analysis_workers=analysis_workers, preset=preset, reference=reference, enable_batching=enable_batching
+            target_panel=target_panel, analysis_workers=analysis_workers, preset=preset, reference=reference, enable_batching=enable_batching, job_timeout_seconds=job_timeout
         )
     except Exception:
         coord = Coordinator.options(name="robin_coordinator").remote(
-            target_panel=target_panel, analysis_workers=analysis_workers, preset=preset, reference=reference, enable_batching=enable_batching
+            target_panel=target_panel, analysis_workers=analysis_workers, preset=preset, reference=reference, enable_batching=enable_batching, job_timeout_seconds=job_timeout
         )
 
     # Set global coordinator reference for external access
