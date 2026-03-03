@@ -56,6 +56,29 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             cnv_scale = ui.toggle(
                 options={"linear": "Linear", "log": "Log"}, value="linear"
             ).classes("mt-1")
+            ui.label("Plot bin width").classes("text-sm ml-4")
+            # NiceGUI select with dict uses keys as option values; map key -> bp (None = use data)
+            _PLOT_BIN_KEY_DEFAULT = "Data default"
+            _PLOT_BIN_OPTIONS = {
+                _PLOT_BIN_KEY_DEFAULT: "Data default",
+                "500 kb": "500 kb",
+                "1 Mb": "1 Mb",
+                "2 Mb": "2 Mb",
+                "5 Mb": "5 Mb",
+                "10 Mb": "10 Mb",
+            }
+            _PLOT_BIN_KEY_TO_BP = {
+                _PLOT_BIN_KEY_DEFAULT: None,
+                "500 kb": 500_000,
+                "1 Mb": 1_000_000,
+                "2 Mb": 2_000_000,
+                "5 Mb": 5_000_000,
+                "10 Mb": 10_000_000,
+            }
+            cnv_plot_bin = ui.select(
+                options=_PLOT_BIN_OPTIONS,
+                value=_PLOT_BIN_KEY_DEFAULT,
+            ).style("width: 120px")
             cnv_bp_label = ui.label("Breakpoints").classes("text-sm ml-4").style("display: none")
             cnv_bp = ui.toggle(
                 options={"hide": "Hide", "show": "Show"}, value="show"
@@ -501,6 +524,35 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             pass
         return "Unknown"
 
+    def _downsample_cnv_for_plot(
+        values_1d: np.ndarray,
+        analysis_bin_width: int,
+        plot_bin_width: int,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Downsample CNV values for display when plot_bin_width > analysis_bin_width.
+
+        Returns (x_positions_bp, values) where x is in genomic bp. If plot_bin_width
+        <= analysis_bin_width, returns original positions and values unchanged.
+        """
+        if plot_bin_width <= analysis_bin_width or plot_bin_width <= 0:
+            x_bp = np.arange(len(values_1d), dtype=float) * analysis_bin_width
+            return x_bp, np.asarray(values_1d, dtype=float)
+        group_size = int(plot_bin_width / analysis_bin_width)
+        if group_size < 1:
+            x_bp = np.arange(len(values_1d), dtype=float) * analysis_bin_width
+            return x_bp, np.asarray(values_1d, dtype=float)
+        n = len(values_1d)
+        n_trim = (n // group_size) * group_size
+        if n_trim == 0:
+            x_bp = np.arange(n, dtype=float) * analysis_bin_width
+            return x_bp, np.asarray(values_1d, dtype=float)
+        trimmed = np.asarray(values_1d[:n_trim], dtype=float)
+        grouped = trimmed.reshape(-1, group_size)
+        values_out = np.mean(grouped, axis=1)
+        # Center of each group in bp (within chromosome)
+        x_bp = (np.arange(len(values_out)) + 0.5) * plot_bin_width
+        return x_bp, values_out
+
     def _analyze_cytoband_cnv(
         cnv_data: Dict[str, np.ndarray],
         chromosome: str,
@@ -890,7 +942,25 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 cnv3_map = cnv3_map["cnv"]
             if not cnv_map:
                 return
-            binw = state.get("cnv_dict", {}).get("bin_width", 1000000)
+            binw_analysis = state.get("cnv_dict", {}).get("bin_width", 1_000_000)
+            plot_bin_width = state.get("plot_bin_width") or binw_analysis
+            if plot_bin_width < binw_analysis:
+                plot_bin_width = binw_analysis
+            binw = plot_bin_width  # used for x positions and padding in the plot
+            # Keep plot bin width dropdown in sync with state
+            try:
+                pb = state.get("plot_bin_width")
+                if pb is None:
+                    cnv_plot_bin.value = _PLOT_BIN_KEY_DEFAULT
+                else:
+                    key = next(
+                        (k for k, v in _PLOT_BIN_KEY_TO_BP.items() if v == pb),
+                        _PLOT_BIN_KEY_DEFAULT,
+                    )
+                    cnv_plot_bin.value = key
+                cnv_plot_bin.update()
+            except Exception:
+                pass
             selected = state.get("selected_chrom", "All")
             use_log = state.get("y_scale", "linear") == "log"
             raw_color_mode = state.get("color_mode", "chromosome")
@@ -962,17 +1032,20 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             chrom_bounds = []  # list of (name, start_bp, end_bp)
             chrom_offsets: Dict[str, float] = {}
             if selected == "All":
-                total = 0
+                offset_bp = 0
                 for contig, cnv in natsort.natsorted(cnv_map.items()):
                     if contig == "chrM":
                         continue
-                    x = (np.arange(len(cnv)) + total) * binw
-                    pts = list(zip(x.tolist(), [float(v) for v in cnv]))
-                    start_bp = total * binw
-                    total += len(cnv)
-                    end_bp = total * binw
+                    x_local, vals = _downsample_cnv_for_plot(
+                        np.asarray(cnv), binw_analysis, int(plot_bin_width)
+                    )
+                    x_global = offset_bp + x_local
+                    pts = list(zip(x_global.tolist(), [float(v) for v in vals]))
+                    start_bp = offset_bp
+                    end_bp = offset_bp + len(cnv) * binw_analysis
                     chrom_offsets[contig] = start_bp
                     chrom_bounds.append((contig, start_bp, end_bp))
+                    offset_bp = end_bp
                     if color_mode == "chromosome":
                         series_abs.append(
                             {
@@ -1037,8 +1110,10 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             else:
                 cnv = cnv_map.get(selected)
                 if cnv is not None:
-                    x = (np.arange(len(cnv))) * binw
-                    pts = list(zip(x.tolist(), [float(v) for v in cnv]))
+                    x_local, vals = _downsample_cnv_for_plot(
+                        np.asarray(cnv), binw_analysis, int(plot_bin_width)
+                    )
+                    pts = list(zip(x_local.tolist(), [float(v) for v in vals]))
                     if color_mode == "chromosome":
                         series_abs.append(
                             {
@@ -1252,7 +1327,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                     gene_df = _load_gene_bed(sample_dir)
                                     events = detect_cnv_events(
                                         cnv_data={selected: vals},
-                                        bin_width=int(binw),
+                                        bin_width=int(binw_analysis),
                                         sex_estimate=sex_lbl,
                                         cytobands_df=cyto_df,
                                         gene_df=gene_df
@@ -1268,8 +1343,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                 
                                 for _, row in bands.iterrows():
                                     s_bp, e_bp = int(row["start_pos"]), int(row["end_pos"])
-                                    s_bin = max(0, s_bp // binw)
-                                    e_bin = min(len(vals) - 1, max(0, e_bp // binw))
+                                    s_bin = max(0, s_bp // binw_analysis)
+                                    e_bin = min(len(vals) - 1, max(0, e_bp // binw_analysis))
                                     if len(vals) > 0 and e_bin >= s_bin:
                                         mean_val = float(
                                             np.mean(vals[s_bin : e_bin + 1])
@@ -1419,8 +1494,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                     if not row.empty:
                         s_bp = int(row.iloc[0]["start_pos"])
                         e_bp = int(row.iloc[0]["end_pos"])
-                        # Use 10x bin width for padding to ensure enough data points are visible
-                        pad = 10 * binw
+                        # Use 10x analysis bin width for padding (in bp)
+                        pad = 10 * binw_analysis
                         zoom_start = max(0, s_bp - pad)
                         zoom_end = e_bp + pad
                         try:
@@ -1452,13 +1527,16 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             if cnv3_map:
                 series_diff = []
                 if selected == "All":
-                    total = 0
+                    offset_bp = 0
                     for contig, cnv in natsort.natsorted(cnv3_map.items()):
                         if contig == "chrM":
                             continue
-                        x = (np.arange(len(cnv)) + total) * binw
-                        pts = list(zip(x.tolist(), [float(v) for v in cnv]))
-                        total += len(cnv)
+                        x_local, vals = _downsample_cnv_for_plot(
+                            np.asarray(cnv), binw_analysis, int(plot_bin_width)
+                        )
+                        x_global = offset_bp + x_local
+                        pts = list(zip(x_global.tolist(), [float(v) for v in vals]))
+                        offset_bp += len(cnv) * binw_analysis
                         series_diff.append(
                             {
                                 "type": "scatter",
@@ -1470,8 +1548,10 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 else:
                     cnv = cnv3_map.get(selected)
                     if cnv is not None:
-                        x = (np.arange(len(cnv))) * binw
-                        pts = list(zip(x.tolist(), [float(v) for v in cnv]))
+                        x_local, vals = _downsample_cnv_for_plot(
+                            np.asarray(cnv), binw_analysis, int(plot_bin_width)
+                        )
+                        pts = list(zip(x_local.tolist(), [float(v) for v in vals]))
                         series_diff.append(
                             {
                                 "type": "scatter",
@@ -1508,8 +1588,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                         if not row.empty:
                             s_bp = int(row.iloc[0]["start_pos"])
                             e_bp = int(row.iloc[0]["end_pos"])
-                            # Use 10x bin width for padding to ensure enough data points are visible
-                            pad = 10 * binw
+                            # Use 10x analysis bin width for padding (in bp)
+                            pad = 10 * binw_analysis
                             zoom_start = max(0, s_bp - pad)
                             zoom_end = e_bp + pad
                             try:
@@ -1661,6 +1741,14 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 if ui_color and ui_color != current_color_mode:
                     state["color_mode"] = ui_color
                     ui_changed = True
+                ui_plot_bin = getattr(cnv_plot_bin, "value", None)
+                if ui_plot_bin is not None:
+                    want_bin = _PLOT_BIN_KEY_TO_BP.get(
+                        ui_plot_bin, _PLOT_BIN_KEY_TO_BP[_PLOT_BIN_KEY_DEFAULT]
+                    )
+                    if want_bin != state.get("plot_bin_width"):
+                        state["plot_bin_width"] = want_bin
+                        ui_changed = True
             except Exception:
                 pass
             # Check if this is a fresh page visit
@@ -2023,6 +2111,24 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             # Trigger immediate refresh to update all UI elements
             ui.timer(0.1, _refresh_cnv, once=True)
 
+        def _on_plot_bin(ev):
+            st = launcher._cnv_state.setdefault(str(sample_dir), {})
+            v = getattr(ev, "args", None) if hasattr(ev, "args") else getattr(ev, "value", None)
+            if v is None and hasattr(ev, "value"):
+                v = ev.value
+            # NiceGUI may pass a dict {'value': index, 'label': '...'} instead of the key
+            if isinstance(v, dict):
+                keys_ordered = list(_PLOT_BIN_KEY_TO_BP.keys())
+                idx = v.get("value", 0)
+                key = keys_ordered[idx] if 0 <= idx < len(keys_ordered) else _PLOT_BIN_KEY_DEFAULT
+            else:
+                key = v
+            st["plot_bin_width"] = _PLOT_BIN_KEY_TO_BP.get(
+                key, _PLOT_BIN_KEY_TO_BP[_PLOT_BIN_KEY_DEFAULT]
+            )
+            st["_force_chrom_refresh"] = True  # force re-render with new bin width
+            ui.timer(0.1, _refresh_cnv, once=True)
+
         # Bind both native change and model-value updates for robustness
         cnv_chrom_select.on("change", _on_chrom)
         cnv_chrom_select.on("update:model-value", _on_chrom)
@@ -2040,6 +2146,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
         cnv_gene_select.on("update:model-value", _on_gene)
         cnv_scale.on("change", _on_scale)
         cnv_scale.on("update:model-value", _on_scale)
+        cnv_plot_bin.on("change", _on_plot_bin)
+        cnv_plot_bin.on("update:model-value", _on_plot_bin)
         cnv_bp.on("change", _on_bp)
         cnv_bp.on("update:model-value", _on_bp)
         cnv_color.on("change", _on_color)

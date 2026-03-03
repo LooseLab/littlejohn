@@ -2676,6 +2676,8 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
 
     def refresh_fusion() -> None:
         """Refresh fusion data."""
+        import time as _time
+        t_start = _time.perf_counter()
         try:
             logging.info(f"[Fusion] refresh_fusion() called for sample_dir: {sample_dir}")
             
@@ -2685,20 +2687,27 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 return
             
             logging.info(f"[Fusion] Loading fusion data from: {sample_dir}")
+            t_before_load = _time.perf_counter()
             
             # Load fusion data directly (already in background)
             fusion_data = _load_fusion_data(sample_dir)
             
-            logging.info(f"[Fusion] Loaded fusion data: {fusion_data}")
+            t_after_load = _time.perf_counter()
+            logging.info(f"[Fusion] Loaded fusion data (load took {t_after_load - t_before_load:.2f}s): {fusion_data}")
             
             # Update UI directly
+            t_before_ui = _time.perf_counter()
             _update_fusion_ui(fusion_data, state, sample_dir)
+            t_after_ui = _time.perf_counter()
+            logging.info(f"[Fusion] refresh_fusion() completed in {t_after_ui - t_start:.2f}s (load={t_after_load - t_before_load:.2f}s, ui={t_after_ui - t_before_ui:.2f}s)")
                 
         except Exception as e:
             logging.exception(f"[Fusion] Refresh failed: {e}")
 
     def _load_fusion_data(sample_dir: Path) -> Dict[str, Any]:
         """Load fusion data from files with optional breakpoint validation."""
+        import time as _time
+        t_load_start = _time.perf_counter()
         try:
             logging.info(f"[Fusion] _load_fusion_data() called with sample_dir: {sample_dir}")
             
@@ -2829,6 +2838,8 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             target_data_hash = _create_data_hash(t) if t is not None else None
             genome_data_hash = _create_data_hash(g) if g is not None else None
             
+            elapsed = _time.perf_counter() - t_load_start
+            logging.info(f"[Fusion] _load_fusion_data() completed in {elapsed:.2f}s")
             return {
                 "target": {
                     "data": t,
@@ -2847,7 +2858,8 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 "sample_dir": sample_dir,  # Pass sample_dir for loading pre-computed summary files
             }
         except Exception as e:
-            logging.exception(f"[Fusion] Failed to load fusion data: {e}")
+            elapsed = _time.perf_counter() - t_load_start
+            logging.exception(f"[Fusion] Failed to load fusion data after {elapsed:.2f}s: {e}")
             return {
                 "target": {"data": None, "mtime": None, "data_hash": None}, 
                 "genome": {"data": None, "mtime": None, "data_hash": None},
@@ -3302,7 +3314,7 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             pass
         
         # Start the refresh timer (every 30 seconds)
-        logging.info("[Fusion] Setting up refresh timer with immediate=True")
+        logging.info("[Fusion] Setting up refresh timer (30s interval + 0.5s deferred + immediate)")
         refresh_timer = ui.timer(30.0, refresh_fusion, active=True, immediate=False)
         ui.timer(0.5, refresh_fusion, once=True)
         try:
@@ -3310,5 +3322,7 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
         except Exception:
             pass
         logging.info("[Fusion] Timer set up successfully")
+        # Populate fusion UI immediately so it matches Summary without waiting for 0.5s/30s
+        refresh_fusion()
     except Exception as e:
         logging.exception(f"[Fusion] Exception in timer setup: {e}")

@@ -553,7 +553,7 @@ def run_ruptures(
     r_cnv: list, penalty_value: int, bin_width: int
 ) -> List[Tuple[int, int]]:
     """
-    Detect change points in a time series using the Kernel Change Point Detection algorithm.
+    Detect change points in a time series using kernel CPD with a linear (L2) kernel (mean-shift detection).
 
     Args:
         r_cnv: A list containing the time series data.
@@ -567,8 +567,8 @@ def run_ruptures(
     # Convert to numpy array once for better performance
     r_cnv_array = np.array(r_cnv)
 
-    # Initialize the Kernel Change Point Detection algorithm with the Radial Basis Function (RBF) kernel
-    algo_c = rpt.KernelCPD(kernel="rbf").fit(r_cnv_array)
+    # Linear kernel (L2 cost): detects mean shifts; faster than RBF for long signals
+    algo_c = rpt.KernelCPD(kernel="linear").fit(r_cnv_array)
 
     # Predict the change points using the provided penalty value
     ruptures_result = algo_c.predict(pen=penalty_value)
@@ -715,7 +715,7 @@ def detect_breakpoints_from_cnv(cnv_data: Dict, bin_width: int, logger) -> List[
             if key != "chrM" and len(data) > 3:
                 try:
                     paired_changepoints = run_ruptures(
-                        data, penalty_value=5, bin_width=bin_width
+                        data, penalty_value=10, bin_width=bin_width
                     )
 
                     for start, end in paired_changepoints:
@@ -1619,14 +1619,11 @@ def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, threads=2,
             save_start = time.time()
             with open(copy_numbers_path, "wb") as f:
                 pickle.dump(final_copy_numbers, f, protocol=pickle.HIGHEST_PROTOCOL)
-            save_time = time.time() - save_start
-            logger.debug(f"Saved aggregated copy_numbers to {copy_numbers_path} in {save_time:.3f}s")
-            
-            # Update cache with the saved copy_numbers
             update_sample_cache(sample_id, copy_numbers=final_copy_numbers)
-            
-            # Update the local copy_numbers variable for subsequent processing
             copy_numbers = final_copy_numbers
+            logger.info(
+                f"[cnv] Save copy_numbers + cache update completed in {time.time() - save_start:.2f}s"
+            )
 
             analysis_result["processing_steps"].append("cnv_data_extracted")
             logger.debug("Aggregated CNV data extracted successfully")
@@ -1642,7 +1639,7 @@ def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, threads=2,
 
         # Calculate normalized CNV data (difference between sample and reference)
         logger.debug("Calculating normalized CNV data from aggregated results")
-        
+        t0 = time.time()
         result3_cnv = {}
         for key in r_cnv.keys():
             if key != "chrM" and key in r2_cnv:
@@ -1652,21 +1649,28 @@ def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, threads=2,
                     moving_avg_data1, moving_avg_data2
                 )
                 result3_cnv[key] = moving_avg_data1 - moving_avg_data2
+        logger.info(f"[cnv] Normalized CNV (moving avg + diff) completed in {time.time() - t0:.2f}s")
 
         analysis_result["processing_steps"].append("normalized_cnv_calculated")
-        
+
         # Estimate sex from aggregated CNV data
+        t0 = time.time()
         sex_estimate = estimate_sex_from_cnv(result3_cnv, logger)
+        logger.info(f"[cnv] Sex estimate completed in {time.time() - t0:.2f}s")
         analysis_result["sex_estimate"] = sex_estimate
         analysis_result["processing_steps"].append("sex_estimated")
 
         # Detect breakpoints from aggregated CNV data
+        t0 = time.time()
         breakpoints = detect_breakpoints_from_cnv(r_cnv, r_bin, logger)
+        logger.info(f"[cnv] Breakpoint detection completed in {time.time() - t0:.2f}s")
         analysis_result["breakpoints"] = breakpoints
         analysis_result["processing_steps"].append("breakpoints_detected")
 
         # Calculate chromosome statistics from aggregated CNV data
+        t0 = time.time()
         chromosome_stats = calculate_chromosome_stats_from_cnv(result3_cnv, logger)
+        logger.info(f"[cnv] Chromosome stats completed in {time.time() - t0:.2f}s")
         analysis_result["chromosome_stats"] = chromosome_stats
         analysis_result["processing_steps"].append("chromosome_stats_calculated")
 
@@ -1675,6 +1679,7 @@ def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, threads=2,
 
         # Save CNV data files as specified in the documentation
         # Generate master BED here since this is batch processing (all BAMs processed)
+        t0 = time.time()
         save_cnv_files(
             sample_output_dir,
             analysis_counter,
@@ -1690,6 +1695,7 @@ def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, threads=2,
             reference=reference,
             generate_master_bed=True,  # Batch processing - generate master BED once at the end
         )
+        logger.info(f"[cnv] save_cnv_files (incl. master BED) completed in {time.time() - t0:.2f}s")
 
         analysis_result["cnv_data_path"] = os.path.join(
             sample_output_dir, f"{analysis_counter}_cnv_data.json"
@@ -1697,12 +1703,11 @@ def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, threads=2,
         analysis_result["processing_steps"].append("cnv_data_saved")
 
         # Save updated analysis counter to disk
+        t0 = time.time()
         save_analysis_counter(sample_id, analysis_counter, work_dir, logger)
         analysis_result["analysis_counter"] = analysis_counter
-        logger.debug(f"Saved analysis counter: {analysis_counter}")
-
-        # Force garbage collection
         gc.collect()
+        logger.info(f"[cnv] Save analysis counter + gc completed in {time.time() - t0:.2f}s")
 
         analysis_result["processing_steps"].append("cnv_analysis_complete")
 
