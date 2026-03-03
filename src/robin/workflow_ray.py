@@ -389,24 +389,26 @@ CLASSIFICATION_TYPES: Set[str] = {"sturgeon", "nanodx", "pannanodx", "random_for
 # Job types that must be serialized per sample (no overlap across these types)
 ## Removed per-sample cross-type serialization to allow one job per type globally
 
-# Ray memory is in bytes. 8 GiB per task to reduce OOM.
+# Ray memory is in bytes. Default 2 GiB per task; snp_analysis needs 8 GiB (Clair3/variant calling).
 _GB = 1024 * 1024 * 1024
+_DEFAULT_MEMORY = 2 * _GB
+_SNP_ANALYSIS_MEMORY = 8 * _GB
 RESOURCE_HINTS: Dict[str, Dict[str, Any]] = {
     # Tune these to your cluster
-    "preprocessing": {"num_cpus": 1, "memory": 8 * _GB},
-    "bed_conversion": {"num_cpus": 1, "memory": 8 * _GB},
-    "mgmt": {"num_cpus": 1, "memory": 8 * _GB},
-    "cnv": {"num_cpus": 1, "memory": 8 * _GB},  # CNV gets dedicated CPU but only 1 thread
-    "target": {"num_cpus": 1, "memory": 8 * _GB},
-    "fusion": {"num_cpus": 1, "memory": 8 * _GB},
+    "preprocessing": {"num_cpus": 1, "memory": _DEFAULT_MEMORY},
+    "bed_conversion": {"num_cpus": 1, "memory": _DEFAULT_MEMORY},
+    "mgmt": {"num_cpus": 1, "memory": _DEFAULT_MEMORY},
+    "cnv": {"num_cpus": 1, "memory": _DEFAULT_MEMORY},  # CNV gets dedicated CPU but only 1 thread
+    "target": {"num_cpus": 1, "memory": _DEFAULT_MEMORY},
+    "fusion": {"num_cpus": 1, "memory": _DEFAULT_MEMORY},
     # Classifiers do not require GPU by default (CPU-only)
-    "sturgeon": {"num_cpus": 1, "memory": 8 * _GB},
-    "nanodx": {"num_cpus": 1, "memory": 8 * _GB},
-    "pannanodx": {"num_cpus": 1, "memory": 8 * _GB},
-    "random_forest": {"num_cpus": 1, "memory": 8 * _GB},
-    "igv_bam": {"num_cpus": 1, "memory": 8 * _GB},
-    "snp_analysis": {"num_cpus": 1, "memory": 8 * _GB},
-    "target_bam_finalize": {"num_cpus": 1, "memory": 8 * _GB},
+    "sturgeon": {"num_cpus": 1, "memory": _DEFAULT_MEMORY},
+    "nanodx": {"num_cpus": 1, "memory": _DEFAULT_MEMORY},
+    "pannanodx": {"num_cpus": 1, "memory": _DEFAULT_MEMORY},
+    "random_forest": {"num_cpus": 1, "memory": _DEFAULT_MEMORY},
+    "igv_bam": {"num_cpus": 1, "memory": _DEFAULT_MEMORY},
+    "snp_analysis": {"num_cpus": 1, "memory": _SNP_ANALYSIS_MEMORY},  # Clair3/variant calling needs 8 GiB
+    "target_bam_finalize": {"num_cpus": 1, "memory": _DEFAULT_MEMORY},
 }
 
 # ---------- Sample Job Batcher ----------
