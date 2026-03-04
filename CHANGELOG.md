@@ -54,6 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Ray per-job memory (workflow_ray.py):** Configurable memory per job type — 1 GiB default for most jobs (preprocessing, bed_conversion, mgmt, cnv, target, classification, igv_bam, target_bam_finalize), 4 GiB for fusion, 8 GiB for snp_analysis (Clair3/variant calling). Reduces memory pressure on shared nodes while keeping SNP calling at 8 GiB.
 - **CNV plots (GUI):** Bin width selector added to the CNV plots so users can choose the bin width used for visualization (independent of the analysis bin width).
 - **CNV plots (GUI):** Chromosome filtering now matches the report: only chr0–chr22, chrX, and chrY are shown in the chromosome selector and in the "All" view. chrM and other contigs (e.g. unplaced, alt) are excluded.
+- Bump version to 0.4.1.
 
 ### Dependencies
 - Added argon2-cffi for GUI password hashing.
