@@ -38,6 +38,10 @@ try:
 except ValueError:
     _LJ_BAM_THREADS = 0
 
+# When True, BAMs with >50k reads are processed (downstream batching uses batch size 1 per file).
+# Set ROBIN_PROCESS_LARGE_BAMS=1 to enable.
+_PROCESS_LARGE_BAMS_INDIVIDUALLY = os.getenv("ROBIN_PROCESS_LARGE_BAMS", "0").strip().lower() in ("1", "true", "yes", "on")
+
 # Constants for MGMT locus (chr10:129,466,536-129,467,536)
 _MGMT_CHR = "chr10"
 _MGMT_START = 129466536
@@ -722,7 +726,7 @@ def bam_preprocessing_handler(job, center: str = None):
         else:
             logger.debug("No reference found in job context")
 
-        # Check read count threshold and deliberately skip large BAMs
+        # Check read count threshold: skip large BAMs unless ROBIN_PROCESS_LARGE_BAMS is set
         try:
             total_reads = int(metadata.extracted_data.get("mapped_reads", 0)) + int(
                 metadata.extracted_data.get("unmapped_reads", 0)
@@ -731,26 +735,35 @@ def bam_preprocessing_handler(job, center: str = None):
             total_reads = 0
         
         if total_reads > 50000:
-            # Mark in context to prevent downstream triggers; record reason and count
-            job.context.add_metadata("skip_downstream", True)
-            job.context.add_metadata("skip_reason", "too_many_reads")
-            job.context.add_metadata("skip_read_count", total_reads)
-            # Add an explicit result so the wrapper can log appropriately
-            job.context.add_result(
-                "preprocessing",
-                {
-                    "status": "skipped",
-                    "reason": "too_many_reads",
-                    "read_count": total_reads,
-                    "message": "Deliberately not processed (>50,000 reads)",
-                },
-            )
-            # CLI warning (logger goes to CLI) with filename
-            logger.warning(
-                f"Skipping {os.path.basename(bam_path)}: {total_reads} reads exceeds 50,000 limit. File deliberately not processed."
-            )
-            # Do not proceed with CSV updates or further processing
-            return
+            if _PROCESS_LARGE_BAMS_INDIVIDUALLY:
+                # Process this BAM; downstream batching will pass it to workers as a single-file batch
+                job.context.add_metadata("force_individual_batch", True)
+                job.context.add_metadata("large_bam_read_count", total_reads)
+                logger.info(
+                    f"Large BAM ({total_reads:,} reads) will be processed individually (ROBIN_PROCESS_LARGE_BAMS=1)."
+                )
+                # Fall through: persist supp, update CSV, add success result, trigger downstream
+            else:
+                # Mark in context to prevent downstream triggers; record reason and count
+                job.context.add_metadata("skip_downstream", True)
+                job.context.add_metadata("skip_reason", "too_many_reads")
+                job.context.add_metadata("skip_read_count", total_reads)
+                # Add an explicit result so the wrapper can log appropriately
+                job.context.add_result(
+                    "preprocessing",
+                    {
+                        "status": "skipped",
+                        "reason": "too_many_reads",
+                        "read_count": total_reads,
+                        "message": "Deliberately not processed (>50,000 reads)",
+                    },
+                )
+                # CLI warning (logger goes to CLI) with filename
+                logger.warning(
+                    f"Skipping {os.path.basename(bam_path)}: {total_reads} reads exceeds 50,000 limit. File deliberately not processed."
+                )
+                # Do not proceed with CSV updates or further processing
+                return
 
         # Persist supplementary_read_ids to a temp file to avoid retaining large lists in memory
         try:

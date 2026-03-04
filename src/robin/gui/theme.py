@@ -63,6 +63,9 @@ import platform
 # Check if we're in development mode
 is_development_mode = os.environ.get("ROBIN_DEV_MODE", "").lower() in ("1", "true", "yes", "on")
 
+# Process large BAMs individually (do not use alongside live runs)
+_process_large_bams_enabled = os.environ.get("ROBIN_PROCESS_LARGE_BAMS", "0").strip().lower() in ("1", "true", "yes", "on")
+
 
 def get_imagefile():
     """Get the path to the ROBIN logo image file."""
@@ -711,6 +714,14 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, se
                         "This code only works with ReadFish at this time. "
                     ).classes("text-body-medium")
 
+                if _process_large_bams_enabled:
+                    ui.label("Process large BAMs").classes(
+                        "text-headline-small text-weight-bold q-mb-md"
+                    )
+                    ui.label(
+                        "ROBIN_PROCESS_LARGE_BAMS is enabled. Do not use this option alongside live runs."
+                    ).classes("text-body-medium text-warning q-mb-md")
+
                 def acknowledge():
                     try:
                         app.storage.general["disclaimer_acknowledged"] = True
@@ -725,6 +736,17 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, se
             disclaimer_dialog.open()
 
     ui.timer(0.5, show_disclaimer, once=True)
+
+    # Warn at launch when process-large-BAMs mode is on (do not use with live runs)
+    def show_large_bam_launch_warning():
+        if _process_large_bams_enabled:
+            ui.notify(
+                "ROBIN_PROCESS_LARGE_BAMS is enabled. Do not use this option alongside live runs.",
+                type="warning",
+                timeout=10000,
+            )
+
+    ui.timer(1.5, show_large_bam_launch_warning, once=True)
 
     # Add version check timer
     ui.timer(1.0, check_version, once=True)

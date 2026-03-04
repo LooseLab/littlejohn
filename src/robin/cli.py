@@ -399,6 +399,15 @@ def _get_user_acknowledgment() -> bool:
     return False
 
 
+def _warn_if_process_large_bams() -> None:
+    """If ROBIN_PROCESS_LARGE_BAMS is set, print a warning not to use with live runs."""
+    if os.environ.get("ROBIN_PROCESS_LARGE_BAMS", "0").strip().lower() in ("1", "true", "yes", "on"):
+        _echo_styled(
+            "Warning: ROBIN_PROCESS_LARGE_BAMS is enabled. Do not use this option alongside live runs.",
+            level="warn",
+        )
+
+
 @click.group()
 @click.version_option()
 def main() -> None:
@@ -2133,6 +2142,8 @@ def workflow(
         # Require user acknowledgment before proceeding
         if not _get_user_acknowledgment():
             sys.exit(1)
+
+        _warn_if_process_large_bams()
 
         # Validate input parameters
         _validate_inputs(path, workflow, analysis_workers, ray_num_cpus)

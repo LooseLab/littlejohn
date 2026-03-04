@@ -303,24 +303,30 @@ class SampleJobBatcher:
             return self._check_and_create_batches(sample_id, job_type)
     
     def _check_and_create_batches(self, sample_id: str, job_type: str) -> List[BatchedJob]:
-        """Check if we should create batches for a sample/job_type combination"""
+        """Check if we should create batches for a sample/job_type combination.
+        Jobs with force_individual_batch (e.g. large BAMs) are emitted as single-file batches.
+        """
         config = BATCH_CONFIG.get(job_type, {"max_batch_size": 20, "timeout_seconds": 10})
         max_batch_size = config["max_batch_size"]
         
         pending = self.pending_jobs[sample_id][job_type]
         batches = []
         
-        # Create batches of max_batch_size
-        while len(pending) >= max_batch_size:
-            batch_jobs = pending[:max_batch_size]
-            pending = pending[max_batch_size:]
-            
-            # Create batched job
+        # Emit single-file batches for jobs marked force_individual_batch (e.g. large BAMs)
+        individual = [j for j in pending if (j.context.metadata or {}).get("force_individual_batch")]
+        rest = [j for j in pending if not (j.context.metadata or {}).get("force_individual_batch")]
+        for job in individual:
+            batches.append(self._create_batched_job([job], sample_id, job_type))
+        
+        # Create batches of max_batch_size from the rest
+        while len(rest) >= max_batch_size:
+            batch_jobs = rest[:max_batch_size]
+            rest = rest[max_batch_size:]
             batched_job = self._create_batched_job(batch_jobs, sample_id, job_type)
             batches.append(batched_job)
         
-        # Update pending list
-        self.pending_jobs[sample_id][job_type] = pending
+        # Update pending list (only unbatched jobs remain)
+        self.pending_jobs[sample_id][job_type] = rest
         
         return batches
     

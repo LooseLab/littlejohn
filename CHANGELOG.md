@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Process large BAMs option:** When `ROBIN_PROCESS_LARGE_BAMS` is set (e.g. `1`, `true`, `yes`, `on`), BAMs with more than 50,000 reads are no longer skipped. They are processed with per-file batching so each large BAM is sent to workers as a single-file batch (no batching with other files). Default remains to skip BAMs over 50k reads.
+- **Launch warnings for large-BAM mode:** When `ROBIN_PROCESS_LARGE_BAMS` is enabled, the GUI shows a warning in the disclaimer dialog (if shown) and a one-time notification on launch; the CLI prints a warning after the disclaimer when starting the workflow. Users are advised not to use this option alongside live runs.
 - **Fusion GUI delay analysis:** `FUSION_GUI_DELAY_ANALYSIS.md` documenting the cause of the ~29s delay between Summary and Fusion tab updates (30s refresh timer) and the mitigation (immediate refresh on section build).
 - **Fusion GUI timing instrumentation:** `refresh_fusion()` and `_load_fusion_data()` in the Fusion component now log duration (load time, UI update time, total) to help diagnose slow fusion processing (e.g. `refresh_fusion() completed in X.XXs (load=Y.YYs, ui=Z.ZZs)`).
 - **GUI authentication:** All GUI routes require login. Unauthenticated users are redirected to a themed `/login` page. Logout is available from the hamburger menu only (styled like the Quit button).
@@ -30,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `robin utils mgmt` command to summarize MGMT CpG site methylation counts from `mgmt_sorted.bam` outputs.
 
 ### Changed
+- **Batching for large BAMs:** When `ROBIN_PROCESS_LARGE_BAMS` is set, the preprocessor marks large BAMs (>50k reads) with `force_individual_batch`. The Ray and simple workflow batchers now emit single-file batches for such jobs and batch remaining jobs as before, so large BAMs are always processed one per worker.
 - **Report layout and typography:**
   - **Classification:** Methylation classification plots now use seaborn for improved styling; plots show top 3 classes with larger fonts and thicker lines. Detailed classification tables use a 2-column layout (Sturgeon|NanoDX, PanNanoDX|Random Forest) with compact styling and top 10 predictions.
   - **CNV:** Summary and event tables use compact styling with unified 9pt font. Chromosome Arm Events and CNV Events Containing Genes tables are displayed side-by-side in two columns. Arm/Region columns widened to prevent text wrapping (e.g. "p-arm"). Increased cell padding and line spacing for readability.
