@@ -61,7 +61,7 @@ dependencies = [
     "requests",
     "PyPDF2",
     "alive-progress",
-    "nicegui>=3.0.4",
+    "nicegui>=3.6",
     "argon2-cffi>=23.1.0",
     "gff3_parser",
     "dna_features_viewer", 
