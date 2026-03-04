@@ -1686,11 +1686,10 @@ class GUILauncher:
                                 password = (
                                     ui.input(
                                         "Password",
-                                        password=True,
-                                        password_toggle_button=True,
                                     )
-                                    .props("autocomplete=current-password")
+                                    .props("autocomplete=off")
                                     .classes("w-full")
+                                    .style("-webkit-text-security: disc;")
                                     .on("keydown.enter", try_login)
                                 )
                                 ui.button(
