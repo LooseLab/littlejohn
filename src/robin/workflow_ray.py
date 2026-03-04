@@ -389,9 +389,9 @@ CLASSIFICATION_TYPES: Set[str] = {"sturgeon", "nanodx", "pannanodx", "random_for
 # Job types that must be serialized per sample (no overlap across these types)
 ## Removed per-sample cross-type serialization to allow one job per type globally
 
-# Ray memory is in bytes. Default 2 GiB per task; fusion 4 GiB; snp_analysis 8 GiB (Clair3/variant calling).
+# Ray memory is in bytes. Default 1 GiB per task; fusion 4 GiB; snp_analysis 8 GiB (Clair3/variant calling).
 _GB = 1024 * 1024 * 1024
-_DEFAULT_MEMORY = 2 * _GB
+_DEFAULT_MEMORY = 1 * _GB
 _FUSION_MEMORY = 4 * _GB
 _SNP_ANALYSIS_MEMORY = 8 * _GB
 RESOURCE_HINTS: Dict[str, Dict[str, Any]] = {
