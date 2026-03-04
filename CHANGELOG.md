@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Fusion GUI delay analysis:** `FUSION_GUI_DELAY_ANALYSIS.md` documenting the cause of the ~29s delay between Summary and Fusion tab updates (30s refresh timer) and the mitigation (immediate refresh on section build).
+- **Fusion GUI timing instrumentation:** `refresh_fusion()` and `_load_fusion_data()` in the Fusion component now log duration (load time, UI update time, total) to help diagnose slow fusion processing (e.g. `refresh_fusion() completed in X.XXs (load=Y.YYs, ui=Z.ZZs)`).
 - **GUI authentication:** All GUI routes require login. Unauthenticated users are redirected to a themed `/login` page. Logout is available from the hamburger menu only (styled like the Quit button).
 - **Password stored as Argon2 hash** in `~/.config/robin/gui_password_hash` (or `%APPDATA%/robin/gui_password_hash` on Windows). No plaintext or env-var password.
 - **Password set at GUI startup:** On first run, prompt twice (set + confirm) with hidden input; on later runs, prompt once to verify. Skipped when not a TTY (e.g. headless); users then log in via the web login page.
@@ -45,6 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MNP-Flex results panel now hides empty fields until results are available.
 - `robin utils mgmt` supports recursive search and file output for TSV summaries.
 - Command-line progress output supports Rich styling; updating the installation is required to enable Rich functionality.
+- **Fusion GUI:** Fusion tab now refreshes immediately when the Fusion section is built (in addition to the 0.5s deferred and 30s periodic timers), so fusion data appears in sync with the Summary without waiting for the next timer tick.
+- **Ray per-job memory (workflow_ray.py):** Configurable memory per job type — 1 GiB default for most jobs (preprocessing, bed_conversion, mgmt, cnv, target, classification, igv_bam, target_bam_finalize), 4 GiB for fusion, 8 GiB for snp_analysis (Clair3/variant calling). Reduces memory pressure on shared nodes while keeping SNP calling at 8 GiB.
 
 ### Dependencies
 - Added argon2-cffi for GUI password hashing.
