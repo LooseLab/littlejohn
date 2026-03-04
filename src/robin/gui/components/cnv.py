@@ -19,6 +19,16 @@ from robin.gui.theme import styled_table
 from robin.analysis.cnv_classification import detect_cnv_events, get_cnv_summary, CNVEvent
 from robin.classification_config import get_cnv_thresholds
 
+# Same chromosome set as reporting (plotting.py): chr0–chr22, chrX, chrY only
+CNV_PLOT_CONTIGS = frozenset(
+    ["chr" + str(i) for i in range(0, 23)] + ["chrX", "chrY"]
+)
+
+
+def _cnv_contig_ok(contig: str) -> bool:
+    """True if contig should be included in CNV plots (matches report behaviour)."""
+    return contig in CNV_PLOT_CONTIGS
+
 
 def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
     """Build the CNV UI section and attach refresh timers.
@@ -797,15 +807,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
         try:
             frames: List[pd.DataFrame] = []
             for chrom in natsort.natsorted(cnv_data.keys()):
-                if (
-                    chrom == "chrM"
-                    or not isinstance(chrom, str)
-                    or not chrom.startswith("chr")
-                ):
-                    continue
-                # restrict to autosomes and sex chromosomes
-                tail = chrom[3:]
-                if not (tail.isdigit() or tail in ("X", "Y")):
+                if not _cnv_contig_ok(chrom):
                     continue
                 df = _analyze_cytoband_cnv(cnv_data, chrom, bin_width, sex_estimate)
                 if not df.empty:
@@ -1034,7 +1036,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             if selected == "All":
                 offset_bp = 0
                 for contig, cnv in natsort.natsorted(cnv_map.items()):
-                    if contig == "chrM":
+                    if not _cnv_contig_ok(contig):
                         continue
                     x_local, vals = _downsample_cnv_for_plot(
                         np.asarray(cnv), binw_analysis, int(plot_bin_width)
@@ -1529,7 +1531,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 if selected == "All":
                     offset_bp = 0
                     for contig, cnv in natsort.natsorted(cnv3_map.items()):
-                        if contig == "chrM":
+                        if not _cnv_contig_ok(contig):
                             continue
                         x_local, vals = _downsample_cnv_for_plot(
                             np.asarray(cnv), binw_analysis, int(plot_bin_width)
@@ -1891,13 +1893,13 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                         cnv_map = state["cnv"].get("cnv", state["cnv"])
                         chrom_opts = {"All": "All"}
                         for contig in natsort.natsorted(cnv_map.keys()):
-                            if contig != "chrM":
+                            if _cnv_contig_ok(contig):
                                 chrom_opts[contig] = contig
                         cnv_chrom_select.set_options(chrom_opts)
                         # Keep selected option if still valid
                         chrom_opts = {"All": "All"}
                         for contig in natsort.natsorted(cnv_map.keys()):
-                            if contig != "chrM":
+                            if _cnv_contig_ok(contig):
                                 chrom_opts[contig] = contig
                         cnv_chrom_select.set_options(chrom_opts)
                         # Keep selected option if still valid
