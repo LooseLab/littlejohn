@@ -1,0 +1,30 @@
+name: robin_0_7
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - git-lfs
+  - r-base
+  - bioconductor-genomicranges
+  - bioconductor-genomeinfodb
+  - bioconda::snpsift
+  - bioconda::snpeff
+  - bioconda::samtools
+  - bioconda::bedtools
+  - conda-forge::pkg-config
+  - conda-forge::cairo
+  - conda-forge::pycairo
+  - conda-forge::gobject-introspection
+  - r-optparse
+  - r-data.table
+  - r-ranger
+  - r-matrixStats
+  - r-glmnet
+  - ruptures
+  - python >=3.12.0,<3.12.19
+  - pip
+  - pip:
+     - scikit-learn
+     - scipy
+
