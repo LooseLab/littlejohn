@@ -218,7 +218,7 @@ def merge_modkit_files(
 
                 df = pd.read_csv(
                     bed,
-                    sep="\s+",
+                    sep=r"\s+",
                     header=None,
                     names=full_cols,
                     dtype={c: str for c in ["chrom", "mod_code", "strand", "color"]},
