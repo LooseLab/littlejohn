@@ -4,3 +4,4 @@
 [submodule "src/robin/submodules/hv_rapidCNS2"]
 	path = src/robin/submodules/hv_rapidCNS2
 	url = https://github.com/mattloose/hv_rapidCNS2_mod
+	branch = main
