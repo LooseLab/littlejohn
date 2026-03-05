@@ -95,6 +95,21 @@ except ImportError:
     docker = None
 
 
+def is_docker_available_for_snp_analysis() -> tuple[bool, str]:
+    """
+    Check if Docker is available for SNP analysis (Clair3 pipeline).
+    Returns (True, "") if Docker is ready, (False, "error message") otherwise.
+    """
+    if docker is None:
+        return False, "Docker Python package is not installed. Install it with: pip install docker"
+    try:
+        client = docker.from_env()
+        client.ping()
+        return True, ""
+    except Exception as e:
+        return False, f"Docker daemon is not available: {e}"
+
+
 def json_serializable(obj):
     """Convert numpy types to JSON serializable types."""
     if isinstance(obj, np.integer):

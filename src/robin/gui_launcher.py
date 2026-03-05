@@ -2254,11 +2254,25 @@ class GUILauncher:
                         try:
                             sample_id = getattr(event, "args", None) if hasattr(event, "args") else None
                             if isinstance(sample_id, str):
-                                self._trigger_target_bam_finalization(sample_id, trigger_snp=True)
-                                ui.notify(
-                                    f"Triggered run finalization and SNP analysis for {sample_id}",
-                                    type="positive",
-                                )
+                                from robin.analysis.target_analysis import is_docker_available_for_snp_analysis
+                                docker_ok, docker_error = is_docker_available_for_snp_analysis()
+                                trigger_snp = docker_ok
+                                if not docker_ok:
+                                    ui.notify(
+                                        f"Docker is not available. Finalization will run; SNP analysis skipped. {docker_error}",
+                                        type="warning",
+                                    )
+                                self._trigger_target_bam_finalization(sample_id, trigger_snp=trigger_snp)
+                                if trigger_snp:
+                                    ui.notify(
+                                        f"Triggered run finalization and SNP analysis for {sample_id}",
+                                        type="positive",
+                                    )
+                                else:
+                                    ui.notify(
+                                        f"Triggered run finalization for {sample_id} (SNP analysis skipped—Docker required)",
+                                        type="positive",
+                                    )
                             else:
                                 ui.notify("Invalid sample ID", type="warning")
                         except Exception as e:
@@ -5630,6 +5644,26 @@ class GUILauncher:
                             target_bam = sample_dir / "target.bam"
                             if not target_bam.exists():
                                 message = "target.bam not found; cannot run SNP analysis."
+                                logging.warning(message)
+                                self.send_update(
+                                    UpdateType.WARNING_NOTIFICATION,
+                                    {
+                                        "title": "SNP analysis skipped",
+                                        "message": message,
+                                        "sample_id": sample_id,
+                                        "level": "warning",
+                                    },
+                                    priority=6,
+                                )
+                                return
+
+                            from robin.analysis.target_analysis import is_docker_available_for_snp_analysis
+                            docker_ok, docker_error = is_docker_available_for_snp_analysis()
+                            if not docker_ok:
+                                message = (
+                                    f"SNP analysis requires Docker, but it is not available. {docker_error} "
+                                    "Please install Docker and ensure the daemon is running, then run SNP analysis separately."
+                                )
                                 logging.warning(message)
                                 self.send_update(
                                     UpdateType.WARNING_NOTIFICATION,

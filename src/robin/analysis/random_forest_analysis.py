@@ -118,7 +118,7 @@ def run_rcns2(rcns2folder, batch, bed, threads, showerrors):
         logger.info(f"Batch number: {batch}")
 
         # Check if R script exists
-        r_script_path = f"{HVPATH}/bin/methylation_classification_nanodx_v0.2.R"
+        r_script_path = f"{HVPATH}/bin/methylation_classification_nanodx_v0.3.R"
         if not os.path.exists(r_script_path):
             logger.error(f"R script not found at: {r_script_path}")
             raise FileNotFoundError(f"R script not found: {r_script_path}")
