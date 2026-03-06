@@ -736,7 +736,7 @@ def _wrap_real_handler(
         except Exception as e:
             job.context.add_error(job_type, str(e))
             logger.error(f"{job_type} failed: {e}")
-            # still return context with error recorded
+            raise  # Re-raise so task fails and coordinator gets failure_kind="exception"
         finally:
             # Mark result if user handler didn't
             if job_type not in job.context.results:
@@ -1055,12 +1055,13 @@ class Coordinator:
             os.makedirs(self.work_dir, exist_ok=True)
             with open(path, "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
-                w.writerow(["sample_id", "filepath", "job_type", "is_oom", "error"])
+                w.writerow(["sample_id", "filepath", "job_type", "failure_kind", "is_oom", "error"])
                 for e in self._failed_jobs_log:
                     w.writerow([
                         e.get("sample_id", ""),
                         e.get("filepath", ""),
                         e.get("job_type", ""),
+                        e.get("failure_kind", ""),
                         "yes" if e.get("is_oom") else "no",
                         (e.get("error") or "").replace("\r", " ").replace("\n", " "),
                     ])
@@ -1222,10 +1223,11 @@ class Coordinator:
             for pool_name, job_types in groups.items():
                 par = pool_parallel(pool_name)
                 actor_name = f"pool_{pool_name}"
+                job_timeout = getattr(self, "job_timeout_seconds", 0) or 0
                 try:
                     pool = Pool.options(
                         name=actor_name, max_concurrency=max(1, int(par)), num_cpus=0
-                    ).remote(pool_name, par)
+                    ).remote(pool_name, par, job_timeout)
                 except Exception:
                     try:
                         # Some Ray versions don't allow num_cpus=0; use a tiny fractional CPU to avoid reservation deadlock
@@ -1233,10 +1235,10 @@ class Coordinator:
                             name=actor_name,
                             max_concurrency=max(1, int(par)),
                             num_cpus=0.001,
-                        ).remote(pool_name, par)
+                        ).remote(pool_name, par, job_timeout)
                     except Exception:
                         pool = Pool.options(max_concurrency=max(1, int(par))).remote(
-                            pool_name, par
+                            pool_name, par, job_timeout
                         )
                 pools[pool_name] = pool
                 # Wire coordinator callback
@@ -2117,8 +2119,22 @@ class Coordinator:
                 pass  # Silently continue on write errors
 
     async def _on_finish(
-        self, job: Job, ok: bool, ctx: WorkflowContext, err: Optional[str]
+        self,
+        job: Job,
+        ok: bool,
+        ctx: WorkflowContext,
+        err: Optional[str],
+        failure_kind: Optional[str] = None,
     ):
+        # Infer structured failure kind when not provided (for filtering/alerting)
+        if not ok and failure_kind is None and err:
+            failure_kind = (
+                "timed_out"
+                if "timed out" in (err or "").lower()
+                else "exception"
+            )
+        elif ok:
+            failure_kind = None
         # capture start info for duration logging, then update dedup maps
         active_info = self.active.pop(job.job_id, None)
         start_time = None
@@ -2426,6 +2442,7 @@ class Coordinator:
                         "job_type": job.job_type,
                         "error": err_str,
                         "is_oom": is_oom,
+                        "failure_kind": failure_kind or "",
                     })
                 except Exception:
                     pass
@@ -2666,7 +2683,7 @@ class Coordinator:
                                 pass
                             self._inflight.pop(ref, None)
                             err_msg = f"Job timed out after {timeout_sec}s"
-                            await self._on_finish(job, False, job.context, err_msg)
+                            await self._on_finish(job, False, job.context, err_msg, "timed_out")
                 refs = list(self._inflight.keys())
                 if not refs:
                     await asyncio.sleep(0.1)
@@ -2990,17 +3007,26 @@ class Coordinator:
 
 @ray.remote
 class Pool:
-    def __init__(self, queue_name: str, max_parallel: int = 1):
+    def __init__(
+        self,
+        queue_name: str,
+        max_parallel: int = 1,
+        job_timeout_seconds: int = 0,
+    ):
         self.queue_name = queue_name
         self.max_parallel = max(1, int(max_parallel))
+        self.job_timeout_seconds = max(0, int(job_timeout_seconds))
         # job_type -> (remote_func, resource_options)
         self.handlers: Dict[str, Tuple[Any, Dict[str, Any]]] = {}
         # callback to Coordinator actor
         self._coordinator = None
         self._coordinator_name: Optional[str] = None
-        self._inflight: Set[ray.ObjectRef] = set()
+        # ref -> (job, start_time) for timeout and completion
+        self._inflight_data: Dict[Any, Tuple[Job, float]] = {}
+        self._timed_out_jobs: Set[str] = set()
         self._running_count: int = 0
         self._shutdown_requested: bool = False
+        self._timeout_task: Optional[asyncio.Task] = None
         
         # Initialize memory manager for long-running pool actor
         self.memory_manager = None
@@ -3085,26 +3111,43 @@ class Pool:
         while self._running_count >= self.max_parallel:
             await asyncio.sleep(0.005)
         ref = remote_func.options(**opts).remote(job)
-        self._inflight.add(ref)
+        self._inflight_data[ref] = (job, time.time())
         self._running_count += 1
+
+        # Start timeout loop once if per-job timeout is enabled
+        if self.job_timeout_seconds > 0 and (self._timeout_task is None or self._timeout_task.done()):
+            try:
+                self._timeout_task = asyncio.create_task(self._timeout_loop())
+            except Exception:
+                pass
 
         async def _wait(r):
             ok, ctx, err = True, None, None
+            failure_kind = None
             try:
                 ctx = await r
+                # Treat handler "error return" as failure: context has errors for this job_type
+                errors = getattr(ctx, "errors", []) or []
+                job_errors = [e for e in errors if isinstance(e, dict) and e.get("job_type") == job.job_type]
+                if job_errors:
+                    ok = False
+                    err = job_errors[-1].get("error", "handler reported error")
+                    failure_kind = "returned_error"
             except Exception as e:
                 ok, err = False, str(e)
                 ctx = job.context
                 ctx.add_error(job.job_type, err)
+                failure_kind = "exception"
+            self._inflight_data.pop(r, None)
             coord2 = self._get_coordinator()
-            if coord2 is not None:
-                await coord2._on_finish.remote(job, ok, ctx, err)
-            self._inflight.discard(r)
+            if coord2 is not None and job.job_id not in self._timed_out_jobs:
+                await coord2._on_finish.remote(job, ok, ctx, err, failure_kind)
+            elif job.job_id in self._timed_out_jobs:
+                self._timed_out_jobs.discard(job.job_id)
             if self._running_count > 0:
                 self._running_count -= 1
             
             # Trigger memory cleanup after job completion
-            # Check if pool is idle (no running jobs) before cleanup
             if self.memory_manager is not None:
                 try:
                     is_idle = self._running_count == 0
@@ -3132,8 +3175,8 @@ class Pool:
             self._shutdown_requested = True
             
             # Cancel all inflight tasks
-            if self._inflight:
-                for ref in list(self._inflight):
+            if self._inflight_data:
+                for ref in list(self._inflight_data):
                     try:
                         ray.cancel(ref)
                     except Exception:
@@ -3142,6 +3185,36 @@ class Pool:
             return True
         except Exception:
             return False
+
+    async def _timeout_loop(self) -> None:
+        """Cancel jobs that exceed job_timeout_seconds and report them as failed."""
+        while not self._shutdown_requested and self.job_timeout_seconds > 0:
+            try:
+                await asyncio.sleep(10)
+                now = time.time()
+                coord = self._get_coordinator()
+                if coord is None:
+                    continue
+                for ref, (job, start_time) in list(self._inflight_data.items()):
+                    if (now - start_time) >= self.job_timeout_seconds:
+                        self._timed_out_jobs.add(job.job_id)
+                        self._inflight_data.pop(ref, None)
+                        if self._running_count > 0:
+                            self._running_count -= 1
+                        try:
+                            ray.cancel(ref)
+                        except Exception:
+                            pass
+                        err_msg = (
+                            f"Job timed out after {self.job_timeout_seconds}s"
+                        )
+                        await coord._on_finish.remote(
+                            job, False, job.context, err_msg, "timed_out"
+                        )
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                pass
 
     # Adapter so callers using TypeProcessor-style .process() keep working
     async def process(self, job: Job):
@@ -4343,6 +4416,9 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
+    # Raise dashboard/State API job list limit (Ray default 10k) if not set
+    if os.environ.get("RAY_MAX_LIMIT_FROM_DATA_SOURCE") is None:
+        os.environ["RAY_MAX_LIMIT_FROM_DATA_SOURCE"] = "100000"
     try:
         # Expose dashboard on all interfaces when supported
         init_kwargs = {"address": args.ray_address}

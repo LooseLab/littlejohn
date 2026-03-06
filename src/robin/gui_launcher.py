@@ -518,6 +518,18 @@ class GUILauncher:
         @app.add_middleware
         class AuthMiddleware(BaseHTTPMiddleware):
             async def dispatch(self, request: Request, call_next):
+                # Store request host for theme (e.g. to show Quit only on localhost)
+                try:
+                    url = request.url
+                    host = getattr(url, "hostname", None)
+                    if not host and getattr(url, "host", None):
+                        host = str(url.host).split(":")[0]
+                    app.storage.user["_request_host"] = (host or "").strip()
+                except Exception:
+                    try:
+                        app.storage.user["_request_host"] = ""
+                    except Exception:
+                        pass
                 path = request.url.path
                 if path.startswith("/_nicegui") or path in unrestricted_page_routes:
                     return await call_next(request)
@@ -2202,7 +2214,8 @@ class GUILauncher:
   <q-btn-group>
     <q-btn color=\"primary\" size=\"sm\" label=\"View\"
            :href=\"'/live_data/' + encodeURIComponent(props.row.sample_id)\" />
-  <q-btn color=\"secondary\" size=\"sm\" label=\"Finalize\" icon=\"merge_type\"
+    <q-btn v-if=\"props.row.origin === 'Complete' || props.row.origin === 'Pre-existing'\"
+           color=\"secondary\" size=\"sm\" label=\"Finalize\" icon=\"merge_type\"
            @click=\"$parent.$emit('finalize-target', props.row.sample_id)\" />
   </q-btn-group>
 </q-td>

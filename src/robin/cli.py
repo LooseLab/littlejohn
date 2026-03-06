@@ -1467,6 +1467,9 @@ def _initialize_ray(num_cpus: Optional[int], include_dashboard: bool = True) -> 
                 os.environ["RAY_DISABLE_IMPORT_WARNING"] = "1"
                 os.environ["RAY_DISABLE_DEPRECATION_WARNING"] = "1"
                 os.environ["RAY_OBJECT_STORE_ALLOW_SLOW_STORAGE"] = "1"
+                # Raise dashboard/State API job list limit (default 10k); set only if not already set
+                if "RAY_MAX_LIMIT_FROM_DATA_SOURCE" not in os.environ:
+                    os.environ["RAY_MAX_LIMIT_FROM_DATA_SOURCE"] = "100000"
 
                 # Bind dashboard to 0.0.0.0 when supported so it's reachable off-host
                 init_kwargs = {
@@ -2187,6 +2190,10 @@ def workflow(
             # Ensure Ray is initialized if CPUs not specified
             try:
                 import ray
+
+                # Raise dashboard/State API job list limit (default 10k) if not set
+                if "RAY_MAX_LIMIT_FROM_DATA_SOURCE" not in os.environ:
+                    os.environ["RAY_MAX_LIMIT_FROM_DATA_SOURCE"] = "100000"
 
                 if not ray.is_initialized():
                     # Apply preset CPU caps for Ray Core if provided

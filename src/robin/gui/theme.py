@@ -291,6 +291,20 @@ _remote_access_request_id = 0
 MENU_BREAKPOINT = 1200
 
 
+def _is_local_client() -> bool:
+    """Return True if the current request is from localhost or 127.0.0.1 (same device as the server)."""
+    try:
+        # Host is set by auth middleware on each request
+        host = (app.storage.user.get("_request_host") or "").strip().lower()
+        if not host:
+            return False
+        # Strip port if present (e.g. "localhost:8080" -> "localhost")
+        host_part = host.split(":")[0].lower()
+        return host_part in ("localhost", "127.0.0.1")
+    except Exception:
+        return False
+
+
 class GlobalSystemMetrics:
     """Global system metrics singleton that provides CPU and RAM usage data."""
     
@@ -872,9 +886,10 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, se
                         ui.button(
                             "LOG OUT", icon="logout", on_click=logout_user
                         ).classes("bg-error text-white rounded-md")
-                        ui.button(
-                            "Quit", icon="logout", on_click=quitdialog.open
-                        ).classes("bg-error text-white rounded-md")
+                        if _is_local_client():
+                            ui.button(
+                                "Quit", icon="logout", on_click=quitdialog.open
+                            ).classes("bg-error text-white rounded-md")
                 
                 # Logo - ultra-small on mobile
                 ui.image(get_imagefile()).style("width: 32px").classes("flex-shrink-0 sm:w-12")

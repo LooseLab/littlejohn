@@ -5605,7 +5605,10 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             if "coverage" not in df.columns:
                 df["length"] = (df["endpos"] - df["startpos"] + 1).astype(float)
                 df["coverage"] = df["bases"] / df["length"]
-            chroms = natsort.natsorted(df["chrom"].astype(str).unique())
+            # Normalize chrom to canonical form so "chr1" and "1" map to one category per chromosome
+            chrom_str = df["chrom"].astype(str).str.strip()
+            df["chrom"] = chrom_str.where(chrom_str.str.startswith("chr"), "chr" + chrom_str)
+            chroms = natsort.natsorted(df["chrom"].unique())
             chrom_lookup = {chrom: idx for idx, chrom in enumerate(chroms)}
             df["chrom_index"] = df["chrom"].map(chrom_lookup)
             agg = (

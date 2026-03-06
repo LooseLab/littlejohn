@@ -55,6 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CNV plots (GUI):** Bin width selector added to the CNV plots so users can choose the bin width used for visualization (independent of the analysis bin width).
 - **CNV plots (GUI):** Chromosome filtering now matches the report: only chr0–chr22, chrX, and chrY are shown in the chromosome selector and in the "All" view. chrM and other contigs (e.g. unplaced, alt) are excluded.
 - Bump version to 0.4.1.
+- **Quit button (menu):** Shown only when the app is opened from localhost or 127.0.0.1 (same device as the server). Hidden when visiting via any other host (e.g. remote or LAN URL) so only someone at the sequencing machine can quit the app.
+- **Python 3.12:** Minimum supported Python version is now 3.12.
 
 ### Dependencies
 - Added argon2-cffi for GUI password hashing.
