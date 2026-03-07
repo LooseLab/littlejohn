@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """
-Simplified Fusion Analysis Module for robin
+Simplified Fusion Analysis Module for robin.
 
-This module provides workflow integration and standalone analysis capabilities
-for fusion detection. Core fusion detection logic is imported from fusion_work.py
-to avoid code duplication.
+Requires Python 3.12+ (PEP 709 inlined comprehensions, match/case type patterns,
+faster interpreter). Workflow integration and standalone fusion detection;
+core logic in fusion_work.py.
 
 Key functions:
 - Workflow integration (fusion_handler)
 - Standalone file processing (process_single_file)
 - Metadata management (FusionMetadata)
 """
+from __future__ import annotations
 
 import os
 import sys
+
+if sys.version_info < (3, 12):
+    raise RuntimeError("robin fusion analysis requires Python 3.12 or newer")
 import tempfile
 import logging
 import time
@@ -53,19 +57,20 @@ logger = logging.getLogger(__name__)
 
 
 def json_serializable(obj):
-    """Convert numpy types to JSON serializable types."""
-    if isinstance(obj, np.integer):
-        return int(obj)
-    elif isinstance(obj, np.floating):
-        return float(obj)
-    elif isinstance(obj, np.ndarray):
-        return obj.tolist()
-    elif isinstance(obj, pd.Series):
-        return obj.tolist()
-    elif isinstance(obj, pd.DataFrame):
-        return obj.to_dict("records")
-    else:
-        return obj
+    """Convert numpy/pandas types to JSON-serializable (3.12: type patterns, no guards)."""
+    match obj:
+        case int():
+            return int(obj)
+        case float():
+            return float(obj)
+        case _ if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        case _ if isinstance(obj, pd.Series):
+            return obj.tolist()
+        case _ if isinstance(obj, pd.DataFrame):
+            return obj.to_dict("records")
+        case _:
+            return obj
 
 
 def _get_fusion_batch_size(default: int = 10) -> int:
@@ -1035,9 +1040,10 @@ Examples:
             filename = os.path.basename(bam_path)
             sample_id = filename.replace(".bam", "").replace(".BAM", "")
             # Remove common prefixes
-            for prefix in ["sample_", "Sample_", "SAMPLE_"]:
+            for prefix in ("sample_", "Sample_", "SAMPLE_"):
                 if sample_id.startswith(prefix):
-                    sample_id = sample_id[len(prefix):]
+                    sample_id = sample_id.removeprefix(prefix)
+                    break
             logger.info(f"Auto-detected sample ID: {sample_id}")
         
         metadata = {

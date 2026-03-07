@@ -1,72 +1,18 @@
 #!/usr/bin/env python3
 """
-Target Analysis Module for robin
+Target Analysis Module for robin.
 
-This module provides automated target analysis following the exact architecture
-specified in the Target Analysis Documentation. It integrates with robin's
+Requires Python 3.12+. Automated target analysis; integrates with robin's
 workflow system and processes files for target-specific analysis.
 
-Features:
-- Automated target analysis using various input file types
-- Integration with robin's workflow system
-- Sample-specific output directories
-- Comprehensive metadata extraction and logging
-- Error handling and result tracking
-- State persistence and incremental processing
-
-Classes
--------
-TargetMetadata
-    Container for target analysis metadata and results.
-
-TargetAnalysis
-    Main analysis class that processes files for target analysis.
-
-Dependencies
------------
-- pandas: Data manipulation and analysis
-- numpy: Numerical computations
-- logging: Logging for debugging and monitoring
-- typing: Type hints
-- tempfile: Temporary file creation
-- pathlib: File system paths
-- os: Operating system interface
-- time: Time utilities
-- json: JSON serialization
-- pickle: Python object serialization
-- gc: Garbage collection
-- pysam: BAM file processing
-- asyncio: Asynchronous processing support
-- subprocess: External command execution
-
-Example Usage
------------
-.. code-block:: python
-
-    from robin.analysis.target_analysis import TargetAnalysis
-
-    # Initialize analysis
-    target_analysis = TargetAnalysis(
-        work_dir="output/",
-        config_path="target_config.json"
-    )
-
-    # Process files
-    target_analysis.process_file("sample.bam")
-
-Notes
------
-The module follows the robin framework patterns for:
-- Integration with workflow system
-- Worker process management
-- State tracking and persistence
-- Error handling and logging
-- Output generation and file management
-
-Authors
--------
-Matt Loose
+Classes: TargetMetadata, TargetAnalysis.
 """
+
+from __future__ import annotations
+
+import sys
+if sys.version_info < (3, 12):
+    raise RuntimeError("robin target_analysis requires Python 3.12 or newer")
 
 import os
 import tempfile
@@ -111,18 +57,20 @@ def is_docker_available_for_snp_analysis() -> tuple[bool, str]:
 
 
 def json_serializable(obj):
-    """Convert numpy types to JSON serializable types."""
-    if isinstance(obj, np.integer):
-        return int(obj)
-    elif isinstance(obj, np.floating):
-        return float(obj)
-    elif isinstance(obj, np.ndarray):
-        return obj.tolist()
-    elif isinstance(obj, pd.Series):
-        return obj.tolist()
-    elif isinstance(obj, pd.DataFrame):
-        return obj.to_dict("records")
-    return obj
+    """Convert numpy/pandas types to JSON-serializable (3.12: type patterns)."""
+    match obj:
+        case int():
+            return int(obj)
+        case float():
+            return float(obj)
+        case _ if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        case _ if isinstance(obj, pd.Series):
+            return obj.tolist()
+        case _ if isinstance(obj, pd.DataFrame):
+            return obj.to_dict("records")
+        case _:
+            return obj
 
 
 class FileLock:
@@ -606,9 +554,9 @@ def run_bedmerge(newcovdf, cov_df_main, bedcovdf, bedcov_df_main):
     return merged_df, merged_bed_df
 
 
-@dataclass
+@dataclass(slots=True)
 class TargetMetadata:
-    """Container for target analysis metadata and results"""
+    """Container for target analysis metadata and results."""
 
     sample_id: str
     file_path: str
@@ -1535,20 +1483,19 @@ class TargetAnalysis:
             ]
             results["summary_stats"]["significant_targets"] = len(significant_targets)
 
-            # Add target analysis results
-            for idx, row in bedcovdf.iterrows():
-                target_info = {
+            # Add target analysis results (list comp inlined in 3.12)
+            max_bases = bedcovdf["bases"].max()
+            results["targets_analyzed"] = [
+                {
                     "target_id": row.get("name", f"target_{idx+1:03d}"),
                     "position": f"{row['chrom']}:{row['startpos']}-{row['endpos']}",
                     "coverage": row["bases"],
                     "significance": (
-                        "high"
-                        if row["bases"]
-                        > significant_threshold * bedcovdf["bases"].max()
-                        else "medium"
+                        "high" if row["bases"] > significant_threshold * max_bases else "medium"
                     ),
                 }
-                results["targets_analyzed"].append(target_info)
+                for idx, row in bedcovdf.iterrows()
+            ]
 
             # Calculate average score
             if results["targets_analyzed"]:
@@ -2446,24 +2393,13 @@ def target_handler(job, work_dir=None, reference=None, target_panel=None):
         for i, filepath in enumerate(filepaths):
             logger.info(f"  Batch file {i+1}/{batch_size}: {os.path.basename(filepath)}")
         
-        # Prepare metadata list for all BAM files in the batch
-        metadata_list = []
-        for i, bam_path in enumerate(filepaths):
-            # Get metadata from preprocessing for this specific file
-            file_metadata = batched_job.contexts[i].metadata.get("bam_metadata", {})
-            
-            # Get sample ID from preprocessing results for this specific file
-            file_context = batched_job.contexts[i]
-            file_sample_id = file_context.get_sample_id()
-            
-            # Use the sample ID from the file's context (which should have preprocessing results)
-            if file_sample_id != "unknown":
-                file_metadata["sample_id"] = file_sample_id
-            else:
-                file_metadata["sample_id"] = sample_id
-            
-            metadata_list.append(file_metadata)
-        
+        # Prepare metadata list for all BAM files in the batch (list comp inlined in 3.12)
+        def _batch_metadata(i: int) -> dict:
+            ctx = batched_job.contexts[i]
+            sid = ctx.get_sample_id()
+            return {**ctx.metadata.get("bam_metadata", {}), "sample_id": sid if sid != "unknown" else sample_id}
+        metadata_list = [_batch_metadata(i) for i in range(len(filepaths))]
+
         # Determine work directory for the batch
         if work_dir is None:
             # Default to first BAM file directory

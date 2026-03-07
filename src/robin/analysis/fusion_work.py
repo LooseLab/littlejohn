@@ -1,18 +1,20 @@
 """
 Fusion detection and processing module for BAM files.
 
-This module provides functionality to detect gene fusions from BAM files by analyzing
-supplementary alignments and identifying reads that map to multiple gene regions.
+Requires Python 3.12+ (PEP 709 inlined comprehensions, slots=True dataclasses,
+faster interpreter). Detects gene fusions from BAM supplementary alignments.
 
-IMPORTANT: This module uses centralized configuration from classification_config.py:
+IMPORTANT: Uses centralized configuration from classification_config.py:
 1. Only processes reads with supplementary alignments (SA tag)
 2. Filters out reads where the same genomic alignment is annotated with multiple overlapping genes
-3. This prevents false positives from mapping artifacts where the same genomic region is annotated with multiple overlapping genes
-4. True fusions require reads to map to multiple genomic locations (supplementary alignments)
-5. Fusions must be supported by a configurable minimum number of reads (default: 3) to ensure reliability and reduce false positives
-
-All thresholds and rules are centrally managed in classification_config.py for consistency across the application.
+3. True fusions require reads to map to multiple genomic locations
+4. Fusions must be supported by a configurable minimum number of reads (default: 3)
 """
+from __future__ import annotations
+
+import sys
+if sys.version_info < (3, 12):
+    raise RuntimeError("robin fusion_work requires Python 3.12 or newer")
 
 # Standard library imports
 import os
@@ -60,9 +62,9 @@ DEBUG_MASTER_BED_INCREMENTAL = os.getenv("ROBIN_DEBUG_MASTER_BED_INCREMENTAL", "
 
 
 
-@dataclass
+@dataclass(slots=True)
 class FusionMetadata:
-    """Container for fusion analysis metadata and results"""
+    """Container for fusion analysis metadata and results."""
 
     sample_id: str
     file_path: str
@@ -107,7 +109,7 @@ def get_summary(df: pd.DataFrame, min_support: int = 2) -> pd.DataFrame:
 # =============================================================================
 
 
-@dataclass
+@dataclass(slots=True)
 class GeneRegion:
     """Represents a gene region with start, end, and name."""
 
@@ -128,7 +130,7 @@ class GeneRegion:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class TaggedGeneRegion:
     """Represents a gene region with a classification tag."""
 
@@ -138,11 +140,9 @@ class TaggedGeneRegion:
     region_type: str  # "target" or "genome"
 
 
-@dataclass
+@dataclass(slots=True)
 class MasterBedRegion:
-    """Represents a region from the master BED file (breakpoints, CNV regions, etc.).
-    Simpler than GeneRegion - just tracks coordinates without gene names.
-    """
+    """Region from the master BED file (breakpoints, CNV). Coordinates only, no gene names."""
 
     start: int
     end: int
@@ -246,14 +246,11 @@ def _build_tagged_ncls_index(
 
 
 def _rows_to_dataframe(rows: List[Dict[str, Any]]) -> pd.DataFrame:
-    """Build a DataFrame from row dicts using columnar storage."""
+    """Build a DataFrame from row dicts using columnar storage (comprehension inlined in 3.12)."""
     if not rows:
         return pd.DataFrame()
     columns = list(rows[0].keys())
-    data = {column: [] for column in columns}
-    for row in rows:
-        for column in columns:
-            data[column].append(row.get(column))
+    data = {col: [row.get(col) for row in rows] for col in columns}
     return pd.DataFrame(data)
 
 
@@ -1822,38 +1819,31 @@ def process_bam_single_pass(
         
         logger.info(f"Found {reads_with_supplementary_count} reads with supplementary alignments")
         
-        # Process target panel candidates
+        # Process target panel candidates (comprehension inlined in 3.12 for speed)
         target_candidates = None
         if target_read_alignments:
-            # Filter out reads with overlapping alignments and apply quality thresholds early
-            # This reduces memory usage by filtering before DataFrame creation (min_mq/min_span from above)
-            filtered_target_rows = []
-            for read_id, alignments in target_read_alignments.items():
-                if not _check_read_alignments_overlap(alignments):
-                    # Apply quality filters early (before DataFrame creation)
-                    for align in alignments:
-                        if (align.get("mapping_quality", 0) > min_mq and 
-                            align.get("mapping_span", 0) > min_span):
-                            filtered_target_rows.append(align)
-            
+            filtered_target_rows = [
+                align
+                for _rid, alignments in target_read_alignments.items()
+                if not _check_read_alignments_overlap(alignments)
+                for align in alignments
+                if align.get("mapping_quality", 0) > min_mq and align.get("mapping_span", 0) > min_span
+            ]
             if filtered_target_rows:
                 target_df = pd.DataFrame(filtered_target_rows)
                 target_df = _optimize_fusion_dataframe(target_df)
                 target_candidates = target_df if not target_df.empty else None
         
-        # Process genome-wide candidates
+        # Process genome-wide candidates (comprehension inlined in 3.12 for speed)
         genome_wide_candidates = None
         if genome_read_alignments:
-            # Filter out reads with overlapping alignments and apply quality thresholds early (min_mq/min_span from above)
-            filtered_genome_rows = []
-            for read_id, alignments in genome_read_alignments.items():
-                if not _check_read_alignments_overlap(alignments):
-                    # Apply quality filters early (before DataFrame creation)
-                    for align in alignments:
-                        if (align.get("mapping_quality", 0) > min_mq and 
-                            align.get("mapping_span", 0) > min_span):
-                            filtered_genome_rows.append(align)
-            
+            filtered_genome_rows = [
+                align
+                for _rid, alignments in genome_read_alignments.items()
+                if not _check_read_alignments_overlap(alignments)
+                for align in alignments
+                if align.get("mapping_quality", 0) > min_mq and align.get("mapping_span", 0) > min_span
+            ]
             if filtered_genome_rows:
                 genome_df = pd.DataFrame(filtered_genome_rows)
                 genome_df = _optimize_fusion_dataframe(genome_df)

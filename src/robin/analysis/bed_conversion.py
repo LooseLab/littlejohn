@@ -2,17 +2,14 @@
 """
 BAM to parquet file conversion module for robin.
 
-This module provides automated conversion of BAM files to parquet format using
-matkit from the robin package. The analysis integrates with robin's
-preprocessing pipeline and provides comprehensive metadata output.
-
-Features:
-- Automated BAM processing with robin's preprocessing pipeline
-- BAM to parquet conversion using matkit from robin package
-- Parquet file management for incremental processing
-- Integration with CPG master file for methylation analysis
-- Comprehensive metadata extraction and logging
+Requires Python 3.12+. Automated conversion of BAM files to parquet using
+matkit; integrates with robin's preprocessing pipeline and CPG master file.
 """
+from __future__ import annotations
+
+import sys
+if sys.version_info < (3, 12):
+    raise RuntimeError("robin bed_conversion requires Python 3.12 or newer")
 
 import os
 import time
@@ -45,9 +42,9 @@ _LOGGER = logging.getLogger("robin.analysis.bed_conversion")
 _CPGS_MASTER_FILE_CACHE: Optional[str] = None
 
 
-@dataclass
+@dataclass(slots=True)
 class BedConversionMetadata:
-    """Container for BAM to parquet conversion metadata and results"""
+    """Container for BAM to parquet conversion metadata and results."""
 
     sample_id: str
     bam_path: str
@@ -197,7 +194,7 @@ class BedConversionAnalysis:
         def process_single_bam(bam: str) -> str:
             logger.debug(f"Processing BAM file: {bam}")
 
-            # Create temporary file for matkit output - exactly like the working code
+            # Create temporary file for matkit output (BEDMethyl text; merge reads this via CSV path)
             temp_file = tempfile.NamedTemporaryFile(
                 mode="w", suffix=".txt", prefix="modkit_", dir=work_dir, delete=False
             )
@@ -226,15 +223,18 @@ class BedConversionAnalysis:
                 raise
 
         if threads == 1 or len(bams) <= 1:
-            for bam in bams:
-                processed_files.append(process_single_bam(bam))
-            return processed_files
+            return [process_single_bam(bam) for bam in bams]
 
+        # Parallel path: tolerate per-file failures so one bad BAM does not fail the batch
         try:
             with ThreadPoolExecutor(max_workers=threads) as executor:
                 futures = {executor.submit(process_single_bam, bam): bam for bam in bams}
                 for future in as_completed(futures):
-                    processed_files.append(future.result())
+                    try:
+                        processed_files.append(future.result())
+                    except Exception as e:
+                        bam_path = futures[future]
+                        logger.warning(f"Failed to process BAM {os.path.basename(bam_path)}: {e}")
             return processed_files
         except Exception:
             cleanup_temp_files(processed_files)
@@ -355,34 +355,19 @@ def process_multiple_files(bam_paths, metadata_list, work_dir, logger, threads=4
         logger.info("Initialized bed conversion analyzer")
         analysis_result["processing_steps"].append("analyzer_initialized")
 
-        # Process each BAM file individually
-        logger.info("Processing BAM files individually")
-        processed_files = 0
-        all_processed_data = []
-        
-        for i, (bam_path, metadata) in enumerate(zip(bam_paths, metadata_list)):
-            logger.debug(
-                f"Processing BAM file {i+1}/{len(bam_paths)}: {os.path.basename(bam_path)}"
-            )
-            
-            try:
-                # Check if BAM file exists
-                if not os.path.exists(bam_path):
-                    logger.warning(f"BAM file not found: {bam_path}")
-                    continue
-                
-                # Process the BAM file using matkit
-                processed_data = bed_analyzer._process_bams([bam_path], sample_dir)
-                
-                if processed_data:
-                    all_processed_data.extend(processed_data)
-                    processed_files += 1
-                else:
-                    logger.warning(f"No data generated for {os.path.basename(bam_path)}")
-                
-            except Exception as e:
-                logger.warning(f"Error processing {os.path.basename(bam_path)}: {e}")
-                continue
+        # Process all BAMs in one call so _process_bams can run them in parallel (threads)
+        valid_bam_paths = [p for p in bam_paths if os.path.exists(p)]
+        for p in bam_paths:
+            if not os.path.exists(p):
+                logger.warning(f"BAM file not found: {p}")
+        if not valid_bam_paths:
+            analysis_result["error_message"] = "No BAM files found or all paths missing"
+            analysis_result["processing_steps"].append("no_files_processed")
+            return analysis_result
+
+        logger.info(f"Processing {len(valid_bam_paths)} BAM files (up to {bed_analyzer.threads} in parallel)")
+        all_processed_data = bed_analyzer._process_bams(valid_bam_paths, sample_dir)
+        processed_files = len(all_processed_data)
 
         if processed_files == 0:
             analysis_result["error_message"] = "No files could be processed successfully"
@@ -467,24 +452,13 @@ def bed_conversion_handler(job, work_dir=None):
             for i, filepath in enumerate(filepaths):
                 logger.info(f"  Batch file {i+1}/{batch_size}: {os.path.basename(filepath)}")
             
-            # Prepare metadata list for all BAM files in the batch
-            metadata_list = []
-            for i, bam_path in enumerate(filepaths):
-                # Get metadata from preprocessing for this specific file
-                file_metadata = batched_job.contexts[i].metadata.get("bam_metadata", {})
-                
-                # Get sample ID from preprocessing results for this specific file
-                file_context = batched_job.contexts[i]
-                file_sample_id = file_context.get_sample_id()
-                
-                # Use the sample ID from the file's context (which should have preprocessing results)
-                if file_sample_id != "unknown":
-                    file_metadata["sample_id"] = file_sample_id
-                else:
-                    file_metadata["sample_id"] = sample_id
-                
-                metadata_list.append(file_metadata)
-            
+            # Prepare metadata list for all BAM files in the batch (list comp inlined in 3.12)
+            def _batch_metadata(i: int) -> dict:
+                ctx = batched_job.contexts[i]
+                sid = ctx.get_sample_id()
+                return {**ctx.metadata.get("bam_metadata", {}), "sample_id": sid if sid != "unknown" else sample_id}
+            metadata_list = [_batch_metadata(i) for i in range(len(filepaths))]
+
             # Determine work directory for the batch
             if work_dir is None:
                 # Default to first BAM file directory

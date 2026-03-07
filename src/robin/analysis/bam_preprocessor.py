@@ -1,11 +1,19 @@
-"""BAM file preprocessing and metadata extraction for robin."""
+"""BAM file preprocessing and metadata extraction for robin.
+
+Requires Python 3.12+ (slots=True, str.removeprefix, PEP 709 comprehensions).
+"""
+from __future__ import annotations
 
 import os
+import sys
 import time
 import re
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List, Tuple
 from pathlib import Path
+
+if sys.version_info < (3, 12):
+    raise RuntimeError("robin bam_preprocessor requires Python 3.12 or newer")
 
 import pysam
 from dateutil import parser
@@ -52,9 +60,9 @@ _MGMT_END = 129467536
 # ============================================================================
 
 
-@dataclass
+@dataclass(slots=True)
 class BamMetadata:
-    """Container for BAM file metadata and extracted data"""
+    """Container for BAM file metadata and extracted data."""
 
     file_path: str
     file_size: int
@@ -104,9 +112,9 @@ def get_rg_tags_from_bam(sam_file) -> Optional[Tuple[Optional[str], ...]]:
         ds_tags = ds_tag.split(" ")
         ds_tags_len = len(ds_tags)
         basecall_model_tag = (
-            ds_tags[1].replace(_BASECALL_MODEL_PREFIX, "") if ds_tags_len > 1 else None
+            ds_tags[1].removeprefix(_BASECALL_MODEL_PREFIX) if ds_tags_len > 1 else None
         )
-        runid_tag = ds_tags[0].replace(_RUNID_PREFIX, "") if ds_tags else None
+        runid_tag = ds_tags[0].removeprefix(_RUNID_PREFIX) if ds_tags else None
     else:
         basecall_model_tag = None
         runid_tag = None
@@ -153,7 +161,7 @@ def _extract_sample_id_from_bam(bam_path: str) -> str:
                 if ds_tag:
                     ds_tags = ds_tag.split(" ")
                     if ds_tags and ds_tags[0].startswith(_RUNID_PREFIX):
-                        runid = ds_tags[0].replace(_RUNID_PREFIX, "")
+                        runid = ds_tags[0].removeprefix(_RUNID_PREFIX)
                         if runid:
                             return runid
 
@@ -806,9 +814,8 @@ def bam_preprocessing_handler(job, center: str = None):
             try:
                 csv_manager = MasterCSVManager(work_dir)
 
-                # Extract BAM statistics for CSV update
-                bam_stats = {}
-                for key in [
+                # Extract BAM statistics for CSV update (dict comp inlined in 3.12)
+                _bam_stat_keys = (
                     "mapped_reads",
                     "unmapped_reads",
                     "yield_tracking",
@@ -828,8 +835,8 @@ def bam_preprocessing_handler(job, center: str = None):
                     "reads_with_supplementary",
                     "has_mgmt_reads",
                     "mgmt_read_count",
-                ]:
-                    bam_stats[key] = metadata.extracted_data.get(key, 0)
+                )
+                bam_stats = {key: metadata.extracted_data.get(key, 0) for key in _bam_stat_keys}
 
                 # Update master.csv
                 csv_manager.update_master_csv(

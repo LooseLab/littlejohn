@@ -1,4 +1,13 @@
+"""
+Modkit/matkit utilities for BAM methylation. Requires Python 3.12+.
+"""
+from __future__ import annotations
+
 import warnings
+import sys
+if sys.version_info < (3, 12):
+    raise RuntimeError("robin matkit utilities require Python 3.12 or newer")
+
 from typing import List, Optional
 import gc
 import os
@@ -10,8 +19,8 @@ from datetime import datetime
 from pathlib import Path
 import pandas as pd
 import polars as pl
-
-
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 import pyranges as pr
 import pysam
@@ -30,6 +39,73 @@ warnings.filterwarnings(
 warnings.filterwarnings(
     "ignore", message="The figure layout has changed to tight", category=UserWarning
 )
+
+# Schema for optimized parquet: only these columns are read/written in the merge path
+ESSENTIAL_COLS = [
+    "chrom",
+    "chromStart",
+    "mod_code",
+    "strand",
+    "valid_cov",
+    "percent_modified",
+    "n_mod",
+    "n_canonical",
+]
+
+# Per-BAM parquet schema: string columns stored as binary to avoid UTF-8 validation on read
+_PARQUET_STR_COLS = ("chrom", "mod_code", "strand")
+PARQUET_SCHEMA_BINARY = pa.schema([
+    ("chrom", pa.binary()),
+    ("chromStart", pa.int64()),
+    ("mod_code", pa.binary()),
+    ("strand", pa.binary()),
+    ("valid_cov", pa.uint32()),
+    ("percent_modified", pa.float32()),
+    ("n_mod", pa.uint32()),
+    ("n_canonical", pa.uint32()),
+])
+
+
+def _decode_binary_columns(table: pa.Table) -> pa.Table:
+    """Decode binary columns (chrom, mod_code, strand) to UTF-8 string with errors='replace'."""
+    arrays = []
+    schema_fields = []
+    for i, name in enumerate(table.column_names):
+        col = table.column(i)
+        if name in _PARQUET_STR_COLS and (
+            pa.types.is_binary(col.type) or pa.types.is_large_binary(col.type)
+        ):
+            str_vals = [
+                (b.decode("utf-8", errors="replace") if b is not None else None)
+                for b in col
+            ]
+            arrays.append(pa.array(str_vals, type=pa.string()))
+            schema_fields.append(pa.field(name, pa.string()))
+        else:
+            arrays.append(col)
+            schema_fields.append(pa.field(name, col.type))
+    return pa.Table.from_arrays(arrays, schema=pa.schema(schema_fields))
+
+
+def _read_parquet_robust(path: str, columns: list[str]):
+    """
+    Read per-BAM parquet (essential columns only). String columns may be stored
+    as binary; they are decoded to str with errors='replace'. If the file has
+    invalid UTF-8 in string columns (legacy writer), use fixed binary schema so
+    no decode runs inside the reader.
+    """
+    try:
+        pl_df = pl.read_parquet(path, columns=columns)
+        table = pl_df.to_arrow()
+        table = _decode_binary_columns(table)
+        return pl.from_arrow(table)
+    except Exception as e:
+        err_msg = str(e).lower()
+        if "utf-8" not in err_msg and "utf8" not in err_msg and "decode" not in err_msg:
+            raise
+        table = pq.read_table(path, schema=PARQUET_SCHEMA_BINARY)
+        table = _decode_binary_columns(table)
+        return pl.from_arrow(table)
 
 
 def _ensure_fasta_index(ref_fasta: str) -> None:
@@ -124,17 +200,8 @@ def merge_modkit_files(
     sample_output_dir = os.path.join(output_dir, sample_id)
     os.makedirs(sample_output_dir, exist_ok=True)
 
-    # Define optimized schema with only essential columns
-    essential_cols = [
-        "chrom",
-        "chromStart",
-        "mod_code",
-        "strand",
-        "valid_cov",
-        "percent_modified",
-        "n_mod",
-        "n_canonical",
-    ]
+    # Use module-level schema so per-BAM parquet and merge path stay in sync
+    essential_cols = ESSENTIAL_COLS
 
     categorical_cols = ["chrom", "mod_code", "strand"]
     unsigned_int_cols = ["chromStart", "valid_cov", "n_mod", "n_canonical"]
@@ -151,7 +218,7 @@ def merge_modkit_files(
         if os.path.exists(existing_file):
             try:
                 # Read existing metadata
-                metadata_file = existing_file.replace(".parquet", "_metadata.json")
+                metadata_file = existing_file.removesuffix(".parquet") + "_metadata.json"
                 if os.path.exists(metadata_file):
                     with open(metadata_file, "r") as f:
                         metadata = json.load(f)
@@ -170,8 +237,9 @@ def merge_modkit_files(
             f"Total cumulative BAM files contributing to parquet: {cumulative_bam_file_count} (added {num_bam_files_seen} new files)"
         )
 
-        # Cache or build PyRanges filter with improved caching
-        # Use distinct cache for .txt (1-based converted) vs .gz (0-based) to avoid stale data
+        # Cache or build PyRanges filter. Key is (sample_output_dir, basename(filter_bed_file), suffix);
+        # use a stable filter_bed_file path so the cache is hit on subsequent runs.
+        # Use distinct cache for .txt (1-based converted) vs .gz (0-based) to avoid stale data.
         cache_suffix = "_1based" if filter_bed_file.endswith(".txt") else ""
         cache_path = os.path.join(
             sample_output_dir,
@@ -191,15 +259,9 @@ def merge_modkit_files(
                     header=0,
                     dtype=str,
                 )
-                # Map to expected column names (handle chr/start/end)
-                rename = {}
-                for c in bed_df.columns:
-                    if c.lower() == "chr":
-                        rename[c] = "Chromosome"
-                    elif c.lower() == "start":
-                        rename[c] = "Start"
-                    elif c.lower() == "end":
-                        rename[c] = "End"
+                # Map to expected column names (handle chr/start/end) – dict comp inlined in 3.12
+                col_map = {"chr": "Chromosome", "start": "Start", "end": "End"}
+                rename = {c: col_map[c.lower()] for c in bed_df.columns if c.lower() in col_map}
                 bed_df = bed_df.rename(columns=rename)
                 bed_df["Start"] = bed_df["Start"].astype(int) - 1  # 1-based -> 0-based
                 bed_df["End"] = bed_df["End"].astype(int)  # 1-based end inclusive -> 0-based exclusive
@@ -220,47 +282,42 @@ def merge_modkit_files(
         new_frames = []
         for bed in new_files:
             try:
-                # Read with pandas first to handle regex separator
-                # Read all 18 columns from the input file
-                full_cols = [
-                    "chrom",
-                    "chromStart",
-                    "chromEnd",
-                    "mod_code",
-                    "score_bed",
-                    "strand",
-                    "thickStart",
-                    "thickEnd",
-                    "color",
-                    "valid_cov",
-                    "percent_modified",
-                    "n_mod",
-                    "n_canonical",
-                    "n_othermod",
-                    "n_delete",
-                    "n_fail",
-                    "n_diff",
-                    "n_nocall",
-                ]
-
-                df = pd.read_csv(
-                    bed,
-                    sep=r"\s+",
-                    header=None,
-                    names=full_cols,
-                    dtype={c: str for c in ["chrom", "mod_code", "strand", "color"]},
-                )
-
-                # Validate required columns
-                missing_cols = set(full_cols) - set(df.columns)
-                if missing_cols:
-                    raise ValueError(f"Missing required columns: {missing_cols}")
-
-                # Extract only essential columns for processing
-                df_essential = df[essential_cols].copy()
-
-                # Convert to Polars for efficient processing
-                pl_df = pl.from_pandas(df_essential)
+                if bed.endswith(".parquet"):
+                    # Per-BAM parquet: load only essential columns (same schema as write_counts_to_parquet)
+                    pl_df = _read_parquet_robust(bed, essential_cols)
+                else:
+                    # Legacy BEDMethyl text: read full columns then keep only essential
+                    full_cols = [
+                        "chrom",
+                        "chromStart",
+                        "chromEnd",
+                        "mod_code",
+                        "score_bed",
+                        "strand",
+                        "thickStart",
+                        "thickEnd",
+                        "color",
+                        "valid_cov",
+                        "percent_modified",
+                        "n_mod",
+                        "n_canonical",
+                        "n_othermod",
+                        "n_delete",
+                        "n_fail",
+                        "n_diff",
+                        "n_nocall",
+                    ]
+                    df = pd.read_csv(
+                        bed,
+                        sep=r"\s+",
+                        header=None,
+                        names=full_cols,
+                        dtype={c: str for c in ["chrom", "mod_code", "strand", "color"]},
+                    )
+                    missing_cols = set(full_cols) - set(df.columns)
+                    if missing_cols:
+                        raise ValueError(f"Missing required columns: {missing_cols}")
+                    pl_df = pl.from_pandas(df[essential_cols].copy())
 
                 # Convert numeric columns with proper error handling
                 for c in unsigned_int_cols:
@@ -269,15 +326,13 @@ def merge_modkit_files(
                     pl_df = pl_df.with_columns(pl.col(c).cast(pl.Float32, strict=False))
 
                 # Filter using PyRanges
-                # Rename columns using Polars syntax
                 pr_df = pl_df.rename({"chrom": "Chromosome", "chromStart": "Start"})
-                # Add chromEnd for filtering (calculate from chromStart)
                 pr_df = pr_df.with_columns((pl.col("Start") + 1).alias("End"))
 
-                # Convert to pandas for PyRanges
                 pr_df_pandas = pr_df.to_pandas()
                 gr = pr.PyRanges(pr_df_pandas[["Chromosome", "Start", "End"]])
                 inter = gr.intersect(filter_ranges).df
+                pl_df_pandas = pl_df.to_pandas()
                 filt = pd.merge(
                     inter.rename(
                         columns={
@@ -285,13 +340,13 @@ def merge_modkit_files(
                             "Start": "chromStart",
                         }
                     ),
-                    pl_df.to_pandas(),
+                    pl_df_pandas,
                     on=["chrom", "chromStart"],
                     how="inner",
                 )
                 new_frames.append(filt)
             except Exception as e:
-                logging.error(f"Error processing file {bed}: {str(e)}")
+                logging.error(f"Error processing file {bed}: {e}")
                 continue
 
         if not new_frames:
@@ -317,7 +372,7 @@ def merge_modkit_files(
                 "files_added_in_this_update": num_bam_files_seen,
                 "column_format": "optimized",  # Mark as optimized format
             }
-            metadata_file = output_file.replace(".parquet", "_metadata.json")
+            metadata_file = output_file.removesuffix(".parquet") + "_metadata.json"
             with open(metadata_file, "w") as f:
                 json.dump(metadata, f, indent=2)
 
@@ -387,7 +442,7 @@ def merge_modkit_files(
             "files_added_in_this_update": num_bam_files_seen,
             "column_format": "optimized",  # Mark as optimized format
         }
-        metadata_file = output_file.replace(".parquet", "_metadata.json")
+        metadata_file = output_file.removesuffix(".parquet") + "_metadata.json"
         with open(metadata_file, "w") as f:
             json.dump(metadata, f, indent=2)
 
@@ -691,8 +746,11 @@ def run_matkit(sortfile: str, temp: str) -> None:
         ref_fasta=None,
     )
 
-    # Write output to BEDMethyl format
-    write_bedmethyl_improved(temp, counts, debug_probs=False)
+    # Write parquet (same schema as merge path) or BEDMethyl text
+    if temp.endswith(".parquet"):
+        write_counts_to_parquet(counts, temp)
+    else:
+        write_bedmethyl_improved(temp, counts, debug_probs=False)
     # Clear memory
     del counts
     del debug_data
@@ -995,6 +1053,74 @@ def write_bedmethyl_improved(output_path, counts, debug_probs=False):
             out.write("\t".join(fields) + "\n")
 
 
+def _ensure_utf8(s: str | bytes) -> str:
+    """Ensure value is a valid UTF-8 str for parquet string columns (avoids decode errors on read)."""
+    if isinstance(s, bytes):
+        return s.decode("utf-8", errors="replace")
+    if isinstance(s, str):
+        return s.encode("utf-8", errors="replace").decode("utf-8")
+    return str(s)
+
+
+def write_counts_to_parquet(counts: dict, output_path: str) -> None:
+    """
+    Write methylation counts to parquet with the essential 8-column schema.
+    String columns (chrom, mod_code, strand) are stored as binary so readers
+    never trigger UTF-8 validation; downstream decode with errors='replace'.
+    """
+    if not counts:
+        pq.write_table(
+            pa.table(
+                {
+                    "chrom": pa.array([], type=pa.binary()),
+                    "chromStart": pa.array([], type=pa.int64()),
+                    "mod_code": pa.array([], type=pa.binary()),
+                    "strand": pa.array([], type=pa.binary()),
+                    "valid_cov": pa.array([], type=pa.uint32()),
+                    "percent_modified": pa.array([], type=pa.float32()),
+                    "n_mod": pa.array([], type=pa.uint32()),
+                    "n_canonical": pa.array([], type=pa.uint32()),
+                },
+                schema=PARQUET_SCHEMA_BINARY,
+            ),
+            output_path,
+        )
+        return
+    chrom_b = []
+    chrom_start = []
+    mod_code_b = []
+    strand_b = []
+    valid_cov = []
+    percent_modified = []
+    n_mod = []
+    n_canonical = []
+    for (chrom, pos, strand, mod_code), c in counts.items():
+        total = c["total"]
+        pct = (c["mod"] / total) * 100.0 if total else 0.0
+        chrom_b.append(_ensure_utf8(chrom).encode("utf-8"))
+        chrom_start.append(pos)
+        mod_code_b.append(_ensure_utf8(mod_code).encode("utf-8"))
+        strand_b.append(_ensure_utf8(strand).encode("utf-8"))
+        valid_cov.append(total)
+        percent_modified.append(round(pct, 2))
+        n_mod.append(c["mod"])
+        n_canonical.append(c["canonical"])
+    table = pa.table(
+        {
+            "chrom": pa.array(chrom_b, type=pa.binary()),
+            "chromStart": pa.array(chrom_start, type=pa.int64()),
+            "mod_code": pa.array(mod_code_b, type=pa.binary()),
+            "strand": pa.array(strand_b, type=pa.binary()),
+            "valid_cov": pa.array(valid_cov, type=pa.uint32()),
+            "percent_modified": pa.array(percent_modified, type=pa.float32()),
+            "n_mod": pa.array(n_mod, type=pa.uint32()),
+            "n_canonical": pa.array(n_canonical, type=pa.uint32()),
+        },
+        schema=PARQUET_SCHEMA_BINARY,
+    )
+    pq.write_table(table, output_path)
+
+
 def process_bam_counts_improved(
     bam_path,
     threshold=0.7,
@@ -1295,14 +1421,12 @@ def process_bam_counts_improved(
     if ref_fasta_obj:
         ref_fasta_obj.close()
 
-    # Filter counts to only include sites that match modkit's filtering logic
-    # and have at least one passing call (Nmod > 0 or Ncanonical > 0)
-    filtered_counts = {}
-    for site_key, c in counts.items():
-        chrom, pos, strand, mod_code = site_key
-        # modkit outputs only positions with at least one passing call
-        if site_key in mod_sites and (c["mod"] > 0 or c["canonical"] > 0):
-            filtered_counts[site_key] = c
+    # Filter counts to only include sites that match modkit's filtering logic (comp inlined in 3.12)
+    filtered_counts = {
+        site_key: c
+        for site_key, c in counts.items()
+        if site_key in mod_sites and (c["mod"] > 0 or c["canonical"] > 0)
+    }
 
     # Force garbage collection to free memory
     gc.collect()
@@ -1321,7 +1445,7 @@ def get_bam_file_count(parquet_file_path: str) -> int:
         int: Cumulative number of BAM files that have contributed to the parquet file
     """
     try:
-        metadata_file = parquet_file_path.replace(".parquet", "_metadata.json")
+        metadata_file = parquet_file_path.removesuffix(".parquet") + "_metadata.json"
         if os.path.exists(metadata_file):
             with open(metadata_file, "r") as f:
                 metadata = json.load(f)
@@ -1345,7 +1469,7 @@ def get_parquet_metadata(parquet_file_path: str) -> dict:
         dict: Dictionary containing metadata (bam_file_count, last_updated, sample_id, files_added_in_this_update)
     """
     try:
-        metadata_file = parquet_file_path.replace(".parquet", "_metadata.json")
+        metadata_file = parquet_file_path.removesuffix(".parquet") + "_metadata.json"
         if os.path.exists(metadata_file):
             with open(metadata_file, "r") as f:
                 return json.load(f)
@@ -1376,5 +1500,5 @@ def get_bam_file_history(parquet_file_path: str) -> dict:
         "last_update": metadata.get("last_updated", "Unknown"),
         "sample_id": metadata.get("sample_id", "Unknown"),
         "files_in_last_update": metadata.get("files_added_in_this_update", 0),
-        "metadata_file": parquet_file_path.replace(".parquet", "_metadata.json"),
+        "metadata_file": parquet_file_path.removesuffix(".parquet") + "_metadata.json",
     }
