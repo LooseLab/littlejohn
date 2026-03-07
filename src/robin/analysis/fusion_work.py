@@ -158,6 +158,10 @@ class MasterBedRegion:
 # =============================================================================
 # MODULE-LEVEL CACHES
 # =============================================================================
+# These caches are keyed only by target_panel (and "shared" for genome-wide BED).
+# They hold BED/gene region data, not sample-specific fusion results. When switching
+# to a new sample, no previous sample's fusion data is retained; per-sample state
+# is always keyed by (work_dir, sample_id) in file paths and FusionMetadata.
 
 # Module-level caches for gene regions (shared across all function calls)
 _gene_regions_cache: Dict[str, Dict[str, List[GeneRegion]]] = {}
@@ -343,6 +347,7 @@ def _append_gene_intersections(
     data: Dict[str, List[Any]],
     region_starts: Optional[List[int]] = None,
     region_index: Optional[Tuple["NCLS", List[GeneRegion]]] = None,
+    min_overlap: Optional[int] = None,
 ) -> int:
     """Append gene intersections for a read into columnar storage."""
     if not read.has_tag("SA"):
@@ -351,7 +356,8 @@ def _append_gene_intersections(
         return 0
 
     added = 0
-    min_overlap = get_fusion_threshold("gene_overlap")
+    if min_overlap is None:
+        min_overlap = get_fusion_threshold("gene_overlap")
     if region_index and _HAS_NCLS:
         ncls_index, indexed_regions = region_index
         for _, _, region_id in ncls_index.find_overlap(ref_start, ref_end):
@@ -407,12 +413,14 @@ def _append_combined_gene_intersections(
     target_read_alignments: Dict[str, List[Dict[str, Any]]],
     genome_read_alignments: Dict[str, List[Dict[str, Any]]],
     read_id: str,
+    min_overlap: Optional[int] = None,
 ) -> None:
     """Append overlaps from a combined tagged index into target/genome buckets."""
     if not read.has_tag("SA"):
         return
 
-    min_overlap = get_fusion_threshold("gene_overlap")
+    if min_overlap is None:
+        min_overlap = get_fusion_threshold("gene_overlap")
     ncls_index, tagged_regions = combined_index
     for _, _, region_id in ncls_index.find_overlap(ref_start, ref_end):
         region = tagged_regions[region_id]
@@ -608,13 +616,13 @@ def _load_bed_regions(bed_file: str) -> Dict[str, List[GeneRegion]]:
 
 def _ensure_gene_regions_loaded(target_panel: str) -> None:
     """Ensure gene regions are loaded into cache for the given target panel."""
-    logger.info(f"DEBUG: _ensure_gene_regions_loaded called with target_panel='{target_panel}'")
-    logger.info(f"DEBUG: Current cache keys: {list(_gene_regions_cache.keys())}")
+    logger.debug("_ensure_gene_regions_loaded called with target_panel='%s'", target_panel)
+    logger.debug("Current cache keys: %s", list(_gene_regions_cache.keys()))
     
     if target_panel not in _gene_regions_cache:
-        logger.info(f"DEBUG: Loading gene regions for target_panel='{target_panel}'")
+        logger.debug("Loading gene regions for target_panel='%s'", target_panel)
         gene_bed, all_gene_bed = _setup_file_paths(target_panel)
-        logger.info(f"DEBUG: Resolved gene_bed='{gene_bed}', all_gene_bed='{all_gene_bed}'")
+        logger.debug("Resolved gene_bed='%s', all_gene_bed='%s'", gene_bed, all_gene_bed)
 
         # Load target panel gene regions
         _gene_regions_cache[target_panel] = _load_bed_regions(gene_bed)
@@ -934,6 +942,7 @@ def _find_gene_intersections(
     gene_regions: List[GeneRegion],
     region_starts: Optional[List[int]] = None,
     region_index: Optional[Tuple["NCLS", List[GeneRegion]]] = None,
+    min_overlap: Optional[int] = None,
 ) -> List[Dict]:
     """
     Find intersections between a read and gene regions using optimized binary search.
@@ -951,6 +960,7 @@ def _find_gene_intersections(
         gene_regions: List of gene regions on this chromosome (must be sorted by start position)
         region_starts: Optional pre-computed list of start positions (for performance)
         region_index: Optional NCLS index for fast interval overlap queries
+        min_overlap: Optional minimum overlap (avoids config lookup when provided by caller)
 
     Returns:
         List of intersection dictionaries with the exact column structure
@@ -966,10 +976,12 @@ def _find_gene_intersections(
     if not gene_regions:
         return read_rows
 
+    if min_overlap is None:
+        min_overlap = get_fusion_threshold("gene_overlap")
+
     # Use NCLS if available for fast interval overlap queries
     if region_index and _HAS_NCLS:
         ncls_index, indexed_regions = region_index
-        min_overlap = get_fusion_threshold("gene_overlap")
         for _, _, region_id in ncls_index.find_overlap(ref_start, ref_end):
             gene_region = indexed_regions[region_id]
             overlap_start = max(gene_region.start, ref_start)
@@ -1012,7 +1024,7 @@ def _find_gene_intersections(
             break
         
         # Check if this region overlaps with the read
-        if gene_region.overlaps_with(ref_start, ref_end):
+        if gene_region.overlaps_with(ref_start, ref_end, min_overlap=min_overlap):
             read_rows.append(
                 _build_fusion_row_dict(
                     ref_name,
@@ -1613,9 +1625,10 @@ def process_bam_single_pass(
         
         reads_with_supplementary_count = 0
         
-        # Single pass through BAM file
+        # Resolve thresholds once per BAM (avoids repeated config lookups in hot path)
         min_mq = get_fusion_threshold("mapping_quality")
         min_span = get_fusion_threshold("mapping_span")
+        min_overlap = get_fusion_threshold("gene_overlap")
         try:
             with pysam.AlignmentFile(bamfile, "rb") as bam:
                 for read in bam:
@@ -1675,6 +1688,7 @@ def process_bam_single_pass(
                             target_read_alignments,
                             genome_read_alignments,
                             read_id,
+                            min_overlap=min_overlap,
                         )
                     else:
                         # 1. Process for target panel fusions
@@ -1689,6 +1703,7 @@ def process_bam_single_pass(
                                 target_regions[ref_name],
                                 target_starts,
                                 target_index,
+                                min_overlap=min_overlap,
                             )
                             if target_rows:
                                 if read_id not in target_read_alignments:
@@ -1707,6 +1722,7 @@ def process_bam_single_pass(
                                 genome_regions[ref_name],
                                 genome_starts,
                                 genome_index,
+                                min_overlap=min_overlap,
                             )
                             if genome_rows:
                                 if read_id not in genome_read_alignments:
@@ -1810,9 +1826,7 @@ def process_bam_single_pass(
         target_candidates = None
         if target_read_alignments:
             # Filter out reads with overlapping alignments and apply quality thresholds early
-            # This reduces memory usage by filtering before DataFrame creation
-            min_mq = get_fusion_threshold("mapping_quality")
-            min_span = get_fusion_threshold("mapping_span")
+            # This reduces memory usage by filtering before DataFrame creation (min_mq/min_span from above)
             filtered_target_rows = []
             for read_id, alignments in target_read_alignments.items():
                 if not _check_read_alignments_overlap(alignments):
@@ -1830,9 +1844,7 @@ def process_bam_single_pass(
         # Process genome-wide candidates
         genome_wide_candidates = None
         if genome_read_alignments:
-            # Filter out reads with overlapping alignments and apply quality thresholds early
-            min_mq = get_fusion_threshold("mapping_quality")
-            min_span = get_fusion_threshold("mapping_span")
+            # Filter out reads with overlapping alignments and apply quality thresholds early (min_mq/min_span from above)
             filtered_genome_rows = []
             for read_id, alignments in genome_read_alignments.items():
                 if not _check_read_alignments_overlap(alignments):
