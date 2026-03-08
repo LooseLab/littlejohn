@@ -43,6 +43,7 @@ from ncls import NCLS
 _HAS_NCLS = True
 
 # Local imports
+from robin.analysis.master_bed_generator import FileLock
 from robin.classification_config import (
     get_fusion_threshold,
     get_fusion_rule,
@@ -1960,28 +1961,29 @@ def _increment_pending_count(work_dir: str, sample_id: str, delta: int = 1) -> i
 def _atomic_counter_increment(work_dir: str, sample_id: str) -> int:
     """
     Increment and return the fusion file counter for a sample.
-    
+    Uses file locking so only the read-increment-write is under the lock.
     Returns:
         The counter value to use for this file
     """
-    counter_file = os.path.join(work_dir, sample_id, "fusion_analysis_counter.txt")
-    
-    # Read current counter
-    if os.path.exists(counter_file):
-        try:
-            with open(counter_file, "r") as f:
-                counter = int(f.read().strip())
-        except (ValueError, IOError):
+    sample_dir = os.path.join(work_dir, sample_id)
+    lock_dir = os.path.join(sample_dir, "_locks")
+    os.makedirs(lock_dir, exist_ok=True)
+    lock_file = os.path.join(lock_dir, "fusion_counter.lock")
+    counter_file = os.path.join(sample_dir, "fusion_analysis_counter.txt")
+
+    with FileLock(lock_file, timeout=30.0):
+        if os.path.exists(counter_file):
+            try:
+                with open(counter_file, "r") as f:
+                    counter = int(f.read().strip())
+            except (ValueError, IOError):
+                counter = 0
+        else:
             counter = 0
-    else:
-        counter = 0
-    
-    # Write incremented counter
-    os.makedirs(os.path.dirname(counter_file), exist_ok=True)
-    with open(counter_file, "w") as f:
-        f.write(str(counter + 1))
-    
-    return counter
+        os.makedirs(os.path.dirname(counter_file), exist_ok=True)
+        with open(counter_file, "w") as f:
+            f.write(str(counter + 1))
+        return counter
 
 
 def process_bam_with_staging(

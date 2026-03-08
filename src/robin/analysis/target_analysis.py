@@ -24,6 +24,7 @@ import subprocess
 import shutil
 import glob
 import fcntl
+import uuid
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
@@ -1623,130 +1624,116 @@ class TargetAnalysis:
     
     def accumulate_staged_files(self, sample_id: str, force: bool = False) -> Dict[str, Any]:
         """
-        Batch accumulation of staged files with proper locking to prevent race conditions.
-        
-        This method:
-        1. Locks the accumulation process to prevent concurrent accumulations
-        2. Loads all staged files
-        3. Efficiently merges them using groupby (faster than iterative merge)
-        4. Merges batch with existing accumulated data
-        5. Saves updated accumulated data
-        6. Cleans up staging files
-        
-        Args:
-            sample_id: Sample identifier
-            force: If True, accumulate even if below threshold (for end-of-run)
-        
-        Returns:
-            Dictionary with accumulation results
+        Batch accumulation of staged files with minimal lock hold time.
+        Lock is held only to: (1) claim staging files, (2) load existing + merge, (3) write outputs + cleanup.
+        Heavy work (load parquets, BAM filtering, read counts) runs outside the lock.
         """
         logger = logging.getLogger("robin.target")
-        
-        # Use lock to prevent concurrent accumulation of the same sample
         lock_file = self._get_lock_file(sample_id, "accumulation")
-        
+        staging_dir = self._get_staging_dir(sample_id)
+        sample_output_dir = os.path.join(self.work_dir, sample_id)
+        start_time = time.time()
+
         try:
+            # --- Critical section 1: claim staging files (short) ---
+            batch_dir = None
+            num_claimed = 0
             with FileLock(lock_file, timeout=60.0):
-                logger.info(f"Starting batch accumulation for {sample_id} (force={force})")
-                start_time = time.time()
-                
-                staging_dir = self._get_staging_dir(sample_id)
-                sample_output_dir = os.path.join(self.work_dir, sample_id)
-                
-                # Find all staging files
                 coverage_files = sorted(glob.glob(os.path.join(staging_dir, "coverage_*.parquet")))
                 bedcov_files = sorted(glob.glob(os.path.join(staging_dir, "bedcov_*.parquet")))
                 timestamp_files = sorted(glob.glob(os.path.join(staging_dir, "timestamp_*.txt")))
                 source_bam_files = sorted(glob.glob(os.path.join(staging_dir, "source_bam_*.txt")))
-                
                 if not coverage_files:
                     logger.info(f"No staged files to accumulate for {sample_id}")
                     return {"status": "no_files", "files_processed": 0}
-                
-                # Check if we should accumulate based on count
                 if not force and len(coverage_files) < self.batch_size:
                     logger.info(
                         f"Skipping accumulation - only {len(coverage_files)} files staged "
                         f"(threshold: {self.batch_size}, force={force})"
                     )
                     return {"status": "below_threshold", "files_pending": len(coverage_files)}
-                
-                logger.info(
-                    f"Accumulating {len(coverage_files)} staged files for {sample_id}"
-                )
-                
-                # Load staged files incrementally to keep memory bounded
-                batch_covdf = None
-                batch_bedcovdf = None
-                timestamps = []
-                source_bam_paths = []
-                loaded_files = 0
-                
-                for cov_file, bed_file, ts_file, source_bam_file in zip(coverage_files, bedcov_files, timestamp_files, source_bam_files):
+                n_claim = len(coverage_files) if force else min(self.batch_size, len(coverage_files))
+                batch_id = str(uuid.uuid4())
+                batch_dir = os.path.join(staging_dir, f"_batch_{batch_id}")
+                os.makedirs(batch_dir, exist_ok=True)
+                for i in range(n_claim):
+                    for src in (coverage_files[i], bedcov_files[i], timestamp_files[i], source_bam_files[i]):
+                        if os.path.exists(src):
+                            shutil.move(src, os.path.join(batch_dir, os.path.basename(src)))
+                num_claimed = n_claim
+            # Lock released
+
+            # --- No lock: load from batch dir ---
+            coverage_batch = sorted(glob.glob(os.path.join(batch_dir, "coverage_*.parquet")))
+            bedcov_batch = sorted(glob.glob(os.path.join(batch_dir, "bedcov_*.parquet")))
+            timestamp_batch = sorted(glob.glob(os.path.join(batch_dir, "timestamp_*.txt")))
+            source_bam_batch = sorted(glob.glob(os.path.join(batch_dir, "source_bam_*.txt")))
+            batch_covdf = None
+            batch_bedcovdf = None
+            timestamps = []
+            source_bam_paths = []
+            loaded_files = 0
+            for cov_file, bed_file, ts_file, source_bam_file in zip(
+                coverage_batch, bedcov_batch, timestamp_batch, source_bam_batch
+            ):
+                try:
+                    cov_df = pd.read_parquet(cov_file)
+                    bed_df = pd.read_parquet(bed_file)
+                    cov_df = cov_df.groupby(['#rname', 'startpos', 'endpos'], as_index=False).agg({
+                        'numreads': 'sum', 'covbases': 'sum', 'meandepth': 'sum'
+                    })
+                    bed_df = bed_df.groupby(
+                        ['chrom', 'startpos', 'endpos', 'name'], as_index=False
+                    ).agg({'bases': 'sum'})
+                    if batch_covdf is None:
+                        batch_covdf = cov_df
+                    else:
+                        batch_covdf = batch_covdf.merge(
+                            cov_df, on=['#rname', 'startpos', 'endpos'], how='outer',
+                            suffixes=('_df1', '_df2'),
+                        )
+                        batch_covdf['numreads'] = batch_covdf['numreads_df1'].fillna(0) + batch_covdf['numreads_df2'].fillna(0)
+                        batch_covdf['covbases'] = batch_covdf['covbases_df1'].fillna(0) + batch_covdf['covbases_df2'].fillna(0)
+                        batch_covdf['meandepth'] = batch_covdf['meandepth_df1'].fillna(0) + batch_covdf['meandepth_df2'].fillna(0)
+                        batch_covdf.drop(columns=['numreads_df1', 'numreads_df2', 'covbases_df1', 'covbases_df2', 'meandepth_df1', 'meandepth_df2'], inplace=True)
+                    if batch_bedcovdf is None:
+                        batch_bedcovdf = bed_df
+                    else:
+                        batch_bedcovdf = batch_bedcovdf.merge(
+                            bed_df, on=['chrom', 'startpos', 'endpos', 'name'], how='outer',
+                            suffixes=('_df1', '_df2'),
+                        )
+                        batch_bedcovdf['bases'] = batch_bedcovdf['bases_df1'].fillna(0) + batch_bedcovdf['bases_df2'].fillna(0)
+                        batch_bedcovdf.drop(columns=['bases_df1', 'bases_df2'], inplace=True)
+                    with open(ts_file, "r") as f:
+                        timestamps.append(float(f.read().strip()))
+                    with open(source_bam_file, "r") as f:
+                        source_bam_paths.append(f.read().strip())
+                    loaded_files += 1
+                except Exception as e:
+                    logger.warning(f"Error loading staging file {cov_file}: {e}")
+            if batch_covdf is None or batch_bedcovdf is None:
+                logger.error("No staging files could be loaded successfully")
+                if batch_dir and os.path.exists(batch_dir):
+                    for f in glob.glob(os.path.join(batch_dir, "*")):
+                        try:
+                            os.remove(f)
+                        except OSError:
+                            pass
                     try:
-                        cov_df = pd.read_parquet(cov_file)
-                        bed_df = pd.read_parquet(bed_file)
-                        
-                        # Group within each file (small) then merge into accumulator
-                        cov_df = cov_df.groupby(['#rname', 'startpos', 'endpos'], as_index=False).agg({
-                            'numreads': 'sum',
-                            'covbases': 'sum',
-                            'meandepth': 'sum'
-                        })
-                        bed_df = bed_df.groupby(
-                            ['chrom', 'startpos', 'endpos', 'name'], as_index=False
-                        ).agg({'bases': 'sum'})
-                        
-                        if batch_covdf is None:
-                            batch_covdf = cov_df
-                        else:
-                            batch_covdf = batch_covdf.merge(
-                                cov_df,
-                                on=['#rname', 'startpos', 'endpos'],
-                                how='outer',
-                                suffixes=('_df1', '_df2'),
-                            )
-                            batch_covdf['numreads'] = batch_covdf['numreads_df1'].fillna(0) + batch_covdf['numreads_df2'].fillna(0)
-                            batch_covdf['covbases'] = batch_covdf['covbases_df1'].fillna(0) + batch_covdf['covbases_df2'].fillna(0)
-                            batch_covdf['meandepth'] = batch_covdf['meandepth_df1'].fillna(0) + batch_covdf['meandepth_df2'].fillna(0)
-                            batch_covdf.drop(columns=['numreads_df1', 'numreads_df2', 'covbases_df1', 'covbases_df2', 'meandepth_df1', 'meandepth_df2'], inplace=True)
-                        
-                        if batch_bedcovdf is None:
-                            batch_bedcovdf = bed_df
-                        else:
-                            batch_bedcovdf = batch_bedcovdf.merge(
-                                bed_df,
-                                on=['chrom', 'startpos', 'endpos', 'name'],
-                                how='outer',
-                                suffixes=('_df1', '_df2'),
-                            )
-                            batch_bedcovdf['bases'] = batch_bedcovdf['bases_df1'].fillna(0) + batch_bedcovdf['bases_df2'].fillna(0)
-                            batch_bedcovdf.drop(columns=['bases_df1', 'bases_df2'], inplace=True)
-                        
-                        with open(ts_file, "r") as f:
-                            timestamps.append(float(f.read().strip()))
-                        with open(source_bam_file, "r") as f:
-                            source_bam_paths.append(f.read().strip())
-                        
-                        loaded_files += 1
-                    except Exception as e:
-                        logger.warning(f"Error loading staging file {cov_file}: {e}")
-                        continue
-                
-                if batch_covdf is None or batch_bedcovdf is None:
-                    logger.error("No staging files could be loaded successfully")
-                    return {"status": "load_failed", "files_attempted": len(coverage_files)}
-                
-                logger.info(f"Loaded {loaded_files} staging files successfully")
-                
-                logger.info("Merging staged coverage data...")
-                logger.info("Merging staged target coverage data...")
-                
-                logger.info(
-                    f"Batch merged: genome={batch_covdf.shape}, targets={batch_bedcovdf.shape}"
-                )
-                
-                # Load existing accumulated data (only once per batch)
+                        os.rmdir(batch_dir)
+                    except OSError:
+                        pass
+                return {"status": "load_failed", "files_attempted": num_claimed}
+            logger.info(f"Loaded {loaded_files} staging files; merging with accumulated data...")
+
+            # --- Critical section 2: load existing + merge (short) ---
+            existing_covdf = None
+            existing_bedcovdf = None
+            existing_coverage_over_time = None
+            updated_covdf = None
+            updated_bedcovdf = None
+            with FileLock(lock_file, timeout=60.0):
                 existing_covdf = self._load_existing_coverage_data(
                     sample_output_dir, "coverage_main.csv", logger
                 )
@@ -1756,53 +1743,115 @@ class TargetAnalysis:
                 existing_coverage_over_time = self._load_existing_coverage_over_time(
                     sample_output_dir, logger
                 )
-                
-                # Single merge with accumulated data
-                logger.info("Merging with accumulated data...")
                 if existing_covdf is not None:
                     updated_covdf, updated_bedcovdf = run_bedmerge(
                         batch_covdf, existing_covdf, batch_bedcovdf, existing_bedcovdf
                     )
                 else:
                     updated_covdf, updated_bedcovdf = batch_covdf, batch_bedcovdf
-                
-                logger.info(
-                    f"Final accumulated: genome={updated_covdf.shape}, targets={updated_bedcovdf.shape}"
+            # Lock released
+
+            logger.info(f"Final accumulated: genome={updated_covdf.shape}, targets={updated_bedcovdf.shape}")
+            bases = updated_covdf["covbases"].sum()
+            genome = updated_covdf["endpos"].sum()
+            coverage = bases / genome if genome > 0 else 0.0
+            logger.info(f"Coverage: {coverage:.4f} ({bases} bases / {genome} genome)")
+            current_timestamp = max(timestamps) if timestamps else time.time() * 1000
+            if existing_coverage_over_time is not None:
+                updated_coverage_over_time = np.vstack(
+                    [existing_coverage_over_time, [[current_timestamp, coverage]]]
                 )
-                
-                # Calculate coverage statistics
-                bases = updated_covdf["covbases"].sum()
-                genome = updated_covdf["endpos"].sum()
-                coverage = bases / genome if genome > 0 else 0.0
-                
-                logger.info(
-                    f"Coverage: {coverage:.4f} ({bases} bases / {genome} genome)"
+            else:
+                updated_coverage_over_time = np.array([[current_timestamp, coverage]])
+
+            target_coverage_df = updated_bedcovdf.copy()
+            target_coverage_df["length"] = (
+                target_coverage_df["endpos"] - target_coverage_df["startpos"] + 1
+            )
+            target_coverage_df["coverage"] = (
+                target_coverage_df["bases"] / target_coverage_df["length"]
+            )
+            target_coverage_df = target_coverage_df[
+                ["chrom", "startpos", "endpos", "name", "length", "coverage", "bases"]
+            ]
+            run_list = target_coverage_df[target_coverage_df["coverage"].ge(self.callthreshold)]
+
+            # --- No lock: BAM read counts and filtered BAMs ---
+            batch_read_counts = None
+            if source_bam_paths:
+                batch_read_counts_list = []
+                for bam_path in source_bam_paths:
+                    read_counts_df = get_read_counts_per_target(bam_path, self.bedfile)
+                    if not read_counts_df.empty:
+                        batch_read_counts_list.append(read_counts_df)
+                if batch_read_counts_list:
+                    batch_read_counts = pd.concat(batch_read_counts_list, ignore_index=True)
+                    batch_read_counts = batch_read_counts.groupby(
+                        ['chrom', 'startpos', 'endpos', 'name'], as_index=False
+                    ).agg({'reads': 'sum'})
+
+            if len(run_list) > 0:
+                logger.info("Processing filtered BAM files...")
+                try:
+                    original_bam_files = list(set(source_bam_paths))
+                    if original_bam_files:
+                        targets_bed = self._get_master_bed_path(sample_id) or self.bedfile
+                        if targets_bed != self.bedfile:
+                            logger.info(f"Using master BED file for target.bam: {targets_bed}")
+                        else:
+                            logger.info(f"Using original target panel BED file for target.bam: {targets_bed}")
+                        filtered_bams_dir = os.path.join(sample_output_dir, "_filtered_bams")
+                        os.makedirs(filtered_bams_dir, exist_ok=True)
+                        new_filtered_bams = []
+                        bed_regions_cache = None
+                        try:
+                            bed_regions_cache = _load_bed_regions(targets_bed)
+                        except Exception as e:
+                            logger.warning(f"Could not preload BED regions from {targets_bed}: {e}")
+                        for i, source_bam in enumerate(original_bam_files):
+                            filtered_bam_name = f"filtered_{i:06d}_{os.path.basename(source_bam)}"
+                            filtered_bam_path = os.path.join(filtered_bams_dir, filtered_bam_name)
+                            logger.info(f"Filtering BAM {i+1}/{len(original_bam_files)}: {os.path.basename(source_bam)}")
+                            run_bedtools(source_bam, targets_bed, filtered_bam_path, regions=bed_regions_cache)
+                            if os.path.exists(filtered_bam_path):
+                                new_filtered_bams.append(filtered_bam_path)
+                        if new_filtered_bams:
+                            batch_timestamp = int(time.time() * 1000)
+                            batch_merged_bam = os.path.join(sample_output_dir, f"batch_{batch_timestamp}.bam")
+                            if len(new_filtered_bams) > 1:
+                                pysam.merge("-o", batch_merged_bam, *new_filtered_bams)
+                            else:
+                                shutil.copy2(new_filtered_bams[0], batch_merged_bam)
+                            pysam.index(batch_merged_bam)
+                            for filtered_bam in new_filtered_bams:
+                                try:
+                                    if os.path.exists(filtered_bam):
+                                        os.remove(filtered_bam)
+                                    if os.path.exists(f"{filtered_bam}.bai"):
+                                        os.remove(f"{filtered_bam}.bai")
+                                except OSError as e:
+                                    logger.warning(f"Could not remove filtered BAM {filtered_bam}: {e}")
+                            try:
+                                if not os.listdir(filtered_bams_dir):
+                                    os.rmdir(filtered_bams_dir)
+                            except OSError:
+                                pass
+                except Exception as e:
+                    logger.error(f"Error creating target.bam: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+
+            # --- Critical section 3: write all outputs + cleanup (short) ---
+            time_coverage_file = os.path.join(sample_output_dir, "target_coverage_time.csv")
+            latest_reads_cache = os.path.join(sample_output_dir, "_target_coverage_latest_reads.parquet")
+            with FileLock(lock_file, timeout=60.0):
+                np.save(
+                    os.path.join(sample_output_dir, "coverage_time_chart.npy"),
+                    updated_coverage_over_time,
                 )
-                
-                # Track coverage over time (use most recent timestamp from batch)
-                if timestamps:
-                    current_timestamp = max(timestamps)
-                    if existing_coverage_over_time is not None:
-                        updated_coverage_over_time = np.vstack(
-                            [existing_coverage_over_time, [[current_timestamp, coverage]]]
-                        )
-                    else:
-                        updated_coverage_over_time = np.array([[current_timestamp, coverage]])
-                    
-                    # Save coverage over time
-                    np.save(
-                        os.path.join(sample_output_dir, "coverage_time_chart.npy"),
-                        updated_coverage_over_time,
-                    )
-                
-                # Save updated coverage data
-                logger.info("Saving accumulated data...")
                 updated_covdf.to_csv(
-                    os.path.join(sample_output_dir, "coverage_main.csv"),
-                    index=False,
+                    os.path.join(sample_output_dir, "coverage_main.csv"), index=False
                 )
-                
-                # Calculate and save bed_coverage_main.csv with length and coverage columns
                 bed_coverage_main_df = updated_bedcovdf.copy()
                 bed_coverage_main_df["length"] = (
                     bed_coverage_main_df["endpos"] - bed_coverage_main_df["startpos"] + 1
@@ -1814,300 +1863,103 @@ class TargetAnalysis:
                     ["chrom", "startpos", "endpos", "name", "length", "coverage", "bases"]
                 ]
                 bed_coverage_main_df.to_csv(
-                    os.path.join(sample_output_dir, "bed_coverage_main.csv"),
-                    index=False,
+                    os.path.join(sample_output_dir, "bed_coverage_main.csv"), index=False
                 )
-                
-                # Calculate and save target_coverage.csv
-                target_coverage_df = updated_bedcovdf.copy()
-                target_coverage_df["length"] = (
-                    target_coverage_df["endpos"] - target_coverage_df["startpos"] + 1
-                )
-                target_coverage_df["coverage"] = (
-                    target_coverage_df["bases"] / target_coverage_df["length"]
-                )
-                target_coverage_df = target_coverage_df[
-                    ["chrom", "startpos", "endpos", "name", "length", "coverage", "bases"]
-                ]
                 target_coverage_df.to_csv(
-                    os.path.join(sample_output_dir, "target_coverage.csv"),
-                    index=False,
+                    os.path.join(sample_output_dir, "target_coverage.csv"), index=False
                 )
-                
-                # Create target coverage with timestamp and read counts (optimized)
-                logger.info("Calculating cumulative read counts per target for batch...")
-                if source_bam_paths:
-                    # Count reads from ALL BAM files in the batch and sum them
-                    batch_read_counts_list = []
-                    for bam_path in source_bam_paths:
-                        read_counts_df = get_read_counts_per_target(bam_path, self.bedfile)
-                        if not read_counts_df.empty:
-                            batch_read_counts_list.append(read_counts_df)
-                    
-                    if batch_read_counts_list:
-                        # Sum read counts across all BAM files in the batch
-                        batch_read_counts = pd.concat(batch_read_counts_list, ignore_index=True)
-                        batch_read_counts = batch_read_counts.groupby(
-                            ['chrom', 'startpos', 'endpos', 'name'], as_index=False
-                        ).agg({'reads': 'sum'})
-                        
-                        # Use optimized approach: store latest cumulative reads in separate Parquet file for fast access
-                        time_coverage_file = os.path.join(sample_output_dir, "target_coverage_time.csv")
-                        latest_reads_cache = os.path.join(sample_output_dir, "_target_coverage_latest_reads.parquet")
-                        
-                        # Load previous cumulative reads from cache (much faster than reading entire CSV)
-                        previous_cumulative_reads = None
-                        if os.path.exists(latest_reads_cache):
-                            try:
-                                previous_cumulative_reads = pd.read_parquet(latest_reads_cache)
+                if batch_read_counts is not None:
+                    previous_cumulative_reads = None
+                    if os.path.exists(latest_reads_cache):
+                        try:
+                            previous_cumulative_reads = pd.read_parquet(latest_reads_cache)
+                            previous_cumulative_reads.rename(columns={'reads': 'previous_reads'}, inplace=True)
+                        except Exception:
+                            pass
+                    if previous_cumulative_reads is None and os.path.exists(time_coverage_file):
+                        try:
+                            existing_time_df = pd.read_csv(time_coverage_file)
+                            if not existing_time_df.empty:
+                                latest_ts = existing_time_df['timestamp'].max()
+                                previous_cumulative_reads = existing_time_df[
+                                    existing_time_df['timestamp'] == latest_ts
+                                ][['chrom', 'startpos', 'endpos', 'name', 'reads']].copy()
                                 previous_cumulative_reads.rename(columns={'reads': 'previous_reads'}, inplace=True)
-                            except Exception as e:
-                                logger.debug(f"Could not load cached latest reads, will try CSV: {e}")
-                                # Fallback to CSV if cache doesn't exist
-                                if os.path.exists(time_coverage_file):
-                                    try:
-                                        # Only read last chunk for efficiency
-                                        existing_time_df = pd.read_csv(time_coverage_file)
-                                        if not existing_time_df.empty:
-                                            latest_timestamp = existing_time_df['timestamp'].max()
-                                            previous_cumulative_reads = existing_time_df[
-                                                existing_time_df['timestamp'] == latest_timestamp
-                                            ][['chrom', 'startpos', 'endpos', 'name', 'reads']].copy()
-                                            previous_cumulative_reads.rename(columns={'reads': 'previous_reads'}, inplace=True)
-                                    except Exception as e2:
-                                        logger.warning(f"Error loading existing target_coverage_time.csv: {e2}")
-                        
-                        # Merge batch read counts with target coverage data
-                        target_coverage_with_reads = target_coverage_df.merge(
-                            batch_read_counts[['chrom', 'startpos', 'endpos', 'name', 'reads']],
-                            on=['chrom', 'startpos', 'endpos', 'name'],
-                            how='left'
-                        )
-                        # Fill missing reads with 0
-                        target_coverage_with_reads['reads'] = target_coverage_with_reads['reads'].fillna(0).astype(int)
-                        
-                        # Accumulate with previous cumulative reads if available
-                        if previous_cumulative_reads is not None:
-                            target_coverage_with_reads = target_coverage_with_reads.merge(
-                                previous_cumulative_reads,
-                                on=['chrom', 'startpos', 'endpos', 'name'],
-                                how='left'
-                            )
-                            target_coverage_with_reads['previous_reads'] = target_coverage_with_reads['previous_reads'].fillna(0).astype(int)
-                            # Add batch reads to previous cumulative reads
-                            target_coverage_with_reads['reads'] = (
-                                target_coverage_with_reads['reads'] + target_coverage_with_reads['previous_reads']
-                            )
-                            target_coverage_with_reads.drop(columns=['previous_reads'], inplace=True)
-                        
-                        # Calculate normalized reads (reads per length)
-                        target_coverage_with_reads['reads_per_length'] = (
-                            target_coverage_with_reads['reads'] / target_coverage_with_reads['length']
-                        )
-                        
-                        # Add timestamp (use most recent timestamp from batch)
-                        current_timestamp = max(timestamps) if timestamps else time.time() * 1000
-                        target_coverage_with_reads['timestamp'] = current_timestamp
-                        
-                        # Reorder columns: chrom, startpos, endpos, name, length, coverage, bases, timestamp, reads, reads_per_length
-                        target_coverage_with_reads = target_coverage_with_reads[
-                            ['chrom', 'startpos', 'endpos', 'name', 'length', 'coverage', 'bases',
-                             'timestamp', 'reads', 'reads_per_length']
-                        ]
-                        
-                        # Save latest cumulative reads to cache for next time (fast access)
-                        try:
-                            target_coverage_with_reads[['chrom', 'startpos', 'endpos', 'name', 'reads']].to_parquet(
-                                latest_reads_cache, index=False
-                            )
-                        except Exception as e:
-                            logger.debug(f"Could not save latest reads cache: {e}")
-                        
-                        # Append to CSV using append mode (much faster than reading entire file)
-                        try:
-                            # Check if file exists to determine if we need header
-                            file_exists = os.path.exists(time_coverage_file)
-                            target_coverage_with_reads.to_csv(
-                                time_coverage_file, 
-                                mode='a', 
-                                header=not file_exists,
-                                index=False
-                            )
-                        except Exception as e:
-                            logger.warning(f"Error appending to target_coverage_time.csv: {e}")
-                            # Fallback: read and concat (slower but works)
-                            if os.path.exists(time_coverage_file):
-                                try:
-                                    existing_time_df = pd.read_csv(time_coverage_file)
-                                    target_coverage_with_reads = pd.concat(
-                                        [existing_time_df, target_coverage_with_reads],
-                                        ignore_index=True
-                                    )
-                                    target_coverage_with_reads.to_csv(time_coverage_file, index=False)
-                                except Exception as e2:
-                                    logger.error(f"Error in fallback CSV write: {e2}")
-                        
-                        logger.info(f"Saved target coverage with timestamp and cumulative read counts: {time_coverage_file}")
-                    else:
-                        logger.warning("No read counts extracted from batch BAM files, skipping target_coverage_time.csv")
-                else:
-                    logger.warning("No source BAM files available for read counting")
-                
-                # Identify and save targets exceeding threshold
-                run_list = target_coverage_df[
-                    target_coverage_df["coverage"].ge(self.callthreshold)
-                ]
-                
-                if len(run_list) > 0:
-                    logger.info(f"Found {len(run_list)} regions exceeding threshold")
-                    
-                    # Save count
-                    targets_exceeding_file = os.path.join(
-                        sample_output_dir, "targets_exceeding_threshold_count.txt"
+                        except Exception:
+                            pass
+                    target_coverage_with_reads = target_coverage_df.merge(
+                        batch_read_counts[['chrom', 'startpos', 'endpos', 'name', 'reads']],
+                        on=['chrom', 'startpos', 'endpos', 'name'], how='left'
                     )
+                    target_coverage_with_reads['reads'] = target_coverage_with_reads['reads'].fillna(0).astype(int)
+                    if previous_cumulative_reads is not None:
+                        target_coverage_with_reads = target_coverage_with_reads.merge(
+                            previous_cumulative_reads,
+                            on=['chrom', 'startpos', 'endpos', 'name'], how='left'
+                        )
+                        target_coverage_with_reads['previous_reads'] = target_coverage_with_reads['previous_reads'].fillna(0).astype(int)
+                        target_coverage_with_reads['reads'] = (
+                            target_coverage_with_reads['reads'] + target_coverage_with_reads['previous_reads']
+                        )
+                        target_coverage_with_reads.drop(columns=['previous_reads'], inplace=True)
+                    target_coverage_with_reads['reads_per_length'] = (
+                        target_coverage_with_reads['reads'] / target_coverage_with_reads['length']
+                    )
+                    target_coverage_with_reads['timestamp'] = current_timestamp
+                    target_coverage_with_reads = target_coverage_with_reads[
+                        ['chrom', 'startpos', 'endpos', 'name', 'length', 'coverage', 'bases',
+                         'timestamp', 'reads', 'reads_per_length']
+                    ]
+                    try:
+                        target_coverage_with_reads[['chrom', 'startpos', 'endpos', 'name', 'reads']].to_parquet(
+                            latest_reads_cache, index=False
+                        )
+                    except Exception:
+                        pass
+                    file_exists = os.path.exists(time_coverage_file)
+                    target_coverage_with_reads.to_csv(
+                        time_coverage_file, mode='a', header=not file_exists, index=False
+                    )
+                targets_exceeding_file = os.path.join(
+                    sample_output_dir, "targets_exceeding_threshold_count.txt"
+                )
+                if len(run_list) > 0:
                     with open(targets_exceeding_file, "w") as f:
                         f.write(str(len(run_list)))
-                    
-                    # Generate BED file
                     run_list[["chrom", "startpos", "endpos"]].to_csv(
                         os.path.join(sample_output_dir, "targets_exceeding_threshold.bed"),
-                        sep="\t",
-                        header=None,
-                        index=None,
+                        sep="\t", header=None, index=None,
                     )
                 else:
-                    logger.info("No regions exceed coverage threshold")
-                    # Create empty BED file
                     with open(
-                        os.path.join(sample_output_dir, "targets_exceeding_threshold.bed"),
-                        "w"
+                        os.path.join(sample_output_dir, "targets_exceeding_threshold.bed"), "w"
                     ) as f:
                         pass
-                
-                # Create target.bam file using filtered BAM accumulation approach
-                if len(run_list) > 0:
-                    logger.info("Processing filtered BAM files...")
+                if batch_dir and os.path.exists(batch_dir):
+                    for f in glob.glob(os.path.join(batch_dir, "*")):
+                        try:
+                            os.remove(f)
+                        except OSError:
+                            pass
                     try:
-                        # Use source BAM files from staging
-                        original_bam_files = list(set(source_bam_paths))  # Remove duplicates
-                        
-                        if original_bam_files:
-                            # Prefer master BED file if available (includes target panel + CNV + fusion + master BED breakpoints)
-                            # Fall back to original target panel BED file if master BED doesn't exist
-                            targets_bed = self._get_master_bed_path(sample_id) or self.bedfile
-                            
-                            if targets_bed != self.bedfile:
-                                logger.info(f"Using master BED file for target.bam: {targets_bed}")
-                            else:
-                                logger.info(f"Using original target panel BED file for target.bam: {targets_bed}")
-                            
-                            # Create filtered BAM directory
-                            filtered_bams_dir = os.path.join(sample_output_dir, "_filtered_bams")
-                            os.makedirs(filtered_bams_dir, exist_ok=True)
-                            
-                            # Process each source BAM file and save filtered version
-                            new_filtered_bams = []
-                            bed_regions_cache = None
-                            try:
-                                bed_regions_cache = _load_bed_regions(targets_bed)
-                            except Exception as e:
-                                logger.warning(f"Could not preload BED regions from {targets_bed}: {e}")
+                        os.rmdir(batch_dir)
+                    except OSError:
+                        pass
 
-                            for i, source_bam in enumerate(original_bam_files):
-                                filtered_bam_name = f"filtered_{i:06d}_{os.path.basename(source_bam)}"
-                                filtered_bam_path = os.path.join(filtered_bams_dir, filtered_bam_name)
-                                
-                                logger.info(f"Filtering BAM {i+1}/{len(original_bam_files)}: {os.path.basename(source_bam)}")
-                                run_bedtools(source_bam, targets_bed, filtered_bam_path, regions=bed_regions_cache)
-                                
-                                if os.path.exists(filtered_bam_path):
-                                    new_filtered_bams.append(filtered_bam_path)
-                            
-                            # Create batch merged BAM instead of merging into target.bam immediately
-                            # We'll merge all batch BAMs into target.bam at the end of the run
-                            if new_filtered_bams:
-                                logger.info(f"Merging {len(new_filtered_bams)} filtered BAM files into batch file...")
-                                
-                                # Create batch-specific output file with timestamp to avoid conflicts
-                                batch_timestamp = int(time.time() * 1000)  # milliseconds for uniqueness
-                                batch_merged_bam = os.path.join(sample_output_dir, f"batch_{batch_timestamp}.bam")
-                                
-                                # Merge all filtered BAMs for this batch
-                                if len(new_filtered_bams) > 1:
-                                    pysam.merge("-o", batch_merged_bam, *new_filtered_bams)
-                                else:
-                                    # Single BAM - just copy it
-                                    shutil.copy2(new_filtered_bams[0], batch_merged_bam)
-                                
-                                # Index the batch merged BAM
-                                logger.info("Indexing batch merged BAM...")
-                                pysam.index(batch_merged_bam)
-                                
-                                # Verify the batch BAM was created
-                                if os.path.exists(batch_merged_bam) and os.path.exists(f"{batch_merged_bam}.bai"):
-                                    try:
-                                        with pysam.AlignmentFile(batch_merged_bam, "rb") as bam_file:
-                                            read_count = bam_file.count(until_eof=True)
-                                            if read_count > 0:
-                                                logger.info(f"Successfully created batch BAM with {read_count} reads from {len(new_filtered_bams)} filtered BAM files")
-                                            else:
-                                                logger.warning("Batch BAM created but contains no reads")
-                                    except Exception as e:
-                                        logger.warning(f"Could not verify batch BAM: {e}")
-                                else:
-                                    logger.error("Failed to create batch BAM file")
-                                
-                                # Clean up filtered BAM files now that batch is merged
-                                logger.info("Cleaning up filtered BAM files after batch merge...")
-                                for filtered_bam in new_filtered_bams:
-                                    try:
-                                        if os.path.exists(filtered_bam):
-                                            os.remove(filtered_bam)
-                                        if os.path.exists(f"{filtered_bam}.bai"):
-                                            os.remove(f"{filtered_bam}.bai")
-                                    except OSError as e:
-                                        logger.warning(f"Could not remove filtered BAM {filtered_bam}: {e}")
-                                
-                                # Remove the filtered BAMs directory if empty
-                                try:
-                                    if not os.listdir(filtered_bams_dir):
-                                        os.rmdir(filtered_bams_dir)
-                                except OSError:
-                                    pass  # Directory not empty, that's fine
-                        else:
-                            logger.warning("No suitable BAM files found to create target.bam")
-                            
-                    except Exception as e:
-                        logger.error(f"Error creating target.bam: {e}")
-                        import traceback
-                        logger.error(traceback.format_exc())
-                
-                # Clean up staging files
-                logger.info("Cleaning up staging files...")
-                for f in coverage_files + bedcov_files + timestamp_files + source_bam_files:
-                    try:
-                        os.remove(f)
-                    except OSError as e:
-                        logger.warning(f"Could not remove staging file {f}: {e}")
-                
-                # Force garbage collection
-                gc.collect()
-                
-                elapsed = time.time() - start_time
-                logger.info(
-                    f"Batch accumulation complete for {sample_id}: "
-                    f"{len(coverage_files)} files in {elapsed:.2f}s "
-                    f"({elapsed/len(coverage_files):.3f}s per file)"
-                )
-                
-                return {
-                    "status": "success",
-                    "files_processed": len(coverage_files),
-                    "coverage": coverage,
-                    "targets_exceeding_threshold": len(run_list) if len(run_list) > 0 else 0,
-                    "elapsed_time": elapsed,
-                }
-        
+            gc.collect()
+            elapsed = time.time() - start_time
+            logger.info(
+                f"Batch accumulation complete for {sample_id}: "
+                f"{num_claimed} files in {elapsed:.2f}s"
+            )
+            return {
+                "status": "success",
+                "files_processed": num_claimed,
+                "coverage": coverage,
+                "targets_exceeding_threshold": len(run_list) if len(run_list) > 0 else 0,
+                "elapsed_time": elapsed,
+            }
+
         except TimeoutError as e:
             logger.error(f"Could not acquire accumulation lock for {sample_id}: {e}")
             return {"status": "lock_timeout", "error": str(e)}
