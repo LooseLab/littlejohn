@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import json
 import time
 import os
 
@@ -2114,6 +2115,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     },
                     "series": [
                         {
+                            "id": "target_box_series",
                             "name": "box plot",
                             "type": "boxplot",
                             "datasetId": "raw",
@@ -2125,6 +2127,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             },
                         },
                         {
+                            "id": "target_outliers_series",
                             "name": "outliers",
                             "type": "scatter",
                             "datasetId": "outliers",
@@ -2142,6 +2145,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             },
                         },
                         {
+                            "id": "target_global_outliers_series",
                             "name": "global outliers",
                             "type": "scatter",
                             "datasetId": "globaloutliers",
@@ -2161,7 +2165,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     ],
                 },
                 on_point_click=handle_boxplot_click
-            ).classes("w-full h-80")
+            ).classes("w-full h-80 target-coverage-boxplot")
         with ui.card().classes("w-full"):
             with ui.row().classes("items-center gap-3"):
                 target_search = ui.input("Search targets…").props(
@@ -5599,6 +5603,19 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 notify=False,
             )
 
+    def _echarts_option_to_json(obj: Any) -> Any:
+        """Convert ECharts options to JSON-serializable form (numpy types, NaN)."""
+        if isinstance(obj, dict):
+            return {k: _echarts_option_to_json(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_echarts_option_to_json(x) for x in obj]
+        if isinstance(obj, (np.floating, np.integer)):
+            v = float(obj) if isinstance(obj, np.floating) else int(obj)
+            return None if (isinstance(obj, np.floating) and np.isnan(obj)) else v
+        if isinstance(obj, float) and np.isnan(obj):
+            return None
+        return obj
+
     def _update_boxplot(bed_df: pd.DataFrame, panel_display_name: str = "Target Coverage") -> None:
         try:
             df = bed_df.copy()
@@ -5652,15 +5669,16 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             target_boxplot.options["dataset"][3]["source"] = glob_rows
             target_boxplot.options["xAxis"]["data"] = chroms
             
-            # Restore original series configuration
+            # Restore original series configuration (explicit ids so ECharts replaceMerge
+            # replaces series correctly on update, avoiding duplicate boxes per chromosome)
             target_boxplot.options["series"] = [
                 {
+                    "id": "target_box_series",
                     "name": "box plot",
                     "type": "boxplot",
-                    "id": "coverage_data",  # Add ID for universal transition
                     "datasetId": "raw",
-                    "universalTransition": True,  # Enable universal transition
-                    "animationDurationUpdate": 1000,  # Set transition duration
+                    "universalTransition": True,
+                    "animationDurationUpdate": 1000,
                     "encode": {
                         "x": "chrom",
                         "y": ["min", "Q1", "median", "Q3", "max"],
@@ -5669,6 +5687,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     },
                 },
                 {
+                    "id": "target_outliers_series",
                     "name": "outliers",
                     "type": "scatter",
                     "datasetId": "outliers",
@@ -5686,6 +5705,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     },
                 },
                 {
+                    "id": "target_global_outliers_series",
                     "name": "global outliers",
                     "type": "scatter",
                     "datasetId": "globaloutliers",
@@ -5710,6 +5730,33 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             target_boxplot.options["legend"]["show"] = True
             
             target_boxplot.update()
+
+            # Force ECharts to replace series/dataset instead of merging, so we don't get
+            # duplicate boxes per chromosome on first load (merge can append series).
+            try:
+                options_clean = _echarts_option_to_json(target_boxplot.options)
+                options_json = json.dumps(options_clean)
+                options_escaped = json.dumps(options_json)
+                ui.run_javascript(
+                    f"""
+                    (function() {{
+                      var el = document.querySelector('.target-coverage-boxplot');
+                      if (!el) return;
+                      var chart = echarts.getInstanceByDom(el);
+                      if (!chart) {{
+                        var child = el.querySelector('div');
+                        if (child) chart = echarts.getInstanceByDom(child);
+                      }}
+                      if (!chart) return;
+                      try {{
+                        var options = JSON.parse({options_escaped});
+                        chart.setOption(options, {{ replaceMerge: ['series', 'dataset'] }});
+                      }} catch (e) {{ console.warn('Target coverage replaceMerge:', e); }}
+                    }})();
+                    """
+                )
+            except Exception as js_err:
+                logging.debug("Target coverage replaceMerge JS skip: %s", js_err)
         except Exception as e:
             _log_notify(
                 f"Target boxplot update failed: {e}", level="warning", notify=False
