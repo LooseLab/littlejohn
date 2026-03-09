@@ -3517,7 +3517,7 @@ async def rich_monitor(coord, continuous: bool = False) -> None:
 
     if _RICH_CONSOLE:
         _RICH_CONSOLE.print(
-            "[dim]Progress: time column = run elapsed; (Ns) = current job duration[/dim]"
+            "[dim]Progress: 1st time = run elapsed; 2nd = est. remaining (-:--:-- = unknown); (Ns) = current job duration[/dim]"
         )
     progress.start()
     try:

@@ -17,6 +17,10 @@ if sys.version_info < (3, 12):
 
 import pysam
 from dateutil import parser
+from robin.analysis.fusion_work import (
+    compute_duplex_skip_set_from_records,
+    parse_start_time,
+)
 from robin.analysis.master_csv_manager import MasterCSVManager
 from robin.logging_config import get_job_logger
 
@@ -270,6 +274,10 @@ def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
             has_mgmt_reads = False
             mgmt_read_count = 0
 
+            # Duplex detection: collect (read_id, ch, st_parsed, du, dx) for primary alignments
+            # so we can exclude second-strand duplex reads from supplementary_read_ids
+            duplex_records: List[Tuple[str, int, Optional[float], Optional[float], Optional[int]]] = []
+
             # Step 4: Process reads in streaming fashion
             for read in sam_file.fetch(until_eof=True):
                 # Extract RG tag and check for barcode - early termination optimization
@@ -353,6 +361,39 @@ def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
                     except KeyError:
                         if not last_start:
                             last_start = bam_read["time_of_run"]
+
+                    # Collect duplex metadata for primary alignments (channel, start_time, duration, dx)
+                    ch_val: int = -1
+                    st_parsed: Optional[float] = None
+                    du_val: Optional[float] = None
+                    dx_val: Optional[int] = None
+                    try:
+                        if read.has_tag("ch"):
+                            ch_val = int(read.get_tag("ch"))
+                    except (ValueError, TypeError):
+                        pass
+                    try:
+                        if read.has_tag(_ST_TAG):
+                            st_parsed = parse_start_time(read.get_tag(_ST_TAG))
+                    except KeyError:
+                        pass
+                    try:
+                        if read.has_tag("du"):
+                            du_val = float(read.get_tag("du"))
+                    except (ValueError, TypeError, KeyError):
+                        pass
+                    try:
+                        if read.has_tag("dx"):
+                            dx_val = int(read.get_tag("dx"))
+                    except (ValueError, TypeError, KeyError):
+                        pass
+                    duplex_records.append((query_name, ch_val, st_parsed, du_val, dx_val))
+
+            # Exclude second-strand duplex reads from supplementary list (keep first strand only)
+            if duplex_records:
+                duplex_skip = compute_duplex_skip_set_from_records(duplex_records)
+                if duplex_skip:
+                    reads_with_supplementary = reads_with_supplementary - duplex_skip
 
             # Step 5: Finalize data
             # Build counters dict once

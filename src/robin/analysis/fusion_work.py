@@ -865,6 +865,191 @@ def find_reads_with_supplementary(bamfile: str) -> Set[str]:
     return reads_with_supp
 
 
+# -----------------------------------------------------------------------------
+# Duplex read detection (Nanopore: same molecule sequenced twice in succession)
+# Used to skip the second strand so fusion analysis uses independent molecules.
+# We identify *missed* duplex pairs (not dx-tag labeled) by adjacency: same channel,
+# consecutive in start_time order. There is unknown dead time between reads, so we do
+# NOT assume read2_start = read1_start + duration; reads must simply be adjacent.
+# Tags: ch (channel), st (start_time). Duration/du not used for adjacency.
+# -----------------------------------------------------------------------------
+
+# Max time (seconds) between *starts* of two reads on same channel to consider as duplex pair.
+# Pairs further apart are not treated as same molecule (safety cap only; adjacency is the rule).
+_DUPLEX_MAX_GAP_SECONDS = 600.0
+
+
+def parse_start_time(st_value: Any) -> Optional[float]:
+    """
+    Parse Nanopore start_time (st tag) to seconds for ordering/gap checks.
+    Handles numeric (seconds) or ISO8601-like string. Returns None if unparseable.
+    Public for use by bam_preprocessor when collecting duplex records in a single pass.
+    """
+    if st_value is None:
+        return None
+    try:
+        return float(st_value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        s = str(st_value).strip()
+        if not s:
+            return None
+        # Try ISO format (e.g. 2024-01-15T10:30:00Z or with offset)
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return dt.timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def compute_duplex_skip_set_from_records(
+    records: List[Tuple[str, int, Optional[float], Optional[float], Optional[int]]],
+    max_gap_seconds: float = _DUPLEX_MAX_GAP_SECONDS,
+) -> Set[str]:
+    """
+    From a list of (read_id, channel, start_time_seconds, duration_seconds, dx_tag),
+    compute the set of read_ids that are the "second strand" of a duplex pair (to skip).
+
+    Duplex pairs are identified by adjacency only (missed duplexes are rarely dx-tagged):
+    - Same channel, consecutive in start_time order → first read kept, second skipped.
+    - No assumption that read2 start = read1 start + duration; there is unknown dead time.
+    - max_gap_seconds: only treat as same-molecule pair if (read2_st - read1_st) <= this
+      (safety cap to avoid pairing reads that are far apart on the same channel).
+    """
+    skip: Set[str] = set()
+
+    # Records with valid channel and start_time only (duration not used for adjacency)
+    with_time = [
+        (read_id, ch, st)
+        for read_id, ch, st, _du, _dx in records
+        if st is not None and ch is not None and ch >= 0
+    ]
+    if not with_time:
+        return skip
+
+    # Sort by (channel, start_time); consecutive same-channel reads are adjacent
+    with_time.sort(key=lambda x: (x[1], x[2]))
+
+    for i in range(len(with_time) - 1):
+        _read_id1, ch1, st1 = with_time[i]
+        read_id2, ch2, st2 = with_time[i + 1]
+        if ch1 != ch2:
+            continue
+        # Adjacent on same channel: read2 is the next read after read1 → duplex pair, skip read2
+        delta_start = st2 - st1
+        if 0 < delta_start <= max_gap_seconds:
+            skip.add(read_id2)
+    return skip
+
+
+def find_duplex_read_ids_to_skip(
+    bamfile: str,
+    max_gap_seconds: float = _DUPLEX_MAX_GAP_SECONDS,
+) -> Set[str]:
+    """
+    One BAM pass to identify read IDs that are the second strand of a duplex pair.
+    Those reads are excluded from fusion analysis so we count independent molecules only.
+
+    Targets *missed* duplex pairs (typically not dx-tag labeled). Uses adjacency only:
+    same channel (ch) + consecutive in start_time (st) order → first read kept, second skipped.
+    Does not assume read2 start = read1 start + duration; there is unknown dead time between reads.
+    max_gap_seconds caps how far apart two consecutive same-channel reads can be to count as one pair.
+    """
+    records: List[Tuple[str, int, Optional[float], Optional[float], Optional[int]]] = []
+    try:
+        with pysam.AlignmentFile(bamfile, "rb") as bam:
+            for read in bam:
+                if read.is_secondary or read.is_unmapped:
+                    continue
+                read_id = read.query_name
+                dx: Optional[int] = None
+                if read.has_tag("dx"):
+                    try:
+                        dx = int(read.get_tag("dx"))
+                    except (ValueError, TypeError):
+                        pass
+                ch: Optional[int] = None
+                st_parsed: Optional[float] = None
+                du: Optional[float] = None
+                if read.has_tag("ch"):
+                    try:
+                        ch = int(read.get_tag("ch"))
+                    except (ValueError, TypeError):
+                        pass
+                if read.has_tag("st"):
+                    st_parsed = parse_start_time(read.get_tag("st"))
+                if read.has_tag("du"):
+                    try:
+                        du = float(read.get_tag("du"))
+                    except (ValueError, TypeError):
+                        pass
+                records.append((read_id, ch if ch is not None else -1, st_parsed, du, dx))
+    except Exception as e:
+        logger.error(f"Error building duplex skip set from {bamfile}: {e}")
+        raise
+
+    skip = compute_duplex_skip_set_from_records(records, max_gap_seconds)
+    if skip:
+        logger.info(f"Duplex filter: {len(skip)} read(s) marked as second-strand duplex (will skip for fusion)")
+    return skip
+
+
+def find_reads_with_supplementary_and_duplex_skip(
+    bamfile: str,
+    max_gap_seconds: float = _DUPLEX_MAX_GAP_SECONDS,
+) -> Tuple[Set[str], Set[str]]:
+    """
+    Single BAM pass: return (reads_with_supplementary, read_ids_to_skip_duplex_second_strand).
+    Duplex skip set is built from adjacency (same channel, consecutive in start_time); no dx tag.
+    Caller should use effective_reads = reads_with_supp - read_ids_to_skip for fusion analysis.
+    """
+    reads_with_supp: Set[str] = set()
+    records: List[Tuple[str, int, Optional[float], Optional[float], Optional[int]]] = []
+    try:
+        with pysam.AlignmentFile(bamfile, "rb") as bam:
+            for read in bam:
+                if read.is_unmapped:
+                    continue
+                if read.is_supplementary or read.has_tag("SA"):
+                    reads_with_supp.add(read.query_name)
+                if read.is_secondary:
+                    continue
+                read_id = read.query_name
+                dx: Optional[int] = None
+                if read.has_tag("dx"):
+                    try:
+                        dx = int(read.get_tag("dx"))
+                    except (ValueError, TypeError):
+                        pass
+                ch: Optional[int] = None
+                st_parsed: Optional[float] = None
+                du: Optional[float] = None
+                if read.has_tag("ch"):
+                    try:
+                        ch = int(read.get_tag("ch"))
+                    except (ValueError, TypeError):
+                        pass
+                if read.has_tag("st"):
+                    st_parsed = parse_start_time(read.get_tag("st"))
+                if read.has_tag("du"):
+                    try:
+                        du = float(read.get_tag("du"))
+                    except (ValueError, TypeError):
+                        pass
+                records.append((read_id, ch if ch is not None else -1, st_parsed, du, dx))
+    except Exception as e:
+        logger.error(f"Error in find_reads_with_supplementary_and_duplex_skip for {bamfile}: {e}")
+        raise
+
+    read_ids_to_skip = compute_duplex_skip_set_from_records(records, max_gap_seconds)
+    n_effective = len(reads_with_supp - read_ids_to_skip)
+    if read_ids_to_skip:
+        logger.info(
+            f"Supplementary reads: {len(reads_with_supp)} total, {len(read_ids_to_skip)} duplex second-strand skipped, {n_effective} effective"
+        )
+    return reads_with_supp, read_ids_to_skip
+
+
 def _check_read_alignments_overlap(read_rows: List[Dict]) -> bool:
     """
     Check for false positives in read alignments:

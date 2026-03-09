@@ -40,6 +40,7 @@ from robin.analysis.fusion_work import (
     _ensure_gene_regions_loaded,
     has_supplementary_alignments,
     find_reads_with_supplementary,
+    find_reads_with_supplementary_and_duplex_skip,
     _find_gene_intersections,
     _process_reads_for_fusions,
     _optimize_fusion_dataframe,
@@ -1024,12 +1025,16 @@ Examples:
         if not has_supplementary:
             logger.warning(f"No supplementary reads found in {os.path.basename(bam_path)} - will be skipped")
         
-        # Get supplementary read IDs
+        # Get supplementary read IDs, excluding duplex second-strand reads (keep first strand only)
         supplementary_read_ids = []
         if has_supplementary:
             try:
-                supplementary_read_ids = list(find_reads_with_supplementary(bam_path))
-                logger.info(f"Found {len(supplementary_read_ids)} reads with supplementary alignments")
+                reads_with_supp, duplex_skip = find_reads_with_supplementary_and_duplex_skip(bam_path)
+                supplementary_read_ids = list(reads_with_supp - duplex_skip)
+                logger.info(
+                    f"Found {len(reads_with_supp)} reads with supplementary alignments, "
+                    f"{len(duplex_skip)} duplex second-strand skipped → {len(supplementary_read_ids)} effective"
+                )
             except Exception as e:
                 logger.warning(f"Error finding supplementary reads: {e}")
                 has_supplementary = False
