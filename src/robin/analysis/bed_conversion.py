@@ -194,20 +194,33 @@ class BedConversionAnalysis:
         def process_single_bam(bam: str) -> str:
             logger.debug(f"Processing BAM file: {bam}")
 
-            # Create temporary file for matkit output (BEDMethyl text; merge reads this via CSV path)
+            # Temporary parquet path: matkit writes 8-column parquet so merge_modkit_files can read directly (no CSV parse).
             temp_file = tempfile.NamedTemporaryFile(
-                mode="w", suffix=".txt", prefix="modkit_", dir=work_dir, delete=False
+                suffix=".parquet", prefix="modkit_", dir=work_dir, delete=False
             )
             temp_file.close()
 
             try:
-                # Run matkit on the BAM file - using the same function as working code
+                # Run matkit on the BAM file (writes parquet when path ends in .parquet)
                 if run_matkit_callable is not None:
                     run_matkit_callable(bam, temp_file.name)
                 else:
-                    # Fallback if robin is not available
-                    with open(temp_file.name, "w") as f:
-                        f.write(f"# Dummy output for {bam}\n")
+                    # Fallback if robin is not available (write empty parquet not used in real runs)
+                    import pyarrow as pa
+                    import pyarrow.parquet as pq
+                    empty = pa.table(
+                        {
+                            "chrom": pa.array([], type=pa.binary()),
+                            "chromStart": pa.array([], type=pa.int64()),
+                            "mod_code": pa.array([], type=pa.binary()),
+                            "strand": pa.array([], type=pa.binary()),
+                            "valid_cov": pa.array([], type=pa.uint32()),
+                            "percent_modified": pa.array([], type=pa.float32()),
+                            "n_mod": pa.array([], type=pa.uint32()),
+                            "n_canonical": pa.array([], type=pa.uint32()),
+                        }
+                    )
+                    pq.write_table(empty, temp_file.name)
 
                 logger.debug(f"Successfully processed: {temp_file.name}")
                 return temp_file.name
@@ -244,7 +257,7 @@ class BedConversionAnalysis:
         self, state: str, data: List[str], sample_id: str, file_number: int
     ) -> str:
         """Update the state with new data from BAM processing - creates parquet file directly"""
-        logger = logging.getLogger("robin.analysis.bed_conversion")
+        logger = _LOGGER
 
         if merge_modkit_files is None:
             logger.error(

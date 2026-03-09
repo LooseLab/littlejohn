@@ -25,7 +25,6 @@ import pyarrow.parquet as pq
 import pyranges as pr
 import pysam
 from alive_progress import alive_bar
-from tqdm import tqdm
 from robin.analysis.utilities.ReadBam import ReadBam
 from robin.analysis.utilities.mnp_flex import APIClient as MnpFlexClient
 from robin import resources
@@ -702,20 +701,20 @@ def reconstruct_full_bedmethyl_for_mnpflex(parquet_file_path: str) -> pd.DataFra
         raise
 
 
-# Pre-compile default count dictionary to avoid repeated creation
-DEFAULT_COUNT_DICT = {
-    "mod": 0,
-    "canonical": 0,
-    "other_mod": 0,
-    "delete": 0,
-    "fail": 0,
-    "diff": 0,
-    "nocall": 0,
-    "total": 0,
-    "max_prob_C": 0,
-    "max_prob_m": 0,
-    "max_prob_h": 0,
-}
+# Count storage: list of 11 ints per site (avoids dict allocation in hot loop).
+# Order: mod, canonical, other_mod, delete, fail, diff, nocall, total, max_prob_C, max_prob_m, max_prob_h
+COUNT_IDX_MOD = 0
+COUNT_IDX_CANONICAL = 1
+COUNT_IDX_OTHER_MOD = 2
+COUNT_IDX_DELETE = 3
+COUNT_IDX_FAIL = 4
+COUNT_IDX_DIFF = 5
+COUNT_IDX_NOCALL = 6
+COUNT_IDX_TOTAL = 7
+COUNT_IDX_MAX_PROB_C = 8
+COUNT_IDX_MAX_PROB_M = 9
+COUNT_IDX_MAX_PROB_H = 10
+COUNT_LEN = 11
 
 # Pre-define constants to avoid repeated string creation and calculations
 PLUS_STRAND = "+"
@@ -737,7 +736,7 @@ def run_matkit(sortfile: str, temp: str) -> None:
     logging.info(f"Processing BAM file with modkit2: {sortfile}")
 
     # Use the improved approach from modkit2.py with memory efficiency and better classification
-    counts, debug_data = process_bam_counts_improved(
+    counts, mod_sites, debug_data = process_bam_counts_improved(
         sortfile,
         threshold=0.73,
         combine_mods=True,
@@ -748,11 +747,12 @@ def run_matkit(sortfile: str, temp: str) -> None:
 
     # Write parquet (same schema as merge path) or BEDMethyl text
     if temp.endswith(".parquet"):
-        write_counts_to_parquet(counts, temp)
+        write_counts_to_parquet(counts, mod_sites, temp)
     else:
-        write_bedmethyl_improved(temp, counts, debug_probs=False)
+        write_bedmethyl_improved(temp, counts, mod_sites, debug_probs=False)
     # Clear memory
     del counts
+    del mod_sites
     del debug_data
     logging.info(f"Modkit2 processing complete. Output written to: {temp}")
     gc.collect()
@@ -945,26 +945,16 @@ def map_read_to_ref_positions(read):
         - Modkit pileup documentation: https://nanoporetech.github.io/modkit/intro_pileup.html
         - BAM format specification for modified bases
     """
-    # Optimized version: use direct iteration and avoid try/except overhead
+    # Use matches_only=True only; with_seq is not needed (we only use read_pos/ref_pos)
+    # and avoids MD-tag parsing and base sequence allocation (faster).
     ref_map = {}
-    try:
-        # Try with sequence first (requires MD tag for base information)
-        # This provides the most accurate mapping when MD tag is available
-        for read_pos, ref_pos, base in read.get_aligned_pairs(
-            with_seq=True, matches_only=True
-        ):
-            if read_pos is not None and ref_pos is not None:
-                ref_map[read_pos] = ref_pos
-    except ValueError:
-        # Fall back to without sequence if MD tag is missing
-        # This is less precise but still functional for modification calling
-        for read_pos, ref_pos in read.get_aligned_pairs(matches_only=True):
-            if read_pos is not None and ref_pos is not None:
-                ref_map[read_pos] = ref_pos
+    for read_pos, ref_pos in read.get_aligned_pairs(matches_only=True):
+        if read_pos is not None and ref_pos is not None:
+            ref_map[read_pos] = ref_pos
     return ref_map
 
 
-def write_bedmethyl_improved(output_path, counts, debug_probs=False):
+def write_bedmethyl_improved(output_path, counts, mod_sites, debug_probs=False):
     """
     Write counts to BEDMethyl format with improved performance.
 
@@ -994,62 +984,54 @@ def write_bedmethyl_improved(output_path, counts, debug_probs=False):
 
     Args:
         output_path: Path to output BEDMethyl file
-        counts: Dictionary containing classification counts with tuple keys
+        counts: Dict mapping (chrom, pos, strand, mod_code) to list of 11 ints (see COUNT_IDX_*)
+        mod_sites: Set of (chrom, pos, strand, mod_code) to include (modkit output sites)
         debug_probs: Whether to include probability columns for debugging
 
     References:
         - BEDMethyl format specification: https://github.com/nanoporetech/modkit?tab=readme-ov-file#description-of-bedmethyl-output
         - Modkit pileup output documentation
     """
-    with open(output_path, "w") as out:
-        # Sort by chromosome, position, strand, and modification code for consistent output
-        sorted_sites = sorted(counts.keys(), key=lambda x: (x[0], x[1], x[2], x[3]))
-
-        # Pre-allocate string templates for better performance
-        pos_str = str
-        percent_str = "{:.2f}".format
-
-        for site_key in sorted_sites:
-            chrom, pos, strand, mod_code = site_key
+    # Large buffer reduces syscalls (Python 3.12 default is 8KiB)
+    with open(output_path, "w", buffering=2**20) as out:
+        # Tuples compare lexicographically; no key= needed
+        for site_key in sorted(counts.keys()):
+            if site_key not in mod_sites:
+                continue
             c = counts[site_key]
-            total = c["total"]
-            # Calculate fraction modified as Nmod / Nvalid_cov
-            percent = (c["mod"] / total) * 100 if total else 0.0
-
-            # Construct the 18-column BEDMethyl line using optimized string operations
+            if not (c[COUNT_IDX_MOD] > 0 or c[COUNT_IDX_CANONICAL] > 0):
+                continue
+            chrom, pos, strand, mod_code = site_key
+            total = c[COUNT_IDX_TOTAL]
+            percent = (c[COUNT_IDX_MOD] / total) * 100 if total else 0.0
             pos_plus_1 = pos + 1
             fields = [
                 chrom,
-                pos_str(pos),
-                pos_str(pos_plus_1),  # Columns 1-3: chrom, start, end
+                str(pos),
+                str(pos_plus_1),
                 mod_code,
-                pos_str(total),
-                strand,  # Columns 4-6: mod_code, score, strand
-                pos_str(pos),
-                pos_str(pos_plus_1),
-                COLOR_VALUE,  # Columns 7-9: start, end, color
-                pos_str(total),
-                percent_str(percent),  # Columns 10-11: Nvalid_cov, fraction_modified
-                pos_str(c["mod"]),
-                pos_str(c["canonical"]),  # Columns 12-13: Nmod, Ncanonical
-                pos_str(c["other_mod"]),
-                pos_str(c["delete"]),  # Columns 14-15: Nother_mod, Ndelete
-                pos_str(c["fail"]),
-                pos_str(c["diff"]),
-                pos_str(c["nocall"]),  # Columns 16-18: Nfail, Ndiff, Nnocall
+                str(total),
+                strand,
+                str(pos),
+                str(pos_plus_1),
+                COLOR_VALUE,
+                str(total),
+                f"{percent:.2f}",
+                str(c[COUNT_IDX_MOD]),
+                str(c[COUNT_IDX_CANONICAL]),
+                str(c[COUNT_IDX_OTHER_MOD]),
+                str(c[COUNT_IDX_DELETE]),
+                str(c[COUNT_IDX_FAIL]),
+                str(c[COUNT_IDX_DIFF]),
+                str(c[COUNT_IDX_NOCALL]),
             ]
-
-            # Add probability columns only if debug_probs is True
             if debug_probs:
-                # Compute probabilities for canonical, 5mC, and 5hmC for each site
-                # Output as 0-1 float (divide by 255)
-                prob_canonical = c.get("max_prob_C", 0.0) / 255.0
-                prob_5mc = c.get("max_prob_m", 0.0) / 255.0
-                prob_5hmc = c.get("max_prob_h", 0.0) / 255.0
+                prob_canonical = c[COUNT_IDX_MAX_PROB_C] / 255.0
+                prob_5mc = c[COUNT_IDX_MAX_PROB_M] / 255.0
+                prob_5hmc = c[COUNT_IDX_MAX_PROB_H] / 255.0
                 fields.extend(
                     [f"{prob_canonical:.3f}", f"{prob_5mc:.3f}", f"{prob_5hmc:.3f}"]
                 )
-
             out.write("\t".join(fields) + "\n")
 
 
@@ -1062,13 +1044,37 @@ def _ensure_utf8(s: str | bytes) -> str:
     return str(s)
 
 
-def write_counts_to_parquet(counts: dict, output_path: str) -> None:
+def write_counts_to_parquet(counts: dict, mod_sites: set, output_path: str) -> None:
     """
     Write methylation counts to parquet with the essential 8-column schema.
+    counts maps (chrom, pos, strand, mod_code) to list of 11 ints (see COUNT_IDX_*).
     String columns (chrom, mod_code, strand) are stored as binary so readers
     never trigger UTF-8 validation; downstream decode with errors='replace'.
     """
-    if not counts:
+    chrom_b = []
+    chrom_start = []
+    mod_code_b = []
+    strand_b = []
+    valid_cov = []
+    percent_modified = []
+    n_mod = []
+    n_canonical = []
+    for (chrom, pos, strand, mod_code), c in counts.items():
+        if (chrom, pos, strand, mod_code) not in mod_sites:
+            continue
+        if not (c[COUNT_IDX_MOD] > 0 or c[COUNT_IDX_CANONICAL] > 0):
+            continue
+        total = c[COUNT_IDX_TOTAL]
+        pct = (c[COUNT_IDX_MOD] / total) * 100.0 if total else 0.0
+        chrom_b.append(_ensure_utf8(chrom).encode("utf-8"))
+        chrom_start.append(pos)
+        mod_code_b.append(_ensure_utf8(mod_code).encode("utf-8"))
+        strand_b.append(_ensure_utf8(strand).encode("utf-8"))
+        valid_cov.append(total)
+        percent_modified.append(round(pct, 2))
+        n_mod.append(c[COUNT_IDX_MOD])
+        n_canonical.append(c[COUNT_IDX_CANONICAL])
+    if not chrom_b:
         pq.write_table(
             pa.table(
                 {
@@ -1086,25 +1092,6 @@ def write_counts_to_parquet(counts: dict, output_path: str) -> None:
             output_path,
         )
         return
-    chrom_b = []
-    chrom_start = []
-    mod_code_b = []
-    strand_b = []
-    valid_cov = []
-    percent_modified = []
-    n_mod = []
-    n_canonical = []
-    for (chrom, pos, strand, mod_code), c in counts.items():
-        total = c["total"]
-        pct = (c["mod"] / total) * 100.0 if total else 0.0
-        chrom_b.append(_ensure_utf8(chrom).encode("utf-8"))
-        chrom_start.append(pos)
-        mod_code_b.append(_ensure_utf8(mod_code).encode("utf-8"))
-        strand_b.append(_ensure_utf8(strand).encode("utf-8"))
-        valid_cov.append(total)
-        percent_modified.append(round(pct, 2))
-        n_mod.append(c["mod"])
-        n_canonical.append(c["canonical"])
     table = pa.table(
         {
             "chrom": pa.array(chrom_b, type=pa.binary()),
@@ -1171,6 +1158,8 @@ def process_bam_counts_improved(
     iterable = (
         bam.fetch(contig=chrom_filter) if chrom_filter else bam.fetch(until_eof=True)
     )
+    # Cache reference names to avoid repeated get_reference_name() lookups per read
+    ref_names = bam.references
 
     # Use a flat dictionary with tuple keys for memory efficiency
     # Structure: counts[(chrom, pos, strand, mod_code)] = count_dict
@@ -1197,7 +1186,7 @@ def process_bam_counts_improved(
 
     # Debug tracking for specific positions
     debug_data = {} if debug_positions else None
-    for read in tqdm(iterable, desc="Processing reads", disable=True):
+    for read in iterable:
         # Skip unmapped, secondary, and optionally supplementary alignments
         # Note: modkit appears to filter out secondary alignments by default
         # This matches the behavior of the original modkit tool
@@ -1208,7 +1197,7 @@ def process_bam_counts_improved(
         ):
             continue
 
-        chrom = bam.get_reference_name(read.reference_id)
+        chrom = ref_names[read.reference_id]
         ref_map = map_read_to_ref_positions(read)
 
         try:
@@ -1250,10 +1239,10 @@ def process_bam_counts_improved(
                 # Update counts directly - each read contributes once per site
                 site_key = (chrom, refpos, strand, COMBINED_MOD_CODE)
                 if site_key not in counts:
-                    counts[site_key] = DEFAULT_COUNT_DICT.copy()
+                    counts[site_key] = [0] * COUNT_LEN
 
                 c = counts[site_key]
-                c["total"] += 1
+                c[COUNT_IDX_TOTAL] += 1
 
                 # Track per-read max probabilities for C, m, h from the original mod_probs
                 total_mod_prob = 0.0
@@ -1275,12 +1264,12 @@ def process_bam_counts_improved(
                 # Canonical probability is the complement
                 canonical_prob = max(0.0, 1.0 - total_mod_prob)
                 canonical_prob_255 = int(canonical_prob * 255)
-                if canonical_prob_255 > c["max_prob_C"]:
-                    c["max_prob_C"] = canonical_prob_255
-                if local_max_prob_m > c["max_prob_m"]:
-                    c["max_prob_m"] = local_max_prob_m
-                if local_max_prob_h > c["max_prob_h"]:
-                    c["max_prob_h"] = local_max_prob_h
+                if canonical_prob_255 > c[COUNT_IDX_MAX_PROB_C]:
+                    c[COUNT_IDX_MAX_PROB_C] = canonical_prob_255
+                if local_max_prob_m > c[COUNT_IDX_MAX_PROB_M]:
+                    c[COUNT_IDX_MAX_PROB_M] = local_max_prob_m
+                if local_max_prob_h > c[COUNT_IDX_MAX_PROB_H]:
+                    c[COUNT_IDX_MAX_PROB_H] = local_max_prob_h
 
                 # Use the highest probability among canonical, 5mC, and 5hmC for classification
                 max_prob = max(canonical_prob_255, local_max_prob_m, local_max_prob_h)
@@ -1288,13 +1277,13 @@ def process_bam_counts_improved(
                 # Apply modkit classification logic based on the highest probability
                 if max_prob >= thresh:
                     if canonical_prob_255 == max_prob:
-                        c["canonical"] += 1  # Canonical call
+                        c[COUNT_IDX_CANONICAL] += 1  # Canonical call
                     else:
-                        c["mod"] += 1  # Modified call
+                        c[COUNT_IDX_MOD] += 1  # Modified call
                 elif max_prob == 0:
-                    c["canonical"] += 1  # Canonical call
+                    c[COUNT_IDX_CANONICAL] += 1  # Canonical call
                 else:
-                    c["fail"] += 1  # Failed call (0 < prob < threshold)
+                    c[COUNT_IDX_FAIL] += 1  # Failed call (0 < prob < threshold)
 
 
                 # Debug tracking for specific positions
@@ -1364,16 +1353,16 @@ def process_bam_counts_improved(
             for (rp, strand, mod_code), probs in read_mod_calls.items():
                 site_key = (chrom, rp, strand, mod_code)
                 if site_key not in counts:
-                    counts[site_key] = DEFAULT_COUNT_DICT.copy()
+                    counts[site_key] = [0] * COUNT_LEN
 
                 c = counts[site_key]
-                c["total"] += 1
+                c[COUNT_IDX_TOTAL] += 1
                 max_prob = max(probs)
                 has_other_mod_above_thresh = False
 
                 # Apply modkit classification logic
                 if max_prob >= thresh:
-                    c["mod"] += 1  # Modified call
+                    c[COUNT_IDX_MOD] += 1  # Modified call
                 elif max_prob == 0:
                     # Check if there are other modification types at this site with prob >= threshold
                     # Only classify as other_mod if the other modification is above threshold
@@ -1388,9 +1377,9 @@ def process_bam_counts_improved(
                                 break
 
                     if has_other_mod_above_thresh:
-                        c["other_mod"] += 1  # Other modification call
+                        c[COUNT_IDX_OTHER_MOD] += 1  # Other modification call
                     else:
-                        c["canonical"] += 1  # Canonical call
+                        c[COUNT_IDX_CANONICAL] += 1  # Canonical call
                 else:
                     # Check if there are other modification types at this site with prob >= threshold
                     # If so, classify as other_mod instead of fail
@@ -1405,9 +1394,9 @@ def process_bam_counts_improved(
                                 break
 
                     if has_other_mod_above_thresh:
-                        c["other_mod"] += 1  # Other modification call
+                        c[COUNT_IDX_OTHER_MOD] += 1  # Other modification call
                     else:
-                        c["fail"] += 1  # Failed call (0 < prob < threshold)
+                        c[COUNT_IDX_FAIL] += 1  # Failed call (0 < prob < threshold)
 
 
         # Process reads without modification data as canonical bases
@@ -1421,17 +1410,11 @@ def process_bam_counts_improved(
     if ref_fasta_obj:
         ref_fasta_obj.close()
 
-    # Filter counts to only include sites that match modkit's filtering logic (comp inlined in 3.12)
-    filtered_counts = {
-        site_key: c
-        for site_key, c in counts.items()
-        if site_key in mod_sites and (c["mod"] > 0 or c["canonical"] > 0)
-    }
-
     # Force garbage collection to free memory
     gc.collect()
 
-    return filtered_counts, debug_data
+    # Caller filters via mod_sites when writing (avoids intermediate dict)
+    return counts, mod_sites, debug_data
 
 
 def get_bam_file_count(parquet_file_path: str) -> int:

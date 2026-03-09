@@ -2791,6 +2791,7 @@ class Coordinator:
             return self._stats_cache
         
         # per-queue active summary (also expose as 'active_by_worker' for GUI compat)
+        # Show the 2 most recently started jobs per queue so the displayed timer resets when new jobs start
         active_by_queue: Dict[str, List[Dict[str, Any]]] = {}
         for jid, info in self.active.items():
             q = info["queue"]
@@ -2800,8 +2801,16 @@ class Coordinator:
                     "job_type": info["job_type"],
                     "filepath": info["filepath"],
                     "duration": int(now - info["start_time"]),
+                    "start_time": info["start_time"],
                 }
             )
+        # Sort each queue's list by start_time descending (newest first), then keep only first 2
+        for q in active_by_queue:
+            active_by_queue[q] = sorted(
+                active_by_queue[q], key=lambda x: x["start_time"], reverse=True
+            )[:2]
+            for entry in active_by_queue[q]:
+                entry.pop("start_time", None)
 
         # build category counts
         def _cat_of(jt: str) -> str:
@@ -3413,22 +3422,16 @@ async def tqdm_monitor(coord, continuous: bool = False) -> None:
                 b = bars[q]
                 b.total = max(b.total or 0, total_for_q)
                 b.n = completed_in_q
-                # show up to 2 active jobs and full path of current file(s)
+                # Show up to 2 active jobs with per-job duration (no full path to avoid clutter)
                 active_jobs_info = active_by_queue.get(q, [])
                 if active_jobs_info:
                     parts = []
                     for j in active_jobs_info[:2]:
                         fn = os.path.basename(j.get("filepath", ""))
-                        # Truncate long filenames to keep display compact
                         if len(fn) > 25:
                             fn = fn[:22] + "..."
-                        parts.append(f"{fn}({j['duration']}s)")
-                    postfix = " | ".join(parts)
-                    # Extra line: full path of first active file
-                    full_path = active_jobs_info[0].get("filepath", "").strip()
-                    if full_path:
-                        postfix += "\n  " + full_path
-                    b.set_postfix_str(postfix)
+                        parts.append(f"{fn} ({j['duration']}s)")
+                    b.set_postfix_str(" | ".join(parts))
                 else:
                     b.set_postfix_str("")
                 b.refresh()
@@ -3443,23 +3446,10 @@ async def tqdm_monitor(coord, continuous: bool = False) -> None:
             oom = s.get("oom_count", 0)
             if oom and s["failed"]:
                 fail_str += f" (OOM:{oom})"
-            overall_postfix = (
+            overall.set_postfix_str(
                 f"Act:{s['active_count']} | Done:{s['completed']} | "
                 f"{fail_str} | Skip:{s['total_skipped']} | Tot:{s['total_enqueued']}"
             )
-            # Extra line: first active file path from any queue
-            first_active_path = ""
-            for q in order:
-                for j in active_by_queue.get(q, [])[:1]:
-                    fp = (j.get("filepath") or "").strip()
-                    if fp:
-                        first_active_path = fp
-                        break
-                if first_active_path:
-                    break
-            if first_active_path:
-                overall_postfix += "\n  " + first_active_path
-            overall.set_postfix_str(overall_postfix)
             overall.refresh()
 
             # exit condition: only in non-continuous mode (batch). In continuous
@@ -3525,6 +3515,10 @@ async def rich_monitor(coord, continuous: bool = False) -> None:
     }
     overall_id = progress.add_task("Overall Progress", total=None, detail="")
 
+    if _RICH_CONSOLE:
+        _RICH_CONSOLE.print(
+            "[dim]Progress: time column = run elapsed; (Ns) = current job duration[/dim]"
+        )
     progress.start()
     try:
         while True:
@@ -3555,12 +3549,8 @@ async def rich_monitor(coord, continuous: bool = False) -> None:
                         fn = os.path.basename(j.get("filepath", ""))
                         if len(fn) > 25:
                             fn = fn[:22] + "..."
-                        parts.append(f"{fn}({j['duration']}s)")
+                        parts.append(f"{fn} ({j['duration']}s)")
                 detail = " | ".join(parts)
-                # Extra line: full path of first active file
-                full_path = (active_jobs_info[0].get("filepath", "") or "").strip() if active_jobs_info else ""
-                if full_path:
-                    detail += "\n  " + full_path
                 progress.update(
                     task_ids[q],
                     total=total_for_q if total_for_q > 0 else None,
@@ -3575,28 +3565,15 @@ async def rich_monitor(coord, continuous: bool = False) -> None:
             oom = s.get("oom_count", 0)
             if oom and s.get("failed"):
                 fail_detail += f" (OOM:{oom})"
-            overall_detail = (
-                f"Done:{s['completed'] + s['failed']}/{total_with_waiting} | "
-                f"Act:{s['active_count']} | "
-                f"{fail_detail} | Skip:{s['total_skipped']}"
-            )
-            # Extra line: first active file path from any queue
-            first_active_path = ""
-            for q in order:
-                for j in active_by_queue.get(q, [])[:1]:
-                    fp = (j.get("filepath") or "").strip()
-                    if fp:
-                        first_active_path = fp
-                        break
-                if first_active_path:
-                    break
-            if first_active_path:
-                overall_detail += "\n  " + first_active_path
             progress.update(
                 overall_id,
                 total=total_with_waiting if total_with_waiting > 0 else None,
                 completed=s["completed"] + s["failed"],
-                detail=overall_detail,
+                detail=(
+                    f"Done:{s['completed'] + s['failed']}/{total_with_waiting} | "
+                    f"Act:{s['active_count']} | "
+                    f"{fail_detail} | Skip:{s['total_skipped']}"
+                ),
             )
 
             if (
