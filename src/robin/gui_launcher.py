@@ -3112,16 +3112,16 @@ class GUILauncher:
     def _open_view_identifiers_modal(
         self, sample_dir: Optional[Path], sample_id: str
     ) -> None:
-        """Open a modal to enter DOB and view decrypted first name, last name and DOB."""
+        """Open a modal to enter sample date of birth and view decrypted sample identifiers."""
         from cryptography.fernet import InvalidToken
 
         encrypted = _load_manifest_encrypted_fields(sample_dir)
         with ui.dialog().props("persistent") as dialog, ui.card().classes(
             "w-full max-w-md p-6"
         ):
-            ui.label("View patient identifiers").classes("text-h6 font-bold mb-2")
+            ui.label("View sample identifiers").classes("text-h6 font-bold mb-2")
             ui.label(
-                "Enter the patient's date of birth to reveal first name, last name, DOB and Hospital Number (if stored)."
+                "Enter the sample date of birth to reveal additional sample identifiers if available."
             ).classes("text-sm text-gray-600 dark:text-gray-400 mb-4")
             if not encrypted:
                 ui.label(
@@ -3214,8 +3214,8 @@ class GUILauncher:
             state: Dict[str, Any] = {
                 "type": "detailed",
                 "export_csv": False,
-                "include_patient_ids": False,
-                "patient_dob": "",
+                "include_sample_ids": False,
+                "sample_dob": "",
             }
 
             with ui.dialog().props("persistent") as dialog:
@@ -3236,31 +3236,34 @@ class GUILauncher:
                                 on_change=lambda e: state.update({"type": e.value}),
                             )
 
-                        # Patient identifiers option
+                        # Sample identifiers option
                         with ui.column().classes("mb-4"):
-                            ui.label("Patient identifiers").classes("font-bold mb-2")
+                            ui.label("Sample identifiers").classes("font-bold mb-2")
+                            ui.label(
+                                "Enter the sample date of birth to reveal additional sample identifiers if available."
+                            ).classes("text-sm text-gray-600 dark:text-gray-400 mb-2")
 
-                            def on_include_patient_change(e):
-                                state["include_patient_ids"] = bool(e.value)
-                                patient_dob_input.set_visibility(bool(e.value))
+                            def on_include_sample_ids_change(e):
+                                state["include_sample_ids"] = bool(e.value)
+                                sample_dob_input.set_visibility(bool(e.value))
 
-                            include_patient_checkbox = ui.checkbox(
-                                "Include patient identifiers in report (first name, last name, DOB, Hospital Number)",
+                            ui.checkbox(
+                                "Include sample identifiers in report",
                                 value=False,
-                                on_change=on_include_patient_change,
+                                on_change=on_include_sample_ids_change,
                             )
-                            patient_dob_input = ui.date_input(
-                                "Date of birth (required to decrypt)",
+                            sample_dob_input = ui.date_input(
+                                "Sample date of birth (required to reveal identifiers)",
                                 value=None,
                             ).classes("w-full")
-                            patient_dob_input.set_visibility(False)
-                            def _on_patient_dob_change(_):
-                                v = getattr(patient_dob_input, "value", None)
+                            sample_dob_input.set_visibility(False)
+                            def _on_sample_dob_change(_):
+                                v = getattr(sample_dob_input, "value", None)
                                 if hasattr(v, "strftime"):
-                                    state["patient_dob"] = v.strftime("%Y-%m-%d")
+                                    state["sample_dob"] = v.strftime("%Y-%m-%d")
                                 else:
-                                    state["patient_dob"] = str(v).strip() if v else ""
-                            patient_dob_input.on("update:model-value", _on_patient_dob_change)
+                                    state["sample_dob"] = str(v).strip() if v else ""
+                            sample_dob_input.on("update:model-value", _on_sample_dob_change)
 
                         # Disclaimer section
                         with ui.column().classes("mb-4"):
@@ -3289,15 +3292,15 @@ class GUILauncher:
 
                         def _capture_dob_and_confirm():
                             """Capture date picker value into state before closing dialog."""
-                            if state.get("include_patient_ids"):
-                                v = getattr(patient_dob_input, "value", None)
+                            if state.get("include_sample_ids"):
+                                v = getattr(sample_dob_input, "value", None)
                                 if v is not None:
                                     if hasattr(v, "strftime"):
-                                        state["patient_dob"] = v.strftime("%Y-%m-%d")
+                                        state["sample_dob"] = v.strftime("%Y-%m-%d")
                                     else:
-                                        state["patient_dob"] = str(v).strip()
+                                        state["sample_dob"] = str(v).strip()
                                 else:
-                                    state["patient_dob"] = ""
+                                    state["sample_dob"] = ""
                             dialog.submit("Yes")
 
                         # Buttons
@@ -3319,13 +3322,13 @@ class GUILauncher:
             if dialog_result != "Yes":
                 return
 
-            # If user requested patient identifiers, decrypt with DOB
-            state["patient_identifiers"] = None
-            if state.get("include_patient_ids"):
-                dob_val = (state.get("patient_dob") or "").strip()
+            # If user requested sample identifiers, decrypt with DOB
+            state["sample_identifiers"] = None
+            if state.get("include_sample_ids"):
+                dob_val = (state.get("sample_dob") or "").strip()
                 if not dob_val:
                     ui.notify(
-                        "Date of birth required to include patient identifiers. Report will be generated without them.",
+                        "Date of birth required to include sample identifiers. Report will be generated without them.",
                         type="warning",
                     )
                 else:
@@ -3350,15 +3353,15 @@ class GUILauncher:
                                 )
                             decrypted["sample_id"] = sample_id
                             decrypted["test_id"] = _get_test_id_from_manifest(sample_dir)
-                            state["patient_identifiers"] = decrypted
+                            state["sample_identifiers"] = decrypted
                         except InvalidToken:
                             ui.notify(
-                                "Incorrect date of birth. Report will be generated without patient identifiers.",
+                                "Incorrect date of birth. Report will be generated without sample identifiers.",
                                 type="warning",
                             )
                     else:
                         ui.notify(
-                            "No identifier manifest found for this sample. Report will be generated without patient identifiers.",
+                            "No identifier manifest found for this sample. Report will be generated without sample identifiers.",
                             type="info",
                         )
 
@@ -3522,7 +3525,7 @@ class GUILauncher:
                     export_zip=bool(state.get("export_csv", False)),
                     progress_callback=combined_callback,
                     workflow_steps=self.workflow_steps if hasattr(self, 'workflow_steps') else None,
-                    patient_identifiers=state.get("patient_identifiers"),
+                    sample_identifiers=state.get("sample_identifiers"),
                 )
                 
                 # Mark report as completed
@@ -3691,7 +3694,7 @@ class GUILauncher:
                             "text-sm ml-4 opacity-80"
                         )
                         ui.button(
-                            "View patient identifiers",
+                            "View sample identifiers",
                             on_click=lambda: self._open_view_identifiers_modal(
                                 sample_dir, sample_id
                             ),
@@ -4295,7 +4298,7 @@ class GUILauncher:
                             "text-sm ml-4 opacity-80"
                         )
                         ui.button(
-                            "View patient identifiers",
+                            "View sample identifiers",
                             on_click=lambda: self._open_view_identifiers_modal(
                                 sample_dir, sample_id
                             ),
