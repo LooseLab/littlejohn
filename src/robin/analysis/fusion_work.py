@@ -191,22 +191,13 @@ def _primary_meets_min_qs(read) -> bool:
     Return True if this alignment is the primary and either has no 'qs' tag, or qs >= MIN_PRIMARY_QS.
     Reads without the qs tag are processed; only reads with qs present and < MIN_PRIMARY_QS are excluded.
     """
-    qname = getattr(read, "query_name", "<unknown>")
     if read.is_secondary or read.is_supplementary:
-        print(f"[fusion QS] EXCLUDE {qname}: not primary (secondary={read.is_secondary}, supplementary={read.is_supplementary})")
         return False
     if not read.has_tag("qs"):
-        print(f"[fusion QS] INCLUDE {qname}: no qs tag")
         return True  # No qs tag: continue to process for fusions
     try:
-        qs_val = read.get_tag("qs")
-        if qs_val >= MIN_PRIMARY_QS:
-            print(f"[fusion QS] INCLUDE {qname}: qs={qs_val} >= {MIN_PRIMARY_QS}")
-            return True
-        print(f"[fusion QS] EXCLUDE {qname}: qs={qs_val} < {MIN_PRIMARY_QS}")
-        return False
-    except (TypeError, KeyError) as e:
-        print(f"[fusion QS] INCLUDE {qname}: qs tag unparseable ({e})")
+        return read.get_tag("qs") >= MIN_PRIMARY_QS
+    except (TypeError, KeyError):
         return True  # Unparseable: allow the read
 
 
