@@ -6,9 +6,10 @@ faster interpreter). Detects gene fusions from BAM supplementary alignments.
 
 IMPORTANT: Uses centralized configuration from classification_config.py:
 1. Only processes reads with supplementary alignments (SA tag)
-2. Filters out reads where the same genomic alignment is annotated with multiple overlapping genes
-3. True fusions require reads to map to multiple genomic locations
-4. Fusions must be supported by a configurable minimum number of reads (default: 3)
+2. Only includes reads where the primary mapping has BAM tag "qs" >= 12 (MIN_PRIMARY_QS)
+3. Filters out reads where the same genomic alignment is annotated with multiple overlapping genes
+4. True fusions require reads to map to multiple genomic locations
+5. Fusions must be supported by a configurable minimum number of reads (default: 3)
 """
 from __future__ import annotations
 
@@ -61,6 +62,8 @@ ENABLE_MASTER_BED = True
 # Debug flag for incremental master BED breakpoint logging
 DEBUG_MASTER_BED_INCREMENTAL = os.getenv("ROBIN_DEBUG_MASTER_BED_INCREMENTAL", "0") == "1"
 
+# Minimum primary alignment QS (BAM tag "qs") to include a read in fusion analysis
+MIN_PRIMARY_QS = 12
 
 
 @dataclass(slots=True)
@@ -181,6 +184,21 @@ _combined_gene_region_ncls_cache: Dict[str, Dict[str, Tuple["NCLS", List[TaggedG
 # =============================================================================
 # UTILITY FUNCTIONS
 # =============================================================================
+
+
+def _primary_meets_min_qs(read) -> bool:
+    """
+    Return True if this alignment is the primary and has BAM tag 'qs' >= MIN_PRIMARY_QS.
+    Used to only include reads in fusion analysis when the primary mapping has sufficient QS.
+    """
+    if read.is_secondary or read.is_supplementary:
+        return False
+    if not read.has_tag("qs"):
+        return False
+    try:
+        return read.get_tag("qs") >= MIN_PRIMARY_QS
+    except (TypeError, KeyError):
+        return False
 
 
 def overlap_fraction(a_start, a_end, b_start, b_end):
@@ -816,6 +834,10 @@ def find_reads_mapping_to_master_bed(
                 if not ref_name or ref_name == "chrM":
                     continue
                 
+                # Only consider primary alignments with QS >= MIN_PRIMARY_QS
+                if not _primary_meets_min_qs(read):
+                    continue
+
                 # Check if this read overlaps with any master BED region
                 if ref_name in master_bed_regions:
                     ref_start = read.reference_start
@@ -1064,16 +1086,25 @@ def _process_reads_for_fusions(
             if index:
                 region_indexes[chrom] = index
 
+    skip_read_ids: Set[str] = set()
     try:
         with pysam.AlignmentFile(bamfile, "rb") as bam:
             for read in bam:
                 # Skip if not in our target reads
                 if read.query_name not in reads_with_supp:
                     continue
+                if read.query_name in skip_read_ids:
+                    continue
 
                 # Skip secondary alignments and unmapped reads
                 if read.is_secondary or read.is_unmapped:
                     continue
+
+                # Only include reads where the primary mapping has QS >= MIN_PRIMARY_QS
+                if not read.is_supplementary:
+                    if not _primary_meets_min_qs(read):
+                        skip_read_ids.add(read.query_name)
+                        continue
 
                 # Get reference information
                 ref_name = (
@@ -1200,6 +1231,10 @@ def _process_reads_for_master_bed_fusions(
                 
                 # Only process reads with supplementary alignments (SA tag)
                 if not read.has_tag("SA"):
+                    continue
+                
+                # Only include reads where the primary mapping has QS >= MIN_PRIMARY_QS
+                if not _primary_meets_min_qs(read):
                     continue
                 
                 # Get reference information
@@ -1417,6 +1452,10 @@ def process_bam_for_master_bed_fusions(
                         has_supplementary = read.has_tag("SA")
                         if not has_supplementary:
                             continue
+                    
+                    # Only include reads where the primary mapping has QS >= MIN_PRIMARY_QS
+                    if not _primary_meets_min_qs(read):
+                        continue
                     
                     # Process this read: it has supplementary alignments
                     reads_with_supplementary_count += 1
@@ -1663,6 +1702,10 @@ def process_bam_single_pass(
                                 continue
                         if not has_supplementary:
                             continue
+                    
+                    # Only include reads where the primary mapping has QS >= MIN_PRIMARY_QS
+                    if not _primary_meets_min_qs(read):
+                        continue
                     
                     # This read has supplementary alignments - process it for all fusion types
                     reads_with_supplementary_count += 1
@@ -2059,36 +2102,31 @@ def process_bam_with_staging(
         if genome_wide_candidates is not None and not genome_wide_candidates.empty:
             genome_wide_candidates = _filter_fusion_candidates(genome_wide_candidates)
         
-        # Save to staging (Parquet is ~5-10x faster than JSON)
-        # Note: staging_dir is pre-created at batch level, but this ensures it exists
+        # Save to staging. Always write one file per BAM per type (even if empty) so that
+        # accumulation sees one staging file per BAM and cross-batch fusion support is preserved.
+        # Use snappy compression for smaller files and faster read/write.
         staging_dir = _get_staging_dir(work_dir, sample_id)
-        
+        _staging_opts = {"index": False, "engine": "pyarrow", "compression": "snappy"}
+
         target_staging = os.path.join(staging_dir, f"target_{counter:06d}.parquet")
         genome_staging = os.path.join(staging_dir, f"genome_{counter:06d}.parquet")
         master_bed_staging = os.path.join(staging_dir, f"master_bed_{counter:06d}.parquet")
-        
-        # Save candidates to staging
+
         if target_candidates is not None and not target_candidates.empty:
-            target_candidates.to_parquet(target_staging, index=False)
+            target_candidates.to_parquet(target_staging, **_staging_opts)
             logger.info(f"Saved {len(target_candidates)} target candidates to staging")
         else:
-            # Save empty marker file
-            pd.DataFrame().to_parquet(target_staging, index=False)
-        
+            pd.DataFrame().to_parquet(target_staging, **_staging_opts)
         if genome_wide_candidates is not None and not genome_wide_candidates.empty:
-            genome_wide_candidates.to_parquet(genome_staging, index=False)
+            genome_wide_candidates.to_parquet(genome_staging, **_staging_opts)
             logger.debug(f"Saved {len(genome_wide_candidates)} genome-wide candidates to staging")
         else:
-            # Save empty marker file
-            pd.DataFrame().to_parquet(genome_staging, index=False)
-        
-        # Save master BED candidates to staging
+            pd.DataFrame().to_parquet(genome_staging, **_staging_opts)
         if master_bed_candidates is not None and not master_bed_candidates.empty:
-            master_bed_candidates.to_parquet(master_bed_staging, index=False)
+            master_bed_candidates.to_parquet(master_bed_staging, **_staging_opts)
             logger.info(f"Saved {len(master_bed_candidates)} master BED candidates to staging")
         else:
-            # Save empty marker file
-            pd.DataFrame().to_parquet(master_bed_staging, index=False)
+            pd.DataFrame().to_parquet(master_bed_staging, **_staging_opts)
         
         # Check if accumulation should run
         # Note: This check is not atomic - multiple workers might see threshold reached
@@ -2186,8 +2224,19 @@ def accumulate_fusion_candidates(
         new_master_bed_files = set(master_bed_files)
         
         if not target_files:
-            logger.info(f"No staged fusion files to accumulate for {sample_id}")
-            return {"status": "no_files", "files_processed": 0}
+            logger.info(
+                f"No staged fusion files to accumulate for {sample_id} "
+                "(no new data this iteration - skip output generation)."
+            )
+            _set_pending_count(work_dir, sample_id, 0)
+            return {
+                "status": "success",
+                "files_processed": 0,
+                "target_candidates": 0,
+                "genome_wide_candidates": 0,
+                "master_bed_candidates": 0,
+                "message": "No new data to accumulate",
+            }
         
         # Re-check if we should accumulate based on count
         if not force and len(target_files) < batch_size:
@@ -2195,7 +2244,11 @@ def accumulate_fusion_candidates(
                 f"Skipping fusion accumulation - only {len(target_files)} files staged "
                 f"(threshold: {batch_size}, force={force}). Another worker may have already accumulated."
             )
-            return {"status": "below_threshold", "files_pending": len(target_files)}
+            return {
+                "status": "below_threshold",
+                "files_pending": len(target_files),
+                "error": f"Below batch threshold ({len(target_files)} < {batch_size})",
+            }
         
         logger.info(
             f"Accumulating {len(target_files)} staged fusion files for {sample_id}"
@@ -2942,11 +2995,11 @@ def _extract_fusion_breakpoints(fusion_metadata: FusionMetadata) -> List[Dict[st
                     filtered_df = fusion_df[fusion_df["tag"].isin(valid_gene_pairs)]
                     
                     # Extract breakpoint coordinates for valid fusions
-                    for _, row in filtered_df.iterrows():
-                        chrom = row.get("reference_id", "Unknown")
-                        start = int(row.get("reference_start", 0))
-                        end = int(row.get("reference_end", 0))
-                        gene = row.get("col4", "Unknown")
+                    for row in filtered_df.itertuples(index=False, name="Row"):
+                        chrom = getattr(row, "reference_id", "Unknown")
+                        start = int(getattr(row, "reference_start", 0))
+                        end = int(getattr(row, "reference_end", 0))
+                        gene = getattr(row, "col4", "Unknown")
                         
                         if start > 0 and end > start:
                             bp_key = (chrom, start, end)
@@ -2957,7 +3010,7 @@ def _extract_fusion_breakpoints(fusion_metadata: FusionMetadata) -> List[Dict[st
                                     "start": start,
                                     "end": end,
                                     "gene": gene,
-                                    "read_id": row.get("read_id", "Unknown"),
+                                    "read_id": getattr(row, "read_id", "Unknown"),
                                     "source": "target"
                                 })
     
@@ -2994,11 +3047,11 @@ def _extract_fusion_breakpoints(fusion_metadata: FusionMetadata) -> List[Dict[st
                     filtered_df_all = fusion_df_all[fusion_df_all["tag"].isin(valid_gene_pairs_all)]
                     
                     # Extract breakpoint coordinates for valid fusions
-                    for _, row in filtered_df_all.iterrows():
-                        chrom = row.get("reference_id", "Unknown")
-                        start = int(row.get("reference_start", 0))
-                        end = int(row.get("reference_end", 0))
-                        gene = row.get("col4", "Unknown")
+                    for row in filtered_df_all.itertuples(index=False, name="Row"):
+                        chrom = getattr(row, "reference_id", "Unknown")
+                        start = int(getattr(row, "reference_start", 0))
+                        end = int(getattr(row, "reference_end", 0))
+                        gene = getattr(row, "col4", "Unknown")
                         
                         if start > 0 and end > start:
                             bp_key = (chrom, start, end)
@@ -3009,7 +3062,7 @@ def _extract_fusion_breakpoints(fusion_metadata: FusionMetadata) -> List[Dict[st
                                     "start": start,
                                     "end": end,
                                     "gene": gene,
-                                    "read_id": row.get("read_id", "Unknown"),
+                                    "read_id": getattr(row, "read_id", "Unknown"),
                                     "source": "genome_wide"
                                 })
     
@@ -3093,32 +3146,29 @@ def _create_breakpoint_pairs_vectorized(
     ).drop("_key", axis=1)
     
     # Convert to list of dictionaries
+    def _opt_val(r, name, default):
+        v = getattr(r, name, None)
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return default
+        return int(v) if isinstance(default, int) else v
+
     breakpoint_pairs = []
-    for _, row in pairs_df.iterrows():
+    for row in pairs_df.itertuples(index=False, name="Row"):
         pair = {
             "read_id": read_id,
-            "primary_chrom": row["reference_id_primary"],
-            "primary_start": int(row["reference_start_primary"]),
-            "primary_end": int(row["reference_end_primary"]),
-            "supp_chrom": row["reference_id_supplementary"],
-            "supp_start": int(row["reference_start_supplementary"]),
-            "supp_end": int(row["reference_end_supplementary"]),
+            "primary_chrom": row.reference_id_primary,
+            "primary_start": int(row.reference_start_primary),
+            "primary_end": int(row.reference_end_primary),
+            "supp_chrom": row.reference_id_supplementary,
+            "supp_start": int(row.reference_start_supplementary),
+            "supp_end": int(row.reference_end_supplementary),
         }
-        
-        # Add optional fields
-        if "mapping_quality_primary" in row:
-            pair["primary_mapq"] = row["mapping_quality_primary"] if pd.notna(row["mapping_quality_primary"]) else 0
-        if "mapping_span_primary" in row:
-            pair["primary_span"] = row["mapping_span_primary"] if pd.notna(row["mapping_span_primary"]) else 0
-        if "mapping_quality_supplementary" in row:
-            pair["supp_mapq"] = row["mapping_quality_supplementary"] if pd.notna(row["mapping_quality_supplementary"]) else 0
-        if "mapping_span_supplementary" in row:
-            pair["supp_span"] = row["mapping_span_supplementary"] if pd.notna(row["mapping_span_supplementary"]) else 0
-        if "strand_primary" in row:
-            pair["primary_strand"] = row["strand_primary"] if pd.notna(row["strand_primary"]) else "."
-        if "strand_supplementary" in row:
-            pair["supp_strand"] = row["strand_supplementary"] if pd.notna(row["strand_supplementary"]) else "."
-        
+        pair["primary_mapq"] = _opt_val(row, "mapping_quality_primary", 0)
+        pair["primary_span"] = _opt_val(row, "mapping_span_primary", 0)
+        pair["supp_mapq"] = _opt_val(row, "mapping_quality_supplementary", 0)
+        pair["supp_span"] = _opt_val(row, "mapping_span_supplementary", 0)
+        pair["primary_strand"] = _opt_val(row, "strand_primary", ".")
+        pair["supp_strand"] = _opt_val(row, "strand_supplementary", ".")
         breakpoint_pairs.append(pair)
     
     return breakpoint_pairs
@@ -3158,55 +3208,55 @@ def _merge_nearby_events(
         
         # Merge overlapping or nearby events
         current_events = []
-        for _, row in group_sorted.iterrows():
+        for row in group_sorted.itertuples(index=False, name="Row"):
             merged = False
-            
+            row_start = row.start
+            row_end = row.end
+            row_read_count = row.read_count
+            row_avg_mq = getattr(row, "avg_mapping_quality", 0) or 0
+            row_avg_span = getattr(row, "avg_mapping_span", 0) or 0
+
             # Check if this event overlaps or is near any existing merged event
             for i, existing in enumerate(current_events):
-                # Check if events overlap
-                overlap_start = max(existing["start"], row["start"])
-                overlap_end = min(existing["end"], row["end"])
+                overlap_start = max(existing["start"], row_start)
+                overlap_end = min(existing["end"], row_end)
                 overlaps = overlap_end > overlap_start
-                
-                # Check if events are nearby (gap between them is <= cluster_distance)
-                # Gap is the distance between the closest endpoints
-                if row["start"] > existing["end"]:
-                    gap = row["start"] - existing["end"]
-                elif existing["start"] > row["end"]:
-                    gap = existing["start"] - row["end"]
+
+                if row_start > existing["end"]:
+                    gap = row_start - existing["end"]
+                elif existing["start"] > row_end:
+                    gap = existing["start"] - row_end
                 else:
-                    gap = 0  # Overlapping
-                
+                    gap = 0
+
                 if overlaps or gap <= cluster_distance:
-                    # Merge: take the union of coordinates and max read count
                     current_events[i] = {
                         "chromosome": chrom,
-                        "start": min(existing["start"], row["start"]),
-                        "end": max(existing["end"], row["end"]),
+                        "start": min(existing["start"], row_start),
+                        "end": max(existing["end"], row_end),
                         "event_type": event_type,
-                        "read_count": max(existing["read_count"], row["read_count"]),
+                        "read_count": max(existing["read_count"], row_read_count),
                         "avg_mapping_quality": max(
                             existing.get("avg_mapping_quality", 0),
-                            row.get("avg_mapping_quality", 0)
+                            row_avg_mq,
                         ),
                         "avg_mapping_span": max(
                             existing.get("avg_mapping_span", 0),
-                            row.get("avg_mapping_span", 0)
+                            row_avg_span,
                         ),
                     }
                     merged = True
                     break
-            
+
             if not merged:
-                # Add as new event
                 current_events.append({
                     "chromosome": chrom,
-                    "start": row["start"],
-                    "end": row["end"],
+                    "start": row_start,
+                    "end": row_end,
                     "event_type": event_type,
-                    "read_count": row["read_count"],
-                    "avg_mapping_quality": row.get("avg_mapping_quality", 0),
-                    "avg_mapping_span": row.get("avg_mapping_span", 0),
+                    "read_count": row_read_count,
+                    "avg_mapping_quality": row_avg_mq,
+                    "avg_mapping_span": row_avg_span,
                 })
         
         merged_events.extend(current_events)
@@ -4686,11 +4736,11 @@ def _generate_fusion_breakpoint_bed(
                         if not new_read_ids:
                             continue
                         new_chunk = chunk[chunk["read_id"].isin(new_read_ids)]
-                        for _, row in new_chunk.iterrows():
-                            chrom = row.get("reference_id", "Unknown")
-                            start = int(row.get("reference_start", 0))
-                            end = int(row.get("reference_end", 0))
-                            gene = row.get("col4", "Unknown")
+                        for row in new_chunk.itertuples(index=False, name="Row"):
+                            chrom = getattr(row, "reference_id", "Unknown")
+                            start = int(getattr(row, "reference_start", 0))
+                            end = int(getattr(row, "reference_end", 0))
+                            gene = getattr(row, "col4", "Unknown")
                             if start > 0 and end > start:
                                 key = (chrom, start, end, str(gene), source)
                                 if key in breakpoint_set:
@@ -4702,7 +4752,7 @@ def _generate_fusion_breakpoint_bed(
                                         "start": start,
                                         "end": end,
                                         "gene": gene,
-                                        "read_id": row.get("read_id", "Unknown"),
+                                        "read_id": getattr(row, "read_id", "Unknown"),
                                         "source": source,
                                     }
                                 )
@@ -4715,11 +4765,11 @@ def _generate_fusion_breakpoint_bed(
                         continue
                     read_ids = set(chunk["read_id"].dropna().unique())
                     processed_read_ids.update(read_ids)
-                    for _, row in chunk.iterrows():
-                        chrom = row.get("reference_id", "Unknown")
-                        start = int(row.get("reference_start", 0))
-                        end = int(row.get("reference_end", 0))
-                        gene = row.get("col4", "Unknown")
+                    for row in chunk.itertuples(index=False, name="Row"):
+                        chrom = getattr(row, "reference_id", "Unknown")
+                        start = int(getattr(row, "reference_start", 0))
+                        end = int(getattr(row, "reference_end", 0))
+                        gene = getattr(row, "col4", "Unknown")
                         if start > 0 and end > start:
                             key = (chrom, start, end, str(gene), source)
                             if key in breakpoint_set:
@@ -4731,7 +4781,7 @@ def _generate_fusion_breakpoint_bed(
                                     "start": start,
                                     "end": end,
                                     "gene": gene,
-                                    "read_id": row.get("read_id", "Unknown"),
+                                    "read_id": getattr(row, "read_id", "Unknown"),
                                     "source": source,
                                 }
                             )
@@ -4923,7 +4973,9 @@ def _append_fusion_candidates_parquet(
     part_path = os.path.join(dataset_dir, f"part_{batch_id:06d}.parquet")
     if os.path.exists(part_path):
         part_path = os.path.join(dataset_dir, f"part_{batch_id:06d}_{int(time.time())}.parquet")
-    candidates_df.to_parquet(part_path, index=False, engine="pyarrow")
+    candidates_df.to_parquet(
+        part_path, index=False, engine="pyarrow", compression="snappy"
+    )
     logger.debug(f"Appended {len(candidates_df)} {candidate_type} to {part_path}")
 
 
@@ -5323,11 +5375,25 @@ def diagnose_master_bed_breakpoint_extraction(
                 supplementaries = supplementary_df[supplementary_df["read_id"] == rid]
                 logger.debug(f"    {rid}:")
                 logger.debug(f"      Primary: {len(primaries)} alignment(s)")
-                for _, row in primaries.iterrows():
-                    logger.debug(f"        {row['reference_id']}:{row['reference_start']}-{row['reference_end']} (col4={row.get('col4', 'N/A')}, is_supp={row.get('is_supplementary', 'N/A')})")
+                for row in primaries.itertuples(index=False, name="Row"):
+                    logger.debug(
+                        "        %s:%s-%s (col4=%s, is_supp=%s)",
+                        getattr(row, "reference_id", "N/A"),
+                        getattr(row, "reference_start", "N/A"),
+                        getattr(row, "reference_end", "N/A"),
+                        getattr(row, "col4", "N/A"),
+                        getattr(row, "is_supplementary", "N/A"),
+                    )
                 logger.debug(f"      Supplementary: {len(supplementaries)} alignment(s)")
-                for _, row in supplementaries.iterrows():
-                    logger.debug(f"        {row['reference_id']}:{row['reference_start']}-{row['reference_end']} (col4={row.get('col4', 'N/A')}, is_supp={row.get('is_supplementary', 'N/A')})")
+                for row in supplementaries.itertuples(index=False, name="Row"):
+                    logger.debug(
+                        "        %s:%s-%s (col4=%s, is_supp=%s)",
+                        getattr(row, "reference_id", "N/A"),
+                        getattr(row, "reference_start", "N/A"),
+                        getattr(row, "reference_end", "N/A"),
+                        getattr(row, "col4", "N/A"),
+                        getattr(row, "is_supplementary", "N/A"),
+                    )
     
     # Create breakpoint pairs
     logger.debug("\n[STEP 6] Creating breakpoint pairs...")
@@ -5996,18 +6062,18 @@ def collapse_ranges(df, max_distance):
     collapsed = []
     current_range = None
 
-    for _, row in df.iterrows():
-        # Only unpack what we need
-        start, end = row["start"], row["end"]
+    for row in df.itertuples(index=False, name="Row"):
+        start, end = row.start, row.end
+        row_dict = row._asdict()
 
         if current_range is None:
-            current_range = row
+            current_range = dict(row_dict)
         else:
             if start <= current_range["end"] + max_distance:
                 current_range["end"] = max(current_range["end"], end)
             else:
                 collapsed.append(current_range)
-                current_range = row
+                current_range = dict(row_dict)
 
     if current_range is not None:
         collapsed.append(current_range)

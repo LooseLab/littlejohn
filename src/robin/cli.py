@@ -94,8 +94,8 @@ def _download_missing_models(missing_files, models_dir):
     # Asset name mapping
     asset_mapping = {
         "general.zip": "general_model",
-        "Capper_et_al_NN.pkl": "capper_model", 
-        "pancan_devel_v5i_NN.pkl": "pancan_model"
+        "Capper_et_al_NN_v2.pkl": "capper_model", 
+        "pancan_devel_v5i_NN_v2.pkl": "pancan_model"
     }
     
     github_token = os.getenv('GITHUB_TOKEN')

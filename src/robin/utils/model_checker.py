@@ -64,8 +64,8 @@ def get_required_models() -> List[Tuple[str, str]]:
     """
     return [
         ("general_model", "general.zip"),
-        ("capper_model", "Capper_et_al_NN.pkl"),
-        ("pancan_model", "pancan_devel_v5i_NN.pkl")
+        ("capper_model", "Capper_et_al_NN_v2.pkl"),
+        ("pancan_model", "pancan_devel_v5i_NN_v2.pkl")
     ]
 
 
@@ -122,8 +122,8 @@ def _download_missing_models(missing_files, models_dir, project_root):
     # Asset name mapping
     asset_mapping = {
         "general.zip": "general_model",
-        "Capper_et_al_NN.pkl": "capper_model", 
-        "pancan_devel_v5i_NN.pkl": "pancan_model"
+        "Capper_et_al_NN_v2.pkl": "capper_model", 
+        "pancan_devel_v5i_NN_v2.pkl": "pancan_model"
     }
     
     github_token = os.getenv('GITHUB_TOKEN')

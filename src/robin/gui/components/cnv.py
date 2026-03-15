@@ -991,14 +991,24 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             
             cnv_abs.options["yAxis"][0]["type"] = "log" if use_log else "value"
             cnv_abs.options["yAxis"][0]["logBase"] = 10 if use_log else None
-            # ensure xAxis sane when switching modes
+            # X-axis is always in genomic base pairs; use actual genome/chromosome length
+            # so the scale does not change when plot bin width changes (dataMax would shrink
+            # with fewer downsampled points).
             if selected == "All":
-                # Ensure full-range x-axes and clear any previous zoom constraints
-                cnv_abs.options["xAxis"]["min"] = 0
-                cnv_abs.options["xAxis"]["max"] = "dataMax"
-                cnv_diff.options["xAxis"]["min"] = 0
-                cnv_diff.options["xAxis"]["max"] = "dataMax"
-                # also clear any leftover x-zoom from prior gene view and align diff zoom to full range
+                x_axis_max = sum(
+                    len(cnv_map[c]) * binw_analysis
+                    for c in natsort.natsorted(cnv_map.keys())
+                    if _cnv_contig_ok(c)
+                )
+            else:
+                chr_cnv = cnv_map.get(selected)
+                x_axis_max = len(chr_cnv) * binw_analysis if chr_cnv is not None else 0
+            cnv_abs.options["xAxis"]["min"] = 0
+            cnv_abs.options["xAxis"]["max"] = x_axis_max
+            cnv_diff.options["xAxis"]["min"] = 0
+            cnv_diff.options["xAxis"]["max"] = x_axis_max
+            # Clear any previous zoom constraints when viewing All
+            if selected == "All":
                 try:
                     if (
                         isinstance(cnv_abs.options.get("dataZoom"), list)
@@ -1016,15 +1026,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                         dz2.pop("startValue", None)
                         dz2.pop("endValue", None)
                         dz2.update({"start": 0, "end": 100})
-                        # also clear any markLine/Area induced constraints by ensuring xAxis remains full dataMax
-                        cnv_diff.options["xAxis"]["max"] = "dataMax"
                 except Exception:
                     pass
-            else:
-                cnv_abs.options["xAxis"]["min"] = 0
-                cnv_abs.options["xAxis"]["max"] = "dataMax"
-                cnv_diff.options["xAxis"]["min"] = 0
-                cnv_diff.options["xAxis"]["max"] = "dataMax"
             logging.debug(
                 f"CNV render: selected={selected}, y_scale={state.get('y_scale')}, color_mode={state.get('color_mode')}"
             )
@@ -1034,6 +1037,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             chrom_bounds = []  # list of (name, start_bp, end_bp)
             chrom_offsets: Dict[str, float] = {}
             if selected == "All":
+                # X-axis is in genomic base pairs; chromosome bounds use actual lengths.
                 offset_bp = 0
                 for contig, cnv in natsort.natsorted(cnv_map.items()):
                     if not _cnv_contig_ok(contig):

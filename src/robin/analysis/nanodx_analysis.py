@@ -187,7 +187,7 @@ def _direct_classification(
 class NanodxAnalysis:
     """NanoDX analysis worker"""
 
-    def __init__(self, work_dir=None, model: str = "Capper_et_al_NN.pkl"):
+    def __init__(self, work_dir=None, model: str = "Capper_et_al_NN_v2.pkl"):
         self.work_dir = work_dir or os.getcwd()
         self.model = model
 
@@ -199,7 +199,7 @@ class NanodxAnalysis:
         self.cpgs = self._load_cpgs_data()
 
         # Determine store file name
-        if self.model != "Capper_et_al_NN.pkl":
+        if self.model != "Capper_et_al_NN_v2.pkl":
             self.storefile = "PanNanoDX_scores.csv"
         else:
             self.storefile = "NanoDX_scores.csv"
@@ -414,7 +414,7 @@ class NanodxAnalysis:
 class PanNanodxAnalysis(NanodxAnalysis):
     """PanNanoDX analysis worker"""
 
-    def __init__(self, work_dir=None, model: str = "pancan_devel_v5i_NN.pkl"):
+    def __init__(self, work_dir=None, model: str = "pancan_devel_v5i_NN_v2.pkl"):
         super().__init__(work_dir=work_dir, model=model)
 
         # Override store file name for PanNanoDX
@@ -429,7 +429,7 @@ class PanNanodxAnalysis(NanodxAnalysis):
         logger.debug(f"Store file: {self.storefile}")
 
 
-def process_multiple_files(parquet_paths, metadata_list, work_dir, logger, model="Capper_et_al_NN.pkl"):
+def process_multiple_files(parquet_paths, metadata_list, work_dir, logger, model="Capper_et_al_NN_v2.pkl"):
     """
     Process multiple parquet files for NanoDX analysis.
     
@@ -442,7 +442,7 @@ def process_multiple_files(parquet_paths, metadata_list, work_dir, logger, model
         metadata_list: List of metadata dictionaries (one per parquet file)
         work_dir: Working directory
         logger: Logger instance
-        model: Model to use ("Capper_et_al_NN.pkl" for NanoDX or "pancan_devel_v5i_NN.pkl" for PanNanoDX)
+        model: Model to use ("Capper_et_al_NN_v2.pkl" for NanoDX or "pancan_devel_v5i_NN_v2.pkl" for PanNanoDX)
 
     Returns:
         Dictionary with aggregated NanoDX analysis results
@@ -457,7 +457,7 @@ def process_multiple_files(parquet_paths, metadata_list, work_dir, logger, model
     sample_id = metadata_list[0].get("sample_id", "unknown")
     
     # Determine analysis type based on model
-    is_pannanodx = model != "Capper_et_al_NN.pkl"
+    is_pannanodx = model != "Capper_et_al_NN_v2.pkl"
     analysis_type = "PanNanoDX" if is_pannanodx else "NanoDX"
     
     logger.info(f"🧠 Starting multi-file {analysis_type} analysis for sample: {sample_id}")
@@ -658,7 +658,7 @@ def nanodx_handler(job, work_dir=None):
                 metadata_list=metadata_list,
                 work_dir=batch_work_dir,
                 logger=logger,
-                model="Capper_et_al_NN.pkl"  # NanoDX model
+                model="Capper_et_al_NN_v2.pkl"  # NanoDX model
             )
             
             # Store batch results in job context (maintain compatibility with existing structure)
@@ -686,7 +686,7 @@ def nanodx_handler(job, work_dir=None):
                         "status": "success",
                         "sample_id": sample_id,
                         "analysis_time": batch_result.get("analysis_timestamp", 0),
-                        "model_used": batch_result.get("model_used", "Capper_et_al_NN.pkl"),
+                        "model_used": batch_result.get("model_used", "Capper_et_al_NN_v2.pkl"),
                         "n_features": batch_result.get("total_features", 0),
                         "store_path": batch_result.get("store_path", ""),
                         "processing_steps": batch_result.get("processing_steps", []),
@@ -843,7 +843,7 @@ def pannanodx_handler(job, work_dir=None):
                 metadata_list=metadata_list,
                 work_dir=batch_work_dir,
                 logger=logger,
-                model="pancan_devel_v5i_NN.pkl"  # PanNanoDX model
+                model="pancan_devel_v5i_NN_v2.pkl"  # PanNanoDX model
             )
             
             # Store batch results in job context (maintain compatibility with existing structure)
@@ -871,7 +871,7 @@ def pannanodx_handler(job, work_dir=None):
                         "status": "success",
                         "sample_id": sample_id,
                         "analysis_time": batch_result.get("analysis_timestamp", 0),
-                        "model_used": batch_result.get("model_used", "pancan_devel_v5i_NN.pkl"),
+                        "model_used": batch_result.get("model_used", "pancan_devel_v5i_NN_v2.pkl"),
                         "n_features": batch_result.get("total_features", 0),
                         "store_path": batch_result.get("store_path", ""),
                         "processing_steps": batch_result.get("processing_steps", []),
