@@ -1670,7 +1670,9 @@ def process_bam_single_pass(
             rows.clear()
         
         reads_with_supplementary_count = 0
-        
+        # Reads whose primary alignment failed QS (exclude all alignments for these reads)
+        primary_qs_excluded: Set[str] = set()
+
         # Resolve thresholds once per BAM (avoids repeated config lookups in hot path)
         min_mq = get_fusion_threshold("mapping_quality")
         min_span = get_fusion_threshold("mapping_span")
@@ -1712,11 +1714,17 @@ def process_bam_single_pass(
                         if not has_supplementary:
                             continue
                     
-                    # Only include reads where the primary mapping has QS >= MIN_PRIMARY_QS
-                    if not _primary_meets_min_qs(read):
+                    # Skip all alignments for reads whose primary failed QS (decided when we saw the primary)
+                    if read.query_name in primary_qs_excluded:
                         continue
                     
-                    # This read has supplementary alignments - process it for all fusion types
+                    # Only check primary QS when we're on the primary alignment; then include/exclude the whole read
+                    if not read.is_supplementary:
+                        if not _primary_meets_min_qs(read):
+                            primary_qs_excluded.add(read.query_name)
+                            continue
+                    
+                    # This read has supplementary alignments - process it for all fusion types (primary + supp)
                     reads_with_supplementary_count += 1
                     read_id = read.query_name
                     ref_start = read.reference_start
