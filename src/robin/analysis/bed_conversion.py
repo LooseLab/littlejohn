@@ -64,10 +64,10 @@ class BedConversionMetadata:
 class BedConversionAnalysis:
     """BAM to parquet conversion analysis worker"""
 
-    def __init__(self, work_dir=None, threads=4):
+    def __init__(self, work_dir=None, threads=1):
         self.work_dir = work_dir or os.getcwd()
         self.threads = threads
-
+        
         # Find required files and paths
         self.cpgs_master_file = self._find_cpgs_master_file()
 
@@ -115,7 +115,6 @@ class BedConversionAnalysis:
     ) -> BedConversionMetadata:
         """Process a single BAM file for parquet conversion"""
         logger = self.logger
-
         logger.info(f"Processing BAM file: {bam_path} for parquet conversion")
         sample_id = metadata.get("sample_id", "unknown")
         start_time = time.time()
@@ -193,7 +192,6 @@ class BedConversionAnalysis:
 
         def process_single_bam(bam: str) -> str:
             logger.debug(f"Processing BAM file: {bam}")
-
             # Temporary parquet path: matkit writes 8-column parquet so merge_modkit_files can read directly (no CSV parse).
             temp_file = tempfile.NamedTemporaryFile(
                 suffix=".parquet", prefix="modkit_", dir=work_dir, delete=False
@@ -203,6 +201,7 @@ class BedConversionAnalysis:
             try:
                 # Run matkit on the BAM file (writes parquet when path ends in .parquet)
                 if run_matkit_callable is not None:
+                    print("Running matkit callable")
                     run_matkit_callable(bam, temp_file.name)
                 else:
                     # Fallback if robin is not available (write empty parquet not used in real runs)
@@ -278,6 +277,7 @@ class BedConversionAnalysis:
 
         # Use merge_modkit_files exactly like the working code
         # This function is designed to create binary parquet files, not text files
+        print(data)
         merge_modkit_files(
             data,
             state,  # Output parquet file path
@@ -289,9 +289,20 @@ class BedConversionAnalysis:
             1,  # Number of BAM files that contributed
         )
 
-        # Verify the parquet file was created
+        # When no reads passed the QS filter, all per-BAM parquets are empty and merge
+        # returns without writing; treat as non-fatal and carry on so next batches can run.
         if not os.path.exists(state):
-            raise FileNotFoundError(f"Parquet file was not created: {state}")
+            logger.info(
+                "No parquet written for this batch (no data after filtering); "
+                "continuing so next batches can be processed."
+            )
+            for file_path in data:
+                try:
+                    os.remove(file_path)
+                    logger.debug(f"Deleted temporary file: {file_path}")
+                except OSError as e:
+                    logger.warning(f"Failed to delete temporary file {file_path}: {e}")
+            return state
 
         parquet_size = os.path.getsize(state)
         logger.debug(
@@ -489,7 +500,7 @@ def bed_conversion_handler(job, work_dir=None):
                 metadata_list=metadata_list,
                 work_dir=batch_work_dir,
                 logger=logger,
-                threads=4  # Default thread count
+                threads=1  # Default thread count
             )
             
             # Store batch results in job context (maintain compatibility with existing structure)

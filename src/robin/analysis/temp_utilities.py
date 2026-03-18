@@ -143,6 +143,7 @@ def merge_modkit_files(
             f"Total cumulative BAM files contributing to parquet: {cumulative_bam_file_count} (added {num_bam_files_seen} new files)"
         )
 
+        
         # Cache or build PyRanges filter with improved caching
         # Use distinct cache for .txt (1-based converted) vs .gz (0-based) to avoid stale data
         cache_suffix = "_1based" if filter_bed_file.endswith(".txt") else ""
@@ -240,6 +241,10 @@ def merge_modkit_files(
                         [pl.col(c).cast(pl.UInt32, strict=False) for c in unsigned_int_cols]
                         + [pl.col(c).cast(pl.Float32, strict=False) for c in float_cols]
                     )
+
+                # Skip empty files (e.g. parquet from a batch where no reads passed the QS filter)
+                if pl_df.is_empty():
+                    continue
 
                 # Build PyRanges for intersection (only need chrom/start/end)
                 pr_df = pl_df.rename({"chrom": "Chromosome", "chromStart": "Start"}).with_columns(

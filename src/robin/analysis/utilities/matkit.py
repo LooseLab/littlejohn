@@ -64,6 +64,30 @@ PARQUET_SCHEMA_BINARY = pa.schema([
     ("n_canonical", pa.uint32()),
 ])
 
+# Minimum primary alignment QS (BAM tag "qs") to include a read in methylation analysis.
+# Same rule as fusion_work: only process alignments for reads whose primary has qs >= this.
+# Reads without the qs tag are included; only reads with qs present and < MIN_PRIMARY_QS are excluded.
+MIN_PRIMARY_QS = 12
+
+# Cache of opened reference FASTA by real path so the same ref is not re-indexed/re-opened per BAM.
+_ref_fasta_cache: dict[str, pysam.FastaFile] = {}
+
+
+def _primary_meets_min_qs(read) -> bool:
+    """
+    Return True if this alignment is the primary and either has no 'qs' tag, or qs >= MIN_PRIMARY_QS.
+    Reads without the qs tag are processed; only reads with qs present and < MIN_PRIMARY_QS are excluded.
+    Matches fusion_work._primary_meets_min_qs for consistent behaviour across robin analysis.
+    """
+    if read.is_secondary or read.is_supplementary:
+        return False
+    if not read.has_tag("qs"):
+        return True
+    try:
+        return read.get_tag("qs") >= MIN_PRIMARY_QS
+    except (TypeError, KeyError):
+        return True
+
 
 def _decode_binary_columns(table: pa.Table) -> pa.Table:
     """Decode binary columns (chrom, mod_code, strand) to UTF-8 string with errors='replace'."""
@@ -358,9 +382,14 @@ def merge_modkit_files(
         else:
             new_df = new_frames[0]
 
-        # If no existing file, just save the new data
+        # If no existing file, just save the new data (use canonical types for consistency)
         if not os.path.exists(existing_file):
             pl_df = pl.from_pandas(new_df)
+            for c in ["valid_cov", "n_mod", "n_canonical"]:
+                if c in pl_df.columns:
+                    pl_df = pl_df.with_columns(pl.col(c).cast(pl.UInt32, strict=False))
+            if "percent_modified" in pl_df.columns:
+                pl_df = pl_df.with_columns(pl.col("percent_modified").cast(pl.Float32, strict=False))
             pl_df.write_parquet(output_file)
 
             # Save metadata with cumulative BAM file count
@@ -380,14 +409,38 @@ def merge_modkit_files(
             )
             return
 
-        # Process existing data in chunks
-        existing_df = pl.scan_parquet(existing_file)
+        # Process existing data
+        existing_df = pl.scan_parquet(existing_file).collect()
 
-        # Convert new data to Polars
+        # If existing parquet is empty, replace it with new data (no merge).
+        # This avoids Int64/UInt32 mismatch: empty file from write_counts_to_parquet
+        # uses UInt32; pl.from_pandas(new_df) uses Int64; concat would fail.
+        if existing_df.is_empty():
+            pl_df = pl.from_pandas(new_df)
+            for c in ["valid_cov", "n_mod", "n_canonical"]:
+                if c in pl_df.columns:
+                    pl_df = pl_df.with_columns(pl.col(c).cast(pl.UInt32, strict=False))
+            if "percent_modified" in pl_df.columns:
+                pl_df = pl_df.with_columns(pl.col("percent_modified").cast(pl.Float32, strict=False))
+            pl_df.write_parquet(output_file)
+            metadata = {
+                "bam_file_count": cumulative_bam_file_count,
+                "last_updated": datetime.now().isoformat(),
+                "sample_id": sample_id,
+                "files_added_in_this_update": num_bam_files_seen,
+                "column_format": "optimized",
+            }
+            metadata_file = output_file.removesuffix(".parquet") + "_metadata.json"
+            with open(metadata_file, "w") as f:
+                json.dump(metadata, f, indent=2)
+            logging.info(
+                "Existing parquet was empty; replaced with new data "
+                f"({len(new_df)} rows from {num_bam_files_seen} BAM files)"
+            )
+            return
+
+        # Convert new data to Polars for merge
         pl_new_df = pl.from_pandas(new_df)
-
-        # Convert existing data to regular DataFrame for concatenation
-        existing_df = existing_df.collect()
 
         # Check if existing file is in old format (18 columns) or new format (8 columns)
         is_old_format = (
@@ -415,6 +468,18 @@ def merge_modkit_files(
             raise ValueError(
                 f"Column mismatch: missing {missing_cols}, extra {extra_cols}"
             )
+
+        # Cast count/float columns to canonical types so concat never sees Int64 vs UInt32.
+        for c in ["valid_cov", "n_mod", "n_canonical"]:
+            if c in existing_df.columns:
+                existing_df = existing_df.with_columns(pl.col(c).cast(pl.UInt32, strict=False))
+            if c in pl_new_df.columns:
+                pl_new_df = pl_new_df.with_columns(pl.col(c).cast(pl.UInt32, strict=False))
+        for c in ["percent_modified"]:
+            if c in existing_df.columns:
+                existing_df = existing_df.with_columns(pl.col(c).cast(pl.Float32, strict=False))
+            if c in pl_new_df.columns:
+                pl_new_df = pl_new_df.with_columns(pl.col(c).cast(pl.Float32, strict=False))
 
         # Combine existing and new data
         combined = pl.concat([existing_df, pl_new_df])
@@ -1169,27 +1234,41 @@ def process_bam_counts_improved(
     # This ensures we only output sites that modkit would output
     mod_sites = set()
 
-    # Load reference genome if provided for validation
+
+    # Load reference genome if provided for validation. Reuse cached handle when the same
+    # path is used across calls (e.g. one ref for many BAMs) to avoid re-indexing/re-opening.
     ref_fasta_obj = None
+    ref_fasta_cached = False
     if ref_fasta:
-        # Ensure the reference FASTA has an index before opening
-        # If index creation fails, log warning but continue without reference
-        try:
-            _ensure_fasta_index(ref_fasta)
-            ref_fasta_obj = pysam.FastaFile(ref_fasta)
-        except (RuntimeError, FileNotFoundError) as e:
-            logging.warning(
-                f"Could not create FASTA index for {ref_fasta}: {e}. "
-                "Continuing without reference genome validation."
-            )
-            ref_fasta_obj = None
+        ref_fasta_path = os.path.realpath(ref_fasta)
+        if ref_fasta_path in _ref_fasta_cache:
+            ref_fasta_obj = _ref_fasta_cache[ref_fasta_path]
+            ref_fasta_cached = True
+        else:
+            try:
+                _ensure_fasta_index(ref_fasta)
+                ref_fasta_obj = pysam.FastaFile(ref_fasta)
+                _ref_fasta_cache[ref_fasta_path] = ref_fasta_obj
+                ref_fasta_cached = True
+            except (RuntimeError, FileNotFoundError) as e:
+                logging.warning(
+                    f"Could not create FASTA index for {ref_fasta}: {e}. "
+                    "Continuing without reference genome validation."
+                )
+                ref_fasta_obj = None
 
     # Debug tracking for specific positions
     debug_data = {} if debug_positions else None
+    # Reads whose primary alignment failed QS (exclude all alignments for these reads)
+    primary_qs_excluded: set = set()
+
     for read in iterable:
+        # Skip all alignments for reads whose primary failed QS (same rule as fusion_work)
+        if read.query_name in primary_qs_excluded:
+            continue
+
         # Skip unmapped, secondary, and optionally supplementary alignments
         # Note: modkit appears to filter out secondary alignments by default
-        # This matches the behavior of the original modkit tool
         if (
             read.is_unmapped
             or read.is_secondary
@@ -1197,8 +1276,12 @@ def process_bam_counts_improved(
         ):
             continue
 
-        chrom = ref_names[read.reference_id]
-        ref_map = map_read_to_ref_positions(read)
+        # Only process alignments for reads whose primary mapping has qs >= MIN_PRIMARY_QS
+        if not read.is_supplementary:
+            # Inline `_primary_meets_min_qs` to avoid redundant checks and per-read function overhead.
+            if read.has_tag("qs") and read.get_tag("qs") < MIN_PRIMARY_QS:
+                primary_qs_excluded.add(read.query_name)
+                continue
 
         try:
             # Extract modification data from MM/ML tags
@@ -1206,13 +1289,24 @@ def process_bam_counts_improved(
         except AttributeError:
             mods = {}
 
+        if not mods:
+            continue
+
+        chrom = ref_names[read.reference_id]
+        ref_map = map_read_to_ref_positions(read)
+
         if combine_mods:
+            ## This is what we use.
             # Combine all modification types into a single 'mod' category
             # This matches modkit's --combine-mods behavior
             # Use a more memory-efficient approach with direct processing
 
-            # Collect all modification data for this read
-            read_sites = {}  # (refpos, strand) -> {mod_code: [probs]}
+            # Collect per-site max probability per mod_code for this read.
+            # Avoids allocating lists of probs when we only ever use max(probs).
+            read_sites: dict[tuple[int, str], dict[str, int]] = {}  # (refpos, strand) -> {mod_code: max_prob_255}
+            seen_sites: set[tuple[int, str]] = set()
+            ref_map_get = ref_map.get
+            read_sites_get = read_sites.get
 
             for key, values in mods.items():
                 if not isinstance(key, tuple) or len(key) != 3:
@@ -1220,40 +1314,43 @@ def process_bam_counts_improved(
                 _, strand_flag, mod_code = key
                 strand = PLUS_STRAND if strand_flag == 0 else MINUS_STRAND
                 for rpos, prob in values:
-                    if rpos not in ref_map:
+                    refpos = ref_map_get(rpos)
+                    if refpos is None:
                         continue
-                    refpos = ref_map[rpos]
-
-                    # Store modification probabilities for this site
                     site_key = (refpos, strand)
-                    if site_key not in read_sites:
-                        read_sites[site_key] = {}
-                    if mod_code not in read_sites[site_key]:
-                        read_sites[site_key][mod_code] = []
-                    read_sites[site_key][mod_code].append(prob)
-                    # Track this as a modkit output site
-                    mod_sites.add((chrom, refpos, strand, COMBINED_MOD_CODE))
+                    seen_sites.add(site_key)
+                    mod_max = read_sites_get(site_key)
+                    if mod_max is None:
+                        read_sites[site_key] = {mod_code: prob}
+                        continue
+                    prev = mod_max.get(mod_code)
+                    if prev is None or prob > prev:
+                        mod_max[mod_code] = prob
+
+            # Track each site once per read (avoid repeated set-add in inner loop)
+            mod_sites_add = mod_sites.add
+            for refpos, strand in seen_sites:
+                mod_sites_add((chrom, refpos, strand, COMBINED_MOD_CODE))
 
             # Process each site for this read
+            counts_local = counts
             for (refpos, strand), mod_probs in read_sites.items():
                 # Update counts directly - each read contributes once per site
                 site_key = (chrom, refpos, strand, COMBINED_MOD_CODE)
-                if site_key not in counts:
-                    counts[site_key] = [0] * COUNT_LEN
-
-                c = counts[site_key]
+                c = counts_local.get(site_key)
+                if c is None:
+                    c = [0] * COUNT_LEN
+                    counts_local[site_key] = c
                 c[COUNT_IDX_TOTAL] += 1
 
                 # Track per-read max probabilities for C, m, h from the original mod_probs
-                total_mod_prob = 0.0
+                sum_max_mod_probs_255 = 0
                 local_max_prob_m = 0
                 local_max_prob_h = 0
 
-                for mod_code, probs in mod_probs.items():
+                for mod_code, max_mod_prob in mod_probs.items():
                     if mod_code != CANONICAL_CODE:  # Skip canonical base
-                        max_mod_prob = max(probs)
-                        max_mod_prob_01 = max_mod_prob / 255.0  # Convert to 0-1
-                        total_mod_prob += max_mod_prob_01
+                        sum_max_mod_probs_255 += max_mod_prob
                         if mod_code == "m":
                             if max_mod_prob > local_max_prob_m:
                                 local_max_prob_m = max_mod_prob
@@ -1262,8 +1359,9 @@ def process_bam_counts_improved(
                                 local_max_prob_h = max_mod_prob
 
                 # Canonical probability is the complement
-                canonical_prob = max(0.0, 1.0 - total_mod_prob)
-                canonical_prob_255 = int(canonical_prob * 255)
+                canonical_prob_255 = 255 - sum_max_mod_probs_255
+                if canonical_prob_255 < 0:
+                    canonical_prob_255 = 0
                 if canonical_prob_255 > c[COUNT_IDX_MAX_PROB_C]:
                     c[COUNT_IDX_MAX_PROB_C] = canonical_prob_255
                 if local_max_prob_m > c[COUNT_IDX_MAX_PROB_M]:
@@ -1297,9 +1395,9 @@ def process_bam_counts_improved(
                         }
 
                     # Store probabilities for this read
-                    for mod_code, probs in mod_probs.items():
+                    for mod_code, max_prob in mod_probs.items():
                         if mod_code in ["C", "m", "h"]:
-                            debug_data[debug_key]["probs"][mod_code].extend(probs)
+                            debug_data[debug_key]["probs"][mod_code].append(max_prob)
 
                     # Store classification
                     if max_prob >= thresh:
@@ -1399,15 +1497,9 @@ def process_bam_counts_improved(
                         c[COUNT_IDX_FAIL] += 1  # Failed call (0 < prob < threshold)
 
 
-        # Process reads without modification data as canonical bases
-        # Note: modkit only outputs positions with explicit modification data (MM tags)
-        # Reads without modification data are not used to generate output positions
-        # This matches modkit's behavior of only outputting sites with modification data
-        if not mods:
-            continue  # Skip reads without modification data
-
     bam.close()
-    if ref_fasta_obj:
+    # Only close the ref handle when we opened it in this call and it is not in the cache.
+    if ref_fasta_obj and not ref_fasta_cached:
         ref_fasta_obj.close()
 
     # Force garbage collection to free memory
