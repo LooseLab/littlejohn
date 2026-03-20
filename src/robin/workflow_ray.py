@@ -945,13 +945,28 @@ class Coordinator:
         # backpressure: global and per-queue caps to prevent queue explosions
         queue_count = max(1, len(QUEUE_TO_TYPES))
         self.max_total_inflight: int = self.max_inflight_per_type * queue_count
-        self.max_total_waiting: int = self.max_total_inflight * 20
+        # Backpressure cap for total waiting jobs.
+        # Test change: temporarily allow 2x waiting capacity to see if we
+        # simply stall because the queue limit is reached.
+        self.max_total_waiting: int = self.max_total_inflight * 40
         self.max_inflight_per_queue: Dict[str, int] = {
             q: self.max_inflight_per_type for q in QUEUE_TO_TYPES
         }
         self.max_waiting_per_queue: Dict[str, int] = {
             q: self.max_inflight_per_type * 20 for q in QUEUE_TO_TYPES
         }
+        # Optional debug logging when backpressure caps are hit.
+        # Enable with:
+        #   ROBIN_DEBUG_BACKPRESSURE=1
+        #   ROBIN_DEBUG_BACKPRESSURE_INTERVAL_S=10
+        self._debug_backpressure: bool = os.getenv("ROBIN_DEBUG_BACKPRESSURE", "0") == "1"
+        try:
+            self._debug_backpressure_interval_s: float = float(
+                os.getenv("ROBIN_DEBUG_BACKPRESSURE_INTERVAL_S", "10")
+            )
+        except Exception:
+            self._debug_backpressure_interval_s = 10.0
+        self._last_backpressure_log_ts: float = 0.0
         self.inflight_by_queue: Dict[str, int] = {}
         self.waiting_by_queue: Dict[str, List[Job]] = {}
         self.waiting_global: List[Job] = []
@@ -1356,6 +1371,16 @@ class Coordinator:
 
         # Global inflight cap
         if self._total_inflight() >= self.max_total_inflight:
+            if self._debug_backpressure:
+                now = time.time()
+                if (now - self._last_backpressure_log_ts) >= self._debug_backpressure_interval_s:
+                    self._last_backpressure_log_ts = now
+                    logging.info(
+                        "[ROBIN][backpressure] global inflight cap hit: "
+                        f"inflight={self._total_inflight()}/{self.max_total_inflight}, "
+                        f"waiting_global={len(self.waiting_global)}, "
+                        f"waiting_serialized={self._total_waiting()}"
+                    )
             self.waiting_global.append(self._spool_job(job, sample_id))
             try:
                 sid_pending = sample_id or "unknown"
@@ -1383,6 +1408,15 @@ class Coordinator:
         # Per-queue inflight cap
         if int(self.inflight_by_queue.get(q, 0)) >= self._queue_inflight_cap(q):
             await self._wait_for_queue_capacity(q)
+            if self._debug_backpressure:
+                now = time.time()
+                if (now - self._last_backpressure_log_ts) >= self._debug_backpressure_interval_s:
+                    self._last_backpressure_log_ts = now
+                    logging.info(
+                        "[ROBIN][backpressure] queue inflight cap hit: "
+                        f"queue={q}, inflight={self.inflight_by_queue.get(q,0)}/{self._queue_inflight_cap(q)}, "
+                        f"waiting_queue={len(self.waiting_by_queue.get(q, []))}/{self._queue_waiting_cap(q)}"
+                    )
             self.waiting_by_queue.setdefault(q, []).append(
                 self._spool_job(job, sample_id)
             )
@@ -1411,6 +1445,15 @@ class Coordinator:
         # Per-type inflight cap
         inflight_for_type = int(self.inflight_by_type.get(job.job_type, 0))
         if inflight_for_type >= self.max_inflight_per_type:
+            if self._debug_backpressure:
+                now = time.time()
+                if (now - self._last_backpressure_log_ts) >= self._debug_backpressure_interval_s:
+                    self._last_backpressure_log_ts = now
+                    logging.info(
+                        "[ROBIN][backpressure] per-type inflight cap hit: "
+                        f"type={job.job_type}, inflight={inflight_for_type}/{self.max_inflight_per_type}, "
+                        f"waiting_global={len(self.waiting_by_type_global.get(job.job_type, []))}"
+                    )
             self.waiting_by_type_global.setdefault(job.job_type, []).append(
                 self._spool_job(job, sample_id)
             )
@@ -2791,19 +2834,27 @@ class Coordinator:
             return self._stats_cache
         
         # per-queue active summary (also expose as 'active_by_worker' for GUI compat)
-        # Show the 2 most recently started jobs per queue so the displayed timer resets when new jobs start
+        # IMPORTANT: We keep two representations:
+        # - active_by_queue: truncated to the 2 most recently started jobs (UI display)
+        # - active_count_by_queue/job_type: full counts (debugging "Act" discrepancies)
         active_by_queue: Dict[str, List[Dict[str, Any]]] = {}
+        active_count_by_queue: Dict[str, int] = {}
+        active_count_by_job_type: Dict[str, int] = {}
         for jid, info in self.active.items():
             q = info["queue"]
+            jt = info["job_type"]
+            active_count_by_queue[q] = active_count_by_queue.get(q, 0) + 1
+            active_count_by_job_type[jt] = active_count_by_job_type.get(jt, 0) + 1
             active_by_queue.setdefault(q, []).append(
                 {
                     "job_id": jid,
-                    "job_type": info["job_type"],
+                    "job_type": jt,
                     "filepath": info["filepath"],
                     "duration": int(now - info["start_time"]),
                     "start_time": info["start_time"],
                 }
             )
+
         # Sort each queue's list by start_time descending (newest first), then keep only first 2
         for q in active_by_queue:
             active_by_queue[q] = sorted(
@@ -2811,6 +2862,22 @@ class Coordinator:
             )[:2]
             for entry in active_by_queue[q]:
                 entry.pop("start_time", None)
+
+        # A compact dump of the longest-running active jobs (useful for "stuck" debugging)
+        active_top_by_duration = sorted(
+            [
+                {
+                    "job_id": jid,
+                    "job_type": info["job_type"],
+                    "queue": info["queue"],
+                    "filepath": info["filepath"],
+                    "duration": int(now - info["start_time"]),
+                }
+                for jid, info in self.active.items()
+            ],
+            key=lambda x: x["duration"],
+            reverse=True,
+        )[:10]
 
         # build category counts
         def _cat_of(jt: str) -> str:
@@ -2869,6 +2936,33 @@ class Coordinator:
             waiting_global += len(getattr(self, "waiting_global", []))
         except Exception:
             pass
+
+        waiting_count_by_queue: Dict[str, int] = {}
+        try:
+            # For debug: how much is queued per queue name
+            for qn, lst in getattr(self, "waiting_by_queue", {}).items():
+                waiting_count_by_queue[qn] = len(lst)
+        except Exception:
+            waiting_count_by_queue = {}
+
+        waiting_count_by_type_global: Dict[str, int] = {}
+        try:
+            # For debug: how much is queued in the per-job-type global backpressure lists
+            for jt, lst in getattr(self, "waiting_by_type_global", {}).items():
+                waiting_count_by_type_global[jt] = len(lst)
+        except Exception:
+            waiting_count_by_type_global = {}
+
+        inflight_by_type_debug: Dict[str, int] = {}
+        inflight_by_queue_debug: Dict[str, int] = {}
+        try:
+            inflight_by_type_debug = dict(getattr(self, "inflight_by_type", {}) or {})
+        except Exception:
+            inflight_by_type_debug = {}
+        try:
+            inflight_by_queue_debug = dict(getattr(self, "inflight_by_queue", {}) or {})
+        except Exception:
+            inflight_by_queue_debug = {}
         # Samples payload for GUI
         samples_payload: List[Dict[str, Any]] = []
         try:
@@ -2898,8 +2992,15 @@ class Coordinator:
             "active_by_queue": active_by_queue,
             "active_by_worker": active_by_queue,  # compatibility for GUI table
             "active_count": len(self.active),
+            "active_count_by_queue": active_count_by_queue,
+            "active_count_by_job_type": active_count_by_job_type,
+            "active_top_by_duration": active_top_by_duration,
             "waiting_serialized": waiting_serialized,
             "waiting_global": waiting_global,
+            "waiting_count_by_queue": waiting_count_by_queue,
+            "waiting_count_by_type_global": waiting_count_by_type_global,
+            "inflight_by_type_debug": inflight_by_type_debug,
+            "inflight_by_queue_debug": inflight_by_queue_debug,
             "running_by_category": running_counts,
             "totals_by_category": totals_counts,
             "samples": samples_payload,
@@ -3262,6 +3363,11 @@ def _matches_any_pattern(p: Path, patterns: Optional[List[str]]) -> bool:
 
 
 def _matches_no_ignores(p: Path, ignore_patterns: Optional[List[str]]) -> bool:
+    # Always ignore hidden dotfiles/directories by default.
+    # This keeps `robin workflow` from getting noisy when watch directories contain
+    # files like `.DS_Store` or editor artifacts.
+    if p.name.startswith("."):
+        return False
     if not ignore_patterns:
         return True
     try:
@@ -3413,11 +3519,18 @@ async def tqdm_monitor(coord, continuous: bool = False) -> None:
 
             # Active per queue
             active_by_queue = s.get("active_by_queue", {})
+            active_count_by_queue = s.get("active_count_by_queue", {}) or {}
+            active_count_by_job_type = s.get("active_count_by_job_type", {}) or {}
+            waiting_count_by_queue = s.get("waiting_count_by_queue", {}) or {}
+            active_count_by_queue = s.get("active_count_by_queue", {}) or {}
+            active_count_by_job_type = s.get("active_count_by_job_type", {}) or {}
+            waiting_count_by_queue = s.get("waiting_count_by_queue", {}) or {}
 
             # Update per-queue bars
             for q in order:
                 completed_in_q = completed_queue_counts.get(q, 0)
-                active_in_q = len(active_by_queue.get(q, []))
+                # Use full active counts for debugging; UI list is truncated to 2/jobs/queue.
+                active_in_q = int(active_count_by_queue.get(q, 0) or 0)
                 total_for_q = completed_in_q + active_in_q
                 b = bars[q]
                 b.total = max(b.total or 0, total_for_q)
@@ -3446,9 +3559,22 @@ async def tqdm_monitor(coord, continuous: bool = False) -> None:
             oom = s.get("oom_count", 0)
             if oom and s["failed"]:
                 fail_str += f" (OOM:{oom})"
+            top_active_types = sorted(
+                active_count_by_job_type.items(), key=lambda x: x[1], reverse=True
+            )[:3]
+            top_waiting_queues = sorted(
+                waiting_count_by_queue.items(), key=lambda x: x[1], reverse=True
+            )[:3]
+            active_types_str = ", ".join([f"{k}:{v}" for k, v in top_active_types])
+            waiting_queues_str = ", ".join(
+                [f"{k}:{v}" for k, v in top_waiting_queues]
+            )
             overall.set_postfix_str(
-                f"Act:{s['active_count']} | Done:{s['completed']} | "
-                f"{fail_str} | Skip:{s['total_skipped']} | Tot:{s['total_enqueued']}"
+                f"Act:{s['active_count']}[{active_types_str}] | "
+                f"Wait:{s.get('waiting_global',0)}+{s.get('waiting_serialized',0)} "
+                f"({waiting_queues_str}) | "
+                f"Done:{s['completed']} | {fail_str} | "
+                f"Skip:{s['total_skipped']} | Tot:{s['total_enqueued']}"
             )
             overall.refresh()
 
@@ -3535,10 +3661,14 @@ async def rich_monitor(coord, continuous: bool = False) -> None:
                 completed_queue_counts[q] += c
 
             active_by_queue = s.get("active_by_queue", {})
+            active_count_by_queue = s.get("active_count_by_queue", {}) or {}
+            active_count_by_job_type = s.get("active_count_by_job_type", {}) or {}
+            waiting_count_by_queue = s.get("waiting_count_by_queue", {}) or {}
 
             for q in order:
                 completed_in_q = completed_queue_counts.get(q, 0)
-                active_in_q = len(active_by_queue.get(q, []))
+                # Use full active counts for debugging; UI list is truncated to 2/jobs/queue.
+                active_in_q = int(active_count_by_queue.get(q, 0) or 0)
                 total_for_q = completed_in_q + active_in_q
                 active_jobs_info = active_by_queue.get(q, [])
                 parts = []
@@ -3571,7 +3701,9 @@ async def rich_monitor(coord, continuous: bool = False) -> None:
                 completed=s["completed"] + s["failed"],
                 detail=(
                     f"Done:{s['completed'] + s['failed']}/{total_with_waiting} | "
-                    f"Act:{s['active_count']} | "
+                    f"Act:{s['active_count']}[{', '.join([f'{k}:{v}' for k, v in sorted(active_count_by_job_type.items(), key=lambda x: x[1], reverse=True)[:3]])}] | "
+                    f"Wait:{s.get('waiting_global',0)}+{s.get('waiting_serialized',0)} "
+                    f"({', '.join([f'{k}:{v}' for k, v in sorted(waiting_count_by_queue.items(), key=lambda x: x[1], reverse=True)[:3]])}) | "
                     f"{fail_detail} | Skip:{s['total_skipped']}"
                 ),
             )
