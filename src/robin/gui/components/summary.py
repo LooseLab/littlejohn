@@ -15,6 +15,7 @@ try:
 except ImportError:  # pragma: no cover
     ui = None
 
+from robin.classification_config import get_confidence_ui_tier
 from robin.gui.config import (
     get_confidence_level as get_classifier_confidence_level,
     is_section_enabled,
@@ -419,12 +420,7 @@ def _create_classification_dashboard_card_with_data(
 ) -> None:
     """Classification Insight card — design.md §8; click scrolls to detail expansion."""
     pct = max(0.0, min(100.0, float(confidence)))
-    if pct >= 80:
-        tier = "high"
-    elif pct >= 50:
-        tier = "medium"
-    else:
-        tier = "low"
+    tier = get_confidence_ui_tier(anchor_key, pct)
 
     def _on_card_click() -> None:
         _scroll_to_classification_detail(anchor_key)
