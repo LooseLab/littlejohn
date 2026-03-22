@@ -614,6 +614,14 @@ NEEDS_WORK_DIR: Set[str] = {
 }
 
 
+def _notify_coordinator_handler_started(job_id: int) -> None:
+    """Tell Coordinator the Ray worker has begun running the handler (not queued in Pool)."""
+    try:
+        ray.get_actor("robin_coordinator").mark_handler_started.remote(job_id)
+    except Exception:
+        pass
+
+
 def _wrap_real_handler(
     py_handler: Optional[Callable[[Job], None]], job_type: str
 ) -> Callable[[Job], WorkflowContext]:
@@ -649,6 +657,13 @@ def _wrap_real_handler(
             f"ray_job_id={ray_job_id} task_id={task_id} node_id={node_id} "
             f"pid={os.getpid()} sample_id={sample_id} filepath={filepath}"
         )
+        # Progress UI "duration" prefers handler wall time (excludes Pool/Ray queue after dispatch).
+        try:
+            jid = getattr(job, "job_id", None)
+            if jid is not None:
+                _notify_coordinator_handler_started(int(jid))
+        except Exception:
+            pass
         try:
             if py_handler is None:
                 raise RuntimeError(
@@ -2827,6 +2842,18 @@ class Coordinator:
                 self.pending.pop(key, None)
             self.running[key] = self.running.get(key, 0) + 1
 
+    async def mark_handler_started(self, job_id: int) -> None:
+        """Worker calls this when the real handler body begins (Ray task running)."""
+        try:
+            info = self.active.get(int(job_id))
+            if info is None:
+                return
+            if info.get("handler_start_time") is not None:
+                return
+            info["handler_start_time"] = time.time()
+        except Exception:
+            pass
+
     async def stats(self) -> Dict[str, Any]:
         # Check cache first for performance
         now = time.time()
@@ -2845,12 +2872,23 @@ class Coordinator:
             jt = info["job_type"]
             active_count_by_queue[q] = active_count_by_queue.get(q, 0) + 1
             active_count_by_job_type[jt] = active_count_by_job_type.get(jt, 0) + 1
+            hs = info.get("handler_start_time")
+            st = info.get("start_time")
+            if hs is not None:
+                duration_s = int(now - float(hs))
+                dispatch_wait = (
+                    int(float(hs) - float(st)) if st is not None else None
+                )
+            else:
+                duration_s = int(now - float(st)) if st is not None else 0
+                dispatch_wait = None
             active_by_queue.setdefault(q, []).append(
                 {
                     "job_id": jid,
                     "job_type": jt,
                     "filepath": info["filepath"],
-                    "duration": int(now - info["start_time"]),
+                    "duration": duration_s,
+                    "dispatch_wait_seconds": dispatch_wait,
                     "start_time": info["start_time"],
                 }
             )
@@ -2871,7 +2909,11 @@ class Coordinator:
                     "job_type": info["job_type"],
                     "queue": info["queue"],
                     "filepath": info["filepath"],
-                    "duration": int(now - info["start_time"]),
+                    "duration": (
+                        int(now - float(info["handler_start_time"]))
+                        if info.get("handler_start_time") is not None
+                        else int(now - float(info["start_time"]))
+                    ),
                 }
                 for jid, info in self.active.items()
             ],
@@ -3543,7 +3585,11 @@ async def tqdm_monitor(coord, continuous: bool = False) -> None:
                         fn = os.path.basename(j.get("filepath", ""))
                         if len(fn) > 25:
                             fn = fn[:22] + "..."
-                        parts.append(f"{fn} ({j['duration']}s)")
+                        dq = j.get("dispatch_wait_seconds")
+                        if dq is not None and int(dq) > 0:
+                            parts.append(f"{fn} ({j['duration']}s, +{int(dq)}q)")
+                        else:
+                            parts.append(f"{fn} ({j['duration']}s)")
                     b.set_postfix_str(" | ".join(parts))
                 else:
                     b.set_postfix_str("")
@@ -3643,7 +3689,8 @@ async def rich_monitor(coord, continuous: bool = False) -> None:
 
     if _RICH_CONSOLE:
         _RICH_CONSOLE.print(
-            "[dim]Progress: time column = run elapsed; (Ns) = current job duration[/dim]"
+            "[dim]Progress: time column = run elapsed; (Ns) = handler wall time once running "
+            "(+Mq = seconds after dispatch waiting in Pool/Ray); before handler starts, wall time since dispatch[/dim]"
         )
     progress.start()
     try:
@@ -3679,7 +3726,11 @@ async def rich_monitor(coord, continuous: bool = False) -> None:
                         fn = os.path.basename(j.get("filepath", ""))
                         if len(fn) > 25:
                             fn = fn[:22] + "..."
-                        parts.append(f"{fn} ({j['duration']}s)")
+                        dq = j.get("dispatch_wait_seconds")
+                        if dq is not None and int(dq) > 0:
+                            parts.append(f"{fn} ({j['duration']}s, +{int(dq)}q)")
+                        else:
+                            parts.append(f"{fn} ({j['duration']}s)")
                 detail = " | ".join(parts)
                 progress.update(
                     task_ids[q],
@@ -4298,16 +4349,18 @@ async def run(
                         rows = []
                         for qname, jobs in (s.get("active_by_queue", {}) or {}).items():
                             for j in jobs:
-                                rows.append(
-                                    {
-                                        "job_id": str(j.get("job_id", "")),
-                                        "job_type": j.get("job_type", ""),
-                                        "filepath": j.get("filepath", ""),
-                                        "worker_name": qname,
-                                        "duration": int(j.get("duration", 0) or 0),
-                                        "progress": 0.0,
-                                    }
-                                )
+                                rj = {
+                                    "job_id": str(j.get("job_id", "")),
+                                    "job_type": j.get("job_type", ""),
+                                    "filepath": j.get("filepath", ""),
+                                    "worker_name": qname,
+                                    "duration": int(j.get("duration", 0) or 0),
+                                    "progress": 0.0,
+                                }
+                                dw = j.get("dispatch_wait_seconds")
+                                if dw is not None:
+                                    rj["dispatch_wait_seconds"] = int(dw)
+                                rows.append(rj)
                         _gui_send_update(
                             _GUIUpdateType.JOB_UPDATE, {"active_jobs": rows}, priority=1
                         )
