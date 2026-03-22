@@ -30,6 +30,185 @@ def _cnv_contig_ok(contig: str) -> bool:
     return contig in CNV_PLOT_CONTIGS
 
 
+def _is_dark_mode() -> bool:
+    """Quasar ``body--dark`` via app storage (see theme.frame)."""
+    try:
+        from nicegui import app
+
+        return bool(app.storage.user.get("dark_mode"))
+    except Exception:
+        return False
+
+
+def _cnv_chromosome_scatter_palette(dark: bool) -> List[str]:
+    """Distinct scatter colours per chromosome.
+
+    ECharts defaults include very dark greys that disappear on midnight backgrounds;
+    dark mode uses lighter, saturated hues (design.md §5–§6).
+    """
+    if dark:
+        return [
+            "#34d399",
+            "#38bdf8",
+            "#fbbf24",
+            "#fb7185",
+            "#a78bfa",
+            "#2dd4bf",
+            "#f472b6",
+            "#facc15",
+            "#4ade80",
+            "#60a5fa",
+            "#f97316",
+            "#e879f9",
+            "#c084fc",
+            "#22d3ee",
+            "#fde047",
+            "#93c5fd",
+            "#f87171",
+            "#bef264",
+            "#5eead4",
+            "#fcd34d",
+            "#7dd3fc",
+            "#fda4af",
+            "#86efac",
+            "#d8b4fe",
+            "#eab308",
+            "#67e8f9",
+        ]
+    return [
+        "#059669",
+        "#0284c7",
+        "#b45309",
+        "#dc2626",
+        "#7c3aed",
+        "#0d9488",
+        "#db2777",
+        "#ca8a04",
+        "#16a34a",
+        "#2563eb",
+        "#ea580c",
+        "#c026d3",
+        "#9333ea",
+        "#0891b2",
+        "#ca8a04",
+        "#3b82f6",
+        "#ef4444",
+        "#65a30d",
+        "#14b8a6",
+        "#eab308",
+        "#0ea5e9",
+        "#ec4899",
+        "#4ade80",
+        "#8b5cf6",
+        "#ca8a04",
+        "#06b6d4",
+    ]
+
+
+def _cnv_value_mode_colors(dark: bool) -> Tuple[str, str, str]:
+    """High / low / in-range scatter colours (semantic green / rose / slate)."""
+    if dark:
+        return ("#34d399", "#fb7185", "#94a3b8")
+    return ("#007AFF", "#FF3B30", "#8E8E93")
+
+
+def _cnv_echart_palette(dark: bool) -> Dict[str, str]:
+    """Axis, title, and tooltip colours for CNV scatter plots (design.md §5, §6)."""
+    if dark:
+        return {
+            "text": "#e2e8f0",
+            "muted": "#94a3b8",
+            "axis_line": "#64748b",
+            "split": "rgba(148, 163, 184, 0.52)",
+            "tooltip_bg": "rgba(15, 23, 42, 0.96)",
+            "tooltip_border": "#334155",
+        }
+    return {
+        "text": "#0f172a",
+        "muted": "#475569",
+        "axis_line": "#94a3b8",
+        "split": "rgba(71, 85, 105, 0.33)",
+        "tooltip_bg": "rgba(255, 255, 255, 0.98)",
+        "tooltip_border": "#e2e8f0",
+    }
+
+
+def _apply_cnv_echart_chrome(echart: Any, dark: bool) -> None:
+    """Apply light/dark readable chrome without touching series data."""
+    p = _cnv_echart_palette(dark)
+    try:
+        o = echart.options
+        if not isinstance(o, dict):
+            return
+        o["backgroundColor"] = "transparent"
+        o["textStyle"] = {"color": p["text"]}
+        title = o.get("title")
+        if isinstance(title, dict):
+            title["textStyle"] = {"color": p["text"], "fontSize": 14}
+        o["tooltip"] = {
+            **(o.get("tooltip") or {}),
+            "backgroundColor": p["tooltip_bg"],
+            "borderColor": p["tooltip_border"],
+            "textStyle": {"color": p["text"]},
+        }
+        xa = o.get("xAxis")
+        if isinstance(xa, dict):
+            xa["axisLine"] = {"lineStyle": {"color": p["axis_line"]}}
+            xa["axisLabel"] = {**(xa.get("axisLabel") or {}), "color": p["muted"]}
+            xa["splitLine"] = {"lineStyle": {"color": p["split"]}}
+        ya_list = o.get("yAxis")
+        if isinstance(ya_list, list):
+            for ya in ya_list:
+                if not isinstance(ya, dict):
+                    continue
+                ya["axisLine"] = {"lineStyle": {"color": p["axis_line"]}}
+                ya["axisLabel"] = {**(ya.get("axisLabel") or {}), "color": p["muted"]}
+                ya["nameTextStyle"] = {"color": p["muted"]}
+                ya["splitLine"] = {"lineStyle": {"color": p["split"]}}
+        leg = o.get("legend")
+        if isinstance(leg, dict):
+            leg["textStyle"] = {"color": p["muted"]}
+        try:
+            dz_list = o.get("dataZoom")
+            if isinstance(dz_list, list):
+                for dz in dz_list:
+                    if not isinstance(dz, dict):
+                        continue
+                    dz["borderColor"] = p["axis_line"]
+                    dz["fillerColor"] = (
+                        "rgba(51, 65, 85, 0.35)"
+                        if dark
+                        else "rgba(148, 163, 184, 0.2)"
+                    )
+                    dz["handleStyle"] = {
+                        "color": p["text"],
+                        "borderColor": p["axis_line"],
+                    }
+                    dz["moveHandleStyle"] = {"color": p["muted"]}
+                    dz["emphasis"] = {
+                        "handleStyle": {"borderColor": p["text"]},
+                    }
+                    dbb = dz.get("dataBackground") or {}
+                    if isinstance(dbb, dict):
+                        dbb["lineStyle"] = {
+                            **(dbb.get("lineStyle") or {}),
+                            "color": p["muted"],
+                        }
+                        dbb["areaStyle"] = {
+                            **(dbb.get("areaStyle") or {}),
+                            "color": (
+                                "rgba(148, 163, 184, 0.12)"
+                                if dark
+                                else "rgba(71, 85, 105, 0.08)"
+                            ),
+                        }
+                        dz["dataBackground"] = dbb
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
     """Build the CNV UI section and attach refresh timers.
 
@@ -38,167 +217,211 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
 
     Controls now trigger immediate refresh instead of waiting for timer updates.
     """
-    with ui.card().classes("w-full"):
-        ui.label("🧬 Copy Number Variation (CNV)").classes("text-lg font-semibold mb-2")
-        with ui.row().classes("w-full items-center justify-between mb-2"):
-            with ui.column().classes("gap-1"):
-                cnv_status = ui.label("Status: Awaiting Data").classes("text-gray-600")
-                cnv_xy = ui.label("Genetic Sex: --").classes("text-gray-600")
-            with ui.column().classes("gap-1 items-end"):
-                cnv_bin = ui.label("Bin Width: --").classes("text-sm text-gray-600")
-                cnv_var = ui.label("Variance: --").classes("text-sm text-gray-600")
-        # Controls similar to original module
-        with ui.row().classes("gap-4 items-center mb-2"):
-            ui.label("Select Chromosome").classes("text-sm")
-            cnv_chrom_select = ui.select(options={"All": "All"}, value="All").style(
-                "width: 160px"
+    with ui.element("div").classes("w-full min-w-0").props("id=analysis-detail-cnv"):
+        with ui.element("div").classes("classification-insight-shell w-full min-w-0"):
+            ui.label("Copy number (CNV)").classes(
+                "classification-insight-heading text-headline-small"
             )
-            ui.label("Select Gene").classes("text-sm ml-4")
-            cnv_gene_select = ui.select(options={"All": "All"}, value="All").style(
-                "width: 200px"
-            )
-            ui.label("Color by").classes("text-sm ml-4")
-            cnv_color = ui.toggle(
-                options={"chromosome": "Chromosome", "value": "Up/Down"},
-                value="chromosome",
-            ).classes("mt-1")
-            ui.label("Y-axis scale").classes("text-sm ml-4")
-            cnv_scale = ui.toggle(
-                options={"linear": "Linear", "log": "Log"}, value="linear"
-            ).classes("mt-1")
-            ui.label("Plot bin width").classes("text-sm ml-4")
-            # NiceGUI select with dict uses keys as option values; map key -> bp (None = use data)
-            _PLOT_BIN_KEY_DEFAULT = "Data default"
-            _PLOT_BIN_OPTIONS = {
-                _PLOT_BIN_KEY_DEFAULT: "Data default",
-                "500 kb": "500 kb",
-                "1 Mb": "1 Mb",
-                "2 Mb": "2 Mb",
-                "5 Mb": "5 Mb",
-                "10 Mb": "10 Mb",
-            }
-            _PLOT_BIN_KEY_TO_BP = {
-                _PLOT_BIN_KEY_DEFAULT: None,
-                "500 kb": 500_000,
-                "1 Mb": 1_000_000,
-                "2 Mb": 2_000_000,
-                "5 Mb": 5_000_000,
-                "10 Mb": 10_000_000,
-            }
-            cnv_plot_bin = ui.select(
-                options=_PLOT_BIN_OPTIONS,
-                value=_PLOT_BIN_KEY_DEFAULT,
-            ).style("width: 120px")
-            cnv_bp_label = ui.label("Breakpoints").classes("text-sm ml-4").style("display: none")
-            cnv_bp = ui.toggle(
-                options={"hide": "Hide", "show": "Show"}, value="show"
-            ).classes("mt-1").style("display: none")
-        cnv_abs = ui.echart(
-            {
-                "backgroundColor": "transparent",
-                "title": {"text": "CNV Scatter Plot", "left": "center", "top": 10},
-                "grid": {
-                    "left": "5%",
-                    "right": "5%",
-                    "bottom": "10%",
-                    "top": "20%",
-                    "containLabel": True,
-                },
-                "tooltip": {"trigger": "axis"},
-                "xAxis": {"type": "value", "max": "dataMax"},
-                "yAxis": [
-                    {"type": "value", "name": "Ploidy"},
+            with ui.element("div").classes(
+                "classification-insight-card w-full min-w-0"
+            ):
+                with ui.column().classes("w-full min-w-0 gap-2 p-2 md:p-3"):
+                    with ui.row().classes("items-center gap-2 min-w-0"):
+                        ui.icon("person").classes("classification-insight-icon")
+                        ui.label("Genome-wide profile").classes(
+                            "classification-insight-model flex-1 min-w-0"
+                        )
+                    cnv_status = ui.label("Status: Awaiting Data").classes(
+                        "classification-insight-result w-full"
+                    )
+                    cnv_xy = ui.label("Genetic sex: --").classes(
+                        "classification-insight-meta w-full"
+                    )
+                    with ui.row().classes(
+                        "w-full justify-end gap-4 flex-wrap items-baseline"
+                    ):
+                        cnv_bin = ui.label("Bin width: --").classes(
+                            "classification-insight-meta"
+                        )
+                        cnv_var = ui.label("Variance: --").classes(
+                            "classification-insight-meta"
+                        )
+            with ui.row().classes(
+                "w-full gap-3 items-center mb-2 flex-wrap mt-2"
+            ):
+                ui.label("Chromosome").classes("classification-insight-meta")
+                cnv_chrom_select = ui.select(options={"All": "All"}, value="All").style(
+                    "width: 160px"
+                )
+                ui.label("Gene").classes("classification-insight-meta ml-2")
+                cnv_gene_select = ui.select(options={"All": "All"}, value="All").style(
+                    "width: 200px"
+                )
+                ui.label("Color by").classes("classification-insight-meta ml-2")
+                cnv_color = ui.toggle(
+                    options={"chromosome": "Chromosome", "value": "Up/Down"},
+                    value="chromosome",
+                ).classes("mt-1")
+                ui.label("Y-axis").classes("classification-insight-meta ml-2")
+                cnv_scale = ui.toggle(
+                    options={"linear": "Linear", "log": "Log"}, value="linear"
+                ).classes("mt-1")
+                ui.label("Plot bin").classes("classification-insight-meta ml-2")
+                # NiceGUI select with dict uses keys as option values; map key -> bp (None = use data)
+                _PLOT_BIN_KEY_DEFAULT = "Data default"
+                _PLOT_BIN_OPTIONS = {
+                    _PLOT_BIN_KEY_DEFAULT: "Data default",
+                    "500 kb": "500 kb",
+                    "1 Mb": "1 Mb",
+                    "2 Mb": "2 Mb",
+                    "5 Mb": "5 Mb",
+                    "10 Mb": "10 Mb",
+                }
+                _PLOT_BIN_KEY_TO_BP = {
+                    _PLOT_BIN_KEY_DEFAULT: None,
+                    "500 kb": 500_000,
+                    "1 Mb": 1_000_000,
+                    "2 Mb": 2_000_000,
+                    "5 Mb": 5_000_000,
+                    "10 Mb": 10_000_000,
+                }
+                cnv_plot_bin = ui.select(
+                    options=_PLOT_BIN_OPTIONS,
+                    value=_PLOT_BIN_KEY_DEFAULT,
+                ).style("width: 120px")
+                cnv_bp_label = ui.label("Breakpoints").classes(
+                    "classification-insight-meta ml-2"
+                ).style("display: none")
+                cnv_bp = ui.toggle(
+                    options={"hide": "Hide", "show": "Show"}, value="show"
+                ).classes("mt-1").style("display: none")
+            with ui.element("div").classes("w-full target-coverage-panel__plot-wrap"):
+                cnv_abs = ui.echart(
                     {
-                        "type": "value",
-                        "name": "Breakpoint density",
-                        "position": "right",
-                    },
-                ],
-                "dataZoom": [
-                    {"type": "slider", "xAxisIndex": [0]},
-                    {"type": "slider", "yAxisIndex": [0, 1], "right": 20, "startValue": 0, "endValue": 6},
-                ],
-                "series": [
-                    {"type": "scatter", "name": "CNV", "symbolSize": 3, "data": []},
-                    {
-                        "type": "scatter",
-                        "name": "centromeres_highlight",
-                        "data": [],
-                        "symbolSize": 3,
-                        "markArea": {
-                            "itemStyle": {"color": "rgba(135, 206, 250, 0.4)"},
-                            "data": [],
+                        "backgroundColor": "transparent",
+                        "title": {"text": "CNV scatter plot", "left": "center", "top": 10},
+                        "grid": {
+                            "left": "5%",
+                            "right": "5%",
+                            "bottom": "10%",
+                            "top": "20%",
+                            "containLabel": True,
                         },
-                    },
+                        "tooltip": {"trigger": "axis"},
+                        "xAxis": {"type": "value", "max": "dataMax"},
+                        "yAxis": [
+                            {"type": "value", "name": "Ploidy"},
+                            {
+                                "type": "value",
+                                "name": "Breakpoint density",
+                                "position": "right",
+                            },
+                        ],
+                        "dataZoom": [
+                            {"type": "slider", "xAxisIndex": [0]},
+                            {
+                                "type": "slider",
+                                "yAxisIndex": [0, 1],
+                                "right": 20,
+                                "startValue": 0,
+                                "endValue": 6,
+                            },
+                        ],
+                        "series": [
+                            {"type": "scatter", "name": "CNV", "symbolSize": 3, "data": []},
+                            {
+                                "type": "scatter",
+                                "name": "centromeres_highlight",
+                                "data": [],
+                                "symbolSize": 3,
+                                "markArea": {
+                                    "itemStyle": {"color": "rgba(135, 206, 250, 0.4)"},
+                                    "data": [],
+                                },
+                            },
+                            {
+                                "type": "scatter",
+                                "name": "cytobands_highlight",
+                                "data": [],
+                                "symbolSize": 3,
+                                "markArea": {
+                                    "itemStyle": {"color": "rgba(200, 200, 200, 0.4)"},
+                                    "data": [],
+                                },
+                                "markLine": {"symbol": "none", "data": []},
+                            },
+                        ],
+                    }
+                ).classes("w-full h-72")
+            with ui.element("div").classes("w-full target-coverage-panel__plot-wrap mt-2"):
+                cnv_diff = ui.echart(
                     {
-                        "type": "scatter",
-                        "name": "cytobands_highlight",
-                        "data": [],
-                        "symbolSize": 3,
-                        "markArea": {
-                            "itemStyle": {"color": "rgba(200, 200, 200, 0.4)"},
-                            "data": [],
+                        "backgroundColor": "transparent",
+                        "title": {"text": "Difference plot", "left": "center", "top": 10},
+                        "grid": {
+                            "left": "5%",
+                            "right": "5%",
+                            "bottom": "10%",
+                            "top": "20%",
+                            "containLabel": True,
                         },
-                        "markLine": {"symbol": "none", "data": []},
-                    },
-                ],
-            }
-        ).classes("w-full h-72")
-        cnv_diff = ui.echart(
-            {
-                "backgroundColor": "transparent",
-                "title": {"text": "Difference Plot", "left": "center", "top": 10},
-                "grid": {
-                    "left": "5%",
-                    "right": "5%",
-                    "bottom": "10%",
-                    "top": "20%",
-                    "containLabel": True,
-                },
-                "tooltip": {"trigger": "axis"},
-                "xAxis": {"type": "value", "max": "dataMax"},
-                "yAxis": [
-                    {"type": "value", "name": "Relative"},
-                    {
-                        "type": "value",
-                        "name": "Breakpoint density",
-                        "position": "right",
-                    },
-                ],
-                "dataZoom": [
-                    {"type": "slider", "xAxisIndex": [0]},
-                    {"type": "slider", "yAxisIndex": [0, 1], "right": 20, "startValue": -4, "endValue": 4},
-                ],
-                "series": [
-                    {"type": "scatter", "name": "CNV Δ", "symbolSize": 3, "data": []},
-                    {
-                        "type": "scatter",
-                        "name": "centromeres_highlight",
-                        "data": [],
-                        "symbolSize": 3,
-                        "markArea": {
-                            "itemStyle": {"color": "rgba(135, 206, 250, 0.4)"},
-                            "data": [],
-                        },
-                    },
-                    {
-                        "type": "scatter",
-                        "name": "cytobands_highlight",
-                        "data": [],
-                        "symbolSize": 3,
-                        "markArea": {
-                            "itemStyle": {"color": "rgba(200, 200, 200, 0.4)"},
-                            "data": [],
-                        },
-                        "markLine": {"symbol": "none", "data": []},
-                    },
-                ],
-            }
-        ).classes("w-full h-72")
+                        "tooltip": {"trigger": "axis"},
+                        "xAxis": {"type": "value", "max": "dataMax"},
+                        "yAxis": [
+                            {"type": "value", "name": "Relative"},
+                            {
+                                "type": "value",
+                                "name": "Breakpoint density",
+                                "position": "right",
+                            },
+                        ],
+                        "dataZoom": [
+                            {"type": "slider", "xAxisIndex": [0]},
+                            {
+                                "type": "slider",
+                                "yAxisIndex": [0, 1],
+                                "right": 20,
+                                "startValue": -4,
+                                "endValue": 4,
+                            },
+                        ],
+                        "series": [
+                            {
+                                "type": "scatter",
+                                "name": "CNV Δ",
+                                "symbolSize": 3,
+                                "data": [],
+                            },
+                            {
+                                "type": "scatter",
+                                "name": "centromeres_highlight",
+                                "data": [],
+                                "symbolSize": 3,
+                                "markArea": {
+                                    "itemStyle": {"color": "rgba(135, 206, 250, 0.4)"},
+                                    "data": [],
+                                },
+                            },
+                            {
+                                "type": "scatter",
+                                "name": "cytobands_highlight",
+                                "data": [],
+                                "symbolSize": 3,
+                                "markArea": {
+                                    "itemStyle": {"color": "rgba(200, 200, 200, 0.4)"},
+                                    "data": [],
+                                },
+                                "markLine": {"symbol": "none", "data": []},
+                            },
+                        ],
+                    }
+                ).classes("w-full h-72")
 
-        # CNV Events Summary
-        ui.label("CNV Events Summary").classes("text-md font-semibold mt-4")
-        cnv_events_summary = ui.label("No CNV events detected").classes("text-gray-600 mb-2")
+            ui.separator().classes("mgmt-detail-separator")
+            ui.label("CNV events").classes("target-coverage-panel__meta-label mt-2 mb-1")
+            cnv_events_summary = ui.label("No CNV events detected").classes(
+                "classification-insight-meta mb-2"
+            )
         
         # CNV Events Table
         cnv_events_columns = [
@@ -220,6 +443,10 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             cnv_events_table.props('multi-sort rows-per-page-options="[10,20,50,0]"')
         except Exception:
             pass
+        ui.separator().classes("mgmt-detail-separator")
+        ui.label("Cytoband summary").classes(
+            "target-coverage-panel__meta-label mt-2 mb-1"
+        )
         cyto_columns = [
             {"name": "chrom", "label": "Chr", "field": "chrom", "sortable": True},
             {"name": "region", "label": "Region", "field": "region", "sortable": True},
@@ -944,6 +1171,10 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 cnv3_map = cnv3_map["cnv"]
             if not cnv_map:
                 return
+            dark_ui = _is_dark_mode()
+            chrom_palette = _cnv_chromosome_scatter_palette(dark_ui)
+            col_high, col_low, col_norm = _cnv_value_mode_colors(dark_ui)
+            chrom_divider = _cnv_echart_palette(dark_ui)["muted"]
             binw_analysis = state.get("cnv_dict", {}).get("bin_width", 1_000_000)
             plot_bin_width = state.get("plot_bin_width") or binw_analysis
             if plot_bin_width < binw_analysis:
@@ -1053,11 +1284,19 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                     chrom_bounds.append((contig, start_bp, end_bp))
                     offset_bp = end_bp
                     if color_mode == "chromosome":
+                        ci = len(
+                            [s for s in series_abs if s.get("type") == "scatter"]
+                        )
                         series_abs.append(
                             {
                                 "type": "scatter",
                                 "name": contig,
                                 "symbolSize": 3,
+                                "itemStyle": {
+                                    "color": chrom_palette[
+                                        ci % len(chrom_palette)
+                                    ]
+                                },
                                 "data": pts,
                             }
                         )
@@ -1089,7 +1328,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                     "type": "scatter",
                                     "name": f"High {contig}",
                                     "symbolSize": 4,
-                                    "itemStyle": {"color": "#007AFF"},
+                                    "itemStyle": {"color": col_high},
                                     "data": high,
                                 }
                             )
@@ -1099,7 +1338,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                     "type": "scatter",
                                     "name": f"Low {contig}",
                                     "symbolSize": 4,
-                                    "itemStyle": {"color": "#FF3B30"},
+                                    "itemStyle": {"color": col_low},
                                     "data": low,
                                 }
                             )
@@ -1109,7 +1348,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                     "type": "scatter",
                                     "name": f"Normal {contig}",
                                     "symbolSize": 2,
-                                    "itemStyle": {"color": "#8E8E93"},
+                                    "itemStyle": {"color": col_norm},
                                     "data": norm,
                                 }
                             )
@@ -1126,6 +1365,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                 "type": "scatter",
                                 "name": selected,
                                 "symbolSize": 3,
+                                "itemStyle": {"color": chrom_palette[0]},
                                 "data": pts,
                             }
                         )
@@ -1152,7 +1392,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                     "type": "scatter",
                                     "name": f"High {selected}",
                                     "symbolSize": 4,
-                                    "itemStyle": {"color": "#007AFF"},
+                                    "itemStyle": {"color": col_high},
                                     "data": high,
                                 }
                             )
@@ -1162,7 +1402,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                     "type": "scatter",
                                     "name": f"Low {selected}",
                                     "symbolSize": 4,
-                                    "itemStyle": {"color": "#FF3B30"},
+                                    "itemStyle": {"color": col_low},
                                     "data": low,
                                 }
                             )
@@ -1172,7 +1412,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                     "type": "scatter",
                                     "name": f"Normal {selected}",
                                     "symbolSize": 2,
-                                    "itemStyle": {"color": "#8E8E93"},
+                                    "itemStyle": {"color": col_norm},
                                     "data": norm,
                                 }
                             )
@@ -1198,8 +1438,15 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                         lines_data.append(
                             {
                                 "xAxis": float(center_bp),
-                                "lineStyle": {"type": "dashed", "color": "#A0A0A0"},
-                                "label": {"show": True, "formatter": contig},
+                                "lineStyle": {
+                                    "type": "dashed",
+                                    "color": chrom_divider,
+                                },
+                                "label": {
+                                    "show": True,
+                                    "formatter": contig,
+                                    "color": chrom_divider,
+                                },
                             }
                         )
 
@@ -1362,14 +1609,19 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                     region_key = f"{s_bp}-{e_bp}"
                                     event = event_regions.get(region_key)
                                     
+                                    fill_neutral = (
+                                        "rgba(255, 255, 255, 0.07)"
+                                        if dark_ui
+                                        else "rgba(0, 0, 0, 0.03)"
+                                    )
                                     if event:
                                         # Highlight significant events with stronger colors
                                         if event.event_type in ("GAIN", "WHOLE_CHR_GAIN"):
-                                            color = "rgba(52, 199, 89, 0.3)"  # Stronger green for gains
+                                            color = "rgba(52, 199, 89, 0.3)"  # gains
                                         elif event.event_type in ("LOSS", "WHOLE_CHR_LOSS"):
-                                            color = "rgba(255, 45, 85, 0.3)"  # Stronger red for losses
+                                            color = "rgba(255, 45, 85, 0.3)"  # losses
                                         else:
-                                            color = "rgba(0, 0, 0, 0.03)"
+                                            color = fill_neutral
                                     else:
                                         # Standard cytoband coloring
                                         if mean_val > 0.5:
@@ -1377,8 +1629,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                         elif mean_val < -0.5:
                                             color = "rgba(255, 45, 85, 0.12)"
                                         else:
-                                            color = "rgba(0, 0, 0, 0.03)"
-                                    
+                                            color = fill_neutral
+
                                     band_areas.append(
                                         [
                                             {
@@ -1388,7 +1640,11 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                                 "label": {
                                                     "show": True,
                                                     "position": "insideTop",
-                                                    "color": "#555",
+                                                    "color": (
+                                                        "#cbd5e1"
+                                                        if dark_ui
+                                                        else "#555"
+                                                    ),
                                                     "fontSize": 11,
                                                 },
                                             },
@@ -1426,7 +1682,11 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                                 "xAxis": float(gr["start_pos"]),
                                                 "label": {
                                                     "position": "insideTop",
-                                                    "color": "#000",
+                                                    "color": (
+                                                        "#e2e8f0"
+                                                        if dark_ui
+                                                        else "#000"
+                                                    ),
                                                     "fontSize": 11,
                                                 }
                                             },
@@ -1528,12 +1788,14 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             except Exception as e:
                 pass
             
+            _apply_cnv_echart_chrome(cnv_abs, _is_dark_mode())
             cnv_abs.update()
             # Difference plot
             if cnv3_map:
                 series_diff = []
                 if selected == "All":
                     offset_bp = 0
+                    dj = 0
                     for contig, cnv in natsort.natsorted(cnv3_map.items()):
                         if not _cnv_contig_ok(contig):
                             continue
@@ -1548,9 +1810,15 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                 "type": "scatter",
                                 "name": contig,
                                 "symbolSize": 3,
+                                "itemStyle": {
+                                    "color": chrom_palette[
+                                        dj % len(chrom_palette)
+                                    ]
+                                },
                                 "data": pts,
                             }
                         )
+                        dj += 1
                 else:
                     cnv = cnv3_map.get(selected)
                     if cnv is not None:
@@ -1563,6 +1831,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                 "type": "scatter",
                                 "name": selected,
                                 "symbolSize": 3,
+                                "itemStyle": {"color": chrom_palette[0]},
                                 "data": pts,
                             }
                         )
@@ -1622,6 +1891,10 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 except Exception as e:
                     pass
                 
+                _apply_cnv_echart_chrome(cnv_diff, _is_dark_mode())
+                cnv_diff.update()
+            else:
+                _apply_cnv_echart_chrome(cnv_diff, _is_dark_mode())
                 cnv_diff.update()
 
             # Cytoband CNV table update (whole-genome table with per-chromosome subsetting)
@@ -1852,7 +2125,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 if cnv_dict_npy_changed:
                     state["cnv_dict"] = np.load(cnv_dict_npy, allow_pickle=True).item()
                     cnv_bin.set_text(
-                        f"Bin Width: {state['cnv_dict'].get('bin_width', '--'):,}"
+                        f"Bin width: {state['cnv_dict'].get('bin_width', '--'):,}"
                     )
                     cnv_var.set_text(
                         f"Variance: {state['cnv_dict'].get('variance','--'):.3f}"
@@ -1868,7 +2141,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
 
                         with xy_pkl.open("rb") as f:
                             xy = pickle.load(f)
-                        cnv_xy.set_text(f"Genetic Sex: {xy}")
+                        cnv_xy.set_text(f"Genetic sex: {xy}")
                         state["xy"] = xy
                     except Exception:
                         pass
@@ -1983,6 +2256,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                             if current_series:
                                 current_series[0].pop("markLine", None)
                         cnv_diff.options["series"] = current_series
+                        _apply_cnv_echart_chrome(cnv_diff, _is_dark_mode())
                         cnv_diff.update()
                     # Update modification time after successful load
                     state["bp_array_mtime"] = data_array_npy_mtime
@@ -2027,6 +2301,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                             if current_series:
                                 current_series[0].pop("markLine", None)
                         cnv_diff.options["series"] = current_series
+                        _apply_cnv_echart_chrome(cnv_diff, _is_dark_mode())
                         cnv_diff.update()
                     except Exception:
                         pass
@@ -2037,7 +2312,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             state["dict_m"] = cnv_dict_npy_mtime
             state["xy_m"] = xy_pkl_mtime
             state["last_visit_time"] = state.get("last_visit_time", time.time())
-            
+            state["cnv_plot_theme_dark"] = _is_dark_mode()
+
             launcher._cnv_state[key] = state
             # Update breakpoints visibility after state is updated
             _update_breakpoints_visibility()
@@ -2161,10 +2437,34 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
     except Exception:
         pass
 
+    def _sync_cnv_echarts_theme_if_needed() -> None:
+        """Re-apply axis/tooltip/title colours when the user toggles light/dark mode."""
+        try:
+            dark = _is_dark_mode()
+        except Exception:
+            dark = False
+        key = str(sample_dir)
+        st = launcher._cnv_state.get(key, {})
+        if st.get("cnv_plot_theme_dark") == dark:
+            return
+        _apply_cnv_echart_chrome(cnv_abs, dark)
+        _apply_cnv_echart_chrome(cnv_diff, dark)
+        try:
+            cnv_abs.update()
+            cnv_diff.update()
+        except Exception:
+            pass
+        launcher._cnv_state.setdefault(key, {})["cnv_plot_theme_dark"] = dark
+
     # Start the refresh timer (every 30 seconds)
     refresh_timer = ui.timer(30.0, _refresh_cnv, active=True, immediate=False)
     ui.timer(0.5, _refresh_cnv, once=True)
+    cnv_theme_timer = ui.timer(0.5, _sync_cnv_echarts_theme_if_needed, active=True)
+    ui.timer(0.05, lambda: _sync_cnv_echarts_theme_if_needed(), once=True)
+    ui.timer(0.45, lambda: _sync_cnv_echarts_theme_if_needed(), once=True)
     try:
-        ui.context.client.on_disconnect(lambda: refresh_timer.deactivate())
+        ui.context.client.on_disconnect(
+            lambda: (refresh_timer.deactivate(), cnv_theme_timer.deactivate())
+        )
     except Exception:
         pass

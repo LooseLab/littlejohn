@@ -151,121 +151,148 @@ def add_mnpflex_section(launcher: Any, sample_dir: Path, sample_id: str) -> None
             output_dir=str(output_dir),
         )
 
-    with ui.card().classes("w-full"):
-        with ui.row().classes("w-full items-start justify-between gap-4"):
-            with ui.column().classes("gap-1"):
-                ui.label("MNP-Flex results").classes(
-                    "text-base font-semibold text-gray-900"
-                )
-                last_updated_label = ui.label("Last updated: --").classes(
-                    "text-xs text-gray-500"
-                )
-            with ui.row().classes("items-center gap-2"):
-                status_badge = ui.badge("Idle").classes(
-                    "text-xs bg-gray-100 text-gray-700"
-                )
-                error_label = ui.label("").classes("text-xs text-red-600")
+    with ui.element("div").classes("classification-insight-shell w-full min-w-0").props(
+        "id=mnpflex-results"
+    ):
+        ui.label("MNP-Flex results").classes(
+            "classification-insight-heading text-headline-small"
+        )
+        with ui.column().classes("w-full min-w-0 gap-3"):
+            with ui.row().classes(
+                "w-full justify-between items-start gap-3 flex-wrap"
+            ):
+                with ui.column().classes("gap-1 min-w-0"):
+                    last_updated_label = ui.label("Last updated: --").classes(
+                        "classification-insight-meta"
+                    )
+                with ui.row().classes("items-center gap-2 flex-shrink-0"):
+                    status_badge = ui.badge("Idle").classes(
+                        "mnpflex-toolbar-badge mnpflex-toolbar-badge--idle"
+                    )
+                    error_label = ui.label("").classes("mnpflex-error-text")
 
-        with ui.row().classes("w-full items-center gap-3 mt-2"):
-            fetch_button = ui.button("Run MNP-Flex analysis").classes(
-                "text-sm font-semibold px-3 py-1 rounded bg-blue-600 text-white"
-            )
-            build_button = ui.button("Generate MNP-Flex subset BED").classes(
-                "text-sm font-semibold px-3 py-1 rounded bg-gray-100 text-gray-800"
-            )
-            empty_state_label = ui.label(
-                "No MNP-Flex results yet. Run the analysis to populate results."
-            ).classes("text-xs text-gray-500")
+            with ui.row().classes("w-full items-center gap-3 flex-wrap"):
+                fetch_button = ui.button(
+                    "Run MNP-Flex analysis", color="primary"
+                ).props("no-caps dense")
+                build_button = ui.button("Generate MNP-Flex subset BED").props(
+                    "outline no-caps dense"
+                )
+                empty_state_label = ui.label(
+                    "No MNP-Flex results yet. Run the analysis to populate results."
+                ).classes("classification-insight-foot")
 
-        results_container = ui.column().classes("w-full")
+        results_container = ui.column().classes("w-full min-w-0")
         with results_container:
-            with ui.row().classes("w-full gap-6 mt-2"):
-                with ui.column().classes("w-full md:w-1/2 gap-2"):
+            with ui.element("div").classes("classification-insight-card w-full min-w-0"):
+                with ui.column().classes("w-full gap-2 p-2 md:p-3"):
+                    with ui.row().classes("items-center gap-2 min-w-0"):
+                        ui.icon("psychology").classes("classification-insight-icon")
+                        ui.label("Classifier").classes(
+                            "classification-insight-model flex-1 min-w-0"
+                        )
                     classifier_name = ui.label("Classifier: --").classes(
-                        "text-xs text-gray-700"
+                        "classification-insight-meta"
                     )
                     classifier_version = ui.label("Version: --").classes(
-                        "text-xs text-gray-700"
+                        "classification-insight-meta"
                     )
                     classifier_type = ui.label("Type: --").classes(
-                        "text-xs text-gray-700"
+                        "classification-insight-meta"
                     )
-            with ui.card().classes("w-full p-4"):
-                ui.label("Hierarchical summary").classes(
-                    "text-sm font-semibold text-gray-900"
-                )
-                _, hierarchy_table = styled_table(
-                    columns=[
-                        {"name": "group", "label": "Group", "field": "group"},
-                        {"name": "score", "label": "Score", "field": "score"},
-                        {
-                            "name": "description",
-                            "label": "Description",
-                            "field": "description",
-                        },
-                    ],
-                    rows=[],
-                    pagination=0,
-                    class_size="table-xs",
-                )
-                with ui.row().classes("w-full items-center gap-2 mt-4"):
-                    ui.label("Top path").classes("text-xs text-gray-500")
+            with ui.element("div").classes("classification-insight-card w-full min-w-0"):
+                with ui.column().classes("w-full gap-2 p-2 md:p-3"):
+                    with ui.row().classes("items-center gap-2 min-w-0"):
+                        ui.icon("account_tree").classes("classification-insight-icon")
+                        ui.label("Hierarchical summary").classes(
+                            "classification-insight-model flex-1 min-w-0"
+                        )
+                    _, hierarchy_table = styled_table(
+                        columns=[
+                            {"name": "group", "label": "Group", "field": "group"},
+                            {"name": "score", "label": "Score", "field": "score"},
+                            {
+                                "name": "description",
+                                "label": "Description",
+                                "field": "description",
+                            },
+                        ],
+                        rows=[],
+                        pagination=0,
+                        class_size="table-xs",
+                    )
+                with ui.row().classes(
+                    "w-full items-center gap-2 mt-4 flex-wrap"
+                ):
+                    ui.label("Top path").classes("classification-insight-meta")
                     top_path_badge = ui.badge("--").classes(
-                        "text-xs bg-gray-100 text-gray-700"
+                        "mnpflex-score-badge mnpflex-score-badge--neutral"
                     )
                 top_path_value = ui.label("--").classes(
-                    "text-xs text-gray-800 leading-relaxed"
+                    "classification-insight-foot w-full leading-relaxed"
                 )
-                no_classification_notice = ui.row().classes(
-                    "w-full mt-3 p-3 rounded-lg bg-amber-50 border border-amber-200"
-                )
+                no_classification_notice = ui.row().classes("mnpflex-notice")
                 with no_classification_notice:
-                    ui.icon("warning", size="sm").classes("text-amber-600 mt-0.5")
+                    ui.icon("warning", size="sm").classes("mnpflex-notice-icon mt-0.5")
                     ui.label(
                         "This is not a confirmed classification. No hierarchical summary is available from the classifier. Information on the top 10 classifications returned can be viewed below."
-                    ).classes("text-sm text-amber-800")
+                    ).classes("mnpflex-notice-text")
                 no_classification_notice.set_visibility(False)
                 main_aggregates_section = ui.column().classes("w-full mt-3 gap-2")
                 with main_aggregates_section:
                     ui.label("Hierarchy aggregates (top entry)").classes(
-                        "text-xs text-gray-500"
+                        "classification-insight-meta"
                     )
-                    main_aggregates_container = ui.row().classes(
-                        "w-full gap-4 flex-nowrap items-stretch"
+                    main_aggregates_container = ui.element("div").classes(
+                        "classification-insight-grid w-full"
                     )
                     with main_aggregates_container:
-                        with ui.card().classes("w-1/4 min-w-0 p-3 bg-gray-50"):
-                            ui.label("Subclass").classes("text-xs text-gray-500")
-                            agg_subclass_name = ui.label("--").classes(
-                                "text-sm font-medium text-gray-900"
-                            )
-                            agg_subclass_badge = ui.badge("--").classes(
-                                "text-xs bg-gray-100 text-gray-700"
-                            )
-                        with ui.card().classes("w-1/4 min-w-0 p-3 bg-gray-50"):
-                            ui.label("Class").classes("text-xs text-gray-500")
-                            agg_class_name = ui.label("--").classes(
-                                "text-sm font-medium text-gray-900"
-                            )
-                            agg_class_badge = ui.badge("--").classes(
-                                "text-xs bg-gray-100 text-gray-700"
-                            )
-                        with ui.card().classes("w-1/4 min-w-0 p-3 bg-gray-50"):
-                            ui.label("Family").classes("text-xs text-gray-500")
-                            agg_family_name = ui.label("--").classes(
-                                "text-sm font-medium text-gray-900"
-                            )
-                            agg_family_badge = ui.badge("--").classes(
-                                "text-xs bg-gray-100 text-gray-700"
-                            )
-                        with ui.card().classes("w-1/4 min-w-0 p-3 bg-gray-50"):
-                            ui.label("Superfamily").classes("text-xs text-gray-500")
-                            agg_superfamily_name = ui.label("--").classes(
-                                "text-sm font-medium text-gray-900"
-                            )
-                            agg_superfamily_badge = ui.badge("--").classes(
-                                "text-xs bg-gray-100 text-gray-700"
-                            )
+                        with ui.element("div").classes(
+                            "classification-insight-card w-full min-w-0"
+                        ):
+                            with ui.column().classes("gap-2 p-3 md:p-4"):
+                                ui.label("Subclass").classes("classification-insight-model")
+                                agg_subclass_name = ui.label("--").classes(
+                                    "classification-insight-result text-sm"
+                                )
+                                agg_subclass_badge = ui.badge("--").classes(
+                                    "mnpflex-score-badge mnpflex-score-badge--neutral"
+                                )
+                        with ui.element("div").classes(
+                            "classification-insight-card w-full min-w-0"
+                        ):
+                            with ui.column().classes("gap-2 p-3 md:p-4"):
+                                ui.label("Class").classes("classification-insight-model")
+                                agg_class_name = ui.label("--").classes(
+                                    "classification-insight-result text-sm"
+                                )
+                                agg_class_badge = ui.badge("--").classes(
+                                    "mnpflex-score-badge mnpflex-score-badge--neutral"
+                                )
+                        with ui.element("div").classes(
+                            "classification-insight-card w-full min-w-0"
+                        ):
+                            with ui.column().classes("gap-2 p-3 md:p-4"):
+                                ui.label("Family").classes("classification-insight-model")
+                                agg_family_name = ui.label("--").classes(
+                                    "classification-insight-result text-sm"
+                                )
+                                agg_family_badge = ui.badge("--").classes(
+                                    "mnpflex-score-badge mnpflex-score-badge--neutral"
+                                )
+                        with ui.element("div").classes(
+                            "classification-insight-card w-full min-w-0"
+                        ):
+                            with ui.column().classes("gap-2 p-3 md:p-4"):
+                                ui.label("Superfamily").classes(
+                                    "classification-insight-model"
+                                )
+                                agg_superfamily_name = ui.label("--").classes(
+                                    "classification-insight-result text-sm"
+                                )
+                                agg_superfamily_badge = ui.badge("--").classes(
+                                    "mnpflex-score-badge mnpflex-score-badge--neutral"
+                                )
                 with ui.expansion("Top 10 classifier scores", value=False).classes(
                     "w-full mt-2"
                 ):
@@ -273,44 +300,60 @@ def add_mnpflex_section(launcher: Any, sample_dir: Path, sample_id: str) -> None
                     expansion_aggregates_container.set_visibility(False)
                     with expansion_aggregates_container:
                         ui.label("Hierarchy aggregates (top entry)").classes(
-                            "text-xs text-gray-500"
+                            "classification-insight-meta"
                         )
-                        with ui.row().classes("w-full gap-4 flex-nowrap items-stretch"):
-                            with ui.card().classes("w-1/4 min-w-0 p-3 bg-gray-50"):
-                                ui.label("Subclass").classes("text-xs text-gray-500")
-                                agg_subclass_name_exp = ui.label("--").classes(
-                                    "text-sm font-medium text-gray-900"
-                                )
-                                agg_subclass_badge_exp = ui.badge("--").classes(
-                                    "text-xs bg-gray-100 text-gray-700"
-                                )
-                            with ui.card().classes("w-1/4 min-w-0 p-3 bg-gray-50"):
-                                ui.label("Class").classes("text-xs text-gray-500")
-                                agg_class_name_exp = ui.label("--").classes(
-                                    "text-sm font-medium text-gray-900"
-                                )
-                                agg_class_badge_exp = ui.badge("--").classes(
-                                    "text-xs bg-gray-100 text-gray-700"
-                                )
-                            with ui.card().classes("w-1/4 min-w-0 p-3 bg-gray-50"):
-                                ui.label("Family").classes("text-xs text-gray-500")
-                                agg_family_name_exp = ui.label("--").classes(
-                                    "text-sm font-medium text-gray-900"
-                                )
-                                agg_family_badge_exp = ui.badge("--").classes(
-                                    "text-xs bg-gray-100 text-gray-700"
-                                )
-                            with ui.card().classes("w-1/4 min-w-0 p-3 bg-gray-50"):
-                                ui.label("Superfamily").classes("text-xs text-gray-500")
-                                agg_superfamily_name_exp = ui.label("--").classes(
-                                    "text-sm font-medium text-gray-900"
-                                )
-                                agg_superfamily_badge_exp = ui.badge("--").classes(
-                                    "text-xs bg-gray-100 text-gray-700"
-                                )
+                        with ui.element("div").classes(
+                            "classification-insight-grid w-full"
+                        ):
+                            with ui.element("div").classes(
+                                "classification-insight-card w-full min-w-0"
+                            ):
+                                with ui.column().classes("gap-2 p-3 md:p-4"):
+                                    ui.label("Subclass").classes("classification-insight-model")
+                                    agg_subclass_name_exp = ui.label("--").classes(
+                                        "classification-insight-result text-sm"
+                                    )
+                                    agg_subclass_badge_exp = ui.badge("--").classes(
+                                        "mnpflex-score-badge mnpflex-score-badge--neutral"
+                                    )
+                            with ui.element("div").classes(
+                                "classification-insight-card w-full min-w-0"
+                            ):
+                                with ui.column().classes("gap-2 p-3 md:p-4"):
+                                    ui.label("Class").classes("classification-insight-model")
+                                    agg_class_name_exp = ui.label("--").classes(
+                                        "classification-insight-result text-sm"
+                                    )
+                                    agg_class_badge_exp = ui.badge("--").classes(
+                                        "mnpflex-score-badge mnpflex-score-badge--neutral"
+                                    )
+                            with ui.element("div").classes(
+                                "classification-insight-card w-full min-w-0"
+                            ):
+                                with ui.column().classes("gap-2 p-3 md:p-4"):
+                                    ui.label("Family").classes("classification-insight-model")
+                                    agg_family_name_exp = ui.label("--").classes(
+                                        "classification-insight-result text-sm"
+                                    )
+                                    agg_family_badge_exp = ui.badge("--").classes(
+                                        "mnpflex-score-badge mnpflex-score-badge--neutral"
+                                    )
+                            with ui.element("div").classes(
+                                "classification-insight-card w-full min-w-0"
+                            ):
+                                with ui.column().classes("gap-2 p-3 md:p-4"):
+                                    ui.label("Superfamily").classes(
+                                        "classification-insight-model"
+                                    )
+                                    agg_superfamily_name_exp = ui.label("--").classes(
+                                        "classification-insight-result text-sm"
+                                    )
+                                    agg_superfamily_badge_exp = ui.badge("--").classes(
+                                        "mnpflex-score-badge mnpflex-score-badge--neutral"
+                                    )
                     ui.label(
                         "Detailed scores for reference (non-primary view)."
-                    ).classes("text-xs text-gray-500")
+                    ).classes("classification-insight-foot")
                     _, classifier_scores_table = styled_table(
                         columns=[
                             {"name": "score", "label": "Score", "field": "score"},
@@ -329,40 +372,56 @@ def add_mnpflex_section(launcher: Any, sample_dir: Path, sample_id: str) -> None
                     )
             ui.separator().classes("my-4")
 
-            with ui.row().classes("w-full gap-6 mt-4 flex-nowrap items-stretch"):
-                with ui.card().classes("w-1/2 min-w-0 p-4 bg-gray-50"):
-                    ui.label("Quality control").classes(
-                        "text-sm font-semibold text-gray-900"
-                    )
-                    with ui.row().classes("items-center gap-2 mt-1"):
-                        ui.label("Status").classes("text-xs text-gray-500")
-                        qc_status_badge = ui.badge("--").classes(
-                            "text-xs bg-gray-100 text-gray-700"
+            with ui.element("div").classes(
+                "classification-insight-grid--2 w-full"
+            ):
+                with ui.element("div").classes(
+                    "classification-insight-card w-full min-w-0"
+                ):
+                    with ui.column().classes("gap-2 p-2 md:p-3"):
+                        with ui.row().classes("items-center gap-2 min-w-0"):
+                            ui.icon("verified").classes("classification-insight-icon")
+                            ui.label("Quality control").classes(
+                                "classification-insight-model flex-1 min-w-0"
+                            )
+                        with ui.row().classes("items-center gap-2 mt-1 flex-wrap"):
+                            ui.label("Status").classes("classification-insight-meta")
+                            qc_status_badge = ui.badge("--").classes(
+                                "mnpflex-status-badge mnpflex-status-badge--neutral"
+                            )
+                        qc_status_detail = ui.label("--").classes(
+                            "classification-insight-foot"
                         )
-                    qc_status_detail = ui.label("--").classes("text-xs text-gray-600")
-                    qc_coverage = ui.label("Average coverage: --").classes(
-                        "text-xs text-gray-700"
-                    )
-                    qc_missing = ui.label("Missing sites: --").classes(
-                        "text-xs text-gray-700"
-                    )
-                    with ui.expansion("QC plots", value=False).classes("w-full mt-3"):
-                        qc_plots_container = ui.row().classes("w-full gap-3 mt-2")
-                with ui.card().classes("w-1/2 min-w-0 p-4 bg-gray-50"):
-                    ui.label("MGMT methylation").classes(
-                        "text-sm font-semibold text-gray-900"
-                    )
-                    with ui.row().classes("items-center gap-2 mt-1"):
-                        ui.label("Status").classes("text-xs text-gray-500")
-                        mgmt_status_badge = ui.badge("--").classes(
-                            "text-xs bg-gray-100 text-gray-700"
+                        qc_coverage = ui.label("Average coverage: --").classes(
+                            "classification-insight-meta"
                         )
-                    mgmt_average = ui.label("MGMT average: --").classes(
-                        "text-xs text-gray-700"
-                    )
-                    mgmt_sites = ui.label("MGMT sites: --").classes("text-xs text-gray-700")
-                    with ui.expansion("MGMT plot", value=False).classes("w-full mt-3"):
-                        mgmt_plot_container = ui.row().classes("w-full gap-3 mt-2")
+                        qc_missing = ui.label("Missing sites: --").classes(
+                            "classification-insight-meta"
+                        )
+                        with ui.expansion("QC plots", value=False).classes("w-full mt-3"):
+                            qc_plots_container = ui.row().classes("w-full gap-3 mt-2")
+                with ui.element("div").classes(
+                    "classification-insight-card w-full min-w-0"
+                ):
+                    with ui.column().classes("gap-2 p-2 md:p-3"):
+                        with ui.row().classes("items-center gap-2 min-w-0"):
+                            ui.icon("science").classes("classification-insight-icon")
+                            ui.label("MGMT methylation").classes(
+                                "classification-insight-model flex-1 min-w-0"
+                            )
+                        with ui.row().classes("items-center gap-2 mt-1 flex-wrap"):
+                            ui.label("Status").classes("classification-insight-meta")
+                            mgmt_status_badge = ui.badge("--").classes(
+                                "mnpflex-status-badge mnpflex-status-badge--neutral"
+                            )
+                        mgmt_average = ui.label("MGMT average: --").classes(
+                            "classification-insight-meta"
+                        )
+                        mgmt_sites = ui.label("MGMT sites: --").classes(
+                            "classification-insight-meta"
+                        )
+                        with ui.expansion("MGMT plot", value=False).classes("w-full mt-3"):
+                            mgmt_plot_container = ui.row().classes("w-full gap-3 mt-2")
 
         
         
@@ -379,32 +438,32 @@ def add_mnpflex_section(launcher: Any, sample_dir: Path, sample_id: str) -> None
             try:
                 score = float(value)
             except Exception:
-                return "text-xs bg-gray-100 text-gray-700"
+                return "mnpflex-score-badge mnpflex-score-badge--neutral"
             if score >= 0.8:
-                return "text-xs bg-green-100 text-green-800"
+                return "mnpflex-score-badge mnpflex-score-badge--5"
             if score >= 0.6:
-                return "text-xs bg-teal-100 text-teal-800"
+                return "mnpflex-score-badge mnpflex-score-badge--4"
             if score >= 0.4:
-                return "text-xs bg-yellow-100 text-yellow-800"
+                return "mnpflex-score-badge mnpflex-score-badge--3"
             if score >= 0.2:
-                return "text-xs bg-orange-100 text-orange-800"
-            return "text-xs bg-red-100 text-red-800"
+                return "mnpflex-score-badge mnpflex-score-badge--2"
+            return "mnpflex-score-badge mnpflex-score-badge--1"
 
         def _status_badge_classes(status: Optional[str]) -> str:
             if not status:
-                return "text-xs bg-gray-100 text-gray-700"
+                return "mnpflex-status-badge mnpflex-status-badge--neutral"
             normalized = str(status).strip().lower()
             if any(key in normalized for key in ["pass", "ok", "success"]):
-                return "text-xs bg-green-100 text-green-800"
+                return "mnpflex-status-badge mnpflex-status-badge--pass"
             if "warning" in normalized or "warn" in normalized:
-                return "text-xs bg-yellow-100 text-yellow-800"
+                return "mnpflex-status-badge mnpflex-status-badge--warn"
             if any(key in normalized for key in ["fail", "error", "invalid"]):
-                return "text-xs bg-red-100 text-red-800"
+                return "mnpflex-status-badge mnpflex-status-badge--fail"
             if "methylated" in normalized:
-                return "text-xs bg-teal-100 text-teal-800"
+                return "mnpflex-status-badge mnpflex-status-badge--meth"
             if "unmethylated" in normalized:
-                return "text-xs bg-gray-200 text-gray-800"
-            return "text-xs bg-gray-100 text-gray-700"
+                return "mnpflex-status-badge mnpflex-status-badge--unmeth"
+            return "mnpflex-status-badge mnpflex-status-badge--neutral"
 
         def _set_badge_value(badge, value: Optional[float]) -> None:
             badge.set_text(_format_score(value))
@@ -702,7 +761,7 @@ def add_mnpflex_section(launcher: Any, sample_dir: Path, sample_id: str) -> None
                     if data_url:
                         with container:
                             with ui.column().classes("w-full gap-3"):
-                                ui.label(title).classes("text-xs text-gray-700")
+                                ui.label(title).classes("classification-insight-meta")
                                 ui.image(data_url).classes("w-full")
 
         def _run_fetch(auto: bool = False) -> None:
@@ -711,7 +770,9 @@ def add_mnpflex_section(launcher: Any, sample_dir: Path, sample_id: str) -> None
             state["running"] = True
             state["last_error"] = ""
             status_badge.set_text("Running")
-            status_badge.classes(replace="text-xs bg-blue-100 text-blue-800")
+            status_badge.classes(
+                replace="mnpflex-toolbar-badge mnpflex-toolbar-badge--running"
+            )
             error_label.set_text("")
             fetch_button.disable()
             build_button.disable()
@@ -739,7 +800,9 @@ def add_mnpflex_section(launcher: Any, sample_dir: Path, sample_id: str) -> None
                 return
             state["last_error"] = ""
             status_badge.set_text("Preparing subset")
-            status_badge.classes(replace="text-xs bg-indigo-100 text-indigo-800")
+            status_badge.classes(
+                replace="mnpflex-toolbar-badge mnpflex-toolbar-badge--busy"
+            )
             error_label.set_text("")
             fetch_button.disable()
             build_button.disable()
@@ -754,7 +817,9 @@ def add_mnpflex_section(launcher: Any, sample_dir: Path, sample_id: str) -> None
                     logging.error(f"[MNPFlex] BED generation failed: {exc}")
                 finally:
                     status_badge.set_text("Idle")
-                    status_badge.classes(replace="text-xs bg-gray-100 text-gray-700")
+                    status_badge.classes(
+                        replace="mnpflex-toolbar-badge mnpflex-toolbar-badge--idle"
+                    )
                     fetch_button.enable()
                     build_button.enable()
 
@@ -764,10 +829,14 @@ def add_mnpflex_section(launcher: Any, sample_dir: Path, sample_id: str) -> None
         def _poll_status() -> None:
             if state["running"]:
                 status_badge.set_text("Running")
-                status_badge.classes(replace="text-xs bg-blue-100 text-blue-800")
+                status_badge.classes(
+                    replace="mnpflex-toolbar-badge mnpflex-toolbar-badge--running"
+                )
             else:
                 status_badge.set_text("Idle")
-                status_badge.classes(replace="text-xs bg-gray-100 text-gray-700")
+                status_badge.classes(
+                    replace="mnpflex-toolbar-badge mnpflex-toolbar-badge--idle"
+                )
                 fetch_button.enable()
                 build_button.enable()
 

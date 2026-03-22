@@ -150,18 +150,20 @@ class NewsFeed:
                 with ui.row().classes("items-center gap-2"):
                     ui.icon("feed", color="primary").classes("text-xl")
                     ui.label("ROBIN News").classes(
-                        "text-sky-600 dark:text-white text-xl font-semibold"
+                        "text-headline-medium text-slate-900 dark:text-slate-50"
                     )
                 if self.last_update:
                     with ui.row().classes("items-center gap-1"):
                         ui.icon("update", color="gray").classes("text-sm")
                         ui.label(
                             f'Updated {self.last_update.strftime("%H:%M %d/%m/%Y")}'
-                        ).classes("text-sm text-gray-600")
+                        ).classes(
+                            "text-body-small text-slate-600 dark:text-slate-400"
+                        )
 
             # Scrollable news container with elegant styling
             with ui.scroll_area().classes("w-full h-96"):
-                self._news_container = ui.column().classes("w-full gap-4 p-4")
+                self._news_container = ui.column().classes("w-full gap-3 p-3")
                 self._update_news_display()
 
         except Exception as e:
@@ -183,27 +185,29 @@ class NewsFeed:
             with self._news_container:
                 if not self.is_available:
                     with ui.card().classes(
-                        "w-full bg-red-50 border border-red-200 rounded-lg p-4"
+                        "w-full rounded-lg p-4 border border-[color:var(--md-error)]/30 bg-[color:var(--md-error-container)]"
                     ):
                         with ui.row().classes("items-center gap-2"):
                             ui.icon("wifi_off", color="negative")
                             ui.label(
                                 "News feed unavailable - please check your network connection"
-                            ).classes("text-red-600")
+                            ).classes("text-body-medium text-[color:var(--md-on-error-container)]")
                     return
 
                 if not self.news_items:
                     with ui.card().classes(
-                        "w-full bg-gray-50 border border-gray-200 rounded-lg p-4"
+                        "w-full rounded-lg p-4 bg-slate-50 dark:bg-slate-900/40"
                     ):
                         with ui.row().classes("items-center gap-2"):
                             ui.icon("inbox", color="gray")
-                            ui.label("No news items available").classes("text-gray-600")
+                            ui.label("No news items available").classes(
+                                "text-body-medium text-slate-600 dark:text-slate-400"
+                            )
                     return
 
                 for item in self.news_items:
                     with ui.card().classes(
-                        "w-full bg-white hover:bg-gray-50 transition-colors duration-200 rounded-lg shadow-sm border border-gray-100"
+                        "w-full transition-shadow duration-200 hover:shadow-md"
                     ):
                         with ui.column().classes("w-full p-4 gap-3"):
                             # Headline with icon based on message type
@@ -216,7 +220,7 @@ class NewsFeed:
                                 }.get(item.message_type, "info")
                                 ui.icon(icon_name, color="primary").classes("text-lg")
                                 ui.label(item.headline).classes(
-                                    "text-sky-600 dark:text-white text-lg font-semibold"
+                                    "text-headline-small text-slate-900 dark:text-slate-50"
                                 )
 
                             # Main content with proper spacing and formatting
@@ -224,7 +228,7 @@ class NewsFeed:
                                 "gap-3 pl-8"
                             ):  # Indent content under headline
                                 ui.label(item.content).classes(
-                                    "text-gray-700 text-base leading-relaxed"
+                                    "text-body-large text-slate-600 dark:text-slate-400 leading-relaxed"
                                 )
 
                                 # Image handling with better presentation
@@ -288,21 +292,23 @@ class NewsFeed:
                             # Add date information if available
                             if hasattr(item, "start_date"):
                                 with ui.row().classes(
-                                    "w-full justify-end mt-2 pt-2 border-t border-gray-100"
+                                    "w-full justify-end mt-2 pt-2 border-t border-[color:var(--md-outline)]"
                                 ):
                                     ui.label(f"Posted: {item.start_date}").classes(
-                                        "text-xs text-gray-500"
+                                        "text-label-small text-slate-500 dark:text-slate-400 font-mono"
                                     )
 
         except Exception as e:
             logging.error(f"Error updating news display: {str(e)}")
             with self._news_container:
                 with ui.card().classes(
-                    "w-full bg-red-50 border border-red-200 rounded-lg p-4"
+                    "w-full rounded-lg p-4 border border-[color:var(--md-error)]/30 bg-[color:var(--md-error-container)]"
                 ):
                     with ui.row().classes("items-center gap-2"):
                         ui.icon("error", color="negative")
-                        ui.label("Error updating news feed").classes("text-red-600")
+                        ui.label("Error updating news feed").classes(
+                            "text-body-medium text-[color:var(--md-on-error-container)]"
+                        )
 
     async def _check_and_update_news(self) -> None:
         """Check if update is needed and fetch news if necessary."""

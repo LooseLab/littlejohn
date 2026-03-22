@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Tuple
 import json
 import time
 import os
@@ -19,6 +19,388 @@ except ImportError:  # pragma: no cover
 
 from robin.gui.theme import styled_table
 
+# --- Coverage charts (design.md §9.5): on/off colours, mean line, gene palette ---
+_COV_GENE_LINE_PALETTE = [
+    "#06b6d4",  # cyan
+    "#c026d3",  # magenta / fuchsia
+    "#ca8a04",  # gold / amber
+    "#2563eb",  # blue
+    "#db2777",  # rose
+]
+_COV_MAX_DIM_GENES = 25
+
+
+def _cov_dim_muted_line() -> str:
+    """Dim in-range gene traces: readable on light and dark plot surfaces."""
+    if _cov_ui_dark():
+        return "#94a3b8"
+    return "#64748b"
+
+
+def _cov_band_fill_rgba() -> str:
+    """Mean ±2σ band fill behind target coverage over time."""
+    if _cov_ui_dark():
+        return "rgba(148,163,184,0.18)"
+    return "rgba(148,163,184,0.12)"
+
+
+def _cov_tooltip_option() -> Dict[str, Any]:
+    """Tooltip chrome for coverage ECharts (JSON-serialisable)."""
+    p = _cov_chrome_palette()
+    return {
+        "backgroundColor": p["tooltip_bg"],
+        "borderColor": p["tooltip_border"],
+        "borderWidth": 1,
+        "textStyle": {"color": p["tooltip_text"]},
+    }
+
+
+def _cov_boxplot_item_style() -> Dict[str, Any]:
+    """Box + whisker stroke/fill for chromosome overview (readable in light/dark)."""
+    if _cov_ui_dark():
+        return {
+            "color": "rgba(148, 163, 184, 0.22)",
+            "borderColor": "#cbd5e1",
+            "borderWidth": 1.2,
+        }
+    return {
+        "color": "rgba(71, 85, 105, 0.12)",
+        "borderColor": "#334155",
+        "borderWidth": 1.2,
+    }
+
+
+def _cov_scatter_outlier_style() -> Dict[str, Any]:
+    """Outlier points on boxplot: stroke matches surface."""
+    if _cov_ui_dark():
+        return {"color": "#38bdf8", "borderColor": "#0f172a", "borderWidth": 1}
+    return {"color": "#0284c7", "borderColor": "#ffffff", "borderWidth": 1}
+
+
+def _cov_ui_dark() -> bool:
+    try:
+        return bool(app.storage.user.get("dark_mode"))
+    except Exception:
+        return False
+
+
+def _cov_on_off_colors() -> Tuple[str, str]:
+    """On-target (brand green family) vs off-target (muted) for chromosome bars."""
+    if _cov_ui_dark():
+        return ("#22c55e", "#475569")
+    # Light surfaces: off-target must stay visible on white / --md-surface (not slate-300).
+    return ("#10b981", "#64748b")
+
+
+def _cov_mean_line_color() -> str:
+    """Thick dashed mean line: high contrast on plot surface."""
+    return "#f8fafc" if _cov_ui_dark() else "#1e293b"
+
+
+def _cov_chrome_palette() -> Dict[str, str]:
+    """Titles / axes / legend / tooltip for coverage ECharts (matches classification charts)."""
+    if _cov_ui_dark():
+        return {
+            "title": "#f1f5f9",
+            "axis": "#cbd5e1",
+            "split": "rgba(148, 163, 184, 0.35)",
+            "legend": "#cbd5e1",
+            "tooltip_bg": "rgba(15, 23, 42, 0.96)",
+            "tooltip_border": "#475569",
+            "tooltip_text": "#f8fafc",
+        }
+    return {
+        "title": "#0f172a",
+        "axis": "#1e293b",
+        "split": "rgba(51, 65, 85, 0.45)",
+        "legend": "#1e293b",
+        "tooltip_bg": "rgba(255, 255, 255, 0.96)",
+        "tooltip_border": "#e2e8f0",
+        "tooltip_text": "#0f172a",
+    }
+
+
+def _cov_area_fill_primary() -> str:
+    """Semi-transparent fill under cumulative coverage line."""
+    if _cov_ui_dark():
+        return "rgba(34, 197, 94, 0.22)"
+    return "rgba(16, 185, 129, 0.18)"
+
+
+def _cov_line_primary() -> str:
+    if _cov_ui_dark():
+        return "#22c55e"
+    return "#10b981"
+
+
+def _short_chr_label(name: str) -> str:
+    """Minimalist chromosome labels: chr1 -> 1, chrX -> X."""
+    t = str(name).strip()
+    if t.lower().startswith("chr"):
+        t = t[3:]
+    return t
+
+
+def _cov_gene_line_color(idx: int) -> str:
+    return _COV_GENE_LINE_PALETTE[idx % len(_COV_GENE_LINE_PALETTE)]
+
+
+def _cov_legend_label(text: str, max_len: int = 44) -> str:
+    """Short label for ECharts legend (JSON-safe options cannot use JS formatters)."""
+    t = (text or "").replace("\n", " ").strip()
+    if len(t) <= max_len:
+        return t
+    return t[: max_len - 1] + "…"
+
+
+def _apply_coverage_target_cov_chrome(ec: Any) -> None:
+    """Re-apply axis/title/legend/tooltip when light/dark toggles."""
+    try:
+        p = _cov_chrome_palette()
+        tt = _cov_tooltip_option()
+        o = ec.options
+        o["textStyle"] = {"color": p["axis"]}
+        o["title"]["textStyle"] = {"fontSize": 15, "color": p["title"]}
+        o["legend"]["textStyle"] = {"color": p["legend"]}
+        o["tooltip"] = {
+            "trigger": "axis",
+            "axisPointer": {"type": "shadow"},
+            **tt,
+        }
+        o["xAxis"]["axisLabel"]["color"] = p["axis"]
+        o["xAxis"]["axisLine"]["lineStyle"]["color"] = p["axis"]
+        o["yAxis"]["nameTextStyle"]["color"] = p["axis"]
+        o["yAxis"]["axisLabel"]["color"] = p["axis"]
+        o["yAxis"]["splitLine"]["lineStyle"]["color"] = p["split"]
+    except Exception:
+        pass
+
+
+def _apply_coverage_time_series_chrome(ec: Any) -> None:
+    """Cumulative coverage over time — chrome + line/area from theme."""
+    try:
+        p = _cov_chrome_palette()
+        tt = _cov_tooltip_option()
+        ln = _cov_line_primary()
+        fill = _cov_area_fill_primary()
+        o = ec.options
+        o["textStyle"] = {"color": p["axis"]}
+        o["title"]["textStyle"] = {"fontSize": 15, "color": p["title"]}
+        o["title"]["subtextStyle"] = {"fontSize": 11, "color": p["axis"]}
+        o["tooltip"] = {
+            "trigger": "axis",
+            "axisPointer": {
+                "type": "cross",
+                "lineStyle": {"color": p["axis"], "width": 1},
+                "crossStyle": {"color": p["axis"]},
+            },
+            **tt,
+        }
+        o["xAxis"]["axisLabel"] = {"color": p["axis"]}
+        o["xAxis"]["axisLine"] = {"lineStyle": {"color": p["axis"]}}
+        o["xAxis"]["splitLine"] = {"lineStyle": {"color": p["split"]}}
+        o["yAxis"]["nameTextStyle"] = {"color": p["axis"]}
+        o["yAxis"]["axisLabel"] = {"color": p["axis"]}
+        o["yAxis"]["splitLine"] = {
+            "lineStyle": {"color": p["split"], "type": "dashed"},
+        }
+        if o.get("series") and len(o["series"]) > 0:
+            o["series"][0]["lineStyle"] = {"width": 2.5, "color": ln}
+            o["series"][0]["itemStyle"] = {"color": ln}
+            o["series"][0]["areaStyle"] = {"color": fill}
+    except Exception:
+        pass
+
+
+def _apply_coverage_boxplot_chrome(bp: Any) -> None:
+    """Target coverage boxplot + scatter outliers — readable in light/dark."""
+    try:
+        p = _cov_chrome_palette()
+        tt = _cov_tooltip_option()
+        box_st = _cov_boxplot_item_style()
+        sc_st = _cov_scatter_outlier_style()
+        o = bp.options
+        o["textStyle"] = {"color": p["axis"]}
+        o.setdefault("title", {})
+        o["title"]["textStyle"] = {"fontSize": 16, "color": p["title"]}
+        o["title"].setdefault("subtextStyle", {})
+        o["title"]["subtextStyle"] = {"fontSize": 12, "color": p["axis"]}
+        o["tooltip"] = {"trigger": "item", **tt}
+        o.setdefault("legend", {})
+        o["legend"]["textStyle"] = {"color": p["legend"]}
+        o.setdefault("xAxis", {})
+        o["xAxis"]["name"] = o["xAxis"].get("name", "Chromosome")
+        # Center the axis title — default "end" puts the label at the right and it clips.
+        o["xAxis"]["nameLocation"] = "middle"
+        o["xAxis"]["nameGap"] = int(o["xAxis"].get("nameGap") or 40)
+        o["xAxis"]["nameTextStyle"] = {"color": p["axis"]}
+        o["xAxis"]["axisLabel"] = {
+            **(o["xAxis"].get("axisLabel") or {}),
+            "color": p["axis"],
+        }
+        o["xAxis"]["axisLine"] = {"lineStyle": {"color": p["axis"]}}
+        o.setdefault("yAxis", {})
+        o["yAxis"]["name"] = o["yAxis"].get("name", "Coverage (x)")
+        o["yAxis"]["nameTextStyle"] = {"color": p["axis"]}
+        o["yAxis"]["axisLabel"] = {"color": p["axis"]}
+        o["yAxis"]["splitLine"] = {
+            "show": True,
+            "lineStyle": {"color": p["split"], "type": "dashed"},
+        }
+        for s in o.get("series") or []:
+            t = s.get("type")
+            if t == "boxplot":
+                s["itemStyle"] = box_st
+            elif t == "scatter":
+                nm = str(s.get("name") or "")
+                if nm in ("outliers", "global outliers"):
+                    s["itemStyle"] = {**sc_st, **(s.get("itemStyle") or {})}
+                    if s.get("label", {}).get("show"):
+                        lab = dict(s.get("label") or {})
+                        lab["color"] = p["axis"]
+                        s["label"] = lab
+                elif nm == "Gene Coverage":
+                    ex = s.get("itemStyle") or {}
+                    s["itemStyle"] = {
+                        "color": ex.get("color", "#3b82f6"),
+                        "opacity": ex.get("opacity", 0.7),
+                    }
+                    em = s.get("emphasis") or {}
+                    eis = dict(em.get("itemStyle") or {})
+                    eis["borderColor"] = p["title"]
+                    eis["borderWidth"] = 2
+                    s["emphasis"] = {**em, "itemStyle": eis}
+                    if s.get("label", {}).get("show"):
+                        lab = dict(s.get("label") or {})
+                        lab["color"] = p["axis"]
+                        s["label"] = lab
+    except Exception:
+        pass
+
+
+def _apply_target_coverage_time_analysis_chrome(ec: Any) -> None:
+    """Outlier / mean / band chart — sync chrome and theme-dependent series colours."""
+    try:
+        p = _cov_chrome_palette()
+        tt = _cov_tooltip_option()
+        mean_c = _cov_mean_line_color()
+        band_fill = _cov_band_fill_rgba()
+        dim_c = _cov_dim_muted_line()
+        o = ec.options
+        o["textStyle"] = {"color": p["axis"]}
+        o.setdefault("title", {})
+        o["title"]["textStyle"] = {"fontSize": 15, "color": p["title"]}
+        o["title"]["subtextStyle"] = {"fontSize": 11, "color": p["axis"]}
+        o["tooltip"] = {
+            "trigger": "axis",
+            "axisPointer": {
+                "type": "cross",
+                "lineStyle": {"color": p["axis"], "width": 1},
+                "crossStyle": {"color": p["axis"]},
+            },
+            "confine": True,
+            "appendToBody": True,
+            **tt,
+        }
+        o.setdefault("legend", {})
+        o["legend"]["pageIconColor"] = p["title"]
+        o["legend"]["pageTextStyle"] = {"color": p["axis"]}
+        o["legend"]["textStyle"] = {"fontSize": 11, "color": p["legend"]}
+        o.setdefault("xAxis", {})
+        o["xAxis"]["axisLabel"] = {"color": p["axis"]}
+        o["xAxis"]["axisLine"] = {"lineStyle": {"color": p["axis"]}}
+        o["xAxis"]["splitLine"] = {"lineStyle": {"color": p["split"]}}
+        o.setdefault("yAxis", {})
+        o["yAxis"]["axisLabel"] = {"color": p["axis"]}
+        o["yAxis"]["axisLine"] = {"lineStyle": {"color": p["axis"]}}
+        o["yAxis"]["splitLine"] = {
+            "lineStyle": {"color": p["split"], "type": "dashed"},
+        }
+        o["yAxis"]["nameTextStyle"] = {"color": p["axis"]}
+        for s in o.get("series") or []:
+            name = str(s.get("name") or "")
+            if name == "_band":
+                ma = s.get("markArea") or {}
+                ist = ma.get("itemStyle") or {}
+                ist["color"] = band_fill
+                ma["itemStyle"] = ist
+                s["markArea"] = ma
+            elif name == "Mean (population)":
+                s["lineStyle"] = {
+                    **(s.get("lineStyle") or {}),
+                    "width": 4,
+                    "type": "dashed",
+                    "color": mean_c,
+                }
+                s["itemStyle"] = {**(s.get("itemStyle") or {}), "color": mean_c}
+            elif "in-range" in name:
+                s["itemStyle"] = {
+                    **(s.get("itemStyle") or {}),
+                    "color": dim_c,
+                    "opacity": 0.42,
+                }
+                s["lineStyle"] = {
+                    **(s.get("lineStyle") or {}),
+                    "width": 1.5,
+                    "type": "dashed",
+                    "color": dim_c,
+                    "opacity": 0.42,
+                }
+    except Exception:
+        pass
+
+
+def _apply_lga_gene_bar_chrome(ec: Any) -> None:
+    """Top genes by coverage bar chart (LGA overview)."""
+    try:
+        p = _cov_chrome_palette()
+        tt = _cov_tooltip_option()
+        bar_fill = "#60a5fa" if _cov_ui_dark() else "#3b82f6"
+        shadow = "rgba(0,0,0,0.45)" if _cov_ui_dark() else "rgba(0,0,0,0.3)"
+        o = ec.options
+        o["textStyle"] = {"color": p["axis"]}
+        o["title"]["textStyle"] = {
+            "fontSize": 16,
+            "color": p["title"],
+            "fontWeight": "bold",
+        }
+        o["title"]["subtextStyle"] = {"fontSize": 12, "color": p["axis"]}
+        o["tooltip"] = {
+            "trigger": "axis",
+            **tt,
+        }
+        o["xAxis"]["axisLabel"] = {
+            **(o["xAxis"].get("axisLabel") or {}),
+            "color": p["axis"],
+        }
+        o["xAxis"]["nameTextStyle"] = {"color": p["axis"]}
+        o["xAxis"]["axisLine"] = {"lineStyle": {"color": p["axis"]}}
+        o["yAxis"]["nameTextStyle"] = {"color": p["axis"]}
+        o["yAxis"]["axisLabel"] = {
+            **(o["yAxis"].get("axisLabel") or {}),
+            "color": p["axis"],
+        }
+        o["yAxis"]["splitLine"] = {
+            "show": True,
+            "lineStyle": {"color": p["split"], "type": "dashed"},
+        }
+        if o.get("dataZoom"):
+            for dz in o["dataZoom"]:
+                if isinstance(dz, dict):
+                    dz["textStyle"] = {"color": p["axis"]}
+                    dz["borderColor"] = p["tooltip_border"]
+                    dz["handleStyle"] = {"color": p["axis"]}
+        if o.get("series") and len(o["series"]) > 0:
+            o["series"][0]["itemStyle"] = {"color": bar_fill}
+            o["series"][0]["emphasis"] = {
+                "itemStyle": {
+                    "shadowBlur": 10,
+                    "shadowColor": shadow,
+                }
+            }
+    except Exception:
+        pass
+
 
 def add_igv_viewer(launcher: Any, sample_dir: Path) -> None:
     """Add the IGV viewer section to a page.
@@ -30,25 +412,44 @@ def add_igv_viewer(launcher: Any, sample_dir: Path) -> None:
     # IGV viewer section - only show if target.bam exists
     target_bam = sample_dir / "target.bam"
     if not (target_bam.exists() and target_bam.is_file()):
-        # Show a message if target.bam doesn't exist
-        with ui.card().classes("w-full"):
-            ui.label("IGV Viewer").classes("text-lg font-semibold mb-2")
-            ui.label("IGV viewer requires target.bam to be available. Please run target analysis first.").classes(
-                "text-sm text-gray-600"
+        with ui.element("div").classes(
+            "classification-insight-shell w-full min-w-0"
+        ).props("id=sample-details-igv"):
+            ui.label("IGV browser").classes(
+                "classification-insight-heading text-headline-small"
             )
+            with ui.element("div").classes("classification-insight-card w-full min-w-0"):
+                with ui.column().classes("w-full min-w-0 gap-2 p-2 md:p-3"):
+                    with ui.row().classes("items-center gap-2 min-w-0"):
+                        ui.icon("biotech").classes("classification-insight-icon")
+                        ui.label("target.bam required").classes(
+                            "classification-insight-model flex-1 min-w-0"
+                        )
+                    ui.label(
+                        "IGV requires target.bam. Run target analysis for this sample first."
+                    ).classes("classification-insight-foot")
         return
-    
-    with ui.card().classes("w-full"):
-        ui.label("IGV").classes("text-lg font-semibold mb-2")
-        igv_div = ui.element("div").classes("w-full h-[900px] border")
+
+    with ui.element("div").classes(
+        "classification-insight-shell w-full min-w-0"
+    ).props("id=sample-details-igv"):
+        ui.label("IGV browser").classes(
+            "classification-insight-heading text-headline-small"
+        )
+        ui.label("Genome: hg38 · Interactive alignment view").classes(
+            "classification-insight-meta mb-2"
+        )
+        igv_div = ui.element("div").classes(
+            "w-full h-[900px] border border-slate-200/90 rounded-lg overflow-hidden "
+            "dark:border-slate-700/80"
+        )
         igv_div._props["id"] = "igv-container"
-        igv_status = ui.label("Initializing IGV viewer...").classes(
-            "text-sm text-gray-600"
+        igv_status = ui.label("Initializing IGV viewer…").classes(
+            "classification-insight-meta"
         )
 
-        # Add IGV library status indicator
-        igv_lib_status = ui.label("IGV library: Checking...").classes(
-            "text-xs text-gray-500"
+        igv_lib_status = ui.label("IGV library: checking…").classes(
+            "classification-insight-foot"
         )
         
         # Initialize IGV browser immediately on page load
@@ -1346,7 +1747,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
     # Check for development environment variable to show/hide testing features
     is_development_mode = os.environ.get("ROBIN_DEV_MODE", "").lower() in ("1", "true", "yes", "on")
     
-    with ui.card().classes("w-full"):
+    with ui.card().classes("w-full").props("id=analysis-detail-coverage"):
         ui.label("Coverage").classes("text-lg font-semibold mb-2")
         # Summary row (quality + metrics)
         with ui.row().classes("w-full items-center justify-between mb-2"):
@@ -1370,69 +1771,128 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     "text-sm text-gray-600"
                 )
         with ui.card().classes("w-full"):
-            # Per Chromosome Target Coverage (bar chart)
+            # Per Chromosome Target Coverage (grouped bar — design.md §9.5)
+            _cp0 = _cov_chrome_palette()
             echart_target_cov = ui.echart(
                     {
                         "backgroundColor": "transparent",
+                        "textStyle": {"color": _cp0["axis"]},
                         "title": {
                             "text": "Per Chromosome Target Coverage",
                             "left": "center",
                             "top": 10,
-                            "textStyle": {"fontSize": 16, "color": "#000"},
+                            "textStyle": {"fontSize": 15, "color": _cp0["title"]},
                         },
                         "legend": {
-                            "data": ["Off Target", "On Target"],
+                            "data": ["On Target", "Off Target"],
                             "left": 10,
                             "top": "center",
                             "orient": "vertical",
                             "itemGap": 10,
+                            "textStyle": {"color": _cp0["legend"]},
                         },
-                        "tooltip": {"trigger": "axis"},
+                        "tooltip": {
+                            "trigger": "axis",
+                            "axisPointer": {"type": "shadow"},
+                            **_cov_tooltip_option(),
+                        },
                         "grid": {
-                            "left": "15%",
-                            "right": "5%",
-                            "bottom": "10%",
+                            "left": "12%",
+                            "right": "8%",
+                            "bottom": "12%",
                             "top": "20%",
                             "containLabel": True,
                         },
                         "xAxis": {
                             "type": "category",
                             "data": [],
-                            "axisLabel": {"rotate": 45},
+                            "axisLabel": {
+                                "rotate": 0,
+                                "interval": 0,
+                                "fontSize": 11,
+                                "color": _cp0["axis"],
+                            },
+                            "axisLine": {"lineStyle": {"color": _cp0["axis"]}},
                         },
-                        "yAxis": {"type": "value", "name": "Coverage (x)"},
+                        "yAxis": {
+                            "type": "value",
+                            "name": "Coverage (×)",
+                            "nameTextStyle": {"color": _cp0["axis"]},
+                            "axisLabel": {"color": _cp0["axis"]},
+                            "splitLine": {
+                                "lineStyle": {"color": _cp0["split"], "type": "dashed"},
+                            },
+                        },
                         "series": [],
                     }
                 ).classes("w-full h-64")
 
         with ui.card().classes("w-full"):
             ui.label("Coverage Over Time").classes("text-lg font-semibold mb-2")
+            _cp1 = _cov_chrome_palette()
+            _ln = _cov_line_primary()
+            _fill = _cov_area_fill_primary()
             echart_time = ui.echart(
                 {
                     "backgroundColor": "transparent",
+                    "textStyle": {"color": _cp1["axis"]},
                     "title": {
-                        "text": "Coverage Over Time",
+                        "text": "Cumulative coverage depth",
+                        "subtext": "Estimated coverage (×) over time",
                         "left": "center",
-                        "top": 10,
-                        "textStyle": {"fontSize": 16, "color": "#000"},
+                        "top": 8,
+                        "textStyle": {"fontSize": 15, "color": _cp1["title"]},
+                        "subtextStyle": {"fontSize": 11, "color": _cp1["axis"]},
                     },
-                    "tooltip": {"trigger": "axis"},
+                    "tooltip": {
+                        "trigger": "axis",
+                        "axisPointer": {
+                            "type": "cross",
+                            "lineStyle": {"color": _cp1["axis"], "width": 1},
+                            "crossStyle": {"color": _cp1["axis"]},
+                        },
+                        **_cov_tooltip_option(),
+                    },
                     "grid": {
-                        "left": "5%",
-                        "right": "5%",
-                        "bottom": "10%",
-                        "top": "20%",
+                        "left": "8%",
+                        "right": "6%",
+                        "bottom": "12%",
+                        "top": "22%",
                         "containLabel": True,
                     },
-                    "xAxis": {"type": "time"},
-                    "yAxis": {"type": "value", "name": "Coverage (x)"},
-                    "series": [{"type": "line", "smooth": True, "data": []}],
+                    "xAxis": {
+                        "type": "time",
+                        "axisLabel": {"color": _cp1["axis"]},
+                        "axisLine": {"lineStyle": {"color": _cp1["axis"]}},
+                        "splitLine": {"lineStyle": {"color": _cp1["split"]}},
+                    },
+                    "yAxis": {
+                        "type": "value",
+                        "name": "Estimated coverage (×)",
+                        "nameTextStyle": {"color": _cp1["axis"]},
+                        "axisLabel": {"color": _cp1["axis"]},
+                        "splitLine": {
+                            "lineStyle": {"color": _cp1["split"], "type": "dashed"},
+                        },
+                    },
+                    "series": [
+                        {
+                            "name": "Coverage",
+                            "type": "line",
+                            "smooth": True,
+                            "showSymbol": False,
+                            "data": [],
+                            "lineStyle": {"width": 2.5, "color": _ln},
+                            "itemStyle": {"color": _ln},
+                            "areaStyle": {"color": _fill},
+                        }
+                    ],
                 }
-            ).classes("w-full h-64")
+            ).classes("w-full h-72")
 
         # Target Coverage Over Time Analysis
         with ui.card().classes("w-full mt-4"):
-            ui.label("📈 Target Coverage Over Time Analysis").classes("text-lg font-semibold mb-2")
+            ui.label("Target Coverage Over Time Analysis").classes("text-lg font-semibold mb-2")
             ui.label(
                 "Analyze mean target coverage over time and identify significant outliers. "
                 "Outliers are detected using standard deviation method: values more than 2 SD above or below the mean for each gene."
@@ -1590,73 +2050,179 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         outlier_limit = 10
                     outlier_limit = max(1, outlier_limit)
                     
-                    # Prepare data for ECharts
-                    # Mean coverage series
+                    # Prepare data for ECharts (design.md §9.5 — mean, ±2 SD band, dim in-range, outliers)
+                    outlier_key_set = set()
+                    for k, _ in outlier_targets:
+                        kk = tuple(k) if isinstance(k, (list, tuple)) else k
+                        outlier_key_set.add(kk)
+
                     mean_coverage_data = [
-                        [int(ts), float(cov)] 
-                        for ts, cov in zip(mean_coverage['timestamp'], mean_coverage['coverage'])
+                        [int(ts), float(cov)]
+                        for ts, cov in zip(
+                            mean_coverage["timestamp"], mean_coverage["coverage"]
+                        )
                     ]
-                    
-                    # Plot full time series profiles for outlier targets (one line per region)
-                    outlier_gene_series = []
-                    sorted_outlier_labels = []
+
+                    mc_vals = mean_coverage["coverage"].astype(float)
+                    m_mu = float(mc_vals.mean())
+                    m_sd = float(mc_vals.std()) if len(mc_vals) > 1 else 0.0
+                    band_low = max(0.0, m_mu - 2.0 * m_sd)
+                    band_high = max(band_low + 1e-9, m_mu + 2.0 * m_sd)
+                    band_fill = _cov_band_fill_rgba()
+
+                    band_series = {
+                        "name": "_band",
+                        "type": "line",
+                        "data": [],
+                        "silent": True,
+                        "showInLegend": False,
+                        "z": 0,
+                        "markArea": {
+                            "silent": True,
+                            "itemStyle": {"color": band_fill},
+                            "data": [[{"yAxis": band_low}, {"yAxis": band_high}]],
+                        },
+                    }
+
+                    mean_c = _cov_mean_line_color()
+                    mean_series = {
+                        "name": "Mean (population)",
+                        "type": "line",
+                        "smooth": True,
+                        "data": mean_coverage_data,
+                        "symbol": "none",
+                        "z": 80,
+                        "lineStyle": {"width": 4, "type": "dashed", "color": mean_c},
+                        "itemStyle": {"color": mean_c},
+                    }
+
+                    outlier_gene_series: List[Dict[str, Any]] = []
                     if outlier_targets:
-                        # Sort by max coverage (prioritize high outliers)
-                        target_max_cov = df.groupby('target_key')['coverage'].max()
-                        def _sort_key(item):
+                        target_max_cov = df.groupby("target_key")["coverage"].max()
+
+                        def _sort_key(item: Any) -> float:
                             key, _ = item
                             k = tuple(key) if isinstance(key, (list, tuple)) else key
-                            return target_max_cov.get(k, 0)
+                            return float(target_max_cov.get(k, 0))
+
                         outlier_targets_sorted = sorted(
                             outlier_targets,
                             key=_sort_key,
-                            reverse=True
+                            reverse=True,
                         )
                         targets_to_plot = outlier_targets_sorted[:outlier_limit]
-                        sorted_outlier_labels = [label for _, label in targets_to_plot]
-                        
-                        import colorsys
-                        num_outliers = len(targets_to_plot)
-                        colors = []
-                        for i in range(num_outliers):
-                            hue = i / max(num_outliers, 1)
-                            rgb = colorsys.hsv_to_rgb(hue, 0.8, 0.9)
-                            colors.append(f"rgb({int(rgb[0]*255)},{int(rgb[1]*255)},{int(rgb[2]*255)})")
-                        
+
                         for idx, (target_key, target_label) in enumerate(targets_to_plot):
-                            key = tuple(target_key) if isinstance(target_key, (list, tuple)) else target_key
+                            key = (
+                                tuple(target_key)
+                                if isinstance(target_key, (list, tuple))
+                                else target_key
+                            )
                             mask = (
-                                (df['chrom'].astype(str) == str(key[0])) &
-                                (df['startpos'] == key[1]) &
-                                (df['endpos'] == key[2])
+                                (df["chrom"].astype(str) == str(key[0]))
+                                & (df["startpos"] == key[1])
+                                & (df["endpos"] == key[2])
                             )
                             target_data = df[mask].copy()
                             if len(target_data) < 2:
                                 continue
-                            target_data = target_data.sort_values('timestamp')
+                            target_data = target_data.sort_values("timestamp")
                             series_data = [
                                 [int(ts), float(cov)]
-                                for ts, cov in zip(target_data['timestamp'], target_data['coverage'])
+                                for ts, cov in zip(
+                                    target_data["timestamp"], target_data["coverage"]
+                                )
                             ]
                             out_sub = outliers_df[
-                                (outliers_df['target_key'].apply(
-                                    lambda x: tuple(x) if isinstance(x, (list, tuple)) else x
-                                ) == key)
+                                (
+                                    outliers_df["target_key"].apply(
+                                        lambda x: (
+                                            tuple(x)
+                                            if isinstance(x, (list, tuple))
+                                            else x
+                                        )
+                                    )
+                                    == key
+                                )
                             ]
-                            is_high = out_sub['type'].value_counts().get('high', 0) > out_sub['type'].value_counts().get('low', 0)
-                            outlier_gene_series.append({
-                                "name": target_label,
+                            is_high = (
+                                out_sub["type"].value_counts().get("high", 0)
+                                > out_sub["type"].value_counts().get("low", 0)
+                            )
+                            gc = _cov_gene_line_color(idx)
+                            outlier_gene_series.append(
+                                {
+                                    "name": _cov_legend_label(target_label),
+                                    "type": "line",
+                                    "smooth": True,
+                                    "data": series_data,
+                                    "symbol": "none",
+                                    "z": 12,
+                                    "itemStyle": {"color": gc},
+                                    "lineStyle": {
+                                        "width": 2.5,
+                                        "type": "dashed" if not is_high else "solid",
+                                        "color": gc,
+                                    },
+                                    "label": {"show": False},
+                                    "labelLayout": {"hideOverlap": True},
+                                    "emphasis": {
+                                        "focus": "series",
+                                        "lineStyle": {"width": 4},
+                                    },
+                                    "blur": {"lineStyle": {"opacity": 0.15}},
+                                }
+                            )
+
+                    dim_gene_series: List[Dict[str, Any]] = []
+                    for tkey, group in df.groupby("target_key", sort=False):
+                        if len(dim_gene_series) >= _COV_MAX_DIM_GENES:
+                            break
+                        kk = tuple(tkey) if isinstance(tkey, (list, tuple)) else tkey
+                        if kk in outlier_key_set:
+                            continue
+                        row0 = group.sort_values("timestamp").iloc[0]
+                        target_label = row0["target_label"]
+                        key = kk
+                        target_data = group.copy()
+                        if len(target_data) < 2:
+                            continue
+                        target_data = target_data.sort_values("timestamp")
+                        series_data = [
+                            [int(ts), float(cov)]
+                            for ts, cov in zip(
+                                target_data["timestamp"], target_data["coverage"]
+                            )
+                        ]
+                        dim_gene_series.append(
+                            {
+                                "name": _cov_legend_label(
+                                    f"{target_label} · in-range"
+                                ),
                                 "type": "line",
                                 "smooth": True,
                                 "data": series_data,
                                 "symbol": "none",
-                                "itemStyle": {"color": colors[idx % len(colors)]},
-                                "lineStyle": {"width": 2, "type": "dashed" if not is_high else "solid"},
+                                "z": 4,
+                                "itemStyle": {
+                                    "color": _cov_dim_muted_line(),
+                                    "opacity": 0.42,
+                                },
+                                "lineStyle": {
+                                    "width": 1.5,
+                                    "type": "dashed",
+                                    "color": _cov_dim_muted_line(),
+                                    "opacity": 0.42,
+                                },
                                 "label": {"show": False},
-                                "labelLayout": {"hideOverlap": True},
-                                "emphasis": {"focus": "series"}
-                            })
-                    
+                                "emphasis": {
+                                    "focus": "series",
+                                    "lineStyle": {"width": 3, "opacity": 1},
+                                },
+                                "blur": {"lineStyle": {"opacity": 0.08}},
+                            }
+                        )
+
                     # Create/update chart
                     if target_coverage_time_chart_state["container"] is None:
                         target_coverage_time_chart_state["container"] = ui.column().classes("w-full")
@@ -1666,78 +2232,98 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         target_coverage_time_chart_state["container"].clear()
                         
                         # Summary statistics
-                        with ui.row().classes("w-full mb-4 gap-4"):
+                        with ui.row().classes("w-full mb-4 gap-3"):
                             ui.label(f"Total timepoints: {len(mean_coverage)}").classes("text-sm")
                             ui.label(f"Total targets: {len(df['target_key'].unique())}").classes("text-sm")
                             ui.label(f"Outliers detected: {len(outliers_df)}").classes("text-sm")
                         
                         # Chart
+                        _cp_t = _cov_chrome_palette()
                         chart_config = {
                             "backgroundColor": "transparent",
+                            "textStyle": {"color": _cp_t["axis"]},
                             "title": {
-                                "text": "Mean Target Coverage Over Time with Outliers",
+                                "text": "Individual target coverage (outlier analysis)",
+                                "subtext": "Mean ±2σ band; in-range targets dimmed; outliers in colour",
                                 "left": "center",
-                                "top": 10,
-                                "textStyle": {"fontSize": 16, "color": "#000"},
+                                "top": 6,
+                                "textStyle": {
+                                    "fontSize": 15,
+                                    "color": _cp_t["title"],
+                                },
+                                "subtextStyle": {
+                                    "fontSize": 11,
+                                    "color": _cp_t["axis"],
+                                },
                             },
+                            # No JS formatter here — options are JSON-serialied; functions
+                            # become strings and break the tooltip (see classification charts).
                             "tooltip": {
                                 "trigger": "axis",
-                                "axisPointer": {"type": "cross"},
-                                ":formatter": (
-                                    "(params) => {"
-                                    "  const to2sf = (x) => {"
-                                    "    if (x == null || !Number.isFinite(x)) return '-';"
-                                    "    if (x === 0) return '0';"
-                                    "    return parseFloat(Number(x).toPrecision(2));"
-                                    "  };"
-                                    "  const pts = Array.isArray(params) ? params : [params];"
-                                    "  return pts.map(p => {"
-                                    "    const val = Array.isArray(p.value) ? p.value[1] : p.value;"
-                                    "    return (p.marker || '') + ' ' + p.seriesName + ': ' + to2sf(val);"
-                                    "  }).join('<br/>');"
-                                    "}"
-                                ),
+                                "axisPointer": {
+                                    "type": "cross",
+                                    "lineStyle": {"color": _cp_t["axis"], "width": 1},
+                                    "crossStyle": {"color": _cp_t["axis"]},
+                                },
+                                "confine": True,
+                                "appendToBody": True,
+                                **_cov_tooltip_option(),
                             },
+                            "legendHoverLink": True,
+                            # Legend below plot (horizontal scroll) — avoids overlapping Y-axis / grid.
                             "legend": {
-                                "data": ["Mean Coverage"] + sorted_outlier_labels,
-                                "left": 10,
-                                "top": 40,
-                                "orient": "vertical",
-                                "itemGap": 5,
                                 "type": "scroll",
-                                "textStyle": {"fontSize": 10}
+                                "orient": "horizontal",
+                                "left": "center",
+                                "bottom": 2,
+                                "itemGap": 10,
+                                "itemWidth": 10,
+                                "itemHeight": 10,
+                                "width": "96%",
+                                "pageIconColor": _cp_t["title"],
+                                "pageTextStyle": {"color": _cp_t["axis"]},
+                                "textStyle": {
+                                    "fontSize": 11,
+                                    "color": _cp_t["legend"],
+                                },
                             },
                             "grid": {
-                                "left": "15%",
-                                "right": "5%",
-                                "bottom": "10%",
-                                "top": "20%",
+                                "left": "10%",
+                                "right": "6%",
+                                "top": "18%",
+                                "bottom": "32%",
                                 "containLabel": True,
                             },
                             "xAxis": {
                                 "type": "time",
                                 "name": "Time",
                                 "nameGap": 30,
+                                "axisLabel": {"color": _cp_t["axis"]},
+                                "axisLine": {"lineStyle": {"color": _cp_t["axis"]}},
+                                "splitLine": {"lineStyle": {"color": _cp_t["split"]}},
                             },
                             "yAxis": {
                                 "type": "value",
-                                "name": "Mean Coverage",
+                                "name": "Coverage (×)",
                                 "nameGap": 50,
-                            },
-                            "series": [
-                                {
-                                    "name": "Mean Coverage",
-                                    "type": "line",
-                                    "smooth": True,
-                                    "data": mean_coverage_data,
-                                    "symbol": "none",
-                                    "itemStyle": {"color": "#5470c6"},
-                                    "lineStyle": {"width": 2},
+                                "axisLabel": {"color": _cp_t["axis"]},
+                                "axisLine": {"lineStyle": {"color": _cp_t["axis"]}},
+                                "splitLine": {
+                                    "lineStyle": {"color": _cp_t["split"], "type": "dashed"},
                                 },
-                            ] + outlier_gene_series,
+                            },
+                            "series": [band_series]
+                            + dim_gene_series
+                            + outlier_gene_series
+                            + [mean_series],
                         }
                         
-                        target_coverage_time_chart_state["chart"] = ui.echart(chart_config).classes("w-full h-96")
+                        target_coverage_time_chart_state["chart"] = ui.echart(
+                            chart_config
+                        ).classes("w-full min-h-[420px] h-[480px]")
+                        _apply_target_coverage_time_analysis_chrome(
+                            target_coverage_time_chart_state["chart"]
+                        )
                         
                         # Show summary of outlier targets
                         if outlier_targets:
@@ -1782,14 +2368,9 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     on_click=_plot_target_coverage_over_time
                 ).classes("ml-2")
 
-        with ui.card().classes("w-full"):
-            with ui.row().classes("w-full items-center justify-between mb-2"):
-                ui.label("Target Coverage").classes("text-lg font-semibold")
-                target_coverage_back_button = ui.button(
-                    "← Back to Overview", 
-                    on_click=lambda: _show_target_coverage_overview()
-                ).props("flat dense").classes("hidden")
-            
+        with ui.column().classes("w-full target-coverage-panel").props(
+            "id=analysis-detail-target-coverage"
+        ):
             # Add target panel legend
             def _get_target_panel_info():
                 """Get the target panel information from master.csv with fallback mechanisms"""
@@ -1855,7 +2436,16 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             if key not in launcher._coverage_state:
                 launcher._coverage_state[key] = {}
             launcher._coverage_state[key]["panel_display_name"] = panel_display_name
-            
+
+            with ui.row().classes(
+                "w-full items-center justify-between mb-2 gap-2 flex-wrap"
+            ):
+                ui.label("Target Coverage").classes("text-lg font-semibold")
+                target_coverage_back_button = ui.button(
+                    "← Back to overview",
+                    on_click=lambda: _show_target_coverage_overview(),
+                ).props("flat dense no-caps outline").classes("hidden")
+
             with ui.row().classes("w-full items-center gap-2 mb-2"):
                 ui.label("Panel:").classes("text-sm font-medium text-gray-600")
                 ui.label(panel_display_name).classes(f"px-2 py-1 rounded text-sm font-medium {panel_color_classes} {panel_text_classes}")
@@ -1967,8 +2557,12 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     target_boxplot.options["xAxis"]["data"] = gene_names
                     target_boxplot.options["xAxis"]["axisLabel"]["rotate"] = 45
                     target_boxplot.options["xAxis"]["axisLabel"]["interval"] = 0
+                    target_boxplot.options["xAxis"]["name"] = "Gene / region"
+                    target_boxplot.options["xAxis"]["nameLocation"] = "middle"
+                    target_boxplot.options["xAxis"]["nameGap"] = 44
                     
                     # Update series to show scatter plot
+                    _cp_sc = _cov_chrome_palette()
                     target_boxplot.options["series"] = [
                         {
                             "name": "Gene Coverage",
@@ -1986,7 +2580,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 "itemStyle": {
                                     "color": "#1d4ed8",
                                     "opacity": 1,
-                                    "borderColor": "#000",
+                                    "borderColor": _cp_sc["title"],
                                     "borderWidth": 2
                                 }
                             },
@@ -1994,7 +2588,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 "show": True,
                                 "position": "top",
                                 "formatter": "{@[1]:.2f}x",
-                                "fontSize": 10
+                                "fontSize": 10,
+                                "color": _cp_sc["axis"],
                             },
                             "tooltip": {
                                 ":formatter": "function(params) { const data = params.data; return 'Gene: ' + data[0] + '<br/>Coverage: ' + Number(data[1]).toFixed(2) + 'x<br/>Position: ' + data[2].toLocaleString() + '-' + data[3].toLocaleString(); }"
@@ -2004,12 +2599,14 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     
                     # Hide legend for scatter view
                     target_boxplot.options["legend"]["show"] = False
-                    
-                    # Update chart
+                    _apply_coverage_boxplot_chrome(target_boxplot)
                     target_boxplot.update()
                     
-                    # Show back button
-                    target_coverage_back_button.classes("", replace="")
+                    # Show back button (remove Tailwind hidden — classes("", replace="") is unreliable)
+                    try:
+                        target_coverage_back_button.classes(remove="hidden")
+                    except Exception:
+                        target_coverage_back_button.set_visibility(True)
                     
                     _log_notify(f"Showing gene coverage for {chromosome}", level="info", notify=False)
                     
@@ -2029,7 +2626,10 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         return
                     
                     # Hide back button
-                    target_coverage_back_button.classes("hidden", replace="")
+                    try:
+                        target_coverage_back_button.classes("hidden")
+                    except Exception:
+                        target_coverage_back_button.set_visibility(False)
                     
                     _log_notify("Returned to target coverage overview", level="info", notify=False)
                     
@@ -2048,19 +2648,21 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 except Exception as e:
                     _log_notify(f"Error handling chart click: {e}", level="warning", notify=False)
             
+            _cp_bp = _cov_chrome_palette()
             target_boxplot = ui.echart(
                 {
                     "backgroundColor": "transparent",
+                    "textStyle": {"color": _cp_bp["axis"]},
                     "title": {
                         "text": f"Target Coverage ({panel_display_name})",
                         "left": "center",
                         "top": 10,
-                        "textStyle": {"fontSize": 16, "color": "#000"},
+                        "textStyle": {"fontSize": 16, "color": _cp_bp["title"]},
                     },
                     "grid": {
                         "left": "15%",
-                        "right": "5%",
-                        "bottom": "10%",
+                        "right": "8%",
+                        "bottom": "18%",
                         "top": "20%",
                         "containLabel": True,
                     },
@@ -2097,7 +2699,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     "xAxis": {
                         "type": "category",
                         "name": "Chromosome",
-                        "nameGap": 30,
+                        "nameLocation": "middle",
+                        "nameGap": 40,
                         "axisLabel": {"interval": 0, "rotate": 45},
                     },
                     "yAxis": {"type": "value", "name": "Coverage (x)"},
@@ -2118,6 +2721,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             "id": "target_box_series",
                             "name": "box plot",
                             "type": "boxplot",
+                            "itemStyle": _cov_boxplot_item_style(),
                             "datasetId": "raw",
                             "encode": {
                                 "x": "chrom",
@@ -2132,6 +2736,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             "type": "scatter",
                             "datasetId": "outliers",
                             "symbolSize": 6,
+                            "itemStyle": _cov_scatter_outlier_style(),
                             "label": {
                                 "show": True,
                                 "position": "right",
@@ -2150,6 +2755,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             "type": "scatter",
                             "datasetId": "globaloutliers",
                             "symbolSize": 6,
+                            "itemStyle": _cov_scatter_outlier_style(),
                             "label": {
                                 "show": True,
                                 "position": "right",
@@ -2166,6 +2772,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 },
                 on_point_click=handle_boxplot_click
             ).classes("w-full h-80 target-coverage-boxplot")
+            _apply_coverage_boxplot_chrome(target_boxplot)
         with ui.card().classes("w-full"):
             with ui.row().classes("items-center gap-3"):
                 target_search = ui.input("Search targets…").props(
@@ -3308,7 +3915,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                         # Display results summary
                         with snp_results_container:
-                            with ui.row().classes("w-full gap-4"):
+                            with ui.row().classes("w-full gap-3"):
                                 with ui.card().classes("flex-1"):
                                     ui.label("SNPs").classes("text-sm font-medium")
                                     if snp_csv.exists():
@@ -3452,7 +4059,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         return
 
                     # Display summary statistics
-                    with ui.row().classes("w-full gap-4 mb-4"):
+                    with ui.row().classes("w-full gap-3 mb-4"):
                         with ui.card().classes("flex-1"):
                             ui.label(f"Total {variant_type}s").classes(
                                 "text-sm font-medium"
@@ -3506,7 +4113,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 ui.label("N/A").classes("text-2xl font-bold text-gray-400")
 
                     # Add filtering controls
-                    with ui.row().classes("w-full gap-4 mb-4"):
+                    with ui.row().classes("w-full gap-3 mb-4"):
                         # Quality filter
                         quality_threshold = ui.input(
                             value="0", label="Min Quality"
@@ -3734,21 +4341,28 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             def _show_variant_details(variant_row, variant_type, clair_dir):
                 """Show detailed information for a specific variant"""
                 try:
-                    with ui.dialog() as dialog, ui.card():
-                        ui.label(f"{variant_type} Details").classes(
-                            "text-lg font-semibold mb-4"
+                    with ui.dialog() as dialog, ui.card().classes(
+                        "robin-dialog-surface p-4 md:p-5 w-full max-w-2xl max-h-[85vh] overflow-auto"
+                    ):
+                        ui.label(f"{variant_type} details").classes(
+                            "classification-insight-heading text-headline-small mb-2"
                         )
 
-                        # Display variant information
                         with ui.column().classes("gap-2"):
                             for col, val in variant_row.items():
                                 if pd.notna(val) and str(val).strip():
-                                    with ui.row().classes("w-full"):
-                                        ui.label(f"{col}:").classes("font-medium w-32")
-                                        ui.label(str(val)).classes("flex-1")
+                                    with ui.row().classes("w-full items-start gap-2"):
+                                        ui.label(f"{col}:").classes(
+                                            "text-xs font-medium min-w-[8rem] shrink-0 "
+                                            "target-coverage-panel__meta-label"
+                                        )
+                                        ui.label(str(val)).classes(
+                                            "text-xs flex-1 break-all whitespace-pre-wrap"
+                                        )
 
-                        # Add close button
-                        ui.button("Close", on_click=dialog.close).classes("w-full mt-4")
+                        ui.button("Close", on_click=dialog.close).props(
+                            "color=primary no-caps outline"
+                        ).classes("w-full mt-4")
 
                 except Exception as e:
                     ui.notify(f"Error showing variant details: {e}", type="error")
@@ -4239,7 +4853,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                     # Display results summary
                     with lga_results_container:
-                        with ui.row().classes("w-full gap-4"):
+                        with ui.row().classes("w-full gap-3"):
                             with ui.card().classes("flex-1"):
                                 ui.label("JSON Results").classes("text-sm font-medium")
                                 ui.label("Available").classes("text-xs text-green-600")
@@ -4309,7 +4923,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 metadata = data.get("metadata", {})
 
                                 # Linear layout - each metric on its own row
-                                with ui.column().classes("w-full gap-4"):
+                                with ui.column().classes("w-full gap-3"):
                                     with ui.row().classes(
                                         "w-full items-center justify-between p-4 bg-blue-50 rounded"
                                     ):
@@ -4394,7 +5008,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                         # Restore the original simple view
                         with lga_results_container:
-                            with ui.row().classes("w-full gap-4"):
+                            with ui.row().classes("w-full gap-3"):
                                 with ui.card().classes("flex-1"):
                                     ui.label("JSON Results").classes("text-sm font-medium")
                                     ui.label("Available").classes("text-xs text-green-600")
@@ -4469,110 +5083,149 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             coverage_values = [g["mean_coverage"] for g in top_genes]
 
                             # Create enhanced bar chart using echart
-                        coverage_chart = ui.echart(
-                            {
-                                "backgroundColor": "transparent",
-                                "title": {
-                                    "text": "Top 20 Genes by Mean Coverage",
-                                    "left": "center",
-                                    "top": 10,
-                                    "textStyle": {
-                                        "fontSize": 16,
-                                        "color": "#000",
-                                        "fontWeight": "bold",
-                                    },
-                                    "subtext": "Higher coverage = More reliable variant detection",
-                                    "subtextStyle": {"fontSize": 12, "color": "#666"},
-                                },
-                                "tooltip": {
-                                    "trigger": "axis",
-                                    "formatter": "Gene: {b}<br/>Coverage: {c}x",
-                                },
-                                "grid": {
-                                    "left": "12%",
-                                    "right": "8%",
-                                    "bottom": "20%",
-                                    "top": "30%",
-                                    "containLabel": True,
-                                },
-                                "xAxis": {
-                                    "type": "category",
-                                    "data": gene_names,
-                                    "axisLabel": {
-                                        "rotate": 45,
-                                        "fontSize": 11,
-                                        "fontWeight": "bold",
-                                    },
-                                    "name": "Gene Names",
-                                    "nameLocation": "middle",
-                                    "nameGap": 50,
-                                },
-                                "yAxis": {
-                                    "type": "value",
-                                    "name": "Mean Coverage (x)",
-                                    "nameLocation": "middle",
-                                    "nameGap": 40,
-                                    "axisLabel": {"fontSize": 12, "fontWeight": "bold"},
-                                    "splitLine": {
-                                        "show": True,
-                                        "lineStyle": {"color": "#eee"},
-                                    },
-                                },
-                                "series": [
-                                    {
-                                        "type": "bar",
-                                        "data": coverage_values,
-                                        "itemStyle": {"color": "#3b82f6"},
-                                        "barWidth": "60%",
-                                        "emphasis": {
-                                            "itemStyle": {
-                                                "shadowBlur": 10,
-                                                "shadowColor": "rgba(0,0,0,0.3)",
-                                            }
+                            _lga_p = _cov_chrome_palette()
+                            coverage_chart = ui.echart(
+                                {
+                                    "backgroundColor": "transparent",
+                                    "textStyle": {"color": _lga_p["axis"]},
+                                    "title": {
+                                        "text": "Top 20 Genes by Mean Coverage",
+                                        "left": "center",
+                                        "top": 10,
+                                        "textStyle": {
+                                            "fontSize": 16,
+                                            "color": _lga_p["title"],
+                                            "fontWeight": "bold",
                                         },
-                                    }
-                                ],
-                                "dataZoom": [
-                                    {
-                                        "type": "slider",
-                                        "show": True,
-                                        "xAxisIndex": [0],
-                                        "start": 0,
-                                        "end": 100,
-                                    }
-                                ],
-                            }
-                        ).classes("w-full h-80")
+                                        "subtext": "Higher coverage = More reliable variant detection",
+                                        "subtextStyle": {
+                                            "fontSize": 12,
+                                            "color": _lga_p["axis"],
+                                        },
+                                    },
+                                    "tooltip": {
+                                        "trigger": "axis",
+                                        "formatter": "Gene: {b}<br/>Coverage: {c}x",
+                                        **_cov_tooltip_option(),
+                                    },
+                                    "grid": {
+                                        "left": "12%",
+                                        "right": "8%",
+                                        "bottom": "20%",
+                                        "top": "30%",
+                                        "containLabel": True,
+                                    },
+                                    "xAxis": {
+                                        "type": "category",
+                                        "data": gene_names,
+                                        "axisLabel": {
+                                            "rotate": 45,
+                                            "fontSize": 11,
+                                            "fontWeight": "bold",
+                                            "color": _lga_p["axis"],
+                                        },
+                                        "name": "Gene Names",
+                                        "nameLocation": "middle",
+                                        "nameGap": 50,
+                                        "nameTextStyle": {"color": _lga_p["axis"]},
+                                        "axisLine": {"lineStyle": {"color": _lga_p["axis"]}},
+                                    },
+                                    "yAxis": {
+                                        "type": "value",
+                                        "name": "Mean Coverage (x)",
+                                        "nameLocation": "middle",
+                                        "nameGap": 40,
+                                        "nameTextStyle": {"color": _lga_p["axis"]},
+                                        "axisLabel": {
+                                            "fontSize": 12,
+                                            "fontWeight": "bold",
+                                            "color": _lga_p["axis"],
+                                        },
+                                        "splitLine": {
+                                            "show": True,
+                                            "lineStyle": {
+                                                "color": _lga_p["split"],
+                                                "type": "dashed",
+                                            },
+                                        },
+                                    },
+                                    "series": [
+                                        {
+                                            "type": "bar",
+                                            "data": coverage_values,
+                                            "itemStyle": {
+                                                "color": (
+                                                    "#60a5fa"
+                                                    if _cov_ui_dark()
+                                                    else "#3b82f6"
+                                                )
+                                            },
+                                            "barWidth": "60%",
+                                            "emphasis": {
+                                                "itemStyle": {
+                                                    "shadowBlur": 10,
+                                                    "shadowColor": (
+                                                        "rgba(0,0,0,0.45)"
+                                                        if _cov_ui_dark()
+                                                        else "rgba(0,0,0,0.3)"
+                                                    ),
+                                                }
+                                            },
+                                        }
+                                    ],
+                                    "dataZoom": [
+                                        {
+                                            "type": "slider",
+                                            "show": True,
+                                            "xAxisIndex": [0],
+                                            "start": 0,
+                                            "end": 100,
+                                            "textStyle": {"color": _lga_p["axis"]},
+                                            "borderColor": _lga_p["tooltip_border"],
+                                            "handleStyle": {"color": _lga_p["axis"]},
+                                        }
+                                    ],
+                                }
+                            ).classes("w-full h-80")
+                            try:
+                                launcher._coverage_state.setdefault(
+                                    str(sample_dir), {}
+                                )["lga_gene_coverage_chart"] = coverage_chart
+                            except Exception:
+                                pass
+                            _apply_lga_gene_bar_chrome(coverage_chart)
 
-                        # Add coverage threshold indicators
-                        with ui.column().classes("w-full mt-3 gap-2"):
-                            ui.label("Coverage Thresholds:").classes(
-                                "text-sm font-medium text-gray-600"
-                            )
-
-                            with ui.row().classes(
-                                "items-center gap-3 p-2 bg-green-50 rounded"
-                            ):
-                                ui.element("div").classes("w-4 h-4 bg-green-500 rounded")
-                                ui.label(
-                                    "≥10x (Good Coverage) - Reliable variant detection"
-                                ).classes("text-sm text-gray-700")
-
-                            with ui.row().classes(
-                                "items-center gap-3 p-2 bg-orange-50 rounded"
-                            ):
-                                ui.element("div").classes("w-4 h-4 bg-orange-500 rounded")
-                                ui.label(
-                                    "5-10x (Moderate Coverage) - Limited reliability"
-                                ).classes("text-sm text-gray-700")
-
-                            with ui.row().classes(
-                                "items-center gap-3 p-2 bg-red-50 rounded"
-                            ):
-                                ui.element("div").classes("w-4 h-4 bg-red-500 rounded")
-                                ui.label("<5x (Low Coverage) - Poor reliability").classes(
-                                    "text-sm text-gray-700"
+                            # Add coverage threshold indicators
+                            with ui.column().classes("w-full mt-3 gap-2"):
+                                ui.label("Coverage Thresholds:").classes(
+                                    "text-sm font-medium text-gray-600"
                                 )
+
+                                with ui.row().classes(
+                                    "items-center gap-3 p-2 bg-green-50 rounded"
+                                ):
+                                    ui.element("div").classes("w-4 h-4 bg-green-500 rounded")
+                                    ui.label(
+                                        "≥10x (Good Coverage) - Reliable variant detection"
+                                    ).classes("text-sm text-gray-700")
+
+                                with ui.row().classes(
+                                    "items-center gap-3 p-2 bg-orange-50 rounded"
+                                ):
+                                    ui.element("div").classes("w-4 h-4 bg-orange-500 rounded")
+                                    ui.label(
+                                        "5-10x (Moderate Coverage) - Limited reliability"
+                                    ).classes("text-sm text-gray-700")
+
+                                with ui.row().classes(
+                                    "items-center gap-3 p-2 bg-red-50 rounded"
+                                ):
+                                    ui.element("div").classes("w-4 h-4 bg-red-500 rounded")
+                                    ui.label(
+                                        "<5x (Low Coverage) - Poor reliability"
+                                    ).classes(
+                                        "text-sm text-gray-700"
+                                    )
 
                         # Summary statistics
                         with ui.card().classes("w-full mb-4"):
@@ -4743,7 +5396,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 variants = gene_data.get("variants", [])
 
                                 # Gene summary
-                                with ui.row().classes("w-full gap-4 mb-2"):
+                                with ui.row().classes("w-full gap-3 mb-2"):
                                     with ui.card().classes("flex-1"):
                                         ui.label("Mean Coverage").classes(
                                             "text-sm text-gray-600"
@@ -4982,7 +5635,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         genes = data.get("genes", {})
 
                         # Gene selector
-                        with ui.row().classes("w-full items-center gap-4 mb-4"):
+                        with ui.row().classes("w-full items-center gap-3 mb-4"):
                             ui.label("Select Gene:").classes("text-sm font-medium")
                             gene_selector = ui.select(
                                 options=list(genes.keys()),
@@ -5563,7 +6216,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 )
                 return
             
-            echart_target_cov.options["xAxis"]["data"] = names
+            names_short = [_short_chr_label(n) for n in names]
+            echart_target_cov.options["xAxis"]["data"] = names_short
             grouped = grouped.set_index("chrom").reindex(names).reset_index()
             
             # Get off-target data - group by chromosome and take mean if multiple entries
@@ -5579,22 +6233,25 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 for v in grouped["meandepth"].fillna(0).tolist()
             ]
             
+            _on, _off = _cov_on_off_colors()
             echart_target_cov.options["series"] = [
                 {
                     "type": "bar",
-                    "name": "Off Target",
-                    "barWidth": "35%",
-                    "data": off_target_data,
-                    "itemStyle": {"color": "#9ca3af"},
+                    "name": "On Target",
+                    "barWidth": "32%",
+                    "barGap": "15%",
+                    "data": on_target_data,
+                    "itemStyle": {"color": _on},
                 },
                 {
                     "type": "bar",
-                    "name": "On Target",
-                    "barWidth": "35%",
-                    "data": on_target_data,
-                    "itemStyle": {"color": "#3b82f6"},
+                    "name": "Off Target",
+                    "barWidth": "32%",
+                    "data": off_target_data,
+                    "itemStyle": {"color": _off},
                 },
             ]
+            _apply_coverage_target_cov_chrome(echart_target_cov)
             echart_target_cov.update()
         except Exception as e:
             _log_notify(
@@ -5668,7 +6325,10 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             target_boxplot.options["dataset"][2]["source"] = out_rows
             target_boxplot.options["dataset"][3]["source"] = glob_rows
             target_boxplot.options["xAxis"]["data"] = chroms
-            
+            target_boxplot.options["xAxis"]["name"] = "Chromosome"
+            target_boxplot.options["xAxis"]["nameLocation"] = "middle"
+            target_boxplot.options["xAxis"]["nameGap"] = 40
+
             # Restore original series configuration (explicit ids so ECharts replaceMerge
             # replaces series correctly on update, avoiding duplicate boxes per chromosome)
             target_boxplot.options["series"] = [
@@ -5676,6 +6336,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     "id": "target_box_series",
                     "name": "box plot",
                     "type": "boxplot",
+                    "itemStyle": _cov_boxplot_item_style(),
                     "datasetId": "raw",
                     "universalTransition": True,
                     "animationDurationUpdate": 1000,
@@ -5692,6 +6353,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     "type": "scatter",
                     "datasetId": "outliers",
                     "symbolSize": 6,
+                    "itemStyle": _cov_scatter_outlier_style(),
                     "label": {
                         "show": True,
                         "position": "right",
@@ -5710,6 +6372,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     "type": "scatter",
                     "datasetId": "globaloutliers",
                     "symbolSize": 6,
+                    "itemStyle": _cov_scatter_outlier_style(),
                     "label": {
                         "show": True,
                         "position": "right",
@@ -5728,6 +6391,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
             target_boxplot.options["title"]["text"] = f"Target Coverage ({panel_display_name})"
             target_boxplot.options["title"]["subtext"] = ""
             target_boxplot.options["legend"]["show"] = True
+            _apply_coverage_boxplot_chrome(target_boxplot)
             
             target_boxplot.update()
 
@@ -5765,7 +6429,10 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
     def _update_time(npy_path: Path) -> None:
         try:
             arr = np.load(npy_path)
-            echart_time.options["series"][0]["data"] = arr.tolist()
+            raw = arr.tolist()
+            # Ensure [[ts_ms, cov], ...] for time axis
+            echart_time.options["series"][0]["data"] = raw
+            _apply_coverage_time_series_chrome(echart_time)
             echart_time.update()
         except Exception as e:
             _log_notify(
@@ -6021,23 +6688,21 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     if target_cov_v is not None:
                         if target_cov_v >= 30:
                             q_text, q_cls, q_bg = (
-                                "Excellent",
-                                "text-green-600",
-                                "bg-green-100",
+                                "Sufficient",
+                                "text-emerald-700",
+                                "bg-emerald-100",
                             )
-                        elif target_cov_v >= 20:
-                            q_text, q_cls, q_bg = "Good", "text-blue-600", "bg-blue-100"
-                        elif target_cov_v >= 10:
+                        elif target_cov_v >= 15:
                             q_text, q_cls, q_bg = (
                                 "Moderate",
-                                "text-yellow-600",
-                                "bg-yellow-100",
+                                "text-amber-700",
+                                "bg-amber-100",
                             )
                         else:
                             q_text, q_cls, q_bg = (
-                                "Insufficient",
-                                "text-red-600",
-                                "bg-red-100",
+                                "Low",
+                                "text-rose-700",
+                                "bg-rose-100",
                             )
                         cov_quality_label.set_text(f"Quality: {q_text}")
                         try:
@@ -6185,20 +6850,84 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 # Never let IGV logic break coverage refresh
                 pass
 
+            # After file/UI updates, re-apply chart chrome so light mode stays correct on first load
+            # (theme timers can run before series/options are set; refresh runs at 0.5s).
+            try:
+                _sync_coverage_echarts_theme(True)
             except Exception:
-                # Never let IGV logic break coverage refresh
                 pass
         except Exception as e:
             _log_notify(
                 f"Unexpected coverage refresh error: {e}", level="error", notify=True
             )
 
+    _last_cov_theme_sig: list = [None]
+
+    def _sync_coverage_echarts_theme(force: bool = False) -> None:
+        """Re-apply coverage chart chrome when the user toggles light/dark mode.
+
+        On first paint, ``app.storage.user['dark_mode']`` and ``body--dark`` can lag
+        behind chart options built at layout time; ``force=True`` reapplies the current
+        palette so plots match the visible theme without toggling.
+        """
+        try:
+            cur = bool(app.storage.user.get("dark_mode"))
+        except Exception:
+            cur = False
+        if not force and _last_cov_theme_sig[0] == cur:
+            return
+        _last_cov_theme_sig[0] = cur
+        try:
+            _apply_coverage_target_cov_chrome(echart_target_cov)
+            echart_target_cov.update()
+        except Exception:
+            pass
+        try:
+            _apply_coverage_time_series_chrome(echart_time)
+            echart_time.update()
+        except Exception:
+            pass
+        try:
+            _apply_coverage_boxplot_chrome(target_boxplot)
+            target_boxplot.update()
+        except Exception:
+            pass
+        try:
+            tc = target_coverage_time_chart_state.get("chart")
+            if tc is not None:
+                _apply_target_coverage_time_analysis_chrome(tc)
+                tc.update()
+        except Exception:
+            pass
+        try:
+            g = launcher._coverage_state.get(str(sample_dir), {}).get(
+                "lga_gene_coverage_chart"
+            )
+            if g is not None:
+                _apply_lga_gene_bar_chrome(g)
+                g.update()
+        except Exception:
+            pass
+
     # Trigger an immediate refresh on page load, then continue with periodic refreshes
     refresh_timer = ui.timer(
         30.0, _refresh_coverage_async, active=True, immediate=False
     )  # Periodic refresh every 30 seconds
     ui.timer(0.5, _refresh_coverage_async, once=True)
+    # Re-sync ECharts after storage / Quasar dark mode settle (fixes first-load mismatch).
+    ui.timer(0.05, lambda: _sync_coverage_echarts_theme(True), once=True)
+    ui.timer(0.2, lambda: _sync_coverage_echarts_theme(True), once=True)
+    ui.timer(0.45, lambda: _sync_coverage_echarts_theme(True), once=True)
+    # After 0.5s data refresh, charts may still settle; one more forced sync for light mode clarity.
+    ui.timer(0.65, lambda: _sync_coverage_echarts_theme(True), once=True)
     try:
-        ui.context.client.on_disconnect(lambda: refresh_timer.deactivate())
+        ui.context.client.on_connect(lambda: _sync_coverage_echarts_theme(True))
+    except Exception:
+        pass
+    cov_theme_timer = ui.timer(1.0, _sync_coverage_echarts_theme, active=True)
+    try:
+        ui.context.client.on_disconnect(
+            lambda: (refresh_timer.deactivate(), cov_theme_timer.deactivate())
+        )
     except Exception:
         pass

@@ -889,7 +889,7 @@ class GUILauncher:
                     # Update job types
                     job_types = s.get("job_types", [])
                     if isinstance(job_types, list):
-                        record.job_types = ",".join(sorted(set(job_types)))
+                        record.job_types = ", ".join(sorted(set(str(x) for x in job_types)))
                     else:
                         record.job_types = str(job_types or "")
                     # Load test_id from sample_identifier_manifest.json if present
@@ -1315,12 +1315,28 @@ class GUILauncher:
         try:
             if hasattr(self, "status_indicator") and hasattr(self, "status_label"):
                 if data.get("is_running", False):
-                    self.status_indicator.classes("text-2xl text-green-400")
-                    self.status_label.set_text("Workflow Status: Running")
+                    self.status_indicator.classes(
+                        replace=(
+                            "text-2xl workflow-monitor-status-icon "
+                            "workflow-monitor-status-icon--running"
+                        )
+                    )
+                    self.status_label.set_text("Workflow status: Running")
+                    self.status_label.classes(
+                        replace="text-sm font-medium workflow-monitor-status-text--running"
+                    )
                     self._is_running = True
                 else:
-                    self.status_indicator.classes("text-2xl text-red-400")
-                    self.status_label.set_text("Workflow Status: Stopped")
+                    self.status_indicator.classes(
+                        replace=(
+                            "text-2xl workflow-monitor-status-icon "
+                            "workflow-monitor-status-icon--stopped"
+                        )
+                    )
+                    self.status_label.set_text("Workflow status: Stopped")
+                    self.status_label.classes(
+                        replace="text-sm font-medium workflow-monitor-status-text--stopped"
+                    )
                     self._is_running = False
 
                 # Update timing
@@ -1571,16 +1587,27 @@ class GUILauncher:
                             files_processed = sample_info["files_processed"]
                             
                             with self.sample_files_progress_container:
-                                with ui.row().classes("w-full items-center gap-2 mb-1"):
-                                    ui.label(sample_id).classes("text-xs font-medium min-w-[120px]")
-                                    progress_bar = ui.linear_progress(progress).classes("flex-1")
+                                with ui.row().classes(
+                                    "w-full items-center gap-2 mb-1 min-w-0"
+                                ):
+                                    ui.label(sample_id).classes(
+                                        "text-xs font-mono min-w-[120px] "
+                                        "workflow-monitor-sample-id"
+                                    )
+                                    progress_bar = ui.linear_progress(progress).classes(
+                                        "flex-1 min-w-0"
+                                    )
                                     if progress >= 1.0:
                                         progress_bar.props("color=positive")
-                                    ui.label(f"{files_processed}/{files_seen}").classes("text-xs text-gray-600 min-w-[60px]")
+                                    ui.label(f"{files_processed}/{files_seen}").classes(
+                                        "text-xs min-w-[60px] workflow-monitor-file-count"
+                                    )
                     else:
                         # Show placeholder when no data
                         with self.sample_files_progress_container:
-                            ui.label("No file progress data available yet").classes("text-xs text-gray-500 italic")
+                            ui.label(
+                                "No file progress data available yet."
+                            ).classes("classification-insight-foot italic")
                 except Exception as e:
                     logging.debug(f"Error updating per-sample file progress: {e}")
                             
@@ -1686,27 +1713,61 @@ class GUILauncher:
                     batphone=False,
                     center=self.center,
                 ):
-                    with ui.column().classes("w-full min-h-[70vh] items-center justify-center"):
-                        with ui.card().classes("w-full max-w-md shadow-lg rounded-xl"):
-                            with ui.column().classes("w-full p-8 gap-3"):
-                                ui.label("ROBIN Login").classes(
-                                    "text-2xl font-semibold text-center"
+                    with ui.element("div").classes("w-full min-w-0").props(
+                        "id=login-page"
+                    ):
+                        with ui.column().classes(
+                            "w-full min-h-[70vh] items-center justify-center "
+                            "p-4 md:p-6"
+                        ):
+                            with ui.element("div").classes(
+                                "w-full max-w-md classification-insight-shell "
+                                "min-w-0"
+                            ):
+                                ui.label("Sign in").classes(
+                                    "classification-insight-heading "
+                                    "text-headline-small text-center w-full"
                                 )
-                                ui.label("Enter password to continue").classes(
-                                    "text-sm text-gray-600 text-center"
-                                )
-                                password = (
-                                    ui.input(
-                                        "Password",
-                                    )
-                                    .props("autocomplete=off")
-                                    .classes("w-full")
-                                    .style("-webkit-text-security: disc;")
-                                    .on("keydown.enter", try_login)
-                                )
-                                ui.button(
-                                    "Log in", on_click=try_login
-                                ).classes("w-full bg-primary text-white rounded-md")
+                                with ui.element("div").classes(
+                                    "classification-insight-card w-full min-w-0"
+                                ):
+                                    with ui.column().classes(
+                                        "w-full min-w-0 gap-3 p-2 md:p-3"
+                                    ):
+                                        with ui.row().classes(
+                                            "items-center gap-2 justify-center "
+                                            "flex-nowrap min-w-0"
+                                        ):
+                                            ui.icon("lock").classes(
+                                                "classification-insight-icon shrink-0"
+                                            )
+                                            ui.label("R.O.B.I.N").classes(
+                                                "classification-insight-model "
+                                                "shrink-0 text-center"
+                                            )
+                                        ui.label(
+                                            "Enter password to continue."
+                                        ).classes(
+                                            "classification-insight-foot text-center"
+                                        )
+                                        password = (
+                                            ui.input(
+                                                "Password",
+                                            )
+                                            .props(
+                                                "autocomplete=off outlined dense"
+                                            )
+                                            .classes("w-full")
+                                            .style("-webkit-text-security: disc;")
+                                            .on("keydown.enter", try_login)
+                                        )
+                                        ui.button(
+                                            "Log in",
+                                            on_click=try_login,
+                                            icon="login",
+                                        ).props("color=primary no-caps").classes(
+                                            "w-full"
+                                        )
 
             # Create the main workflow monitor page
             @ui.page("/")
@@ -1910,8 +1971,8 @@ class GUILauncher:
             traceback.print_exc()
 
     def _create_welcome_page(self):
-        """Create the welcome page."""
-        # Background and main container
+        """Create the welcome page (Editorial Bioinformatics, design.md)."""
+        # Surfaces follow global body gradient + .q-card (slate border, light elevation).
         with theme.frame(
             "<strong>R</strong>apid nanop<strong>O</strong>re <strong>B</strong>rain intraoperat<strong>I</strong>ve classificatio<strong>N</strong>",
             smalltitle="<strong>R.O.B.I.N</strong>",
@@ -1919,66 +1980,75 @@ class GUILauncher:
             center=self.center,
             setup_notifications=self._setup_notification_system,
         ):
-            # Main content container with full width and proper centering
-            with ui.column().classes("w-full min-h-screen p-4 md:p-8"):
-                # Header section
-                with ui.card().classes(
-                    "w-full max-w-6xl mx-auto shadow-lg rounded-xl mb-8"
-                ):
-                    with ui.column().classes("p-8 text-center"):
+            with ui.column().classes("w-full min-h-screen p-3 md:p-6"):
+                # Anchor: Manrope display, slate hierarchy (design.md typography + light surfaces)
+                with ui.card().classes("w-full max-w-6xl mx-auto mb-8"):
+                    with ui.column().classes(
+                        "p-6 gap-3 w-full bg-gradient-to-b from-slate-50 to-white "
+                        "dark:from-slate-900/80 dark:to-[var(--md-surface)] rounded-[inherit]"
+                    ):
+                        with ui.row().classes("w-full justify-end"):
+                            ui.image(theme.get_imagefile()).classes(
+                                "flex-shrink-0 object-contain w-28 sm:w-32 md:w-36 "
+                                "max-h-36"
+                            )
                         ui.label("Welcome to R.O.B.I.N").classes(
-                            "text-sky-600 dark:text-white text-4xl md:text-5xl font-bold mb-4"
-                        ).style("font-weight: 600")
-
+                            "text-display-small text-slate-900 dark:text-slate-50 "
+                            "text-left w-full"
+                        )
                         ui.label(
                             "This tool enables real time analysis of data from Oxford Nanopore Technologies sequencers."
                         ).classes(
-                            "text-gray-700 dark:text-gray-300 text-lg md:text-xl mb-6"
+                            "text-body-large text-slate-600 dark:text-slate-400 "
+                            "text-left w-full"
                         )
 
-                # Main content section
-                with ui.card().classes(
-                    "w-full max-w-6xl mx-auto shadow-lg rounded-xl mb-8"
-                ):
-                    with ui.column().classes("p-8"):
+                # Modular content card: Inter body, emerald primary actions
+                with ui.card().classes("w-full max-w-6xl mx-auto mb-8"):
+                    with ui.column().classes("p-6 gap-4"):
                         ui.label("What is R.O.B.I.N?").classes(
-                            "text-2xl font-semibold mb-4 text-center"
+                            "text-headline-medium text-center text-slate-900 dark:text-slate-50"
                         )
                         ui.label(
                             "ROBIN (Rapid nanopOre Brain intraoperatIve classificatioN) is a comprehensive bioinformatics workflow system designed for processing and analyzing BAM files. It provides automated preprocessing, multiple analysis pipelines, and real-time monitoring capabilities. It now incorporates LITTLE JOHN (Lightweight Infrastructure for Task Tracking and Logging with Extensible Job Orchestration for High-throughput aNalysis), which handles the heavy lifting behind the scenes."
-                        ).classes("text-gray-700 mb-8 text-center text-lg")
+                        ).classes(
+                            "text-body-large text-slate-600 dark:text-slate-400 text-center"
+                        )
 
-                        # Action buttons - responsive grid layout
-                        with ui.grid(columns=2).classes("w-full gap-4 mb-8"):
+                        _cta_primary = (
+                            "bg-primary text-white rounded-lg px-6 py-4 text-title-medium "
+                            "text-center transition-opacity hover:opacity-90 no-underline"
+                        )
+                        _cta_secondary = (
+                            "border border-primary text-primary rounded-lg px-6 py-4 "
+                            "text-title-medium text-center bg-transparent "
+                            "hover:bg-[var(--md-primary-container)] "
+                            "hover:text-[var(--md-on-primary-container)] "
+                            "transition-colors no-underline"
+                        )
+
+                        with ui.grid(columns=2).classes("w-full gap-3"):
                             ui.link("View All Samples", "/live_data").classes(
-                                "bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors text-center"
+                                _cta_primary
                             )
                             ui.link("Open Workflow Monitor", "/robin").classes(
-                                "bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors text-center"
+                                _cta_primary
                             )
                             ui.link(
                                 "Manage watched folders",
                                 "/watched_folders",
-                            ).classes(
-                                "bg-green-600 hover:bg-green-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors text-center"
-                            )
+                            ).classes(_cta_secondary)
                             ui.link(
                                 "Generate Sample ID",
                                 "/sample_id_generator",
-                            ).classes(
-                                "bg-green-600 hover:bg-green-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors text-center"
-                            )
+                            ).classes(_cta_secondary)
                             ui.link(
                                 "View Documentation",
                                 "https://looselab.github.io/ROBIN/",
-                            ).classes(
-                                "bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-6 py-4 rounded-lg shadow-lg transition-colors text-center"
-                            )
+                            ).classes(_cta_primary)
 
-                # News feed section
-                with ui.card().classes(
-                    "w-full max-w-6xl mx-auto shadow-lg rounded-xl mb-8"
-                ):
+                # News — card uses same surface treatment as global theme
+                with ui.card().classes("w-full max-w-6xl mx-auto mb-8"):
                     with ui.column().classes("w-full"):
                         # Initialize news feed only if it hasn't been initialized yet
                         if self.news_feed is None:
@@ -1988,8 +2058,7 @@ class GUILauncher:
                         self.news_feed.create_news_element()
 
     def _create_samples_overview(self):
-        """Create the samples overview page showing all tracked samples."""
-        # Page title and navigation
+        """Create the samples overview page showing all tracked samples (design.md Editorial Bioinformatics)."""
         with theme.frame(
             "R.O.B.I.N - Sample Tracking Overview",
             smalltitle="Samples",
@@ -1997,26 +2066,31 @@ class GUILauncher:
             center=self.center,
             setup_notifications=self._setup_notification_system,
         ):
-            # Main content area
-            with ui.column().classes("w-full p-4 gap-4"):
-                # Sample statistics
-                with ui.card().classes(
-                    "w-full bg-gradient-to-r from-blue-50 to-indigo-50"
-                ):
-                    ui.label("Sample Statistics").classes(
-                        "text-lg font-semibold mb-4 text-blue-800"
-                    )
+            with ui.column().classes("w-full min-h-[70vh] p-3 md:p-6 gap-4"):
+                # Anchor: bold headline + secondary copy (Digital Curator hierarchy)
+                # w-full on inner column so the gradient spans the full card (not content width)
+                with ui.card().classes("w-full max-w-7xl mx-auto overflow-hidden"):
+                    with ui.column().classes(
+                        "w-full min-w-0 p-4 md:p-6 gap-3 bg-gradient-to-b from-slate-50 to-white "
+                        "dark:from-slate-900/80 dark:to-[var(--md-surface)]"
+                    ):
+                        ui.label("Sample tracking").classes(
+                            "text-display-small text-slate-900 dark:text-slate-50"
+                        )
+                        ui.label(
+                            "Tracked nanopore runs and workflow state in one place. "
+                            "Use search and origin filters to find a library, then open a sample for analysis."
+                        ).classes(
+                            "text-body-large text-slate-600 dark:text-slate-400 max-w-3xl"
+                        )
 
-                    # SIMPLIFIED: Show basic info without workflow_state access
-                    ui.label(
-                        "Sample statistics will be available once the workflow is running."
-                    ).classes("text-sm text-gray-600")
-
-                # Samples table section - removed card wrapper to enable touch scrolling on mobile
-                with ui.column().classes("w-full gap-2"):
-                    with ui.row().classes("w-full items-center justify-between mb-4"):
-                        ui.label("All Tracked Samples").classes(
-                            "text-lg font-semibold"
+                # Samples table section — outer column keeps mobile scroll behavior
+                with ui.column().classes("w-full max-w-7xl mx-auto gap-3"):
+                    with ui.row().classes(
+                        "w-full items-center justify-between flex-wrap gap-2 mb-1"
+                    ):
+                        ui.label("All tracked samples").classes(
+                            "text-headline-medium text-slate-900 dark:text-slate-50"
                         )
                         
                         # Loading indicator
@@ -2028,8 +2102,12 @@ class GUILauncher:
                         #    on_click=lambda: self._refresh_all_sample_plots(),
                         #).classes("q-btn--secondary")
 
-                    # Filters row
-                    with ui.row().classes("items-center gap-2 mb-2"):
+                    # Filters row (search left, origin right — read .value in handlers; Quasar
+                    # update:model-value payloads are not reliably parsed by _extract_event_value)
+                    with ui.row().classes(
+                        "w-full items-center justify-between gap-2 mb-2 flex-wrap "
+                        "text-slate-700 dark:text-slate-300"
+                    ):
 
                         # Initialize filters model
                         self._samples_filters = getattr(
@@ -2039,12 +2117,12 @@ class GUILauncher:
                         # Global search box
                         self.samples_search = (
                             ui.input(placeholder="Search…")
-                            .props("clearable dense")
-                            .on("change", lambda e: self._set_samples_query(self._extract_event_value(e)))
-                            .on("update:model-value", lambda e: self._set_samples_query(self._extract_event_value(e)))
-                            .classes("ml-auto")
+                            .props("clearable dense outlined")
+                            .on("change", self._on_samples_search_update)
+                            .on("update:model-value", self._on_samples_search_update)
+                            .classes("min-w-[12rem] flex-1 max-w-xl")
                         )
-                        
+
                         # Initialize search input with current filter value
                         try:
                             current_query = self._samples_filters.get("query", "")
@@ -2060,17 +2138,28 @@ class GUILauncher:
                                 value=self._samples_filters.get("origin", "All"),
                                 label="Origin",
                             )
-                            .props("dense clearable")
-                            .on("change", lambda e: self._set_samples_origin_filter(self._extract_event_value(e)))
-                            .on("update:model-value", lambda e: self._set_samples_origin_filter(self._extract_event_value(e)))
+                            # Do not set Quasar emit-value — it changes event shape and breaks
+                            # NiceGUI Select._event_args_to_value (expects dict args, not raw index).
+                            .props("dense clearable outlined")
+                            .on("change", self._on_origin_filter_update)
+                            .on("update:model-value", self._on_origin_filter_update)
+                            .classes("min-w-[11rem]")
                         )
 
                     # Loading state container
-                    self.samples_loading_container = ui.card().classes("w-full p-8 text-center")
+                    self.samples_loading_container = ui.card().classes(
+                        "w-full p-6 text-center border border-slate-200 dark:border-slate-800 "
+                        "bg-gradient-to-b from-slate-50 to-white dark:from-slate-900/80 dark:to-zinc-950/90 "
+                        "rounded-xl"
+                    )
                     with self.samples_loading_container:
                         ui.spinner(size="lg", color="primary")
-                        ui.label("Loading samples...").classes("ml-2 text-lg")
-                        ui.label("This may take a moment for large directories").classes("text-sm text-gray-500 mt-2")
+                        ui.label("Loading samples…").classes(
+                            "ml-2 text-title-medium text-slate-800 dark:text-slate-100"
+                        )
+                        ui.label("This may take a moment for large directories").classes(
+                            "text-body-small text-slate-500 dark:text-slate-400 mt-2"
+                        )
                     
                     # Create a placeholder table that will be updated later
                     from robin.gui.theme import styled_table
@@ -2237,9 +2326,25 @@ class GUILauncher:
       size=\"12px\" 
       rounded
       class=\"q-mb-xs\" />
-    <div style=\"font-size: 10px; color: #666; text-align: center;\">
+    <div class=\"text-center text-[10px] text-slate-600 dark:text-slate-400\">
       {{ props.row.files_processed || 0 }}/{{ props.row.files_seen || 0 }} files
     </div>
+  </div>
+</q-td>
+""",
+                        )
+                    except Exception:
+                        pass
+
+                    # Job types: allow wrapping (comma+space separated in row data)
+                    try:
+                        self.samples_table.add_slot(
+                            "body-cell-job_types",
+                            """
+<q-td key="job_types" :props="props">
+  <div class="text-xs whitespace-normal break-words max-w-[min(28rem,50vw)]"
+       style="word-break: break-word;">
+    {{ props.row.job_types }}
   </div>
 </q-td>
 """,
@@ -2336,12 +2441,14 @@ class GUILauncher:
                     except Exception:
                         pass
 
-                    # Export selected reports button moved to the right of the table
+                    # Primary action: high-contrast emerald (shell palette §4)
                     with ui.row().classes("w-full justify-end mt-2"):
                         self.export_reports_button = ui.button(
-                            "Export Reports",
+                            "Export reports",
                             on_click=lambda: None,
-                        ).props("color=primary")
+                        ).props("color=primary").classes(
+                            "rounded-lg px-5 text-title-medium"
+                        )
                         self.export_reports_button.disable()
 
                     # Batch export selected reports
@@ -2499,15 +2606,18 @@ class GUILauncher:
                             }
 
                             with ui.dialog().props("persistent") as dialog:
-                                with ui.card().classes("w-96 p-4"):
-                                    ui.label("Export Reports").classes(
-                                        "text-h6 font-bold mb-4"
+                                with ui.card().classes(
+                                    "robin-dialog-surface w-96 max-w-[95vw] p-4"
+                                ):
+                                    ui.label("Export reports").classes(
+                                        "classification-insight-heading text-headline-small mb-3"
                                     )
 
                                     with ui.column():
-                                        # Report type selector
                                         with ui.column().classes("mb-4"):
-                                            ui.label("Report Type").classes("font-bold mb-2")
+                                            ui.label("Report type").classes(
+                                                "target-coverage-panel__meta-label mb-2"
+                                            )
                                             ui.toggle(
                                                 report_types,
                                                 value="detailed",
@@ -2516,9 +2626,10 @@ class GUILauncher:
                                                 ),
                                             )
 
-                                        # Data export options
                                         with ui.column().classes("mb-4"):
-                                            ui.label("Include Data").classes("font-bold mb-2")
+                                            ui.label("Include data").classes(
+                                                "target-coverage-panel__meta-label mb-2"
+                                            )
                                             ui.checkbox(
                                                 "CSV data (ZIP)",
                                                 value=False,
@@ -2527,9 +2638,10 @@ class GUILauncher:
                                                 ),
                                             )
 
-                                        # Disclaimer section
                                         with ui.column().classes("mb-4"):
-                                            ui.label("Disclaimer").classes("font-bold mb-2")
+                                            ui.label("Disclaimer").classes(
+                                                "target-coverage-panel__meta-label mb-2"
+                                            )
                                             formatted_text = EXTENDED_DISCLAIMER_TEXT.replace(
                                                 "\n\n", "<br><br>"
                                             ).replace("\n", " ")
@@ -2539,24 +2651,29 @@ class GUILauncher:
 
                                         ui.label(
                                             f"Are you sure you want to export reports for {num_selected} sample(s)?"
-                                        ).classes("mb-4")
+                                        ).classes("classification-insight-foot mb-4")
 
-                                        # Buttons
-                                        with ui.row().classes("justify-end gap-2"):
+                                        with ui.row().classes("justify-end gap-2 flex-wrap"):
                                             ui.button(
                                                 "Cancel",
                                                 on_click=lambda: dialog.submit("Cancel"),
-                                            ).props("flat")
+                                            ).props("flat no-caps outline")
                                             ui.button(
                                                 "Export",
                                                 on_click=lambda: dialog.submit("Export"),
-                                            ).props("color=primary")
+                                                icon="download",
+                                            ).props("color=primary no-caps")
 
-                                    # Display selected samples below buttons
                                     ui.label(
                                         f"Exporting reports for {num_selected} sample(s): {', '.join(selected_ids[:3])}"
-                                        + (f" and {num_selected - 3} more" if num_selected > 3 else "")
-                                    ).classes("text-sm font-medium text-gray-700 mt-4")
+                                        + (
+                                            f" and {num_selected - 3} more"
+                                            if num_selected > 3
+                                            else ""
+                                        )
+                                    ).classes(
+                                        "text-sm font-medium text-gray-700 mt-4"
+                                    )
 
                             dialog_result = await dialog
                             if dialog_result != "Export":
@@ -2564,13 +2681,13 @@ class GUILauncher:
 
                             # Now show the progress dialog
                             with ui.dialog().props("persistent") as progress_dialog:
-                                with ui.card().classes("w-96 p-4"):
-                                    # Title
-                                    ui.label("Exporting Reports").classes(
-                                        "text-h6 font-bold mb-4"
+                                with ui.card().classes(
+                                    "robin-dialog-surface w-96 max-w-[95vw] p-4"
+                                ):
+                                    ui.label("Exporting reports").classes(
+                                        "classification-insight-heading text-headline-small mb-3"
                                     )
 
-                                    # Sample count
                                     ui.label(f"Exporting {num_selected} report(s)").classes(
                                         "text-sm font-medium text-gray-700 mb-4"
                                     )
@@ -2788,7 +2905,9 @@ class GUILauncher:
                         "completed_jobs": completed_jobs,
                         "failed_jobs": s.get("failed_jobs", 0),
                         "job_types": (
-                            ",".join(sorted(set(s.get("job_types", []))))
+                            ", ".join(
+                                sorted(set(str(x) for x in s.get("job_types", [])))
+                            )
                             if isinstance(s.get("job_types", []), list)
                             else str(s.get("job_types", ""))
                         ),
@@ -2888,6 +3007,40 @@ class GUILauncher:
             except Exception:
                 return ""
 
+    def _format_job_types_display(self, job_types: Any) -> str:
+        """Normalize job types to comma + space separated text so cells wrap in the table."""
+        if job_types is None:
+            return ""
+        if isinstance(job_types, (list, set, tuple)):
+            parts = sorted({str(x).strip() for x in job_types if str(x).strip()})
+            return ", ".join(parts)
+        s = str(job_types).strip()
+        if not s:
+            return ""
+        parts = [p.strip() for p in s.replace(", ", ",").split(",") if p.strip()]
+        return ", ".join(parts)
+
+    def _get_samples_search_query(self) -> str:
+        try:
+            return (self.samples_search.value or "").strip()
+        except Exception:
+            return ""
+
+    def _on_samples_search_update(self, _=None) -> None:
+        self._set_samples_query(self._get_samples_search_query())
+
+    def _get_origin_filter_value(self) -> str:
+        try:
+            v = self.origin_filter.value
+            if v is None or v == "":
+                return "All"
+            return str(v)
+        except Exception:
+            return "All"
+
+    def _on_origin_filter_update(self, _=None) -> None:
+        self._set_samples_origin_filter(self._get_origin_filter_value())
+
     def _normalize_rows_for_display(
         self, rows: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
@@ -2897,27 +3050,47 @@ class GUILauncher:
             if not sid or sid == "unknown":
                 continue
             jt = r.get("job_types")
-            if isinstance(jt, set):
-                r = dict(r)
-                r["job_types"] = ",".join(sorted(jt))
+            r = dict(r)
+            r["job_types"] = self._format_job_types_display(jt)
             normalized.append(r)
         return normalized
 
     def _extract_event_value(self, event, default=""):
         """Extract value from NiceGUI event arguments."""
         try:
-            # Handle different event types
-            if hasattr(event, "value"):
-                return str(event.value or default)
-            elif hasattr(event, "args"):
-                if isinstance(event.args, dict):
-                    return str(event.args.get("value", event.args.get("label", default)))
-                elif isinstance(event.args, list) and len(event.args) > 0:
-                    return str(event.args[0] or default)
-                else:
-                    return str(event.args or default)
-            else:
+            if event is None:
                 return str(default)
+            if isinstance(event, (str, int, float, bool)):
+                return str(event)
+            if hasattr(event, "value"):
+                v = event.value
+                if v is None:
+                    return str(default)
+                if isinstance(v, dict):
+                    return str(
+                        v.get("value", v.get("label", v.get("modelValue", default)))
+                    )
+                return str(v)
+            if hasattr(event, "args"):
+                args = event.args
+                if args is None:
+                    return str(default)
+                if isinstance(args, dict):
+                    return str(
+                        args.get("value", args.get("label", args.get("modelValue", default)))
+                    )
+                if isinstance(args, (list, tuple)) and len(args) > 0:
+                    first = args[0]
+                    if isinstance(first, dict):
+                        return str(
+                            first.get(
+                                "value",
+                                first.get("label", first.get("modelValue", default)),
+                            )
+                        )
+                    return str(first)
+                return str(args)
+            return str(default)
         except Exception:
             return str(default)
 
@@ -3117,17 +3290,21 @@ class GUILauncher:
 
         encrypted = _load_manifest_encrypted_fields(sample_dir)
         with ui.dialog().props("persistent") as dialog, ui.card().classes(
-            "w-full max-w-md p-6"
+            "robin-dialog-surface w-full max-w-md p-4 md:p-5"
         ):
-            ui.label("View sample identifiers").classes("text-h6 font-bold mb-2")
+            ui.label("View sample identifiers").classes(
+                "classification-insight-heading text-headline-small mb-2"
+            )
             ui.label(
                 "Enter the sample date of birth to reveal additional sample identifiers if available."
-            ).classes("text-sm text-gray-600 dark:text-gray-400 mb-4")
+            ).classes("classification-insight-foot mb-4")
             if not encrypted:
                 ui.label(
                     "No identifier manifest found for this sample, or it has no encrypted fields."
-                ).classes("text-sm text-amber-600 dark:text-amber-400 mb-4")
-                ui.button("Close", on_click=dialog.close).classes("mt-2")
+                ).classes("text-sm text-amber-700 mb-4")
+                ui.button("Close", on_click=dialog.close).props(
+                    "color=primary no-caps outline"
+                ).classes("mt-2")
                 dialog.open()
                 return
             dob_input = ui.date_input(
@@ -3171,9 +3348,11 @@ class GUILauncher:
                             "text-red-600 dark:text-red-400"
                         )
 
-            with ui.row().classes("w-full gap-2 mt-2"):
-                ui.button("Show identifiers", on_click=on_show).props("color=primary")
-                ui.button("Close", on_click=dialog.close)
+            with ui.row().classes("w-full gap-2 mt-2 flex-wrap"):
+                ui.button("Show identifiers", on_click=on_show).props(
+                    "color=primary no-caps"
+                )
+                ui.button("Close", on_click=dialog.close).props("flat no-caps outline")
         dialog.open()
 
     def _create_sample_detail_page(self, sample_id: str):
@@ -3219,29 +3398,31 @@ class GUILauncher:
             }
 
             with ui.dialog().props("persistent") as dialog:
-                with ui.card().classes("w-96 p-4"):
-                    # Title
-                    title_label = ui.label("Generate Report").classes(
-                        "text-h6 font-bold mb-4"
+                with ui.card().classes(
+                    "robin-dialog-surface w-96 max-w-[95vw] p-4"
+                ):
+                    title_label = ui.label("Generate report").classes(
+                        "classification-insight-heading text-headline-small mb-3"
                     )
 
-                    # Container for initial form content
                     with ui.column():
-                        # Report type selector
                         with ui.column().classes("mb-4"):
-                            ui.label("Report Type").classes("font-bold mb-2")
+                            ui.label("Report type").classes(
+                                "target-coverage-panel__meta-label mb-2"
+                            )
                             type_toggle = ui.toggle(
                                 report_types,
                                 value="detailed",
                                 on_change=lambda e: state.update({"type": e.value}),
                             )
 
-                        # Sample identifiers option
                         with ui.column().classes("mb-4"):
-                            ui.label("Sample identifiers").classes("font-bold mb-2")
+                            ui.label("Sample identifiers").classes(
+                                "target-coverage-panel__meta-label mb-2"
+                            )
                             ui.label(
                                 "Enter the sample date of birth to reveal additional sample identifiers if available."
-                            ).classes("text-sm text-gray-600 dark:text-gray-400 mb-2")
+                            ).classes("classification-insight-foot mb-2")
 
                             def on_include_sample_ids_change(e):
                                 state["include_sample_ids"] = bool(e.value)
@@ -3265,9 +3446,10 @@ class GUILauncher:
                                     state["sample_dob"] = str(v).strip() if v else ""
                             sample_dob_input.on("update:model-value", _on_sample_dob_change)
 
-                        # Disclaimer section
                         with ui.column().classes("mb-4"):
-                            ui.label("Disclaimer").classes("font-bold mb-2")
+                            ui.label("Disclaimer").classes(
+                                "target-coverage-panel__meta-label mb-2"
+                            )
                             formatted_text = EXTENDED_DISCLAIMER_TEXT.replace(
                                 "\n\n", "<br><br>"
                             ).replace("\n", " ")
@@ -3275,9 +3457,10 @@ class GUILauncher:
                                 "text-sm text-gray-600 mb-4"
                             )
 
-                        # Data export options
                         with ui.column().classes("mb-4"):
-                            ui.label("Include Data").classes("font-bold mb-2")
+                            ui.label("Include data").classes(
+                                "target-coverage-panel__meta-label mb-2"
+                            )
                             csv_checkbox = ui.checkbox(
                                 "CSV data (ZIP)",
                                 value=False,
@@ -3288,7 +3471,7 @@ class GUILauncher:
 
                         ui.label(
                             "Are you sure you want to generate a report?"
-                        ).classes("mb-4")
+                        ).classes("classification-insight-foot mb-4")
 
                         def _capture_dob_and_confirm():
                             """Capture date picker value into state before closing dialog."""
@@ -3303,15 +3486,14 @@ class GUILauncher:
                                     state["sample_dob"] = ""
                             dialog.submit("Yes")
 
-                        # Buttons
-                        with ui.row().classes("justify-end gap-2"):
+                        with ui.row().classes("justify-end gap-2 flex-wrap"):
                             ui.button(
                                 "No", on_click=lambda: dialog.submit("No")
-                            ).props("flat")
+                            ).props("flat no-caps outline")
                             ui.button(
                                 "Yes",
                                 on_click=_capture_dob_and_confirm,
-                            ).props("color=primary")
+                            ).props("color=primary no-caps")
                     
                     # Run name below buttons
                     ui.label(f"Exporting data for run: {sample_id}").classes(
@@ -3367,10 +3549,11 @@ class GUILauncher:
 
             # Now show the progress dialog
             with ui.dialog().props("persistent") as progress_dialog:
-                with ui.card().classes("w-96 p-4"):
-                    # Title
-                    ui.label("Generating Report").classes(
-                        "text-h6 font-bold mb-2"
+                with ui.card().classes(
+                    "robin-dialog-surface w-96 max-w-[95vw] p-4"
+                ):
+                    ui.label("Generating report").classes(
+                        "classification-insight-heading text-headline-small mb-2"
                     )
                     
                     # Divider
@@ -3631,19 +3814,24 @@ class GUILauncher:
         ):
             # Guard: unknown sample -> show message and back button; also redirect
             if self._known_sample_ids and sample_id not in self._known_sample_ids:
-                with ui.column().classes("w-full items-center justify-center p-8"):
-                    ui.label(f"Unknown sample: {sample_id}").classes(
-                        "text-xl font-semibold text-red-600"
+                with ui.column().classes(
+                    "w-full max-w-lg mx-auto items-center justify-center p-5 gap-2"
+                ):
+                    ui.label(f"Unknown sample").classes(
+                        "text-headline-medium text-slate-900 dark:text-slate-50"
+                    )
+                    ui.label(sample_id).classes(
+                        "text-display-small text-red-600 dark:text-rose-400 font-mono"
                     )
                     ui.label(
-                        "This sample ID has not been seen yet in the current session."
-                    ).classes("text-sm text-gray-600")
+                        "This library ID has not been seen yet in the current session."
+                    ).classes("text-body-medium text-slate-600 dark:text-slate-400 text-center")
                     ui.label(
-                        "Redirecting to sample list..."
-                    ).classes("text-sm text-gray-500 mt-2")
+                        "Redirecting to sample list…"
+                    ).classes("text-body-small text-slate-500 dark:text-slate-500 mt-1")
                     ui.button(
-                        "Back to Samples", on_click=lambda: ui.navigate.to("/live_data")
-                    ).props("color=primary")
+                        "Back to samples", on_click=lambda: ui.navigate.to("/live_data")
+                    ).props("color=primary").classes("rounded-lg mt-2")
                 
                 # Soft redirect after short delay
                 def redirect_to_samples():
@@ -3683,63 +3871,114 @@ class GUILauncher:
             # Start directory check in background
             ui.timer(0.1, check_directory_and_notify, once=True)
 
-            with ui.card().classes("w-full").style("border: 2px solid var(--md-primary)"):
-                with ui.row().classes("w-full flex justify-between items-center"):
-                    with ui.column():
-                        details_label = f"Library ID: {sample_id}"
-                        if test_id:
-                            details_label += f"  |  Test ID: {test_id}"
-                        ui.label(f"Sample Details: {details_label}").classes("text-2xl font-bold")
-                        ui.label("Detailed sample information and analysis results.").classes(
-                            "text-sm ml-4 opacity-80"
-                        )
-                        ui.button(
-                            "View sample identifiers",
-                            on_click=lambda: self._open_view_identifiers_modal(
-                                sample_dir, sample_id
-                            ),
-                        ).classes("mt-2 text-sm")
-                    with ui.column().classes("flex gap-2 items-center"):
-                        # Check if target.bam exists to show "More Details" button
+            with ui.card().classes(
+                "w-full border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden shadow-sm"
+            ):
+                with ui.column().classes(
+                    "w-full min-w-0 gap-0 bg-gradient-to-b from-slate-50 to-white "
+                    "dark:from-slate-900/90 dark:to-[var(--md-surface)] "
+                    "border-b border-slate-200/90 dark:border-slate-800"
+                ):
+                    # Mobile: flex-col stacks title + actions; md+ row (Quasar ui.column ignores flex-row)
+                    with ui.element("div").classes(
+                        "w-full min-w-0 flex flex-col gap-2 p-2 md:p-3 "
+                        "md:flex-row md:justify-between md:items-start"
+                    ):
+                        with ui.column().classes("gap-3 min-w-0 w-full md:flex-1"):
+                            # Anchor: Manrope ExtraBold — break-words, not break-all (mid-word splits)
+                            ui.label(sample_id).classes(
+                                "text-display-small font-extrabold text-slate-900 "
+                                "dark:text-slate-50 break-words w-full min-w-0"
+                            )
+                            # Data labels: Inter semibold; values: JetBrains Mono (§2.2)
+                            with ui.column().classes("gap-1.5"):
+                                with ui.row().classes("items-baseline gap-2 flex-wrap"):
+                                    ui.label("Library ID").classes(
+                                        "text-label-medium text-slate-500 dark:text-slate-400"
+                                    )
+                                    ui.label(sample_id).classes(
+                                        "text-body-small text-mono text-slate-800 "
+                                        "dark:text-slate-200 break-words"
+                                    )
+                                if test_id:
+                                    with ui.row().classes("items-baseline gap-2 flex-wrap"):
+                                        ui.label("Test ID").classes(
+                                            "text-label-medium text-slate-500 dark:text-slate-400"
+                                        )
+                                        ui.label(test_id).classes(
+                                            "text-body-small text-mono text-slate-800 "
+                                            "dark:text-slate-200 break-words"
+                                        )
+                            ui.label(
+                                "Classification, coverage, and analysis modules below."
+                            ).classes(
+                                "text-body-medium text-slate-600 dark:text-slate-400"
+                            )
+                            ui.button(
+                                "View sample identifiers",
+                                on_click=lambda: self._open_view_identifiers_modal(
+                                    sample_dir, sample_id
+                                ),
+                            ).classes(
+                                "mt-1 w-full sm:w-auto self-stretch sm:self-start"
+                            ).props(
+                                "flat dense color=primary no-caps"
+                            )
                         target_bam_exists = False
                         if sample_dir and sample_dir.exists():
                             target_bam = sample_dir / "target.bam"
-                            target_bam_exists = target_bam.exists() and target_bam.is_file()
-                        
-                        if target_bam_exists:
-                            ui.button(
-                                "More Details",
-                                on_click=lambda: ui.navigate.to(f"/live_data/{sample_id}/details")
-                            ).classes(
-                                "text-sm font-semibold px-3 py-1 rounded bg-secondary text-white"
+                            target_bam_exists = (
+                                target_bam.exists() and target_bam.is_file()
                             )
-                        ui.button(
-                            "Generate Report", on_click=confirm_report_generation
-                        ).classes(
-                            "object-right ml-auto text-sm font-semibold px-3 py-1 rounded"
-                        )
-                ui.separator().classes().style("border: 1px solid var(--md-primary)")
+                        with ui.column().classes(
+                            "w-full shrink-0 flex flex-col gap-2 "
+                            "md:w-auto md:min-w-[12rem] md:items-end"
+                        ):
+                            if target_bam_exists:
+                                ui.button(
+                                    "More details",
+                                    on_click=lambda: ui.navigate.to(
+                                        f"/live_data/{sample_id}/details"
+                                    ),
+                                ).classes(
+                                    "rounded-lg border border-slate-300 dark:border-slate-600 "
+                                    "text-title-medium w-full md:w-auto md:min-w-[10rem]"
+                                ).props("flat no-caps")
+                            ui.button(
+                                "Generate report",
+                                on_click=confirm_report_generation,
+                            ).props("color=primary no-caps").classes(
+                                "rounded-lg px-4 py-2 text-title-medium "
+                                "w-full md:w-auto md:min-w-[10rem]"
+                            )
                 # Main content area with conditional loading state
-                with ui.column().classes("w-full p-4 gap-4"):
+                with ui.column().classes("w-full p-2 md:p-3 gap-2"):
                     if show_loading:
                         # Loading container that will be hidden when data is ready
                         loading_container = ui.column().classes(
-                            "w-full items-center justify-center p-8"
+                            "w-full items-center justify-center p-5 "
+                            "rounded-xl border border-slate-200/90 dark:border-slate-800 "
+                            "bg-gradient-to-b from-slate-50 to-white "
+                            "dark:from-slate-900/60 dark:to-zinc-950/80"
                         )
                         with loading_container:
-                            ui.spinner("bars", size="4em").classes("mb-4")
-                            ui.label("Loading sample data...").classes("text-lg text-gray-600")
+                            ui.spinner("bars", size="4em", color="primary").classes("mb-4")
+                            ui.label("Loading sample data…").classes(
+                                "text-title-medium text-slate-800 dark:text-slate-100"
+                            )
                             ui.label("This may take a moment for large datasets").classes(
-                                "text-sm text-gray-500"
+                                "text-body-small text-slate-500 dark:text-slate-400"
                             )
 
                         # Content container that will be shown when data is ready
                         content_container = (
-                            ui.column().classes("w-full gap-4").style("display: none")
+                            ui.column()
+                            .classes("w-full gap-2")
+                            .style("display: none")
                         )
                     else:
                         # For page refreshes, show content immediately
-                        content_container = ui.column().classes("w-full gap-4")
+                        content_container = ui.column().classes("w-full gap-2")
                         loading_container = None
 
                     with content_container:
@@ -3770,18 +4009,22 @@ class GUILauncher:
                         workflow_steps = self.workflow_steps if hasattr(self, 'workflow_steps') else None
 
                         # Defer heavy analysis sections until after initial render
-                        analysis_loading_card = ui.card().classes("w-full p-4")
+                        analysis_loading_card = ui.card().classes(
+                            "w-full p-2 border border-slate-200/90 dark:border-slate-800 "
+                            "bg-gradient-to-b from-white to-slate-50/80 "
+                            "dark:from-slate-900/40 dark:to-zinc-950/60"
+                        )
                         with analysis_loading_card:
                             with ui.row().classes("items-center gap-3"):
                                 ui.spinner(size="md", color="primary")
                                 ui.label("Loading analysis sections…").classes(
-                                    "text-sm text-gray-700"
+                                    "text-body-medium text-slate-700 dark:text-slate-200"
                                 )
                             ui.label(
                                 "This can take a moment for large datasets."
-                            ).classes("text-xs text-gray-500 mt-2")
+                            ).classes("text-body-small text-slate-500 dark:text-slate-400 mt-2")
 
-                        analysis_container = ui.column().classes("w-full gap-4")
+                        analysis_container = ui.column().classes("w-full gap-2")
 
                         def _build_analysis_sections():
                             try:
@@ -3917,113 +4160,118 @@ class GUILauncher:
                         # Delay heavy UI creation to allow websocket handshake to complete
                         ui.timer(0.5, _build_analysis_sections, once=True)
 
-                        # Files in output directory
-                        with ui.card().classes("w-full"):
-                            ui.label("Output Files").classes(
-                                "text-lg font-semibold mb-2"
-                            )
-                            with ui.row().classes("items-center gap-3 mb-2"):
-                                files_search = ui.input("Search files…").props(
-                                    "borderless dense clearable"
-                                )
-                            from robin.gui.theme import styled_table
+                        from robin.gui.theme import styled_table
 
-                            _files_container, files_table = styled_table(
-                                columns=[
-                                    {
-                                        "name": "name",
-                                        "label": "File",
-                                        "field": "name",
-                                        "sortable": True,
-                                    },
-                                    {
-                                        "name": "size",
-                                        "label": "Size (bytes)",
-                                        "field": "size",
-                                        "sortable": True,
-                                    },
-                                    {
-                                        "name": "mtime",
-                                        "label": "Last Modified",
-                                        "field": "mtime",
-                                        "sortable": True,
-                                    },
-                        {
-                            "name": "actions",
-                            "label": "Download",
-                            "field": "actions",
-                            "sortable": False,
-                            "align": "center",
-                        },
-                                ],
-                                rows=[],
-                                pagination=20,
-                                class_size="table-xs",
-                            )
-                            try:
-                                files_table.props(
-                                    'multi-sort rows-per-page-options="[10,20,50,0]"'
+                        # Files in output directory (design.md §9 — insight shell)
+                        with ui.element("div").classes("w-full min-w-0").props(
+                            "id=analysis-detail-output-files"
+                        ):
+                            with ui.element("div").classes(
+                                "classification-insight-shell w-full min-w-0"
+                            ):
+                                ui.label("Output files").classes(
+                                    "classification-insight-heading text-headline-small"
                                 )
-                                files_search.bind_value(files_table, "filter")
-                            except Exception:
-                                pass
-                            
-                            # Add download button slot that emits an event to trigger Python download
-                            try:
-                                files_table.add_slot(
-                                    "body-cell-actions",
-                                    """
+                                with ui.element("div").classes(
+                                    "classification-insight-card w-full min-w-0"
+                                ):
+                                    with ui.column().classes(
+                                        "w-full min-w-0 gap-2 p-2 md:p-3"
+                                    ):
+                                        with ui.row().classes(
+                                            "items-center gap-2 min-w-0"
+                                        ):
+                                            ui.icon("folder_open").classes(
+                                                "classification-insight-icon"
+                                            )
+                                            ui.label("Sample output directory").classes(
+                                                "classification-insight-model flex-1 min-w-0"
+                                            )
+                                        ui.label(sample_id).classes(
+                                            "classification-insight-result w-full"
+                                        )
+                                        ui.label(str(sample_dir)).classes(
+                                            "classification-insight-meta w-full break-all"
+                                        )
+                                        ui.label(
+                                            "Browse or download files from this run."
+                                        ).classes("classification-insight-foot")
+
+                                ui.label("File list").classes(
+                                    "target-coverage-panel__meta-label mt-4 mb-1"
+                                )
+                                with ui.row().classes(
+                                    "items-center gap-3 mb-2 w-full flex-wrap"
+                                ):
+                                    files_search = ui.input("Search files…").props(
+                                        "borderless dense clearable"
+                                    )
+
+                                _files_container, files_table = styled_table(
+                                    columns=[
+                                        {
+                                            "name": "name",
+                                            "label": "File",
+                                            "field": "name",
+                                            "sortable": True,
+                                        },
+                                        {
+                                            "name": "size",
+                                            "label": "Size (bytes)",
+                                            "field": "size",
+                                            "sortable": True,
+                                        },
+                                        {
+                                            "name": "mtime",
+                                            "label": "Last Modified",
+                                            "field": "mtime",
+                                            "sortable": True,
+                                        },
+                                        {
+                                            "name": "actions",
+                                            "label": "Download",
+                                            "field": "actions",
+                                            "sortable": False,
+                                            "align": "center",
+                                        },
+                                    ],
+                                    rows=[],
+                                    pagination=20,
+                                    class_size="table-xs",
+                                )
+                                try:
+                                    files_table.props(
+                                        "multi-sort rows-per-page-options="
+                                        '"[10,20,50,0]"'
+                                    )
+                                    files_search.bind_value(files_table, "filter")
+                                except Exception:
+                                    pass
+
+                                # Add download button slot that emits an event
+                                try:
+                                    files_table.add_slot(
+                                        "body-cell-actions",
+                                        """
 <q-td key="actions" :props="props">
-  <q-btn color="primary" size="sm" icon="download" 
-         @click="() => $parent.$emit('download-file', props.row.name)" 
+  <q-btn color="primary" size="sm" icon="download"
+         @click="() => $parent.$emit('download-file', props.row.name)"
          title="Download file" />
 </q-td>
 """,
-                                )
-                            except Exception:
-                                pass
-                            
-                            # Add event handler for download button clicks
-                            try:
-                                files_table.on('download-file', lambda event: _download_file(event.args))
-                            except Exception:
-                                pass
+                                    )
+                                except Exception:
+                                    pass
 
-                        # master.csv summary
-                        with ui.card().classes("w-full"):
-                            ui.label("master.csv Summary").classes(
-                                "text-lg font-semibold mb-2"
-                            )
-                            with ui.row().classes("items-center gap-3 mb-2"):
-                                summary_search = ui.input("Search fields…").props(
-                                    "borderless dense clearable"
-                                )
-                            from robin.gui.theme import styled_table
+                                try:
+                                    files_table.on(
+                                        "download-file",
+                                        lambda event: _download_file(event.args),
+                                    )
+                                except Exception:
+                                    pass
 
-                            _summary_container, summary_table = styled_table(
-                                columns=[
-                                    {
-                                        "name": "key",
-                                        "label": "Field",
-                                        "field": "key",
-                                        "sortable": True,
-                                    },
-                                    {
-                                        "name": "value",
-                                        "label": "Value",
-                                        "field": "value",
-                                        "sortable": True,
-                                    },
-                                ],
-                                rows=[],
-                                pagination=0,
-                                class_size="table-xs",
-                            )
-                            try:
-                                summary_table.props("multi-sort")
-                                summary_search.bind_value(summary_table, "filter")
-                            except Exception:
-                                pass
+                    # master.csv fields (BAM counters, etc.) are shown in Run summary (summary.py)
 
                     # Download method for individual files
                     def _download_file(filename: str):
@@ -4050,8 +4298,8 @@ class GUILauncher:
                         except Exception as e:
                             ui.notify(f"Download failed: {e}", type="error")
 
-                    # Periodic refresher for files table and master.csv summary
-                    _notify_state = {"files_error": False, "csv_error": False}
+                    # Periodic refresher for files table
+                    _notify_state = {"files_error": False}
 
                     def _refresh_files_list_sync() -> List[Dict[str, Any]]:
                         """Synchronous file list refresh - runs in background thread"""
@@ -4076,51 +4324,6 @@ class GUILauncher:
                                         continue
                         return rows
 
-                    def _refresh_csv_summary_sync() -> List[Dict[str, Any]]:
-                        """Synchronous CSV summary refresh - runs in background thread"""
-                        if not sample_dir:
-                            return [{"key": "Status", "value": "No sample directory"}]
-                            
-                        csv_path = sample_dir / "master.csv"
-                        if not csv_path.exists():
-                            return [{"key": "Status", "value": "master.csv not found"}]
-                            
-                        try:
-                            with csv_path.open("r", newline="") as fh:
-                                reader = csv.DictReader(fh)
-                                first_row = next(reader, None)
-                            if first_row:
-                                preferred_keys = [
-                                    "counter_bam_passed",
-                                    "counter_bam_failed",
-                                    "counter_bases_count",
-                                    "counter_mapped_count",
-                                    "counter_unmapped_count",
-                                    "run_info_run_time",
-                                    "run_info_device",
-                                    "run_info_model",
-                                    "run_info_flow_cell",
-                                    "bam_tracking_counter",
-                                    "bam_tracking_total_files",
-                                ]
-                                rows2 = []
-                                for k in preferred_keys:
-                                    if k in first_row:
-                                        rows2.append(
-                                            {
-                                                "key": k,
-                                                "value": first_row.get(k, ""),
-                                            }
-                                        )
-                                if not rows2:
-                                    rows2 = [
-                                        {"key": k, "value": v}
-                                        for k, v in first_row.items()
-                                    ]
-                                return rows2
-                        except Exception:
-                            return [{"key": "Error", "value": "Failed to read CSV"}]
-
                     async def _refresh_sample_detail_async() -> None:
                         """Asynchronous version of sample detail refresh"""
                         try:
@@ -4129,19 +4332,13 @@ class GUILauncher:
                             # Run file I/O operations in background threads to avoid blocking GUI
                             import asyncio
                             files_result = await asyncio.to_thread(_refresh_files_list_sync)
-                            csv_result = await asyncio.to_thread(_refresh_csv_summary_sync)
-                            
-                            
+
                             # Update UI with results
                             files_table.rows = files_result
                             files_table.update()
-                            
-                            summary_table.rows = csv_result
-                            summary_table.update()
-                            
+
                             # Reset error states on success
                             _notify_state["files_error"] = False
-                            _notify_state["csv_error"] = False
                             
                         except Exception as e:
                             logging.error(f"Error in async sample detail refresh: {e}")
@@ -4173,28 +4370,6 @@ class GUILauncher:
                                 except Exception:
                                     pass
                                 _notify_state["files_error"] = True
-
-                        # Refresh master.csv summary (non-blocking)
-                        def update_csv_summary():
-                            try:
-                                rows2 = _refresh_csv_summary_sync()
-                                summary_table.rows = rows2
-                                summary_table.update()
-                            except Exception as e:
-                                if not _notify_state["csv_error"]:
-                                    try:
-                                        ui.notify(
-                                            f"Failed to read master.csv for {sample_id}: {e}",
-                                            type="warning",
-                                        )
-                                    except Exception:
-                                        pass
-                                    _notify_state["csv_error"] = True
-                        
-                        # Run in background thread to avoid blocking GUI
-                        import threading
-                        thread = threading.Thread(target=update_csv_summary, daemon=True)
-                        thread.start()
 
                     # Show content and hide loading after initial data load (only when showing loading)
                     if show_loading and loading_container:
@@ -4259,21 +4434,30 @@ class GUILauncher:
                 center=self.center,
                 setup_notifications=self._setup_notification_system,
             ):
-                with ui.column().classes("w-full items-center justify-center p-8"):
-                    ui.label(f"Unknown sample: {sample_id}").classes(
-                        "text-xl font-semibold text-red-600"
+                with ui.column().classes(
+                    "w-full max-w-lg mx-auto items-center justify-center p-5 gap-2"
+                ):
+                    ui.label("Unknown sample").classes(
+                        "text-headline-medium text-slate-900 dark:text-slate-50"
+                    )
+                    ui.label(sample_id).classes(
+                        "text-display-small text-red-600 dark:text-rose-400 font-mono"
                     )
                     ui.label(
-                        "This sample ID has not been seen yet in the current session."
-                    ).classes("text-sm text-gray-600")
+                        "This library ID has not been seen yet in the current session."
+                    ).classes(
+                        "text-body-medium text-slate-600 dark:text-slate-400 text-center"
+                    )
                     ui.button(
-                        "Back to Sample", 
-                        on_click=lambda: ui.navigate.to(f"/live_data/{sample_id}")
-                    ).props("color=primary").classes("mt-4")
+                        "Back to sample",
+                        on_click=lambda: ui.navigate.to(f"/live_data/{sample_id}"),
+                    ).props("color=primary").classes("rounded-lg mt-2")
                     ui.button(
-                        "Back to Samples", 
-                        on_click=lambda: ui.navigate.to("/live_data")
-                    ).classes("mt-2")
+                        "Back to samples",
+                        on_click=lambda: ui.navigate.to("/live_data"),
+                    ).classes(
+                        "mt-1 rounded-lg border border-slate-300 dark:border-slate-600"
+                    ).props("flat")
             return
         
         # Create the page with theme frame
@@ -4285,53 +4469,109 @@ class GUILauncher:
             center=self.center,
             setup_notifications=self._setup_notification_system,
         ):
-            # Main content - full width like sample page
-            with ui.card().classes("w-full").style("border: 2px solid var(--md-primary)"):
-                # Header section
-                with ui.row().classes("w-full flex justify-between items-center flex-wrap gap-2 p-4"):
-                    with ui.column():
-                        details_label = f"Library ID: {sample_id}"
-                        if test_id:
-                            details_label += f"  |  Test ID: {test_id}"
-                        ui.label(f"Sample Details: {details_label}").classes("text-2xl font-bold")
-                        ui.label("IGV Viewer, sample information and analysis results.").classes(
-                            "text-sm ml-4 opacity-80"
+            with ui.element("div").classes("w-full min-w-0").props("id=sample-details-page"):
+                with ui.element("div").classes("classification-insight-shell w-full min-w-0"):
+                    with ui.row().classes(
+                        "w-full flex flex-col gap-3 md:flex-row md:justify-between "
+                        "md:items-start p-2 md:p-3"
+                    ):
+                        with ui.column().classes("gap-2 min-w-0 flex-1"):
+                            ui.label("Sample details").classes(
+                                "classification-insight-heading text-headline-small"
+                            )
+                            ui.label(sample_id).classes(
+                                "classification-insight-result w-full break-words"
+                            )
+                            details_label = f"Library ID · {sample_id}"
+                            if test_id:
+                                details_label += f" · Test ID {test_id}"
+                            ui.label(details_label).classes(
+                                "classification-insight-meta w-full font-mono break-all"
+                            )
+                            ui.label(
+                                "IGV browser, sample identifiers, SNP tables, fusion pairs, "
+                                "and target genes."
+                            ).classes("classification-insight-foot")
+                            ui.button(
+                                "View sample identifiers",
+                                on_click=lambda: self._open_view_identifiers_modal(
+                                    sample_dir, sample_id
+                                ),
+                            ).classes("mt-1 self-start").props(
+                                "flat dense color=primary no-caps"
+                            )
+                        ui.button(
+                            "Back to sample",
+                            on_click=lambda: ui.navigate.to(f"/live_data/{sample_id}"),
+                        ).props("color=primary no-caps").classes(
+                            "rounded-lg shrink-0 self-stretch md:self-start "
+                            "w-full md:w-auto md:min-w-[10rem]"
                         )
-                        ui.button(
-                            "View sample identifiers",
-                            on_click=lambda: self._open_view_identifiers_modal(
-                                sample_dir, sample_id
-                            ),
-                        ).classes("mt-2 text-sm")
-                    with ui.column():
-                        ui.button(
-                            "Back to Sample", 
-                            on_click=lambda: ui.navigate.to(f"/live_data/{sample_id}")
-                        ).classes("bg-primary text-white rounded-md mobile-button")
-                
-                ui.separator().classes().style("border: 1px solid var(--md-primary)")
-                
-                # Placeholder content
-                with ui.column().classes("w-full p-4 gap-4"):
-                    ui.label("Sample Details Page").classes("text-headline-medium text-center")
-                    # Sample information section
-                    with ui.card().classes("w-full elevation-2 rounded-lg p-4"):
-                        ui.label("Sample Information").classes("text-headline-small font-bold mb-4")
-                        
-                        if sample_dir and sample_dir.exists():
-                            ui.label(f"Sample Directory: {sample_dir}").classes("text-body-medium mb-2")
-                            ui.label("Status: Directory found").classes("text-body-medium text-green-600")
-                        else:
-                            ui.label("Status: Directory not found").classes("text-body-medium text-red-600")
-                            if sample_dir:
-                                ui.label(f"Expected path: {sample_dir}").classes("text-body-small text-gray-500")
-                    
-                    # Center information
+
+                with ui.column().classes("w-full gap-3 p-2 md:p-3"):
+                    with ui.element("div").classes(
+                        "classification-insight-shell w-full min-w-0"
+                    ):
+                        ui.label("Output location").classes(
+                            "classification-insight-heading text-headline-small"
+                        )
+                        with ui.element("div").classes(
+                            "classification-insight-card w-full min-w-0"
+                        ):
+                            with ui.column().classes(
+                                "w-full min-w-0 gap-2 p-2 md:p-3"
+                            ):
+                                with ui.row().classes("items-center gap-2 min-w-0"):
+                                    ui.icon("folder_open").classes(
+                                        "classification-insight-icon"
+                                    )
+                                    ui.label("Sample output directory").classes(
+                                        "classification-insight-model flex-1 min-w-0"
+                                    )
+                                if sample_dir and sample_dir.exists():
+                                    ui.label(str(sample_dir)).classes(
+                                        "classification-insight-meta w-full font-mono break-all"
+                                    )
+                                    ui.label("Directory found").classes(
+                                        "classification-insight-level "
+                                        "classification-insight-level--high w-full"
+                                    )
+                                else:
+                                    ui.label("Directory not found").classes(
+                                        "classification-insight-level "
+                                        "classification-insight-level--low w-full"
+                                    )
+                                    if sample_dir:
+                                        ui.label(
+                                            f"Expected path: {sample_dir}"
+                                        ).classes("classification-insight-foot")
+
                     if self.center:
-                        with ui.card().classes("w-full elevation-2 rounded-lg p-4"):
-                            ui.label("Analysis Center").classes("text-headline-small font-bold mb-4")
-                            ui.label(f"Center: {self.center}").classes("text-body-medium")
-                    
+                        with ui.element("div").classes(
+                            "classification-insight-shell w-full min-w-0"
+                        ):
+                            ui.label("Analysis center").classes(
+                                "classification-insight-heading text-headline-small"
+                            )
+                            with ui.element("div").classes(
+                                "classification-insight-card w-full min-w-0"
+                            ):
+                                with ui.column().classes(
+                                    "w-full min-w-0 gap-2 p-2 md:p-3"
+                                ):
+                                    with ui.row().classes(
+                                        "items-center gap-2 min-w-0"
+                                    ):
+                                        ui.icon("hub").classes(
+                                            "classification-insight-icon"
+                                        )
+                                        ui.label("Deployment").classes(
+                                            "classification-insight-model flex-1 min-w-0"
+                                        )
+                                    ui.label(str(self.center)).classes(
+                                        "classification-insight-result w-full break-words"
+                                    )
+
                     # IGV Viewer section - moved to top, before tables
                     if sample_dir and sample_dir.exists():
                         from robin.gui.components.coverage import add_igv_viewer
@@ -4389,11 +4629,15 @@ class GUILauncher:
                                 )
                                 
                                 if not clustered_data.empty:
-                                    with ui.card().classes("w-full elevation-2 rounded-lg p-4"):
-                                        ui.label("Fusion Pairs").classes("text-headline-small font-bold mb-4")
-                                        ui.label("Click on a row to view the fusion pair in IGV.").classes(
-                                            "text-body-small text-gray-600 mb-2"
+                                    with ui.element("div").classes(
+                                        "classification-insight-shell w-full min-w-0"
+                                    ):
+                                        ui.label("Fusion pairs").classes(
+                                            "classification-insight-heading text-headline-small"
                                         )
+                                        ui.label(
+                                            "Click a row to open the fusion region in IGV."
+                                        ).classes("classification-insight-meta w-full mb-2")
                                         
                                         # Create columns for the table
                                         from robin.gui.theme import styled_table
@@ -4482,7 +4726,7 @@ class GUILauncher:
                                                 "chr2": chr2,
                                                 "pos2": display_pos2,
                                                 "reads": int(row.get("reads", 0)),
-                                                "action": "🔍"  # Icon for viewing in IGV
+                                                "action": "",
                                             }
                                             
                                             rows.append(formatted_row)
@@ -4767,24 +5011,43 @@ class GUILauncher:
                                             total_fusions = len(rows)
                                             total_reads = sum(r["reads"] for r in rows)
                                             ui.label(
-                                                f"Total fusions: {total_fusions} | Total supporting reads: {total_reads}"
-                                            ).classes("text-xs text-gray-500 mt-2")
+                                                f"Total fusions: {total_fusions} | "
+                                                f"Total supporting reads: {total_reads}"
+                                            ).classes("classification-insight-foot")
                                         else:
-                                            ui.label("No fusion pairs found").classes("text-gray-600")
+                                            ui.label("No fusion pairs found").classes(
+                                                "classification-insight-meta"
+                                            )
                                 else:
-                                    with ui.card().classes("w-full elevation-2 rounded-lg p-4"):
-                                        ui.label("Fusion Pairs").classes("text-headline-small font-bold mb-4")
-                                        ui.label("No validated fusion pairs found").classes("text-gray-600")
+                                    with ui.element("div").classes(
+                                        "classification-insight-shell w-full min-w-0"
+                                    ):
+                                        ui.label("Fusion pairs").classes(
+                                            "classification-insight-heading text-headline-small"
+                                        )
+                                        ui.label(
+                                            "No validated fusion pairs found in this run."
+                                        ).classes("classification-insight-meta")
                             else:
-                                with ui.card().classes("w-full elevation-2 rounded-lg p-4"):
-                                    ui.label("Fusion Pairs").classes("text-headline-small font-bold mb-4")
-                                    ui.label("Fusion data is empty").classes("text-gray-600")
+                                with ui.element("div").classes(
+                                    "classification-insight-shell w-full min-w-0"
+                                ):
+                                    ui.label("Fusion pairs").classes(
+                                        "classification-insight-heading text-headline-small"
+                                    )
+                                    ui.label("Fusion data is empty.").classes(
+                                        "classification-insight-meta"
+                                    )
                         else:
-                            with ui.card().classes("w-full elevation-2 rounded-lg p-4"):
-                                ui.label("Fusion Pairs").classes("text-headline-small font-bold mb-4")
-                                ui.label("Fusion analysis data not available. Please run fusion analysis first.").classes(
-                                    "text-gray-600"
+                            with ui.element("div").classes(
+                                "classification-insight-shell w-full min-w-0"
+                            ):
+                                ui.label("Fusion pairs").classes(
+                                    "classification-insight-heading text-headline-small"
                                 )
+                                ui.label(
+                                    "Fusion analysis data not available. Run fusion analysis first."
+                                ).classes("classification-insight-meta")
                     
                     # Target Genes Table section
                     if sample_dir and sample_dir.exists():
@@ -4862,15 +5125,19 @@ class GUILauncher:
                                             "endpos": f"{endpos_raw:,}",  # Format with commas for display
                                             "name": gene_name,
                                             "coverage": float(row.get("coverage", 0)),
-                                            "action": "🔍"  # Icon for viewing in IGV
+                                            "action": "",
                                         })
                                     
                                     if table_data:
-                                        with ui.card().classes("w-full elevation-2 rounded-lg p-4"):
-                                            ui.label("Target Genes").classes("text-headline-small font-bold mb-4")
-                                            ui.label("Click on a gene row to view it in IGV.").classes(
-                                                "text-body-small text-gray-600 mb-2"
+                                        with ui.element("div").classes(
+                                            "classification-insight-shell w-full min-w-0"
+                                        ):
+                                            ui.label("Target genes").classes(
+                                                "classification-insight-heading text-headline-small"
                                             )
+                                            ui.label(
+                                                "Click a gene row to open the region in IGV."
+                                            ).classes("classification-insight-meta w-full mb-2")
                                             
                                             from robin.gui.theme import styled_table
                                             
@@ -5095,335 +5362,496 @@ class GUILauncher:
                                             
                                             # Add summary
                                             total_genes = len(table_data)
-                                            ui.label(f"Total target genes: {total_genes}").classes("text-xs text-gray-500 mt-2")
+                                            ui.label(
+                                                f"Total target genes: {total_genes}"
+                                            ).classes("classification-insight-foot")
                             except Exception as e:
                                 logging.warning(f"Could not load target gene table: {e}")
 
     def _create_workflow_monitor(self):
         """Create the main workflow monitoring page."""
         with theme.frame(
-            "R.O.B.I.N - robin Workflow Monitor",
+            "R.O.B.I.N - Workflow Monitor",
             smalltitle="Samples",
             batphone=False,
             center=self.center,
             setup_notifications=self._setup_notification_system,
         ):
-            # Page title and navigation
-            with ui.row().classes("w-full p-4 items-center justify-between"):
-                with ui.row().classes("items-center"):
-                    ui.label("robin Workflow Monitor").classes("text-2xl font-bold")
-                    ui.label("Real-time workflow monitoring and control").classes(
-                        "text-sm ml-4 opacity-80"
-                    )
-
-            # Main content area
-            with ui.column().classes("w-full p-4 gap-4"):
-                # Workflow Status Overview
-                with ui.card().classes(
-                    "w-full bg-gradient-to-r from-blue-50 to-indigo-50"
+            with ui.element("div").classes("w-full min-w-0").props(
+                "id=workflow-monitor-page"
+            ):
+                with ui.column().classes(
+                    "w-full gap-3 p-2 md:p-3 max-w-6xl mx-auto"
                 ):
-                    ui.label("Workflow Status Overview").classes(
-                        "text-lg font-semibold mb-4 text-blue-800"
-                    )
-
-                    # Status indicator
-                    with ui.row().classes("w-full items-center gap-4"):
-                        self.status_indicator = ui.label("🟢").classes("text-2xl")
-                        self.status_label = ui.label(
-                            "Workflow Status: Running"
-                        ).classes("text-sm font-medium text-green-600")
-
-                    # Timing information
-                    with ui.row().classes("w-full gap-8 mt-4"):
-                        self.workflow_start_time = ui.label("Started: --").classes(
-                            "text-sm text-gray-600"
+                    with ui.element("div").classes(
+                        "classification-insight-shell w-full min-w-0"
+                    ):
+                        ui.label("Workflow monitor").classes(
+                            "classification-insight-heading text-headline-small"
                         )
-                        self.workflow_duration = ui.label("Duration: --").classes(
-                            "text-sm text-gray-600"
-                        )
+                        ui.label(
+                            "Real-time workflow monitoring and control."
+                        ).classes("classification-insight-foot")
 
-                    # Progress bar (hide internal float value text; use external formatted label below)
-                    self.progress_bar = (
-                        ui.linear_progress(0.0)
-                        .classes("w-full mt-4")
-                        .style("color: transparent")
-                    )
-                    self.progress_label = ui.label("0% Complete").classes(
-                        "text-sm text-center text-gray-600"
-                    )
+                    # Workflow status overview
+                    with ui.element("div").classes(
+                        "classification-insight-card w-full min-w-0"
+                    ):
+                        with ui.column().classes(
+                            "w-full min-w-0 gap-3 p-2 md:p-3"
+                        ):
+                            with ui.row().classes("items-center gap-2 min-w-0"):
+                                ui.icon("monitor_heart").classes(
+                                    "classification-insight-icon"
+                                )
+                                ui.label("Workflow status").classes(
+                                    "classification-insight-model flex-1 min-w-0"
+                                )
 
-                    # Counts summary
-                    with ui.row().classes("w-full gap-6 mt-2"):
-                        with ui.row().classes("items-center gap-2"):
-                            ui.label("Completed:").classes("text-xs text-gray-600")
-                            self.completed_count = ui.label("0").classes(
-                                "text-xs font-semibold"
-                            )
-                        with ui.row().classes("items-center gap-2"):
-                            ui.label("Failed:").classes("text-xs text-gray-600")
-                            self.failed_count = ui.label("0").classes(
-                                "text-xs font-semibold"
-                            )
-                        with ui.row().classes("items-center gap-2"):
-                            ui.label("Total:").classes("text-xs text-gray-600")
-                            self.total_count = ui.label("0").classes(
-                                "text-xs font-semibold"
-                            )
+                            with ui.row().classes("w-full items-center gap-3 min-w-0"):
+                                self.status_indicator = ui.icon(
+                                    "fiber_manual_record"
+                                ).classes(
+                                    "text-2xl workflow-monitor-status-icon "
+                                    "workflow-monitor-status-icon--running"
+                                )
+                                self.status_label = ui.label(
+                                    "Workflow status: Running"
+                                ).classes(
+                                    "text-sm font-medium "
+                                    "workflow-monitor-status-text--running"
+                                )
 
-                # File Processing Progress (Per-Run)
-                with ui.card().classes("w-full bg-gradient-to-r from-green-50 to-emerald-50"):
-                    ui.label("File Processing Progress (Per Run)").classes(
-                        "text-lg font-semibold mb-4 text-green-800"
-                    )
-                    with ui.column().classes("w-full gap-3"):
-                        # Overall file progress summary
-                        with ui.row().classes("w-full items-center gap-4"):
-                            ui.label("Overall Files:").classes("text-sm font-medium text-gray-700")
-                            self.overall_files_progress = ui.linear_progress(0.0).classes("flex-1")
-                            self.overall_files_label = ui.label("0/0 files processed").classes(
-                                "text-sm text-gray-600 min-w-[120px]"
-                            )
-                        
-                        # Per-sample file progress will be shown in a scrollable container
-                        ui.label("Per-Sample Progress:").classes("text-sm font-medium text-gray-700 mt-2")
-                        with ui.scroll_area().classes("w-full").style("max-height: 300px;"):
-                            self.sample_files_progress_container = ui.column().classes("w-full gap-2 p-2")
-                            # Individual sample progress bars will be added here dynamically
+                            with ui.row().classes(
+                                "w-full gap-2 mt-2 flex-wrap"
+                            ):
+                                self.workflow_start_time = ui.label(
+                                    "Started: —"
+                                ).classes("text-sm workflow-monitor-meta")
+                                self.workflow_duration = ui.label(
+                                    "Duration: —"
+                                ).classes("text-sm workflow-monitor-meta")
 
-                # Queue Status
-                with ui.card().classes("w-full"):
-                    ui.label("Queue Status").classes("text-lg font-semibold mb-4")
-
-                    # Queue status grid
-                    with ui.grid(columns=4).classes("w-full gap-4"):
-                        # Preprocessing
-                        with ui.card().classes("bg-green-50 p-4"):
-                            ui.label("Preprocessing").classes(
-                                "text-sm font-medium text-green-800"
+                            self.progress_bar = (
+                                ui.linear_progress(0.0)
+                                .classes("w-full mt-4")
+                                .style("color: transparent")
                             )
-                            self.preprocessing_status = ui.label("0/0").classes(
-                                "text-2xl font-bold text-green-600"
+                            self.progress_label = ui.label("0% complete").classes(
+                                "text-sm text-center w-full workflow-monitor-meta"
                             )
 
-                        # Analysis
-                        with ui.card().classes("bg-blue-50 p-4"):
-                            ui.label("🧬 Analysis").classes(
-                                "text-sm font-medium text-blue-800"
+                            ui.label("Run counts").classes(
+                                "target-coverage-panel__meta-label mt-2 mb-1"
                             )
-                            self.analysis_status = ui.label("0/0").classes(
-                                "text-2xl font-bold text-blue-600"
+                            with ui.row().classes(
+                                "w-full gap-4 mt-1 flex-wrap"
+                            ):
+                                with ui.row().classes("items-center gap-2"):
+                                    ui.label("Completed").classes(
+                                        "text-xs workflow-monitor-meta"
+                                    )
+                                    self.completed_count = ui.label("0").classes(
+                                        "text-xs font-semibold workflow-monitor-num"
+                                    )
+                                with ui.row().classes("items-center gap-2"):
+                                    ui.label("Failed").classes(
+                                        "text-xs workflow-monitor-meta"
+                                    )
+                                    self.failed_count = ui.label("0").classes(
+                                        "text-xs font-semibold workflow-monitor-num"
+                                    )
+                                with ui.row().classes("items-center gap-2"):
+                                    ui.label("Total").classes(
+                                        "text-xs workflow-monitor-meta"
+                                    )
+                                    self.total_count = ui.label("0").classes(
+                                        "text-xs font-semibold workflow-monitor-num"
+                                    )
+
+                    # File processing progress (per run)
+                    with ui.element("div").classes(
+                        "classification-insight-card w-full min-w-0"
+                    ):
+                        with ui.column().classes(
+                            "w-full min-w-0 gap-3 p-2 md:p-3"
+                        ):
+                            with ui.row().classes("items-center gap-2 min-w-0"):
+                                ui.icon("folder_open").classes(
+                                    "classification-insight-icon"
+                                )
+                                ui.label("File processing (per run)").classes(
+                                    "classification-insight-model flex-1 min-w-0"
+                                )
+
+                            with ui.row().classes(
+                                "w-full items-center gap-3 min-w-0"
+                            ):
+                                ui.label("Overall files").classes(
+                                    "text-sm font-medium workflow-monitor-meta shrink-0"
+                                )
+                                self.overall_files_progress = (
+                                    ui.linear_progress(0.0).classes(
+                                        "flex-1 min-w-0"
+                                    )
+                                )
+                                self.overall_files_label = ui.label(
+                                    "0/0 files processed"
+                                ).classes(
+                                    "text-sm min-w-[120px] workflow-monitor-meta"
+                                )
+
+                            ui.label("Per-sample progress").classes(
+                                "target-coverage-panel__meta-label mt-2 mb-1"
+                            )
+                            with ui.scroll_area().classes("w-full").style(
+                                "max-height: 300px;"
+                            ):
+                                self.sample_files_progress_container = ui.column().classes(
+                                    "w-full gap-2 p-1 min-w-0"
+                                )
+
+                    # Queue status
+                    with ui.element("div").classes(
+                        "classification-insight-card w-full min-w-0"
+                    ):
+                        with ui.column().classes(
+                            "w-full min-w-0 gap-3 p-2 md:p-3"
+                        ):
+                            with ui.row().classes("items-center gap-2 min-w-0"):
+                                ui.icon("layers").classes(
+                                    "classification-insight-icon"
+                                )
+                                ui.label("Queue status").classes(
+                                    "classification-insight-model flex-1 min-w-0"
+                                )
+
+                            with ui.row().classes(
+                                "w-full gap-2 flex-wrap items-stretch"
+                            ):
+                                with ui.element("div").classes(
+                                    "workflow-monitor-queue-tile flex-1 min-w-[10rem]"
+                                ):
+                                    ui.label("Preprocessing").classes(
+                                        "classification-insight-foot"
+                                    )
+                                    self.preprocessing_status = ui.label("0/0").classes(
+                                        "text-2xl font-bold workflow-monitor-queue-num--prep"
+                                    )
+
+                                with ui.element("div").classes(
+                                    "workflow-monitor-queue-tile flex-1 min-w-[10rem]"
+                                ):
+                                    with ui.row().classes(
+                                        "items-center gap-1 min-w-0"
+                                    ):
+                                        ui.icon("science").classes(
+                                            "text-base workflow-monitor-queue-icon"
+                                        )
+                                        ui.label("Analysis").classes(
+                                            "classification-insight-foot"
+                                        )
+                                    self.analysis_status = ui.label("0/0").classes(
+                                        "text-2xl font-bold workflow-monitor-queue-num--analysis"
+                                    )
+
+                                with ui.element("div").classes(
+                                    "workflow-monitor-queue-tile flex-1 min-w-[10rem]"
+                                ):
+                                    ui.label("Classification").classes(
+                                        "classification-insight-foot"
+                                    )
+                                    self.classification_status = ui.label("0/0").classes(
+                                        "text-2xl font-bold workflow-monitor-queue-num--class"
+                                    )
+
+                                with ui.element("div").classes(
+                                    "workflow-monitor-queue-tile flex-1 min-w-[10rem]"
+                                ):
+                                    ui.label("Other").classes(
+                                        "classification-insight-foot"
+                                    )
+                                    self.other_status = ui.label("0/0").classes(
+                                        "text-2xl font-bold workflow-monitor-queue-num--other"
+                                    )
+
+                            try:
+                                if self._last_queue_status:
+                                    self._update_queue_status(self._last_queue_status)
+                            except Exception:
+                                pass
+
+                    # Active jobs
+                    with ui.element("div").classes(
+                        "classification-insight-card w-full min-w-0"
+                    ):
+                        with ui.column().classes(
+                            "w-full min-w-0 gap-3 p-2 md:p-3"
+                        ):
+                            with ui.row().classes("items-center gap-2 min-w-0"):
+                                ui.icon("work").classes(
+                                    "classification-insight-icon"
+                                )
+                                ui.label("Active jobs").classes(
+                                    "classification-insight-model flex-1 min-w-0"
+                                )
+
+                            with ui.row().classes(
+                                "items-center gap-2 mb-2 flex-wrap"
+                            ):
+                                self.active_jobs_search = ui.input("Search…").props(
+                                    "outlined dense clearable"
+                                ).classes("min-w-[12rem] flex-1")
+                                self.active_jobs_type_filter = (
+                                    ui.select(
+                                        options=["All"],
+                                        value="All",
+                                        label="Type",
+                                    )
+                                    .props("outlined dense clearable")
+                                    .classes("w-40")
+                                )
+                                self.active_jobs_worker_filter = (
+                                    ui.select(
+                                        options=["All"],
+                                        value="All",
+                                        label="Worker",
+                                    )
+                                    .props("outlined dense clearable")
+                                    .classes("w-40")
+                                )
+
+                            from robin.gui.theme import styled_table
+
+                            _jobs_container, self.active_jobs_table = styled_table(
+                                columns=[
+                                    {
+                                        "name": "job_id",
+                                        "label": "Job ID",
+                                        "field": "job_id",
+                                        "sortable": True,
+                                    },
+                                    {
+                                        "name": "job_type",
+                                        "label": "Type",
+                                        "field": "job_type",
+                                        "sortable": True,
+                                    },
+                                    {
+                                        "name": "filepath",
+                                        "label": "File",
+                                        "field": "filepath",
+                                        "sortable": True,
+                                    },
+                                    {
+                                        "name": "worker",
+                                        "label": "Worker",
+                                        "field": "worker",
+                                        "sortable": True,
+                                    },
+                                    {
+                                        "name": "duration",
+                                        "label": "Duration",
+                                        "field": "duration",
+                                        "sortable": True,
+                                    },
+                                    {
+                                        "name": "progress",
+                                        "label": "Progress",
+                                        "field": "progress",
+                                        "sortable": True,
+                                    },
+                                ],
+                                rows=[],
+                                pagination=10,
+                                class_size="table-xs",
+                            )
+                            try:
+                                self.active_jobs_table.props(
+                                    'multi-sort rows-per-page-options="[10,20,50,0]"'
+                                )
+                                self.active_jobs_search.bind_value(
+                                    self.active_jobs_table, "filter"
+                                )
+                            except Exception:
+                                pass
+                            try:
+
+                                def _on_active_jobs_filter_change(_=None):
+                                    self._apply_active_jobs_filters_and_update()
+
+                                self.active_jobs_type_filter.on(
+                                    "update:model-value",
+                                    _on_active_jobs_filter_change,
+                                )
+                                self.active_jobs_worker_filter.on(
+                                    "update:model-value",
+                                    _on_active_jobs_filter_change,
+                                )
+                            except Exception:
+                                pass
+
+                            self.no_active_jobs_label = ui.label(
+                                "No active jobs at the moment."
+                            ).classes("classification-insight-foot mt-2")
+
+                    # Live logs
+                    with ui.element("div").classes(
+                        "classification-insight-card w-full min-w-0"
+                    ):
+                        with ui.column().classes(
+                            "w-full min-w-0 gap-3 p-2 md:p-3"
+                        ):
+                            with ui.row().classes(
+                                "w-full items-center justify-between gap-2 "
+                                "flex-wrap min-w-0"
+                            ):
+                                with ui.row().classes(
+                                    "items-center gap-2 min-w-0"
+                                ):
+                                    ui.icon("article").classes(
+                                        "classification-insight-icon"
+                                    )
+                                    ui.label("Live logs").classes(
+                                        "classification-insight-model flex-1 min-w-0"
+                                    )
+                                with ui.row().classes("gap-2 shrink-0"):
+                                    ui.button(
+                                        "Clear",
+                                        on_click=self._clear_logs,
+                                        icon="clear_all",
+                                    ).props("flat no-caps outline")
+                                    ui.button(
+                                        "Export",
+                                        on_click=lambda: self._export_logs(),
+                                        icon="download",
+                                    ).props("color=primary no-caps outline")
+
+                            self.log_area = (
+                                ui.textarea(
+                                    "Workflow logs will appear here…"
+                                )
+                                .classes(
+                                    "w-full h-40 workflow-monitor-log-area"
+                                )
+                                .props("outlined readonly dense")
                             )
 
-                        # Classification
-                        with ui.card().classes("bg-purple-50 p-4"):
-                            ui.label("Classification").classes(
-                                "text-sm font-medium text-purple-800"
+                    # Configuration
+                    with ui.element("div").classes(
+                        "classification-insight-card w-full min-w-0"
+                    ):
+                        with ui.column().classes(
+                            "w-full min-w-0 gap-3 p-2 md:p-3"
+                        ):
+                            with ui.row().classes("items-center gap-2 min-w-0"):
+                                ui.icon("tune").classes(
+                                    "classification-insight-icon"
+                                )
+                                ui.label("Workflow configuration").classes(
+                                    "classification-insight-model flex-1 min-w-0"
+                                )
+
+                            with ui.grid(columns=2).classes(
+                                "w-full gap-3 min-w-0"
+                            ):
+                                with ui.column().classes("min-w-0 gap-1"):
+                                    ui.label("Monitored directory").classes(
+                                        "target-coverage-panel__meta-label"
+                                    )
+                                    ui.label(
+                                        self.monitored_directory or "Not specified"
+                                    ).classes(
+                                        "text-sm break-all font-mono "
+                                        "workflow-monitor-config-value"
+                                    )
+
+                                    ui.label("Workflow steps").classes(
+                                        "target-coverage-panel__meta-label mt-2"
+                                    )
+                                    ui.label(
+                                        ", ".join(self.workflow_steps)
+                                        if self.workflow_steps
+                                        else "Not specified"
+                                    ).classes(
+                                        "text-sm workflow-monitor-config-value"
+                                    )
+
+                                with ui.column().classes("min-w-0 gap-1"):
+                                    ui.label("Log level").classes(
+                                        "target-coverage-panel__meta-label"
+                                    )
+                                    ui.label("—").classes(
+                                        "text-sm workflow-monitor-config-value"
+                                    )
+
+                                    ui.label("Analysis workers").classes(
+                                        "target-coverage-panel__meta-label mt-2"
+                                    )
+                                    ui.label("—").classes(
+                                        "text-sm workflow-monitor-config-value"
+                                    )
+
+                    # Error summary
+                    with ui.element("div").classes(
+                        "classification-insight-card w-full min-w-0"
+                    ):
+                        with ui.column().classes(
+                            "w-full min-w-0 gap-3 p-2 md:p-3"
+                        ):
+                            with ui.row().classes("items-center gap-2 min-w-0"):
+                                ui.icon("error_outline").classes(
+                                    "classification-insight-icon"
+                                )
+                                ui.label("Errors & troubleshooting").classes(
+                                    "classification-insight-model flex-1 min-w-0"
+                                )
+
+                            with ui.row().classes(
+                                "w-full justify-between gap-2 flex-wrap"
+                            ):
+                                with ui.column().classes(
+                                    "text-center min-w-[5rem]"
+                                ):
+                                    self.preprocessing_errors = ui.label("0").classes(
+                                        "text-xl font-bold workflow-monitor-error-num"
+                                    )
+                                    ui.label("Preprocessing").classes(
+                                        "text-xs workflow-monitor-meta"
+                                    )
+                                with ui.column().classes(
+                                    "text-center min-w-[5rem]"
+                                ):
+                                    self.analysis_errors = ui.label("0").classes(
+                                        "text-xl font-bold workflow-monitor-error-num"
+                                    )
+                                    ui.label("Analysis").classes(
+                                        "text-xs workflow-monitor-meta"
+                                    )
+                                with ui.column().classes(
+                                    "text-center min-w-[5rem]"
+                                ):
+                                    self.classification_errors = ui.label("0").classes(
+                                        "text-xl font-bold workflow-monitor-error-num"
+                                    )
+                                    ui.label("Classification").classes(
+                                        "text-xs workflow-monitor-meta"
+                                    )
+
+                            ui.separator().classes("mgmt-detail-separator")
+                            ui.label("Recent errors").classes(
+                                "target-coverage-panel__meta-label mt-1 mb-1"
                             )
-                            self.classification_status = ui.label("0/0").classes(
-                                "text-2xl font-bold text-purple-800"
-                            )
-
-                        # Other
-                        with ui.card().classes("bg-gray-50 p-4"):
-                            ui.label("Other").classes(
-                                "text-sm font-medium text-gray-800"
-                            )
-                            self.other_status = ui.label("0/0").classes(
-                                "text-2xl font-bold text-gray-600"
-                            )
-
-                    # If we have a cached queue status from before the page was created, apply it now
-                    try:
-                        if self._last_queue_status:
-                            self._update_queue_status(self._last_queue_status)
-                    except Exception:
-                        pass
-
-                # Active Jobs
-                with ui.card().classes("w-full"):
-                    ui.label("Active Jobs").classes("text-lg font-semibold mb-4")
-
-                    with ui.row().classes("items-center gap-3 mb-2"):
-                        self.active_jobs_search = ui.input("Search…").props(
-                            "borderless dense clearable"
-                        )
-                        self.active_jobs_type_filter = (
-                            ui.select(options=["All"], value="All", label="Type")
-                            .props("dense clearable")
-                            .classes("w-40")
-                        )
-                        self.active_jobs_worker_filter = (
-                            ui.select(options=["All"], value="All", label="Worker")
-                            .props("dense clearable")
-                            .classes("w-40")
-                        )
-
-                    # Active jobs table
-                    from robin.gui.theme import styled_table
-
-                    _jobs_container, self.active_jobs_table = styled_table(
-                        columns=[
-                            {
-                                "name": "job_id",
-                                "label": "Job ID",
-                                "field": "job_id",
-                                "sortable": True,
-                            },
-                            {
-                                "name": "job_type",
-                                "label": "Type",
-                                "field": "job_type",
-                                "sortable": True,
-                            },
-                            {
-                                "name": "filepath",
-                                "label": "File",
-                                "field": "filepath",
-                                "sortable": True,
-                            },
-                            {
-                                "name": "worker",
-                                "label": "Worker",
-                                "field": "worker",
-                                "sortable": True,
-                            },
-                            {
-                                "name": "duration",
-                                "label": "Duration",
-                                "field": "duration",
-                                "sortable": True,
-                            },
-                            {
-                                "name": "progress",
-                                "label": "Progress",
-                                "field": "progress",
-                                "sortable": True,
-                            },
-                        ],
-                        rows=[],
-                        pagination=10,
-                        class_size="table-xs",
-                    )
-                    try:
-                        self.active_jobs_table.props(
-                            'multi-sort rows-per-page-options="[10,20,50,0]"'
-                        )
-                        self.active_jobs_search.bind_value(
-                            self.active_jobs_table, "filter"
-                        )
-                    except Exception:
-                        pass
-                    try:
-
-                        def _on_active_jobs_filter_change(_=None):
-                            self._apply_active_jobs_filters_and_update()
-
-                        self.active_jobs_type_filter.on(
-                            "update:model-value", _on_active_jobs_filter_change
-                        )
-                        self.active_jobs_worker_filter.on(
-                            "update:model-value", _on_active_jobs_filter_change
-                        )
-                    except Exception:
-                        pass
-
-                    # Placeholder for when no jobs are active
-                    self.no_active_jobs_label = ui.label(
-                        "No active jobs at the moment."
-                    ).classes("text-sm text-gray-500 mt-2")
-
-                # Live Logs
-                with ui.card().classes("w-full"):
-                    ui.label("Live Logs").classes("text-lg font-semibold mb-4")
-
-                    # Log controls
-                    with ui.row().classes("w-full justify-between items-center mb-2"):
-                        with ui.row().classes("gap-2"):
-                            ui.button("Clear", on_click=self._clear_logs).classes(
-                                "bg-gray-500 hover:bg-gray-600 text-white text-xs"
-                            )
-                            ui.button(
-                                "Export", on_click=lambda: self._export_logs()
+                            self.error_summary_label = ui.label(
+                                "No errors detected."
                             ).classes(
-                                "bg-blue-500 hover:bg-blue-600 text-white text-xs"
+                                "text-xs workflow-monitor-error-summary"
                             )
 
-                    # Log area
-                    self.log_area = (
-                        ui.textarea("Workflow logs will appear here...")
-                        .classes("w-full h-40")
-                        .props("readonly")
-                    )
-
-                # Configuration
-                with ui.card().classes("w-full"):
-                    ui.label("Workflow Configuration").classes(
-                        "text-lg font-semibold mb-4"
-                    )
-
-                    # Configuration details
-                    with ui.grid(columns=2).classes("w-full gap-4"):
-                        with ui.column():
-                            ui.label("Monitored Directory:").classes(
-                                "text-sm font-medium"
-                            )
-                            ui.label(
-                                self.monitored_directory or "Not specified"
-                            ).classes("text-sm text-gray-600")
-
-                            ui.label("Workflow Steps:").classes(
-                                "text-sm font-medium mt-2"
-                            )
-                            ui.label(
-                                ", ".join(self.workflow_steps)
-                                if self.workflow_steps
-                                else "Not specified"
-                            ).classes("text-sm text-gray-600")
-
-                        with ui.column():
-                            ui.label("Log Level:").classes("text-sm font-medium")
-                            ui.label("--").classes("text-sm text-gray-600")
-
-                            ui.label("Analysis Workers:").classes(
-                                "text-sm font-medium mt-2"
-                            )
-                            ui.label("--").classes("text-sm text-gray-600")
-
-                # Error Summary & Troubleshooting
-                with ui.card().classes("w-full"):
-                    ui.label("Error Summary & Troubleshooting").classes(
-                        "text-lg font-semibold mb-2"
-                    )
-
-                    # Error counts by type
-                    with ui.row().classes("w-full justify-between"):
-                        with ui.column().classes("text-center"):
-                            self.preprocessing_errors = ui.label("0").classes(
-                                "text-xl font-bold text-red-600"
-                            )
-                            ui.label("Preprocessing").classes("text-xs text-gray-600")
-                        with ui.column().classes("text-center"):
-                            self.analysis_errors = ui.label("0").classes(
-                                "text-xl font-bold text-red-600"
-                            )
-                            ui.label("Analysis").classes("text-xs text-gray-600")
-                        with ui.column().classes("text-center"):
-                            self.classification_errors = ui.label("0").classes(
-                                "text-xl font-bold text-red-600"
-                            )
-                            ui.label("Classification").classes("text-xs text-gray-600")
-
-                    # Common error messages
-                    ui.separator()
-                    ui.label("Recent Errors").classes("text-sm font-medium mt-2")
-                    self.error_summary_label = ui.label("No errors detected").classes(
-                        "text-xs text-gray-600"
-                    )
-
-                # Footer
-                with ui.row().classes("w-full bg-gray-200 p-2 justify-center"):
-                    ui.label("robin Workflow Monitor - Running").classes(
-                        "text-sm text-gray-600"
+                    ui.label(
+                        "R.O.B.I.N workflow monitor — session active"
+                    ).classes(
+                        "classification-insight-foot text-center w-full py-2"
                     )
 
                 # Signal that GUI is ready to receive updates
@@ -5979,7 +6407,7 @@ class GUILauncher:
                 "total_jobs": total_jobs,
                 "completed_jobs": completed_jobs,
                 "failed_jobs": failed_jobs,
-                "job_types": ",".join(sorted(job_types)) if job_types else ""
+                "job_types": ", ".join(sorted(job_types)) if job_types else ""
             }
             
         except Exception as e:
@@ -6415,10 +6843,32 @@ class GUILauncher:
                 center=self.center,
                 setup_notifications=self._setup_notification_system,
             ):
-                ui.notify("Manage folders requires Ray workflow. Are you running with --use-ray?", type="negative")
-                ui.label("Manage folders requires Ray workflow. Are you running with --use-ray?").classes(
-                    "text-red-600 p-4"
+                ui.notify(
+                    "Manage folders requires Ray workflow. Are you running with --use-ray?",
+                    type="negative",
                 )
+                with ui.element("div").classes("w-full min-w-0").props(
+                    "id=watched-folders-page"
+                ):
+                    with ui.column().classes(
+                        "w-full max-w-2xl mx-auto gap-3 p-2 md:p-3"
+                    ):
+                        with ui.element("div").classes(
+                            "classification-insight-shell w-full min-w-0"
+                        ):
+                            ui.label("Watched folders").classes(
+                                "classification-insight-heading text-headline-small"
+                            )
+                            with ui.element("div").classes(
+                                "classification-insight-card w-full min-w-0"
+                            ):
+                                with ui.column().classes(
+                                    "w-full min-w-0 gap-2 p-2 md:p-3"
+                                ):
+                                    ui.label(
+                                        "Manage folders requires the Ray workflow. "
+                                        "Start the app with --use-ray to enable this feature."
+                                    ).classes("classification-insight-foot")
             return
 
         with theme.frame(
@@ -6428,85 +6878,160 @@ class GUILauncher:
             center=self.center,
             setup_notifications=self._setup_notification_system,
         ):
-            with ui.column().classes("w-full p-4 gap-4 max-w-2xl mx-auto"):
-                with ui.card().classes("w-full p-6"):
-                    ui.label("Manage watched folders").classes("text-xl font-semibold mb-4")
-                    ui.label(
-                        "Add or remove directories containing BAM files. "
-                        "Watched folders are monitored for new files and existing files are submitted for processing."
-                    ).classes("text-sm text-gray-600 mb-4")
-
-                    # Current watched paths with remove buttons
-                    watched_container = ui.column().classes("w-full gap-2 mb-4")
-                    with watched_container:
-                        paths = get_watched_paths()
-                        if paths:
-                            ui.label("Currently watched:").classes("text-sm font-medium")
-                            for p in paths:
-                                with ui.row().classes("w-full items-center gap-2 p-2 bg-gray-100 dark:bg-gray-800 rounded"):
-                                    ui.label(p).classes("text-sm flex-1 break-all")
-                                    ui.button(
-                                        "Remove",
-                                        on_click=lambda path=p: self._do_remove_folder(
-                                            path, watched_container, remove_watch_path, get_watched_paths
-                                        ),
-                                    ).props("flat color=negative size=sm")
-                        else:
-                            ui.label("No folders currently watched.").classes("text-sm text-gray-500 italic")
-
-                    ui.separator()
-                    ui.label("Add folder:").classes("text-sm font-medium mt-2 mb-2")
-                    with ui.row().classes("w-full gap-2 items-end"):
-                        path_input = ui.input(
-                            placeholder="e.g. /data/incoming/new_batch",
-                            label="Folder path",
-                        ).classes("flex-1")
-
-                        async def pick_folder():
-                            from robin.gui.components.folder_picker import local_folder_picker
-
-                            watched = get_watched_paths()
-                            start = (
-                                watched[0]
-                                if watched
-                                else (self.monitored_directory or str(Path.home()))
-                            )
-                            picker = local_folder_picker(start, upper_limit=None)
-                            result = await picker
-                            if result and len(result) > 0:
-                                path_input.value = result[0]
-
-                        ui.button("Browse", on_click=pick_folder).classes("mb-0")
-
-                    if self.monitored_directory:
-                        with ui.column().classes("w-full mt-2"):
-                            ui.label("Work directory:").classes("text-xs text-gray-500")
-                            ui.label(self.monitored_directory).classes("text-xs text-gray-600 break-all")
-
-                    async def do_add_folder():
-                        path_val = (path_input.value or "").strip()
-                        if not path_val:
-                            ui.notify("Please enter a folder path", type="warning")
-                            return
-                        with ui.dialog().props("persistent").classes("w-full max-w-sm") as add_dialog:
-                            with ui.card().classes("p-6"):
-                                with ui.row().classes("items-center gap-3"):
-                                    ui.spinner(size="lg")
-                                    ui.label("Adding folder...").classes("text-lg")
-                        add_dialog.open()
-                        # Close modal immediately before long-running add to avoid
-                        # "client has been deleted" when user navigates away during add
-                        add_dialog.close()
-                        self._safe_notify("Adding folder...", "info")
-                        await self._do_add_folder(
-                            path_input=path_input,
-                            add_watch_path=add_watch_path,
-                            watched_container=watched_container,
-                            get_watched_paths=get_watched_paths,
-                            remove_watch_path=remove_watch_path,
+            with ui.element("div").classes("w-full min-w-0").props(
+                "id=watched-folders-page"
+            ):
+                with ui.column().classes(
+                    "w-full max-w-2xl mx-auto gap-3 p-2 md:p-3"
+                ):
+                    with ui.element("div").classes(
+                        "classification-insight-shell w-full min-w-0"
+                    ):
+                        ui.label("Watched folders").classes(
+                            "classification-insight-heading text-headline-small"
                         )
+                        with ui.element("div").classes(
+                            "classification-insight-card w-full min-w-0"
+                        ):
+                            with ui.column().classes(
+                                "w-full min-w-0 gap-3 p-2 md:p-3"
+                            ):
+                                with ui.row().classes(
+                                    "items-center gap-2 min-w-0"
+                                ):
+                                    ui.icon("folder_special").classes(
+                                        "classification-insight-icon"
+                                    )
+                                    ui.label("Manage watched directories").classes(
+                                        "classification-insight-model flex-1 min-w-0"
+                                    )
+                                ui.label(
+                                    "Add or remove directories containing BAM files. "
+                                    "Watched folders are monitored for new files and existing "
+                                    "files are submitted for processing."
+                                ).classes("classification-insight-foot")
 
-                    ui.button("Add folder", on_click=do_add_folder).classes("bg-green-600 mt-4")
+                                watched_container = ui.column().classes(
+                                    "w-full gap-2 min-w-0"
+                                )
+                                with watched_container:
+                                    paths = get_watched_paths()
+                                    if paths:
+                                        ui.label("Currently watched").classes(
+                                            "target-coverage-panel__meta-label mt-1 mb-1"
+                                        )
+                                        for p in paths:
+                                            with ui.row().classes(
+                                                "w-full items-center gap-2 p-2 "
+                                                "rounded min-w-0 watched-folders-path-row"
+                                            ):
+                                                ui.label(p).classes(
+                                                    "text-sm flex-1 break-all font-mono"
+                                                )
+                                                ui.button(
+                                                    "Remove",
+                                                    on_click=lambda path=p: self._do_remove_folder(
+                                                        path,
+                                                        watched_container,
+                                                        remove_watch_path,
+                                                        get_watched_paths,
+                                                    ),
+                                                ).props("flat color=negative size=sm no-caps")
+                                    else:
+                                        ui.label(
+                                            "No folders currently watched."
+                                        ).classes(
+                                            "classification-insight-foot italic"
+                                        )
+
+                                ui.separator().classes("mgmt-detail-separator")
+
+                                ui.label("Add folder").classes(
+                                    "target-coverage-panel__meta-label mt-1 mb-1"
+                                )
+                                with ui.row().classes(
+                                    "w-full gap-2 items-end flex-wrap"
+                                ):
+                                    path_input = ui.input(
+                                        placeholder="e.g. /data/incoming/new_batch",
+                                        label="Folder path",
+                                    ).classes("flex-1 min-w-[12rem]")
+
+                                    async def pick_folder():
+                                        from robin.gui.components.folder_picker import (
+                                            local_folder_picker,
+                                        )
+
+                                        watched = get_watched_paths()
+                                        start = (
+                                            watched[0]
+                                            if watched
+                                            else (
+                                                self.monitored_directory
+                                                or str(Path.home())
+                                            )
+                                        )
+                                        picker = local_folder_picker(
+                                            start, upper_limit=None
+                                        )
+                                        result = await picker
+                                        if result and len(result) > 0:
+                                            path_input.value = result[0]
+
+                                    ui.button(
+                                        "Browse",
+                                        on_click=pick_folder,
+                                        icon="folder_open",
+                                    ).props("flat no-caps outline")
+
+                                if self.monitored_directory:
+                                    ui.label("Work directory").classes(
+                                        "target-coverage-panel__meta-label mt-2 mb-1"
+                                    )
+                                    ui.label(self.monitored_directory).classes(
+                                        "text-xs break-all font-mono "
+                                        "watched-folders-work-dir"
+                                    )
+
+                                async def do_add_folder():
+                                    path_val = (path_input.value or "").strip()
+                                    if not path_val:
+                                        ui.notify(
+                                            "Please enter a folder path",
+                                            type="warning",
+                                        )
+                                        return
+                                    with ui.dialog().props("persistent").classes(
+                                        "w-full max-w-sm"
+                                    ) as add_dialog:
+                                        with ui.card().classes(
+                                            "robin-dialog-surface p-4 md:p-5 w-full"
+                                        ):
+                                            with ui.row().classes(
+                                                "items-center gap-3 min-w-0"
+                                            ):
+                                                ui.spinner(size="lg")
+                                                ui.label("Adding folder…").classes(
+                                                    "classification-insight-model"
+                                                )
+                                    add_dialog.open()
+                                    # Close modal immediately before long-running add to avoid
+                                    # "client has been deleted" when user navigates away during add
+                                    add_dialog.close()
+                                    self._safe_notify("Adding folder...", "info")
+                                    await self._do_add_folder(
+                                        path_input=path_input,
+                                        add_watch_path=add_watch_path,
+                                        watched_container=watched_container,
+                                        get_watched_paths=get_watched_paths,
+                                        remove_watch_path=remove_watch_path,
+                                    )
+
+                                ui.button(
+                                    "Add folder",
+                                    on_click=do_add_folder,
+                                    icon="add_circle_outline",
+                                ).props("color=primary no-caps").classes("w-full mt-2")
 
     def _save_sample_identifier_manifest(
         self,
@@ -6568,106 +7093,145 @@ class GUILauncher:
             center=self.center,
             setup_notifications=self._setup_notification_system,
         ):
-            with ui.column().classes("w-full p-4 gap-4 max-w-2xl mx-auto"):
-                with ui.card().classes("w-full p-6"):
-                    ui.label("Generate Sample Identifier").classes(
-                        "text-xl font-semibold mb-2"
-                    )
-                    ui.label(
-                        "Test ID is required. First Name, Last Name, Date of Birth and Hospital Number are optional. "
-                        "The sample name is the MD5 hash of Test ID, First Name, Last Name and D.O.B (concatenated with a pipe); empty optional fields use an empty string."
-                    ).classes("text-sm text-gray-600 dark:text-gray-400 mb-4")
-
-                    test_id = ui.input(
-                        label="Test ID (required)",
-                        placeholder="e.g. LAB-2024-001",
-                    ).classes("w-full")
-
-                    first_name = ui.input(
-                        label="First Name (optional)",
-                        placeholder="Given name",
-                    ).classes("w-full")
-
-                    last_name = ui.input(
-                        label="Last Name (optional)",
-                        placeholder="Family name",
-                    ).classes("w-full")
-
-                    dob = ui.date_input(
-                        "Date of Birth (optional)",
-                        value=None,
-                    ).classes("w-full")
-
-                    nhs_number = ui.input(
-                        label="Hospital Number (optional)",
-                        placeholder="e.g. 123 456 7890",
-                    ).classes("w-full")
-
-                    result_label = ui.label("").classes(
-                        "text-sm font-mono mt-2 p-3 bg-gray-100 dark:bg-gray-800 rounded break-all"
-                    )
-                    result_label.set_visibility(False)
-                    result_input = ui.input(
-                        label="Generated Sample ID",
-                        placeholder="Click Generate to create an ID",
-                    ).classes("w-full mt-2 font-mono").props("readonly")
-
-                    def generate_sample_id():
-                        _dob_val = dob.value
-                        dob_str = (
-                            _dob_val.strftime("%Y-%m-%d")
-                            if hasattr(_dob_val, "strftime")
-                            else (str(_dob_val).strip() if _dob_val else "")
+            with ui.element("div").classes("w-full min-w-0").props(
+                "id=sample-id-generator-page"
+            ):
+                with ui.column().classes(
+                    "w-full max-w-2xl mx-auto gap-3 p-2 md:p-3"
+                ):
+                    with ui.element("div").classes(
+                        "classification-insight-shell w-full min-w-0"
+                    ):
+                        ui.label("Sample ID generator").classes(
+                            "classification-insight-heading text-headline-small"
                         )
-                        parts = [
-                            (test_id.value or "").strip(),
-                            (first_name.value or "").strip(),
-                            (last_name.value or "").strip(),
-                            dob_str,
-                        ]
-                        if not parts[0]:
-                            ui.notify("Please enter Test ID.", type="warning")
-                            return
-                        test_id_val, first_name_val, last_name_val, dob_val = parts
-                        payload = "|".join(parts)
-                        sample_id = hashlib.md5(payload.encode("utf-8")).hexdigest()
-                        result_input.value = sample_id
-                        result_label.set_text(f"MD5 of: {payload!r}")
-                        result_label.set_visibility(True)
-                        nhs_val = (nhs_number.value or "").strip()
-                        success, msg = self._save_sample_identifier_manifest(
-                            sample_id,
-                            test_id_val,
-                            first_name_val,
-                            last_name_val,
-                            dob_val,
-                            nhs_number=nhs_val,
-                        )
-                        if success:
-                            ui.notify(f"Sample ID generated. {msg}", type="positive")
-                        else:
-                            ui.notify(f"Sample ID generated. {msg}", type="warning")
+                        with ui.element("div").classes(
+                            "classification-insight-card w-full min-w-0"
+                        ):
+                            with ui.column().classes(
+                                "w-full min-w-0 gap-3 p-2 md:p-3"
+                            ):
+                                with ui.row().classes(
+                                    "items-center gap-2 min-w-0"
+                                ):
+                                    ui.icon("fingerprint").classes(
+                                        "classification-insight-icon"
+                                    )
+                                    ui.label("Generate a sample identifier").classes(
+                                        "classification-insight-model flex-1 min-w-0"
+                                    )
+                                ui.label(
+                                    "Test ID is required. First name, last name, date of birth, "
+                                    "and hospital number are optional. The sample name is the MD5 "
+                                    "hash of test ID, first name, last name, and D.O.B. "
+                                    "(pipe-separated); empty optional fields use an empty string."
+                                ).classes("classification-insight-foot")
 
-                    def copy_to_clipboard():
-                        if result_input.value:
-                            ui.run_javascript(
-                                f"navigator.clipboard.writeText({json.dumps(result_input.value)})"
-                            )
-                            ui.notify("Copied to clipboard", type="positive")
-                        else:
-                            ui.notify("Generate an ID first.", type="warning")
+                                test_id = ui.input(
+                                    label="Test ID (required)",
+                                    placeholder="e.g. LAB-2024-001",
+                                ).classes("w-full")
 
-                    with ui.row().classes("w-full gap-2 mt-4"):
-                        ui.button(
-                            "Generate Sample ID",
-                            on_click=generate_sample_id,
-                            icon="fingerprint",
-                        ).classes("bg-primary text-white")
-                        ui.button(
-                            "Copy to clipboard",
-                            on_click=copy_to_clipboard,
-                            icon="content_copy",
-                        ).props("flat")
+                                first_name = ui.input(
+                                    label="First name (optional)",
+                                    placeholder="Given name",
+                                ).classes("w-full")
+
+                                last_name = ui.input(
+                                    label="Last name (optional)",
+                                    placeholder="Family name",
+                                ).classes("w-full")
+
+                                dob = ui.date_input(
+                                    "Date of birth (optional)",
+                                    value=None,
+                                ).classes("w-full")
+
+                                nhs_number = ui.input(
+                                    label="Hospital number (optional)",
+                                    placeholder="e.g. 123 456 7890",
+                                ).classes("w-full")
+
+                                ui.separator().classes("mgmt-detail-separator")
+
+                                ui.label("Generated identifier").classes(
+                                    "target-coverage-panel__meta-label mt-1 mb-1"
+                                )
+                                result_label = ui.label("").classes(
+                                    "text-sm font-mono break-all p-3 rounded sample-id-gen-hash-preview"
+                                )
+                                result_label.set_visibility(False)
+                                result_input = ui.input(
+                                    label="Sample ID (MD5)",
+                                    placeholder="Click Generate to create an ID",
+                                ).classes("w-full font-mono").props("readonly outlined dense")
+
+                                def generate_sample_id():
+                                    _dob_val = dob.value
+                                    dob_str = (
+                                        _dob_val.strftime("%Y-%m-%d")
+                                        if hasattr(_dob_val, "strftime")
+                                        else (str(_dob_val).strip() if _dob_val else "")
+                                    )
+                                    parts = [
+                                        (test_id.value or "").strip(),
+                                        (first_name.value or "").strip(),
+                                        (last_name.value or "").strip(),
+                                        dob_str,
+                                    ]
+                                    if not parts[0]:
+                                        ui.notify("Please enter Test ID.", type="warning")
+                                        return
+                                    test_id_val, first_name_val, last_name_val, dob_val = parts
+                                    payload = "|".join(parts)
+                                    sample_id = hashlib.md5(
+                                        payload.encode("utf-8")
+                                    ).hexdigest()
+                                    result_input.value = sample_id
+                                    result_label.set_text(f"MD5 of: {payload!r}")
+                                    result_label.set_visibility(True)
+                                    nhs_val = (nhs_number.value or "").strip()
+                                    success, msg = self._save_sample_identifier_manifest(
+                                        sample_id,
+                                        test_id_val,
+                                        first_name_val,
+                                        last_name_val,
+                                        dob_val,
+                                        nhs_number=nhs_val,
+                                    )
+                                    if success:
+                                        ui.notify(
+                                            f"Sample ID generated. {msg}",
+                                            type="positive",
+                                        )
+                                    else:
+                                        ui.notify(
+                                            f"Sample ID generated. {msg}",
+                                            type="warning",
+                                        )
+
+                                def copy_to_clipboard():
+                                    if result_input.value:
+                                        ui.run_javascript(
+                                            f"navigator.clipboard.writeText({json.dumps(result_input.value)})"
+                                        )
+                                        ui.notify("Copied to clipboard", type="positive")
+                                    else:
+                                        ui.notify("Generate an ID first.", type="warning")
+
+                                with ui.row().classes(
+                                    "w-full gap-2 mt-2 flex-wrap"
+                                ):
+                                    ui.button(
+                                        "Generate sample ID",
+                                        on_click=generate_sample_id,
+                                        icon="fingerprint",
+                                    ).props("color=primary no-caps")
+                                    ui.button(
+                                        "Copy to clipboard",
+                                        on_click=copy_to_clipboard,
+                                        icon="content_copy",
+                                    ).props("flat no-caps outline")
 
     def _safe_notify(self, message: str, type_: str = "info"):
         """Notify only if the client context is still valid (avoids 'client deleted' errors)."""
@@ -6729,18 +7293,28 @@ class GUILauncher:
         with watched_container:
             paths = get_watched_paths()
             if paths:
-                ui.label("Currently watched:").classes("text-sm font-medium")
+                ui.label("Currently watched").classes(
+                    "target-coverage-panel__meta-label mt-1 mb-1"
+                )
                 for p in paths:
-                    with ui.row().classes("w-full items-center gap-2 p-2 bg-gray-100 dark:bg-gray-800 rounded"):
-                        ui.label(p).classes("text-sm flex-1 break-all")
+                    with ui.row().classes(
+                        "w-full items-center gap-2 p-2 rounded min-w-0 "
+                        "watched-folders-path-row"
+                    ):
+                        ui.label(p).classes("text-sm flex-1 break-all font-mono")
                         ui.button(
                             "Remove",
                             on_click=lambda path=p: self._do_remove_folder(
-                                path, watched_container, remove_watch_path, get_watched_paths
+                                path,
+                                watched_container,
+                                remove_watch_path,
+                                get_watched_paths,
                             ),
-                        ).props("flat color=negative size=sm")
+                        ).props("flat color=negative size=sm no-caps")
             else:
-                ui.label("No folders currently watched.").classes("text-sm text-gray-500 italic")
+                ui.label("No folders currently watched.").classes(
+                    "classification-insight-foot italic"
+                )
 
     def stop_gui(self):
         """Stop the GUI thread."""

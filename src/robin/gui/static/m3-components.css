@@ -46,7 +46,7 @@
   bottom: 24px;
   right: 24px;
   height: 56px;
-  padding: 0 24px;
+  padding: 0 16px;
   border-radius: 28px;
   background-color: var(--md-primary);  /* Green */
   color: var(--md-on-primary);
@@ -119,7 +119,7 @@
   display: flex;
   align-items: center;
   height: 80px;
-  padding: 0 24px;
+  padding: 0 16px;
   background-color: var(--md-surface);  /* White */
   border-bottom: 1px solid var(--md-outline-variant);
   box-shadow: var(--elevation-1);
@@ -171,7 +171,7 @@
 
 .nav-drawer__header {
   height: 120px;
-  padding: 24px;
+  padding: 16px;
   background-color: var(--md-primary);  /* Green header */
   color: var(--md-on-primary);
   display: flex;
@@ -185,14 +185,14 @@
 }
 
 .nav-drawer__content {
-  padding: 16px 0;
+  padding: 12px 0;
 }
 
 .nav-drawer__item {
   display: flex;
   align-items: center;
   height: 56px;
-  padding: 0 24px;
+  padding: 0 16px;
   color: var(--md-on-surface);
   text-decoration: none;
   transition: background-color var(--transition-base);
@@ -229,8 +229,8 @@
 }
 
 .search-bar:focus-within {
-  border-color: var(--md-primary);  /* Green focus */
-  box-shadow: 0 0 0 3px rgba(79, 145, 83, 0.1);  /* Apple's focus ring */
+  border-color: var(--md-primary);
+  box-shadow: 0 0 0 3px rgba(var(--md-primary-rgb), 0.15);
 }
 
 .search-bar__input {
@@ -269,7 +269,7 @@
 
 .data-table__header {
   background-color: var(--md-surface-container-high);
-  padding: 16px 24px;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--md-outline-variant);
 }
 
@@ -319,7 +319,7 @@
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 16px 24px;
+  padding: 12px 16px;
   background-color: var(--md-surface-container);  /* Light gray */
   border-top: 1px solid var(--md-outline-variant);
 }
@@ -387,7 +387,7 @@
   transform: translateX(-50%);
   background-color: var(--md-inverse-surface);
   color: var(--md-inverse-on-surface);
-  padding: 14px 24px;
+  padding: 12px 16px;
   border-radius: var(--radius-md);
   box-shadow: var(--elevation-3);
   z-index: 1400;
@@ -566,7 +566,7 @@
 /* Apple HIG: Focus management for accessibility */
 .focus-visible {
   outline: none;
-  box-shadow: 0 0 0 3px rgba(79, 145, 83, 0.3);  /* Apple's focus ring */
+  box-shadow: 0 0 0 3px rgba(var(--md-primary-rgb), 0.28);
   border-radius: var(--radius-sm);
 }
 
