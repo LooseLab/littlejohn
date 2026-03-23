@@ -201,7 +201,7 @@ class BedConversionAnalysis:
             try:
                 # Run matkit on the BAM file (writes parquet when path ends in .parquet)
                 if run_matkit_callable is not None:
-                    print("Running matkit callable")
+                    logger.debug("Running matkit callable")
                     run_matkit_callable(bam, temp_file.name)
                 else:
                     # Fallback if robin is not available (write empty parquet not used in real runs)
@@ -277,7 +277,6 @@ class BedConversionAnalysis:
 
         # Use merge_modkit_files exactly like the working code
         # This function is designed to create binary parquet files, not text files
-        print(data)
         merge_modkit_files(
             data,
             state,  # Output parquet file path
