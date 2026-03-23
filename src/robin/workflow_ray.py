@@ -968,7 +968,7 @@ class Coordinator:
             q: self.max_inflight_per_type for q in QUEUE_TO_TYPES
         }
         self.max_waiting_per_queue: Dict[str, int] = {
-            q: self.max_inflight_per_type * 20 for q in QUEUE_TO_TYPES
+            q: self.max_inflight_per_type * 200 for q in QUEUE_TO_TYPES
         }
         # Optional debug logging when backpressure caps are hit.
         # Enable with:
