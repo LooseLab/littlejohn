@@ -376,8 +376,15 @@ TRIGGERS: Dict[str, List[str]] = {
 
 # Per-sample de-duplication to avoid output races. Ensure only one job of these types
 # runs concurrently per sample (max 1 running + 1 pending).
-# Only deduplicate classifiers/slow per sample; analysis/bed_conversion should queue, not skip
-DEDUP_TYPES: Set[str] = {"sturgeon", "nanodx", "pannanodx", "random_forest"}
+# Only deduplicate selected per-sample jobs; analysis/bed_conversion should queue, not skip.
+# Include SNP analysis to avoid duplicate manual submissions for the same sample.
+DEDUP_TYPES: Set[str] = {
+    "sturgeon",
+    "nanodx",
+    "pannanodx",
+    "random_forest",
+    "snp_analysis",
+}
 
 # Per-sample serialization by type to avoid races on shared per-sample outputs
 # Disabled: treat CNV like other analysis jobs (mgmt/target/fusion)
