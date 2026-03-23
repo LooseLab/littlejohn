@@ -2112,7 +2112,7 @@ class GUILauncher:
                         # Initialize filters model
                         self._samples_filters = getattr(
                             self, "_samples_filters", None
-                        ) or {"query": "", "origin": "All"}
+                        ) or {"query": "", "origin": "All", "job_type": "All"}
 
                         # Global search box
                         self.samples_search = (
@@ -2144,6 +2144,19 @@ class GUILauncher:
                             .on("change", self._on_origin_filter_update)
                             .on("update:model-value", self._on_origin_filter_update)
                             .classes("min-w-[11rem]")
+                        )
+
+                        # Job type filter (options populated from current row data)
+                        self.job_type_filter = (
+                            ui.select(
+                                options=["All"],
+                                value=self._samples_filters.get("job_type", "All"),
+                                label="Job type",
+                            )
+                            .props("dense clearable outlined")
+                            .on("change", self._on_job_type_filter_update)
+                            .on("update:model-value", self._on_job_type_filter_update)
+                            .classes("min-w-[12rem]")
                         )
 
                     # Loading state container
@@ -3041,6 +3054,18 @@ class GUILauncher:
     def _on_origin_filter_update(self, _=None) -> None:
         self._set_samples_origin_filter(self._get_origin_filter_value())
 
+    def _get_job_type_filter_value(self) -> str:
+        try:
+            v = self.job_type_filter.value
+            if v is None or v == "":
+                return "All"
+            return str(v)
+        except Exception:
+            return "All"
+
+    def _on_job_type_filter_update(self, _=None) -> None:
+        self._set_samples_job_type_filter(self._get_job_type_filter_value())
+
     def _normalize_rows_for_display(
         self, rows: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
@@ -3098,7 +3123,11 @@ class GUILauncher:
         try:
             # Ensure we have a filters dict
             if not hasattr(self, "_samples_filters"):
-                self._samples_filters = {"query": "", "origin": "All"}
+                self._samples_filters = {
+                    "query": "",
+                    "origin": "All",
+                    "job_type": "All",
+                }
             
             # Normalize the query
             normalized_query = (query or "").strip().lower()
@@ -3117,7 +3146,11 @@ class GUILauncher:
         try:
             # Ensure we have a filters dict
             if not hasattr(self, "_samples_filters"):
-                self._samples_filters = {"query": "", "origin": "All"}
+                self._samples_filters = {
+                    "query": "",
+                    "origin": "All",
+                    "job_type": "All",
+                }
             
             # Normalize the origin value
             normalized_origin = origin_value or "All"
@@ -3130,6 +3163,24 @@ class GUILauncher:
             logging.debug(f"Origin filter updated: '{normalized_origin}'")
         except Exception as e:
             logging.error(f"Error setting samples origin filter: {e}")
+            pass
+
+    def _set_samples_job_type_filter(self, job_type_value: str) -> None:
+        try:
+            if not hasattr(self, "_samples_filters"):
+                self._samples_filters = {
+                    "query": "",
+                    "origin": "All",
+                    "job_type": "All",
+                }
+
+            normalized_job_type = job_type_value or "All"
+            self._samples_filters["job_type"] = normalized_job_type
+
+            self._apply_samples_table_filters()
+            logging.debug(f"Job type filter updated: '{normalized_job_type}'")
+        except Exception as e:
+            logging.error(f"Error setting samples job type filter: {e}")
             pass
 
     def _apply_samples_table_filters(self) -> None:
@@ -3159,6 +3210,42 @@ class GUILauncher:
             if origin and origin != "All":
                 rows = [r for r in rows if (r.get("origin") == origin)]
                 logging.debug(f"After origin filter ({origin}): {len(rows)} rows")
+
+            # Keep job-type filter options up to date from the unfiltered row set.
+            try:
+                all_job_types: Set[str] = set()
+                for r in self._normalize_rows_for_display(base_rows):
+                    jt = str(r.get("job_types", "") or "").strip()
+                    if not jt:
+                        continue
+                    for token in jt.split(","):
+                        token = token.strip()
+                        if token:
+                            all_job_types.add(token)
+                options = ["All"] + sorted(all_job_types)
+                if hasattr(self, "job_type_filter"):
+                    self.job_type_filter.set_options(options)
+                    current_jt = (self._samples_filters or {}).get("job_type", "All")
+                    if current_jt not in options:
+                        self._samples_filters["job_type"] = "All"
+                        self.job_type_filter.value = "All"
+            except Exception:
+                pass
+
+            # Job type filter (exact token match in comma-separated job_types field)
+            selected_job_type = (self._samples_filters or {}).get("job_type", "All")
+            if selected_job_type and selected_job_type != "All":
+                def _row_has_job_type(r: Dict[str, Any]) -> bool:
+                    jt = str(r.get("job_types", "") or "").strip()
+                    if not jt:
+                        return False
+                    parts = [p.strip() for p in jt.split(",") if p.strip()]
+                    return selected_job_type in parts
+
+                rows = [r for r in rows if _row_has_job_type(r)]
+                logging.debug(
+                    f"After job type filter ({selected_job_type}): {len(rows)} rows"
+                )
 
             # Global query filter
             q = (self._samples_filters or {}).get("query", "")
