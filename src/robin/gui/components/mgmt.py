@@ -16,55 +16,138 @@ except ImportError:  # pragma: no cover
 from robin.gui.theme import styled_table
 
 
+def _is_dark_mode() -> bool:
+    """Match Quasar ``body--dark`` via app storage (see theme.frame)."""
+    try:
+        from nicegui import app
+
+        return bool(app.storage.user.get("dark_mode"))
+    except Exception:
+        return False
+
+
+def _apply_mgmt_figure_theme(fig: Any, dark: bool) -> None:
+    """Adjust matplotlib locus figure for light vs dark UI (design.md §6). Methylartist is theme-agnostic."""
+    if fig is None:
+        return
+    # Light: clinical white surface; dark: slate-950 / midnight analysis strip
+    if dark:
+        bg = "#0f172a"
+        fg = "#e2e8f0"
+        fg_muted = "#94a3b8"
+    else:
+        bg = "#ffffff"
+        fg = "#0f172a"
+        fg_muted = "#475569"
+    try:
+        fig.patch.set_facecolor(bg)
+        for ax in fig.get_axes():
+            try:
+                ax.set_facecolor(bg)
+                ax.tick_params(colors=fg_muted)
+                ax.xaxis.label.set_color(fg_muted)
+                ax.yaxis.label.set_color(fg_muted)
+                ax.title.set_color(fg)
+                for spine in ax.spines.values():
+                    spine.set_color(fg_muted)
+                leg = ax.get_legend()
+                if leg is not None:
+                    fr = leg.get_frame()
+                    if fr is not None:
+                        fr.set_facecolor(bg)
+                        fr.set_edgecolor(fg_muted)
+                    for t in leg.get_texts():
+                        t.set_color(fg)
+            except Exception:
+                continue
+        for txt in getattr(fig, "texts", []) or []:
+            try:
+                txt.set_color(fg)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _mgmt_meth_tier(average: float) -> str:
+    """Methylation band for styling (design.md §9.2; matches analysis strip)."""
+    if average > 10:
+        return "high"
+    if average > 5:
+        return "medium"
+    return "low"
+
+
 def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
     """Build the MGMT section and attach refresh timer. Uses launcher._mgmt_state."""
-    with ui.card().classes("w-full"):
-        with ui.card().classes(
-            "w-full bg-gradient-to-r from-blue-50 to-indigo-50 mb-2 p-2"
-        ):
-            with ui.row().classes("gap-6 items-center"):
-                mgmt_status = ui.label("MGMT status: Unknown").classes(
-                    "text-sm font-semibold text-blue-800"
-                )
-                mgmt_avg = ui.label("Average: --%").classes("text-sm text-gray-700")
-                mgmt_pred = ui.label("Prediction: --%").classes("text-sm text-gray-700")
-        ui.label("MGMT methylation plot").classes("text-sm text-gray-700")
-        # mgmt_img = ui.image('')
-        # Matplotlib element for displaying the methylation plot
-        # Using ui.matplotlib() as it works with pre-existing figure objects
-        # Width is 2x relative to height (24:12 = 2:1 aspect ratio)
-        mgmt_mpl = ui.matplotlib(figsize=(24, 12)).classes("w-full")
-        ui.separator()
-        ui.label("MGMT results (latest)").classes("text-sm text-gray-700 mt-2")
-        _, mgmt_results_table = styled_table(
-            columns=[
-                {"name": "average", "label": "Average %", "field": "average"},
-                {"name": "pred", "label": "Prediction %", "field": "pred"},
-                {"name": "status", "label": "Status", "field": "status"},
-            ],
-            rows=[],
-            pagination=0,
-            class_size="table-xs",
-        )
-        ui.separator()
-        ui.label("MGMT CpG Site Methylation Data").classes("text-sm text-gray-700 mt-2")
-        _, mgmt_sites_table = styled_table(
-            columns=[
-                {"name": "site", "label": "Site", "field": "site"},
-                {"name": "chr", "label": "Chr", "field": "chr"},
-                {"name": "pos", "label": "CpG Position", "field": "pos"},
-                {"name": "cov_fwd", "label": "Forward Cov", "field": "cov_fwd"},
-                {"name": "cov_rev", "label": "Reverse Cov", "field": "cov_rev"},
-                {"name": "cov_total", "label": "Total Cov", "field": "cov_total"},
-                {"name": "meth", "label": "% Methylation", "field": "meth"},
-                {"name": "meth_fwd", "label": "Forward Methylated", "field": "meth_fwd"},
-                {"name": "meth_rev", "label": "Reverse Methylated", "field": "meth_rev"},
-                {"name": "notes", "label": "Notes", "field": "notes"},
-            ],
-            rows=[],
-            pagination=0,
-            class_size="table-xs",
-        )
+    # design.md §6–§9: insight shell, cards, semantic tiers, explicit .body--dark CSS
+    with ui.element("div").classes("w-full min-w-0").props("id=analysis-detail-mgmt"):
+        with ui.element("div").classes("classification-insight-shell w-full min-w-0"):
+            ui.label("MGMT methylation").classes(
+                "classification-insight-heading text-headline-small"
+            )
+            with ui.element("div").classes(
+                "classification-insight-card w-full min-w-0"
+            ):
+                with ui.column().classes("w-full min-w-0 gap-2 p-2 md:p-3"):
+                    with ui.row().classes("items-center gap-2 min-w-0"):
+                        ui.icon("science").classes("classification-insight-icon")
+                        ui.label("Promoter summary").classes(
+                            "classification-insight-model flex-1 min-w-0"
+                        )
+                    mgmt_status = ui.label("MGMT status: Unknown").classes(
+                        "classification-insight-result w-full"
+                    )
+                    mgmt_avg = ui.label("Average methylation: --%").classes(
+                        "classification-insight-level classification-insight-level--low w-full"
+                    )
+                    mgmt_pred = ui.label("Prediction score: --%").classes(
+                        "classification-insight-meta w-full"
+                    )
+                    ui.label(
+                        "chr10 MGMT promoter; per-site strand coverage below."
+                    ).classes("classification-insight-foot")
+            ui.label("Locus visualization").classes(
+                "target-coverage-panel__meta-label mt-4 mb-1"
+            )
+            with ui.element("div").classes("w-full target-coverage-panel__plot-wrap"):
+                # Width 2× height (24:12) for methylartist-style locus figure
+                mgmt_mpl = ui.matplotlib(figsize=(24, 12)).classes("w-full")
+            ui.separator().classes("mgmt-detail-separator")
+            ui.label("Latest results").classes(
+                "target-coverage-panel__meta-label mt-2 mb-1"
+            )
+            _, mgmt_results_table = styled_table(
+                columns=[
+                    {"name": "average", "label": "Average %", "field": "average"},
+                    {"name": "pred", "label": "Prediction %", "field": "pred"},
+                    {"name": "status", "label": "Status", "field": "status"},
+                ],
+                rows=[],
+                pagination=0,
+                class_size="table-xs",
+            )
+            ui.separator().classes("mgmt-detail-separator")
+            ui.label("CpG site methylation").classes(
+                "target-coverage-panel__meta-label mt-2 mb-1"
+            )
+            _, mgmt_sites_table = styled_table(
+                columns=[
+                    {"name": "site", "label": "Site", "field": "site"},
+                    {"name": "chr", "label": "Chr", "field": "chr"},
+                    {"name": "pos", "label": "CpG Position", "field": "pos"},
+                    {"name": "cov_fwd", "label": "Forward Cov", "field": "cov_fwd"},
+                    {"name": "cov_rev", "label": "Reverse Cov", "field": "cov_rev"},
+                    {"name": "cov_total", "label": "Total Cov", "field": "cov_total"},
+                    {"name": "meth", "label": "% Methylation", "field": "meth"},
+                    {"name": "meth_fwd", "label": "Forward Methylated", "field": "meth_fwd"},
+                    {"name": "meth_rev", "label": "Reverse Methylated", "field": "meth_rev"},
+                    {"name": "notes", "label": "Notes", "field": "notes"},
+                ],
+                rows=[],
+                pagination=0,
+                class_size="table-xs",
+            )
 
     def _extract_mgmt_specific_sites(bed_path: Path) -> List[Dict[str, Any]]:
         try:
@@ -332,8 +415,18 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                     average = float(df.get("average", pd.Series([0.0])).iloc[0])
                     pred = float(df.get("pred", pd.Series([0.0])).iloc[0])
                     mgmt_status.set_text(f"MGMT status: {status}")
-                    mgmt_avg.set_text(f"Average: {average:.2f}%")
-                    mgmt_pred.set_text(f"Prediction: {pred:.2f}%")
+                    mgmt_avg.set_text(f"Average methylation: {average:.2f}%")
+                    _tier = _mgmt_meth_tier(average)
+                    try:
+                        mgmt_avg.classes(
+                            replace=(
+                                f"classification-insight-level "
+                                f"classification-insight-level--{_tier} w-full"
+                            )
+                        )
+                    except Exception:
+                        pass
+                    mgmt_pred.set_text(f"Prediction score: {pred:.2f}%")
                     try:
                         mgmt_results_table.rows = [
                             {
@@ -521,6 +614,7 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                             except Exception:
                                 pass
                         logging.debug(f"[MGMT] Assigning figure to matplotlib element")
+                        _apply_mgmt_figure_theme(fig, _is_dark_mode())
                         mgmt_mpl.figure = fig
                         mgmt_mpl.update()
                         logging.debug(f"[MGMT] Plot updated successfully")
@@ -545,7 +639,7 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                     ax.set_ylim(0, 1)
                     ax.axis('off')
                     ax.set_title("MGMT Methylation Plot")
-                    
+                    _apply_mgmt_figure_theme(fig, _is_dark_mode())
                     mgmt_mpl.figure = fig
                     mgmt_mpl.update()
             elif not bam_path.exists():
@@ -567,6 +661,7 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                     ax.set_ylim(0, 1)
                     ax.axis('off')
                     ax.set_title("MGMT Methylation Plot")
+                    _apply_mgmt_figure_theme(fig, _is_dark_mode())
                     mgmt_mpl.figure = fig
                     mgmt_mpl.update()
 
@@ -582,6 +677,7 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                 "bam_path": current_bam_path_str,
                 "bam_mtime": bam_mtime,
                 "last_visit_time": state.get("last_visit_time", time.time()),  # Preserve visit time
+                "mgmt_plot_theme_dark": _is_dark_mode(),
             }
             
             # Debug: log state after update
@@ -593,7 +689,32 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
     # Start the refresh timer (every 30 seconds)
     refresh_timer = ui.timer(30.0, _refresh_mgmt, active=True, immediate=False)
     ui.timer(0.5, _refresh_mgmt, once=True)
+
+    def _sync_mgmt_plot_theme_if_needed() -> None:
+        """Re-tint matplotlib locus figure when the user toggles light/dark mode."""
+        try:
+            dark = _is_dark_mode()
+        except Exception:
+            dark = False
+        key = str(sample_dir)
+        state = launcher._mgmt_state.get(key, {})
+        if state.get("mgmt_plot_theme_dark") == dark:
+            return
+        fig = getattr(mgmt_mpl, "figure", None)
+        if fig is None:
+            launcher._mgmt_state.setdefault(key, {})["mgmt_plot_theme_dark"] = dark
+            return
+        _apply_mgmt_figure_theme(fig, dark)
+        try:
+            mgmt_mpl.update()
+        except Exception:
+            pass
+        launcher._mgmt_state.setdefault(key, {})["mgmt_plot_theme_dark"] = dark
+
+    mgmt_theme_timer = ui.timer(0.5, _sync_mgmt_plot_theme_if_needed, active=True)
     try:
-        ui.context.client.on_disconnect(lambda: refresh_timer.deactivate())
+        ui.context.client.on_disconnect(
+            lambda: (refresh_timer.deactivate(), mgmt_theme_timer.deactivate())
+        )
     except Exception:
         pass

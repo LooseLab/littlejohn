@@ -62,6 +62,25 @@ def get_confidence_level(classifier: str, confidence: float) -> str:
     else:
         return "Very low confidence"
 
+
+def get_confidence_ui_tier(classifier: str, confidence: float) -> str:
+    """
+    Map confidence percentage (0–100) to 'high', 'medium', or 'low' for UI bars and badges.
+
+    Uses the same thresholds as get_confidence_level (CLASSIFIER_CONFIDENCE_THRESHOLDS /
+    DEFAULT_CONFIDENCE_THRESHOLDS). Bands below ``medium`` map to ``low`` (including
+    “very low” verbal labels).
+    """
+    thresholds = CLASSIFIER_CONFIDENCE_THRESHOLDS.get(
+        classifier, DEFAULT_CONFIDENCE_THRESHOLDS
+    )
+    if confidence >= thresholds["high"]:
+        return "high"
+    if confidence >= thresholds["medium"]:
+        return "medium"
+    return "low"
+
+
 def get_confidence_status(classifier: str, confidence: float) -> tuple[str, str]:
     """
     Get confidence status and color for reporting.

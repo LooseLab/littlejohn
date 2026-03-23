@@ -15,6 +15,7 @@ try:
 except ImportError:  # pragma: no cover
     ui = None
 
+from robin.classification_config import get_confidence_ui_tier
 from robin.gui.config import (
     get_confidence_level as get_classifier_confidence_level,
     is_section_enabled,
@@ -39,9 +40,30 @@ def _set_summary_cache(sample_dir: Path, data: Dict[str, Any]) -> None:
         _SUMMARY_CACHE[key] = data
 
 
+def _run_summary_cell(
+    icon: str,
+    label: str,
+    value: str,
+    *,
+    col_class: str = "",
+    hint: str = "",
+) -> None:
+    """One Run Summary grid cell; colors from styles.css (§7, .body--dark — not Tailwind dark:)."""
+    cell = ("run-summary-cell min-w-0 " + col_class).strip()
+    with ui.element("div").classes(cell):
+        with ui.element("div").classes("run-summary-cell-inner"):
+            ui.icon(icon).classes("run-summary-icon")
+            with ui.element("div").classes("run-summary-stack"):
+                ui.label(label).classes("run-summary-label")
+                vl = ui.label(value).classes("run-summary-value")
+                if hint:
+                    safe = hint.replace('"', "'")
+                    vl.props(f'title="{safe}"')
+
+
 @ui.refreshable
 def _run_info_section(sample_dir: Path, sample_id: str):
-    """Create refreshable run information section."""
+    """Run Summary block (design.md §7): responsive grid, light/dark tokens."""
     cache = _get_summary_cache(sample_dir)
     run_info = cache.get(
         "run_info",
@@ -51,32 +73,65 @@ def _run_info_section(sample_dir: Path, sample_id: str):
             "device": "Loading...",
             "flow_cell": "Loading...",
             "panel": "Loading...",
+            "bam_passed": "Not available",
+            "bam_failed": "Not available",
+            "total_bases": "Not available",
+            "mapped_reads": "Not available",
+            "unmapped_reads": "Not available",
+            "bam_batches": "Not available",
         },
     )
-    
-    with ui.card().classes("w-full"):
-        ui.label("Run Details").classes("text-lg font-semibold text-blue-800")
-        ui.separator().classes().style("border: 1px solid var(--md-primary)")
-        
-        with ui.row().classes("w-full gap-2 sm:gap-1 flex-wrap mobile-run-details"):
-            _create_dashboard_card(
-                "Run Time", run_info.get("run_time", "Not available"), "schedule", "Sequencing run timestamp"
-            )
-            _create_dashboard_card(
-                        "Basecall Model", run_info.get("model", "Not available"), "settings", "Model used for basecalling"
-            )
-            _create_dashboard_card(
-                "Device", run_info.get("device", "Not available"), "smartphone", "Sequencing device identifier"
-            )
-            _create_dashboard_card(
-                "Flow Cell", run_info.get("flow_cell", "Not available"), "tag", "Flow cell identification"
-            )
-            _create_dashboard_card(
-                "Analysis Panel", run_info.get("panel", "Not available"), "science", "Target panel used for analysis"
-            )
-            _create_dashboard_card(
-                "Sample ID", sample_id, "play_arrow", "Unique sample identifier"
-            )
+
+    rt = run_info.get("run_time", "Not available")
+    model = run_info.get("model", "Not available")
+    device = run_info.get("device", "Not available")
+    flow = run_info.get("flow_cell", "Not available")
+    panel = run_info.get("panel", "Not available")
+
+    # (icon, label, value, col_span); optional tooltip text via hints map
+    hints = {
+        "Run time": "run_info_run_time (from master.csv; shown in local time with seconds)",
+        "Device": "run_info_device",
+        "Flow cell": "run_info_flow_cell",
+        "Analysis panel": "analysis_panel",
+        "Basecall model": "run_info_model",
+        "Sample ID": "Unique sample identifier",
+        "BAM passed": "counter_bam_passed",
+        "BAM failed": "counter_bam_failed",
+        "Total bases": "counter_bases_count",
+        "Mapped reads": "counter_mapped_count",
+        "Unmapped reads": "counter_unmapped_count",
+        "BAM batches": "bam_tracking_counter / bam_tracking_total_files",
+    }
+    cells: List[tuple] = [
+        ("schedule", "Run time", rt, ""),
+        ("smartphone", "Device", device, ""),
+        ("tag", "Flow cell", flow, ""),
+        ("science", "Analysis panel", panel, ""),
+        ("settings", "Basecall model", model, "run-summary-cell--basecall"),
+        ("pin", "Sample ID", sample_id, "run-summary-cell--sample"),
+    ]
+    for icn, lab, key in (
+        ("check_circle", "BAM passed", "bam_passed"),
+        ("cancel", "BAM failed", "bam_failed"),
+        ("analytics", "Total bases", "total_bases"),
+        ("map", "Mapped reads", "mapped_reads"),
+        ("link_off", "Unmapped reads", "unmapped_reads"),
+        ("layers", "BAM batches", "bam_batches"),
+    ):
+        val = run_info.get(key, "Not available")
+        if val != "Not available":
+            cells.append((icn, lab, val, ""))
+
+    # §7.2 / §7.3 — shell is flex column + full-width grid (see styles.css; avoid ui.column shrink)
+    with ui.element("div").classes("run-summary-shell w-full min-w-0"):
+        ui.label("Run summary").classes("run-summary-title text-headline-small")
+        with ui.element("div").classes("run-summary-grid"):
+            for icn, lab, val, span in cells:
+                ht = hints.get(lab, "")
+                _run_summary_cell(
+                    icn, lab, val, col_class=span, hint=ht
+                )
 
 
 @ui.refreshable
@@ -121,61 +176,65 @@ def _classification_section(sample_dir: Path, launcher: Any = None):
     if workflow_steps and not enabled_classification_steps:
         return
     
-    with ui.card().classes("w-full"):
-        ui.label("Classification Details").classes("text-lg font-semibold text-blue-800")
-        ui.separator().classes().style("border: 1px solid var(--md-primary)")
-        
-        with ui.row().classes("w-full gap-2 sm:gap-1 flex-wrap mobile-classification-details"):
+    with ui.element("div").classes("classification-insight-shell w-full min-w-0"):
+        ui.label("Classification details").classes(
+            "classification-insight-heading text-headline-small"
+        )
+        with ui.element("div").classes("classification-insight-grid"):
             # Sturgeon
             if not workflow_steps or "sturgeon" in enabled_classification_steps:
                 sturgeon_data = classification_data.get("sturgeon", {})
                 _create_classification_dashboard_card_with_data(
-                    "Sturgeon", 
+                    "Sturgeon",
                     sturgeon_data.get("classification", "Not available"),
                     sturgeon_data.get("confidence", 0.0),
                     sturgeon_data.get("confidence_level", "Not available"),
                     sturgeon_data.get("features", 0),
-                    "psychology", # icon parameter
-                    "CNS tumor classification"
+                    "psychology",
+                    "CNS tumor classification",
+                    "sturgeon",
                 )
-            
+
             # NanoDX
             if not workflow_steps or "nanodx" in enabled_classification_steps:
                 nanodx_data = classification_data.get("nanodx", {})
                 _create_classification_dashboard_card_with_data(
-                    "NanoDX", 
+                    "NanoDX",
                     nanodx_data.get("classification", "Not available"),
                     nanodx_data.get("confidence", 0.0),
                     nanodx_data.get("confidence_level", "Not available"),
                     nanodx_data.get("features", 0),
-                    "biotech", 
-                    "CNS tumor classification"
+                    "biotech",
+                    "CNS tumor classification",
+                    "nanodx",
                 )
-            
+
             # PanNanoDX
             if not workflow_steps or "pannanodx" in enabled_classification_steps:
                 pannanodx_data = classification_data.get("pannanodx", {})
                 _create_classification_dashboard_card_with_data(
-                    "PanNanoDX", 
+                    "PanNanoDX",
                     pannanodx_data.get("classification", "Not available"),
                     pannanodx_data.get("confidence", 0.0),
                     pannanodx_data.get("confidence_level", "Not available"),
                     pannanodx_data.get("features", 0),
-                    "science", 
-                    "Pan-cancer tumor classification"
+                    "science",
+                    "Pan-cancer tumor classification",
+                    "pannanodx",
                 )
-            
+
             # Random Forest
             if not workflow_steps or "random_forest" in enabled_classification_steps:
                 rf_data = classification_data.get("random_forest", {})
                 _create_classification_dashboard_card_with_data(
-                    "Random Forest", 
+                    "Random Forest",
                     rf_data.get("classification", "Not available"),
                     rf_data.get("confidence", 0.0),
                     rf_data.get("confidence_level", "Not available"),
                     rf_data.get("features", 0),
-                    "forest", 
-                    "CNS Machine learning classification"
+                    "forest",
+                    "CNS Machine learning classification",
+                    "random_forest",
                 )
 
 
@@ -199,21 +258,22 @@ def _analysis_section(sample_dir: Path, launcher: Any = None):
     
     if workflow_steps and not any([should_show_target, should_show_cnv, should_show_mgmt, should_show_fusion]):
         return
-    
-    with ui.card().classes("w-full"):
-        ui.label("Analysis Details").classes("text-lg font-semibold text-blue-800")
-        ui.separator().classes().style("border: 1px solid var(--md-primary)")
-        
-        with ui.row().classes("w-full gap-2 sm:gap-1 flex-wrap mobile-analysis-details"):
+
+    with ui.element("div").classes("classification-insight-shell w-full min-w-0"):
+        ui.label("Analysis details").classes(
+            "classification-insight-heading text-headline-small"
+        )
+        with ui.element("div").classes("classification-insight-grid"):
             # Coverage Analysis (target)
             if should_show_target:
                 _create_coverage_dashboard_card_with_data(
                     coverage_data.get("quality", "Not available"),
                     coverage_data.get("target_coverage", "Not available"),
                     coverage_data.get("global_coverage", "Not available"),
-                    coverage_data.get("enrichment", "Not available")
+                    coverage_data.get("enrichment", "Not available"),
+                    anchor_key="coverage",
                 )
-            
+
             # CNV Analysis
             if should_show_cnv:
                 _create_cnv_dashboard_card_with_data(
@@ -221,9 +281,10 @@ def _analysis_section(sample_dir: Path, launcher: Any = None):
                     cnv_data.get("bin_width", "Not available"),
                     cnv_data.get("variance", "Not available"),
                     cnv_data.get("gained", 0),
-                    cnv_data.get("lost", 0)
+                    cnv_data.get("lost", 0),
+                    anchor_key="cnv",
                 )
-            
+
             # MGMT Analysis
             if should_show_mgmt:
                 _create_mgmt_dashboard_card_with_data(
@@ -231,9 +292,10 @@ def _analysis_section(sample_dir: Path, launcher: Any = None):
                     mgmt_data.get("methylation_percent", "Not available"),
                     mgmt_data.get("average_methylation", "Not available"),
                     mgmt_data.get("prediction_score", "Not available"),
-                    mgmt_data.get("cpg_sites", "Not available")
+                    mgmt_data.get("cpg_sites", "Not available"),
+                    anchor_key="mgmt",
                 )
-            
+
             # Fusion Analysis
             if should_show_fusion:
                 panel = _get_analysis_panel(sample_dir)
@@ -244,7 +306,8 @@ def _analysis_section(sample_dir: Path, launcher: Any = None):
                     fusion_data.get("target_pairs", 0),
                     fusion_data.get("target_groups", 0),
                     fusion_data.get("genome_pairs", 0),
-                    fusion_data.get("genome_groups", 0)
+                    fusion_data.get("genome_groups", 0),
+                    anchor_key="fusion",
                 )
 
 
@@ -317,64 +380,84 @@ def _refresh_summary_cache_sync(
     return data
 
 
-def _create_dashboard_card(title: str, value: str, icon: str, description: str) -> None:
-    """Create a compact dashboard-style card matching the Mosaic design pattern."""
-    with ui.card().classes("mosaic-card flex-1 min-w-0 mobile-dashboard-card"):
-        with ui.row().classes("mosaic-card__header"):
-            # Title
-            ui.label(title).classes("mosaic-card__title truncate text-xs sm:text-sm")
-            
-            # Icon in circular background - larger on mobile
-            with ui.row().classes("mosaic-card__icon"):
-                ui.icon(icon).classes("w-5 h-5 sm:w-4 sm:h-4")
-        
-        # Main value with text wrapping
-        ui.label(value).classes("mosaic-card__content text-xs sm:text-sm font-bold mb-1 break-words")
-        
-        # Description
-        ui.label(description).classes("mosaic-card__subtitle text-xs")
+def _scroll_to_classification_detail(anchor_key: str) -> None:
+    """Scroll to the detailed classification panel for this tool (design.md §8)."""
+    safe = "".join(c for c in anchor_key if c.isalnum() or c in "_-")
+    if not safe:
+        return
+    try:
+        ui.run_javascript(
+            f'document.getElementById("classification-detail-{safe}")'
+            f'?.scrollIntoView({{behavior:"smooth",block:"start"}})'
+        )
+    except Exception:
+        pass
+
+
+def _scroll_to_analysis_detail(anchor_key: str) -> None:
+    """Scroll to the detailed analysis section (coverage, CNV, MGMT, fusion). design.md §9."""
+    safe = "".join(c for c in anchor_key if c.isalnum() or c in "_-")
+    if not safe:
+        return
+    try:
+        ui.run_javascript(
+            f'document.getElementById("analysis-detail-{safe}")'
+            f'?.scrollIntoView({{behavior:"smooth",block:"start"}})'
+        )
+    except Exception:
+        pass
 
 
 def _create_classification_dashboard_card_with_data(
-    title: str, 
-    classification: str, 
-    confidence: float, 
-    confidence_level: str, 
-    features: int, 
-    icon: str, 
-    description: str
+    title: str,
+    classification: str,
+    confidence: float,
+    confidence_level: str,
+    features: int,
+    icon: str,
+    description: str,
+    anchor_key: str,
 ) -> None:
-    """Create a compact classification dashboard card with Mosaic styling."""
-    with ui.card().classes("mosaic-card flex-1 min-w-0 mobile-dashboard-card"):
-        with ui.row().classes("mosaic-card__header"):
-            # Title
-            ui.label(title).classes("mosaic-card__title truncate text-xs sm:text-sm")
-            
-            # Icon in circular background - larger on mobile
-            with ui.row().classes("mosaic-card__icon"):
-                ui.icon(icon).classes("w-5 h-5 sm:w-4 sm:h-4")
-        
-        # Main classification result with confidence badge
-        with ui.row().classes("flex items-start justify-between mb-1 gap-1"):
-            ui.label(classification).classes("mosaic-card__content text-xs sm:text-sm font-bold break-words flex-1")
-            # Confidence level badge with color coding
-            confidence_badge_class = "status-badge"
-            if confidence >= 80:
-                confidence_badge_class += " status-badge--success"
-            elif confidence >= 50:
-                confidence_badge_class += " status-badge--warning"
-            else:
-                confidence_badge_class += " status-badge--error"
-            
-            ui.label(confidence_level).classes(confidence_badge_class)
-        
-        # Compact details in a single row
-        with ui.row().classes("flex items-center justify-between mb-1 gap-1"):
-            ui.label(f"Confidence: {confidence:.1f}%").classes("mosaic-card__subtitle")
-            ui.label(f"Features: {features:,}").classes("mosaic-card__subtitle")
-        
-        # Description
-        ui.label(description).classes("mosaic-card__subtitle")
+    """Classification Insight card — design.md §8; click scrolls to detail expansion."""
+    pct = max(0.0, min(100.0, float(confidence)))
+    tier = get_confidence_ui_tier(anchor_key, pct)
+
+    def _on_card_click() -> None:
+        _scroll_to_classification_detail(anchor_key)
+
+    with (
+        ui.element("div")
+        .classes(
+            "classification-insight-card w-full min-w-0 "
+            "cursor-pointer transition-all duration-200 select-none"
+        )
+        .on("click", _on_card_click)
+    ):
+        with ui.column().classes("w-full min-w-0 gap-2 p-2 md:p-3"):
+            with ui.row().classes("items-center gap-2 min-w-0"):
+                ui.icon(icon).classes("classification-insight-icon")
+                ui.label(title).classes("classification-insight-model flex-1 min-w-0")
+            _cls_title = classification.replace('"', "'")
+            ui.label(classification).classes(
+                "classification-insight-result w-full"
+            ).props(f'title="{_cls_title}"')
+            with ui.element("div").classes("classification-insight-track w-full"):
+                ui.element("div").classes(
+                    f"classification-insight-bar classification-insight-bar--{tier}"
+                ).style(f"width: {pct}%")
+            with ui.row().classes(
+                "w-full justify-between items-baseline gap-2 flex-wrap"
+            ):
+                ui.label(f"Confidence: {confidence:.1f}%").classes(
+                    "classification-insight-meta"
+                )
+                ui.label(f"Features: {features:,}").classes(
+                    "classification-insight-meta"
+                )
+            ui.label(confidence_level).classes(
+                f"classification-insight-level classification-insight-level--{tier}"
+            )
+            ui.label(description).classes("classification-insight-foot")
 
 
 def _create_classification_dashboard_card(title: str, classification: str, icon: str, description: str) -> Dict[str, Any]:
@@ -436,54 +519,84 @@ def _create_classification_card(
     return labels
 
 
+def _parse_target_coverage_x(target_coverage: str) -> float | None:
+    try:
+        return float(str(target_coverage).replace("x", "").strip())
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def _coverage_depth_tier(coverage_num: float) -> str:
+    if coverage_num >= 30:
+        return "high"
+    if coverage_num >= 20:
+        return "medium"
+    return "low"
+
+
 def _create_coverage_dashboard_card_with_data(
-    quality: str, 
-    target_coverage: str, 
-    global_coverage: str, 
-    enrichment: str
+    quality: str,
+    target_coverage: str,
+    global_coverage: str,
+    enrichment: str,
+    anchor_key: str = "coverage",
 ) -> None:
-    """Create a compact coverage analysis dashboard card with data."""
-    with ui.card().classes("mosaic-card flex-1 min-w-0 mobile-dashboard-card"):
-        with ui.row().classes("mosaic-card__header"):
-            # Title
-            ui.label("Coverage Analysis").classes("mosaic-card__title truncate text-xs sm:text-sm")
-            
-            # Icon in circular background - larger on mobile
-            with ui.row().classes("mosaic-card__icon"):
-                ui.icon("analytics").classes("w-5 h-5 sm:w-4 sm:h-4")
-        
-        # Main quality result with badge
-        with ui.row().classes("flex items-start justify-between mb-1 gap-1"):
-            ui.label(quality).classes("mosaic-card__content text-xs sm:text-sm font-bold break-words flex-1")
-            # Coverage badge with color coding
-            coverage_badge_class = "status-badge"
-            try:
-                coverage_num = float(target_coverage.replace("x", ""))
-                if coverage_num >= 30:
-                    coverage_badge_class += " status-badge--success"
-                elif coverage_num >= 20:
-                    coverage_badge_class += " status-badge--info"
-                elif coverage_num >= 10:
-                    coverage_badge_class += " status-badge--warning"
-                else:
-                    coverage_badge_class += " status-badge--error"
-            except (ValueError, AttributeError):
-                coverage_badge_class += " status-badge--info"
-            
-            ui.label(target_coverage).classes(coverage_badge_class)
-        
-        # Coverage details in compact layout
-        with ui.column().classes("mb-1 gap-0.5"):
-            ui.label(f"Global: {global_coverage}").classes("mosaic-card__subtitle")
-            ui.label(f"Targets: {target_coverage}").classes("mosaic-card__subtitle")
-            ui.label(f"Enrichment: {enrichment}").classes("mosaic-card__subtitle")
-        
-        # Coverage thresholds as small badges
-        with ui.row().classes("gap-1 flex-wrap"):
-            ui.label("≥30x").classes("px-1 py-0.5 text-xs bg-green-100 text-green-800 rounded")
-            ui.label("≥20x").classes("px-1 py-0.5 text-xs bg-blue-100 text-blue-800 rounded")
-            ui.label("≥10x").classes("px-1 py-0.5 text-xs bg-yellow-100 text-yellow-800 rounded")
-            ui.label("<10x").classes("px-1 py-0.5 text-xs bg-red-100 text-red-800 rounded")
+    """Coverage insight card — same shell as classification (design.md §9)."""
+    cov_num = _parse_target_coverage_x(target_coverage)
+    if cov_num is not None:
+        tier = _coverage_depth_tier(cov_num)
+    else:
+        tier = "low"
+
+    def _on_click() -> None:
+        _scroll_to_analysis_detail(anchor_key)
+
+    _q = quality.replace('"', "'")
+    with (
+        ui.element("div")
+        .classes(
+            "classification-insight-card w-full min-w-0 "
+            "cursor-pointer transition-all duration-200 select-none"
+        )
+        .on("click", _on_click)
+    ):
+        with ui.column().classes("w-full min-w-0 gap-2 p-2 md:p-3"):
+            with ui.row().classes("items-center gap-2 min-w-0"):
+                ui.icon("analytics").classes("classification-insight-icon")
+                ui.label("Coverage analysis").classes(
+                    "classification-insight-model flex-1 min-w-0"
+                )
+            ui.label(quality).classes("classification-insight-result w-full").props(
+                f'title="{_q}"'
+            )
+            with ui.row().classes(
+                "w-full justify-between items-baseline gap-2 flex-wrap"
+            ):
+                ui.label(f"Target: {target_coverage}").classes(
+                    f"classification-insight-level classification-insight-level--{tier}"
+                )
+            with ui.column().classes("w-full gap-1"):
+                ui.label(f"Global: {global_coverage}").classes(
+                    "classification-insight-meta"
+                )
+                ui.label(f"Targets: {target_coverage}").classes(
+                    "classification-insight-meta"
+                )
+                ui.label(f"Enrichment: {enrichment}").classes(
+                    "classification-insight-meta"
+                )
+            with ui.row().classes("gap-1 flex-wrap"):
+                ui.label("≥30x").classes(
+                    "analysis-insight-pill analysis-insight-pill--emerald"
+                )
+                ui.label("≥20x").classes("analysis-insight-pill analysis-insight-pill--sky")
+                ui.label("≥10x").classes(
+                    "analysis-insight-pill analysis-insight-pill--amber"
+                )
+                ui.label("<10x").classes("analysis-insight-pill analysis-insight-pill--rose")
+            ui.label("Target panel coverage quality and depth").classes(
+                "classification-insight-foot"
+            )
 
 
 def _create_coverage_dashboard_card() -> Dict[str, Any]:
@@ -526,37 +639,54 @@ def _create_coverage_dashboard_card() -> Dict[str, Any]:
 
 
 def _create_cnv_dashboard_card_with_data(
-    genetic_sex: str, 
-    bin_width: str, 
-    variance: str, 
-    gained: int, 
-    lost: int
+    genetic_sex: str,
+    bin_width: str,
+    variance: str,
+    gained: int,
+    lost: int,
+    anchor_key: str = "cnv",
 ) -> None:
-    """Create a compact CNV analysis dashboard card with data."""
-    with ui.card().classes("mosaic-card flex-1 min-w-0 mobile-dashboard-card"):
-        with ui.row().classes("mosaic-card__header"):
-            # Title
-            ui.label("Copy Number Analysis").classes("mosaic-card__title truncate text-xs sm:text-sm")
-            
-            # Icon in circular background - larger on mobile
-            with ui.row().classes("mosaic-card__icon"):
-                ui.icon("person").classes("w-5 h-5 sm:w-4 sm:h-4")
-        
-        # Main genetic sex result
-        ui.label(genetic_sex).classes("mosaic-card__content text-xs sm:text-sm font-bold mb-1 break-words")
-        
-        # Analysis details in compact layout
-        with ui.column().classes("mb-1 gap-0.5"):
-            ui.label(f"Bin Width: {bin_width}").classes("mosaic-card__subtitle")
-            ui.label(f"Variance: {variance}").classes("mosaic-card__subtitle")
-        
-        # CNV counts as badges
-        with ui.row().classes("gap-1 mb-1"):
-            ui.label(f"Gained: {gained}").classes("px-1 py-0.5 text-xs font-medium rounded-full bg-green-100 text-green-800")
-            ui.label(f"Lost: {lost}").classes("px-1 py-0.5 text-xs font-medium rounded-full bg-red-100 text-red-800")
-        
-        # Description
-        ui.label("Copy number analysis across genome with breakpoint detection").classes("mosaic-card__subtitle")
+    """CNV insight card — design.md §9."""
+    total = int(gained) + int(lost)
+    total_denom = str(total) if total > 0 else "—"
+
+    def _on_click() -> None:
+        _scroll_to_analysis_detail(anchor_key)
+
+    _gs = genetic_sex.replace('"', "'")
+    with (
+        ui.element("div")
+        .classes(
+            "classification-insight-card w-full min-w-0 "
+            "cursor-pointer transition-all duration-200 select-none"
+        )
+        .on("click", _on_click)
+    ):
+        with ui.column().classes("w-full min-w-0 gap-2 p-2 md:p-3"):
+            with ui.row().classes("items-center gap-2 min-w-0"):
+                ui.icon("person").classes("classification-insight-icon")
+                ui.label("Copy number (CNV)").classes(
+                    "classification-insight-model flex-1 min-w-0"
+                )
+            ui.label(genetic_sex).classes("classification-insight-result w-full").props(
+                f'title="{_gs}"'
+            )
+            ui.label(f"Gained vs total: {gained} / {total_denom}").classes(
+                "classification-insight-meta w-full"
+            )
+            with ui.column().classes("w-full gap-1"):
+                ui.label(f"Bin width: {bin_width}").classes("classification-insight-meta")
+                ui.label(f"Variance: {variance}").classes("classification-insight-meta")
+            with ui.row().classes("gap-1 flex-wrap"):
+                ui.label(f"Gained: {gained}").classes(
+                    "analysis-insight-pill analysis-insight-pill--emerald"
+                )
+                ui.label(f"Lost: {lost}").classes(
+                    "analysis-insight-pill analysis-insight-pill--rose"
+                )
+            ui.label(
+                "Copy number across the genome with breakpoint detection"
+            ).classes("classification-insight-foot")
 
 
 def _create_cnv_dashboard_card() -> Dict[str, Any]:
@@ -596,47 +726,67 @@ def _create_cnv_dashboard_card() -> Dict[str, Any]:
 
 
 def _create_mgmt_dashboard_card_with_data(
-    status: str, 
-    methylation_percent: str, 
-    average_methylation: str, 
-    prediction_score: str, 
-    cpg_sites: str
+    status: str,
+    methylation_percent: str,
+    average_methylation: str,
+    prediction_score: str,
+    cpg_sites: str,
+    anchor_key: str = "mgmt",
 ) -> None:
-    """Create a compact MGMT analysis dashboard card with data."""
-    with ui.card().classes("mosaic-card flex-1 min-w-0 mobile-dashboard-card"):
-        with ui.row().classes("mosaic-card__header"):
-            # Title
-            ui.label("MGMT Analysis").classes("mosaic-card__title truncate text-xs sm:text-sm")
-            
-            # Icon in circular background - larger on mobile
-            with ui.row().classes("mosaic-card__icon"):
-                ui.icon("science").classes("w-5 h-5 sm:w-4 sm:h-4")
-        
-        # Main status result with badge
-        with ui.row().classes("flex items-start justify-between mb-1 gap-1"):
-            ui.label(status).classes("mosaic-card__content text-xs sm:text-sm font-bold break-words flex-1")
-            # Methylation badge with color coding
-            methylation_badge_class = "status-badge"
-            try:
-                meth_num = float(methylation_percent.replace("%", ""))
-                if meth_num > 10:
-                    methylation_badge_class += " status-badge--success"
-                elif meth_num > 5:
-                    methylation_badge_class += " status-badge--warning"
-                else:
-                    methylation_badge_class += " status-badge--error"
-            except (ValueError, AttributeError):
-                methylation_badge_class += " status-badge--info"
-            
-            ui.label(methylation_percent).classes(methylation_badge_class)
-        
-        # Analysis details in compact layout
-        with ui.column().classes("mb-1 gap-0.5"):
-            ui.label(f"Average: {average_methylation}").classes("mosaic-card__subtitle")
-            ui.label(f"Score: {prediction_score}").classes("mosaic-card__subtitle")
-        
-        # Description
-        ui.label(f"MGMT status determined from methylation analysis of {cpg_sites} CpG sites").classes("mosaic-card__subtitle")
+    """MGMT insight card — design.md §9."""
+    try:
+        meth_num = float(str(methylation_percent).replace("%", "").strip())
+    except (ValueError, AttributeError, TypeError):
+        meth_num = None
+
+    if meth_num is not None:
+        if meth_num > 10:
+            tier = "high"
+        elif meth_num > 5:
+            tier = "medium"
+        else:
+            tier = "low"
+    else:
+        tier = "low"
+
+    def _on_click() -> None:
+        _scroll_to_analysis_detail(anchor_key)
+
+    _st = status.replace('"', "'")
+    with (
+        ui.element("div")
+        .classes(
+            "classification-insight-card w-full min-w-0 "
+            "cursor-pointer transition-all duration-200 select-none"
+        )
+        .on("click", _on_click)
+    ):
+        with ui.column().classes("w-full min-w-0 gap-2 p-2 md:p-3"):
+            with ui.row().classes("items-center gap-2 min-w-0"):
+                ui.icon("science").classes("classification-insight-icon")
+                ui.label("MGMT methylation").classes(
+                    "classification-insight-model flex-1 min-w-0"
+                )
+            ui.label(status).classes("classification-insight-result w-full").props(
+                f'title="{_st}"'
+            )
+            with ui.row().classes(
+                "w-full justify-between items-baseline gap-2 flex-wrap"
+            ):
+                ui.label(f"Methylation: {methylation_percent}").classes(
+                    f"classification-insight-level classification-insight-level--{tier}"
+                )
+                ui.label("Promoter %").classes("classification-insight-meta")
+            with ui.column().classes("w-full gap-1"):
+                ui.label(f"Average: {average_methylation}").classes(
+                    "classification-insight-meta"
+                )
+                ui.label(f"Score: {prediction_score}").classes(
+                    "classification-insight-meta"
+                )
+            ui.label(
+                f"Status from methylation at {cpg_sites} CpG sites"
+            ).classes("classification-insight-foot")
 
 
 def _create_mgmt_dashboard_card() -> Dict[str, Any]:
@@ -674,41 +824,60 @@ def _create_mgmt_dashboard_card() -> Dict[str, Any]:
 
 
 def _create_fusion_dashboard_card_with_data(
-    panel: str, 
-    target_fusions: int, 
+    panel: str,
+    target_fusions: int,
     genome_fusions: int,
     target_pairs: int = 0,
     target_groups: int = 0,
     genome_pairs: int = 0,
-    genome_groups: int = 0
+    genome_groups: int = 0,
+    anchor_key: str = "fusion",
 ) -> None:
-    """Create a compact fusion analysis dashboard card with data."""
-    with ui.card().classes("mosaic-card flex-1 min-w-0 mobile-dashboard-card"):
-        with ui.row().classes("mosaic-card__header"):
-            # Title
-            ui.label("Fusion Analysis").classes("mosaic-card__title truncate text-xs sm:text-sm")
-            
-            # Icon in circular background - larger on mobile
-            with ui.row().classes("mosaic-card__icon"):
-                ui.icon("merge").classes("w-5 h-5 sm:w-4 sm:h-4")
-        
-        # Panel info and main result
-        with ui.row().classes("flex items-start justify-between mb-1 gap-1"):
-            ui.label(f"Panel: {panel}").classes("mosaic-card__content text-xs sm:text-sm font-medium break-words flex-1")
-            if target_pairs > 0 or target_groups > 0:
-                ui.label(f"{target_pairs} pairs, {target_groups} groups").classes("px-1 py-0.5 text-xs font-medium rounded-full bg-blue-100 text-blue-800")
-            else:
-                ui.label(f"{target_fusions} target fusions").classes("px-1 py-0.5 text-xs font-medium rounded-full bg-blue-100 text-blue-800")
-        
-        # Analysis details in compact layout
-        with ui.column().classes("mb-1"):
-            if genome_pairs > 0 or genome_groups > 0:
-                ui.label(f"{genome_pairs} pairs, {genome_groups} groups").classes("mosaic-card__subtitle")
-            else:
-                ui.label(f"{genome_fusions} genome wide fusions").classes("mosaic-card__subtitle")
-        
-        # Description
-        ui.label("Fusion candidates identified from reads with supplementary alignments").classes("mosaic-card__subtitle")
+    """Fusion insight card — design.md §9 (no single % metric; no bar)."""
+
+    def _on_click() -> None:
+        _scroll_to_analysis_detail(anchor_key)
+
+    if target_pairs > 0 or target_groups > 0:
+        target_badge = f"{target_pairs} pairs, {target_groups} groups"
+    else:
+        target_badge = f"{target_fusions} target fusions"
+
+    if genome_pairs > 0 or genome_groups > 0:
+        genome_line = f"{genome_pairs} pairs, {genome_groups} groups"
+    else:
+        genome_line = f"{genome_fusions} genome-wide fusions"
+
+    _panel = panel.replace('"', "'")
+    main_line = f"Panel: {panel}"
+    with (
+        ui.element("div")
+        .classes(
+            "classification-insight-card w-full min-w-0 "
+            "cursor-pointer transition-all duration-200 select-none"
+        )
+        .on("click", _on_click)
+    ):
+        with ui.column().classes("w-full min-w-0 gap-2 p-2 md:p-3"):
+            with ui.row().classes("items-center gap-2 min-w-0"):
+                ui.icon("merge").classes("classification-insight-icon")
+                ui.label("Fusion analysis").classes(
+                    "classification-insight-model flex-1 min-w-0"
+                )
+            ui.label(main_line).classes("classification-insight-result w-full").props(
+                f'title="{_panel}"'
+            )
+            with ui.row().classes(
+                "w-full justify-between items-start gap-2 flex-wrap"
+            ):
+                ui.label(target_badge).classes(
+                    "analysis-insight-pill analysis-insight-pill--sky"
+                )
+            with ui.column().classes("w-full gap-1"):
+                ui.label(genome_line).classes("classification-insight-meta")
+            ui.label(
+                "Candidates from reads with supplementary alignments"
+            ).classes("classification-insight-foot")
 
 
 def _create_fusion_dashboard_card() -> Dict[str, Any]:
@@ -745,6 +914,24 @@ def _create_fusion_dashboard_card() -> Dict[str, Any]:
 
 
 
+def _fmt_master_csv_integer(v: Optional[str]) -> Optional[str]:
+    """Format integer counters from master.csv without float precision loss on large values."""
+    if v is None or not str(v).strip():
+        return None
+    s = str(v).replace(",", "").strip()
+    try:
+        if "e" in s.lower():
+            n = int(float(s))
+        elif "." in s:
+            n = int(float(s))
+        else:
+            n = int(s)
+        return f"{n:,}"
+    except (ValueError, OverflowError, TypeError):
+        out = str(v).strip()
+        return out or None
+
+
 def _get_analysis_panel(sample_dir: Path) -> str:
     """Get the analysis panel from master.csv"""
     try:
@@ -763,6 +950,94 @@ def _get_analysis_panel(sample_dir: Path) -> str:
         return ""
 
 
+def _apply_master_csv_to_run_info(sample_dir: Path, run_info: Dict[str, str]) -> None:
+    """Merge first row of master.csv into run_info.
+
+    Maps typical columns to Run summary tiles:
+
+    - ``run_info_run_time`` → run time (local clock, with seconds)
+    - ``run_info_device`` / ``devices`` → Device
+    - ``run_info_model`` / ``basecall_models`` → Basecall model
+    - ``run_info_flow_cell`` / ``flowcell_ids`` → Flow cell
+    - ``analysis_panel`` → Analysis panel
+    - ``counter_bam_passed`` / ``counter_bam_failed`` / ``counter_bases_count`` /
+      ``counter_mapped_count`` / ``counter_unmapped_count`` → BAM / bases tiles
+    - ``bam_tracking_counter`` / ``bam_tracking_total_files`` → BAM batches (current / total)
+    """
+    master_path = sample_dir / "master.csv"
+    if not master_path.exists():
+        return
+
+    def get_ci(r: Dict[str, str], key: str) -> Optional[str]:
+        for k, v in r.items():
+            if k and k.strip().lower() == key.lower():
+                return v
+        return None
+
+    try:
+        with master_path.open("r", newline="") as f:
+            reader = csv.DictReader(f)
+            row = next(reader, None)
+        if not row:
+            return
+
+        model_val = get_ci(row, "run_info_model") or get_ci(row, "basecall_models")
+        if model_val and str(model_val).strip():
+            run_info["model"] = str(model_val).strip()
+
+        device_val = get_ci(row, "run_info_device") or get_ci(row, "devices")
+        if device_val and str(device_val).strip():
+            run_info["device"] = str(device_val).strip()
+
+        flowcell_val = get_ci(row, "run_info_flow_cell") or get_ci(
+            row, "flowcell_ids"
+        )
+        if flowcell_val and str(flowcell_val).strip():
+            run_info["flow_cell"] = str(flowcell_val).strip()
+
+        panel_val = get_ci(row, "analysis_panel")
+        if panel_val and str(panel_val).strip():
+            run_info["panel"] = str(panel_val).strip()
+
+        run_time_val = get_ci(row, "run_info_run_time")
+        if run_time_val and str(run_time_val).strip():
+            try:
+                raw_ts = str(run_time_val).strip().replace("Z", "+00:00")
+                dt = datetime.fromisoformat(raw_ts)
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone()
+                run_info["run_time"] = dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                pass
+
+        for csv_key, ri_key in (
+            ("counter_bam_passed", "bam_passed"),
+            ("counter_bam_failed", "bam_failed"),
+            ("counter_bases_count", "total_bases"),
+            ("counter_mapped_count", "mapped_reads"),
+            ("counter_unmapped_count", "unmapped_reads"),
+        ):
+            raw = get_ci(row, csv_key)
+            if raw is not None and str(raw).strip() != "":
+                fv = _fmt_master_csv_integer(raw)
+                if fv:
+                    run_info[ri_key] = fv
+
+        btc = get_ci(row, "bam_tracking_counter")
+        btt = get_ci(row, "bam_tracking_total_files")
+        parts = []
+        if btc is not None and str(btc).strip() != "":
+            parts.append(_fmt_master_csv_integer(btc) or str(btc).strip())
+        if btt is not None and str(btt).strip() != "":
+            parts.append(_fmt_master_csv_integer(btt) or str(btt).strip())
+        if len(parts) == 2:
+            run_info["bam_batches"] = f"{parts[0]} / {parts[1]}"
+        elif len(parts) == 1:
+            run_info["bam_batches"] = parts[0]
+    except Exception:
+        pass
+
+
 def _extract_run_information(sample_dir: Path, sample_id: str) -> Dict[str, str]:
     """Extract run information from sample directory."""
     run_info = {
@@ -771,6 +1046,12 @@ def _extract_run_information(sample_dir: Path, sample_id: str) -> Dict[str, str]
         "device": "Not available",
         "flow_cell": "Not available",
         "panel": "Not available",
+        "bam_passed": "Not available",
+        "bam_failed": "Not available",
+        "total_bases": "Not available",
+        "mapped_reads": "Not available",
+        "unmapped_reads": "Not available",
+        "bam_batches": "Not available",
     }
 
     try:
@@ -792,7 +1073,6 @@ def _extract_run_information(sample_dir: Path, sample_id: str) -> Dict[str, str]
             "sample_metadata.json",
             "run_info.json",
             "sequencing_summary.txt",
-            "master.csv",
         ]
 
         for metadata_file in metadata_files:
@@ -816,55 +1096,6 @@ def _extract_run_information(sample_dir: Path, sample_id: str) -> Dict[str, str]
                                 run_info["flow_cell"] = str(data["flow_cell"]).strip()
                     except Exception:
                         pass
-                elif metadata_file == "master.csv":
-                    try:
-                        with open(file_path, "r") as f:
-                            reader = csv.DictReader(f)
-                            for row in reader:
-                                # Helper to fetch by case-insensitive key
-                                def get_ci(
-                                    r: Dict[str, str], key: str
-                                ) -> Optional[str]:
-                                    for k, v in r.items():
-                                        if k and k.strip().lower() == key:
-                                            return v
-                                    return None
-
-                                model_val = get_ci(row, "run_info_model") or get_ci(
-                                    row, "basecall_models"
-                                )
-                                if model_val and model_val.strip():
-                                    run_info["model"] = model_val.strip()
-
-                                device_val = get_ci(row, "run_info_device") or get_ci(
-                                    row, "devices"
-                                )
-                                if device_val and device_val.strip():
-                                    run_info["device"] = device_val.strip()
-
-                                flowcell_val = get_ci(
-                                    row, "run_info_flow_cell"
-                                ) or get_ci(row, "flowcell_ids")
-                                if flowcell_val and flowcell_val.strip():
-                                    run_info["flow_cell"] = flowcell_val.strip()
-
-                                panel_val = get_ci(row, "analysis_panel")
-                                if panel_val and panel_val.strip():
-                                    run_info["panel"] = panel_val.strip()
-
-                                run_time_val = get_ci(row, "run_info_run_time")
-                                if run_time_val and run_time_val.strip():
-                                    try:
-                                        dt = datetime.fromisoformat(
-                                            run_time_val.replace("Z", "+00:00")
-                                        )
-                                        run_info["run_time"] = dt.strftime(
-                                            "%Y-%m-%d %H:%M"
-                                        )
-                                    except Exception:
-                                        pass
-                    except Exception:
-                        pass
                 # Stop early if we have all fields
                 if all(
                     run_info[k] != "Not available"
@@ -879,6 +1110,8 @@ def _extract_run_information(sample_dir: Path, sample_id: str) -> Dict[str, str]
                 break
     except Exception:
         pass
+
+    _apply_master_csv_to_run_info(sample_dir, run_info)
 
     return run_info
 

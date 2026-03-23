@@ -45,16 +45,23 @@ class local_folder_picker(ui.dialog):
             ).expanduser()
         self.show_hidden_files = show_hidden_files
 
-        with self, ui.card():
+        with self, ui.card().classes(
+            "robin-dialog-surface p-4 w-full max-w-md min-w-[18rem]"
+        ):
             self.add_drives_toggle()
-            self.path_label = ui.label().classes("text-sm text-gray-600 mb-2")
-            self.list_container = ui.column().classes("w-96 max-h-80 overflow-y-auto")
-            with ui.row().classes("w-full justify-end gap-2 mt-2"):
-                ui.button("Cancel", on_click=self.close).props("outline")
+            self.path_label = ui.label().classes(
+                "text-sm workflow-folder-picker-path mb-2"
+            )
+            self.list_container = ui.column().classes(
+                "w-full max-w-md max-h-80 overflow-y-auto min-w-0"
+            )
+            with ui.row().classes("w-full justify-end gap-2 mt-2 flex-wrap"):
+                ui.button("Cancel", on_click=self.close).props("flat no-caps outline")
                 ui.button(
                     "Select this folder",
                     on_click=lambda: self.submit([str(self.path)]),
-                ).props("unelevated")
+                    icon="check",
+                ).props("color=primary no-caps")
             self.update_list()
 
     def add_drives_toggle(self) -> None:
@@ -103,10 +110,12 @@ class local_folder_picker(ui.dialog):
                     self.path = parent_path
                     self.update_list()
 
-                with ui.row().classes("w-full items-center gap-2 p-2 hover:bg-gray-100 cursor-pointer rounded").on(
-                    "click", go_up
-                ):
-                    ui.label("📁 ..").classes("font-medium")
+                with ui.row().classes(
+                    "w-full items-center gap-2 p-2 cursor-pointer rounded "
+                    "workflow-folder-picker-row"
+                ).on("click", go_up):
+                    ui.icon("arrow_upward").classes("text-base shrink-0")
+                    ui.label("..").classes("font-medium")
 
             for p in paths:
                 path_str = str(p)
@@ -122,9 +131,16 @@ class local_folder_picker(ui.dialog):
 
                 if p.is_dir():
                     with ui.row().classes(
-                        "w-full items-center gap-2 p-2 hover:bg-gray-100 cursor-pointer rounded"
+                        "w-full items-center gap-2 p-2 cursor-pointer rounded "
+                        "workflow-folder-picker-row"
                     ).on("click", make_click_handler(path_str)):
-                        ui.label(f"📁 {p.name}").classes("font-medium")
+                        ui.icon("folder").classes("text-base shrink-0")
+                        ui.label(p.name).classes("font-medium")
                 else:
-                    with ui.row().classes("w-full items-center gap-2 p-2 text-gray-500"):
+                    with ui.row().classes(
+                        "w-full items-center gap-2 p-2 workflow-folder-picker-file"
+                    ):
+                        ui.icon("insert_drive_file").classes(
+                            "text-base shrink-0 opacity-70"
+                        )
                         ui.label(p.name)

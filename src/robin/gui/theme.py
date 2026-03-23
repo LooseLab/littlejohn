@@ -1,8 +1,8 @@
 """
 Module: theme
 
-This module defines the theme and layout for the entire application, implementing Material Design 3 (M3) principles
-for a modern, accessible, and consistent user experience across all pages.
+This module defines the theme and layout for the entire application, following the **Editorial Bioinformatics**
+design system (see ``design.md``): clear hierarchy, slate neutrals, emerald accents, and semantic visualization colors.
 
 It includes:
 
@@ -23,7 +23,8 @@ Constants:
 
 - IMAGEFILE: Path to the image file used in the header and footer.
 - HEADER_HTML: HTML content for the header.
-- STYLE_CSS: CSS styles for the application.
+- STYLE_CSS, M3_COMPONENTS_CSS, MOSAIC_COMPONENTS_CSS: CSS bundles for the app shell.
+- EDITORIAL_FONTS_HTML: Google Fonts link block (Manrope, Inter, JetBrains Mono).
 
 External Dependencies:
 
@@ -187,16 +188,16 @@ async def check_version():
         remote_version_str = await run.io_bound(get_version_from_github)
 
         if not remote_version_str:
-            with ui.dialog() as dialog, ui.card().classes("elevation-3 rounded-xl"):
-                ui.label("Version Check Error").classes(
-                    "text-headline-small text-weight-bold q-mb-md"
+            with ui.dialog() as dialog, ui.card().classes(
+                "robin-dialog-surface p-4 md:p-5 min-w-[18rem] max-w-md"
+            ):
+                ui.label("Version check").classes(
+                    "classification-insight-heading text-headline-small q-mb-sm"
                 )
                 ui.label(
                     "Could not determine remote version. Please check manually."
-                ).classes("text-body-medium q-mb-md")
-                ui.button("OK", on_click=dialog.close).classes(
-                    "bg-primary text-white rounded-md"
-                )
+                ).classes("classification-insight-foot q-mb-md")
+                ui.button("OK", on_click=dialog.close).props("color=primary no-caps")
             dialog.open()
             return
 
@@ -206,69 +207,83 @@ async def check_version():
         if local_version == remote_version:
             ui.notify("Your ROBIN installation is up to date!", type="positive")
         elif local_version < remote_version:
-            with ui.dialog() as dialog, ui.card().classes("elevation-3 rounded-xl"):
-                ui.label("Update Available!").classes(
-                    "text-headline-small text-weight-bold q-mb-md"
+            with ui.dialog() as dialog, ui.card().classes(
+                "robin-dialog-surface p-4 md:p-5 min-w-[18rem] max-w-md"
+            ):
+                ui.label("Update available").classes(
+                    "classification-insight-heading text-headline-small q-mb-sm"
                 )
-                ui.label(f"Your version: {local_version}").classes("text-body-medium")
+                ui.label(f"Your version: {local_version}").classes(
+                    "classification-insight-foot"
+                )
                 ui.label(f"Latest version: {remote_version}").classes(
-                    "text-body-medium"
+                    "classification-insight-foot"
                 )
                 ui.label(
                     "Would you like to visit the GitHub repository to update?"
-                ).classes("text-body-medium q-mb-md")
-                with ui.row().classes("w-full justify-center gap-3"):
+                ).classes("classification-insight-foot q-mb-md")
+                with ui.row().classes("w-full justify-center gap-2 flex-wrap"):
                     ui.button(
-                        "Continue with current version", on_click=dialog.close
-                    ).classes("rounded-md")
+                        "Continue with current version",
+                        on_click=dialog.close,
+                    ).props("flat no-caps outline")
                     ui.button(
                         "Visit GitHub",
                         on_click=lambda: ui.open("https://github.com/LooseLab/ROBIN"),
-                    ).classes("bg-primary text-white rounded-md elevation-2")
+                        icon="open_in_new",
+                    ).props("color=primary no-caps")
             dialog.open()
         else:
-            with ui.dialog() as dialog, ui.card().classes("elevation-3 rounded-xl"):
-                ui.label("Development Version").classes(
-                    "text-headline-small text-weight-bold q-mb-md"
+            with ui.dialog() as dialog, ui.card().classes(
+                "robin-dialog-surface p-4 md:p-5 min-w-[18rem] max-w-md"
+            ):
+                ui.label("Development version").classes(
+                    "classification-insight-heading text-headline-small q-mb-sm"
                 )
                 ui.label(
                     f"You are running a development version ({local_version})."
-                ).classes("text-body-medium")
+                ).classes("classification-insight-foot")
                 ui.label(f"Latest release: {remote_version}").classes(
-                    "text-body-medium"
+                    "classification-insight-foot"
                 )
                 ui.label(
-                    "This version may be unstable and is only for testing purposes. It is not recommended for production use."
-                ).classes("text-body-medium q-mb-md")
-                ui.label("Please consider using the latest release instead.").classes(
-                    "text-body-medium"
-                )
-                ui.button("OK", on_click=dialog.close).classes(
-                    "bg-primary text-white rounded-md"
-                )
+                    "This version may be unstable and is only for testing. "
+                    "It is not recommended for production use."
+                ).classes("classification-insight-foot q-mb-md")
+                ui.label(
+                    "Please consider using the latest release instead."
+                ).classes("classification-insight-foot q-mb-md")
+                ui.button("OK", on_click=dialog.close).props("color=primary no-caps")
             dialog.open()
 
     except requests.RequestException:
-        with ui.dialog() as dialog, ui.card().classes("elevation-3 rounded-xl"):
-            ui.label("Connection Error").classes(
-                "text-headline-small text-weight-bold q-mb-md"
+        with ui.dialog() as dialog, ui.card().classes(
+            "robin-dialog-surface p-4 md:p-5 min-w-[18rem] max-w-md"
+        ):
+            ui.label("Connection error").classes(
+                "classification-insight-heading text-headline-small q-mb-sm"
             )
-            ui.label("Could not check for updates.").classes("text-body-medium")
+            ui.label("Could not check for updates.").classes("classification-insight-foot")
             ui.label(
-                "Either you are not connected to the internet or you cannot access https://www.github.com/looselab/robin."
-            ).classes("text-body-medium q-mb-md")
-            ui.label("Please manually check for updates.").classes("text-body-medium")
-            ui.button("OK", on_click=dialog.close).classes(
-                "bg-primary text-white rounded-md"
+                "Either you are not connected to the internet or you cannot access "
+                "https://www.github.com/looselab/robin."
+            ).classes("classification-insight-foot q-mb-md")
+            ui.label("Please manually check for updates.").classes(
+                "classification-insight-foot q-mb-md"
             )
+            ui.button("OK", on_click=dialog.close).props("color=primary no-caps")
         dialog.open()
     except Exception as e:
-        with ui.dialog() as dialog, ui.card().classes("elevation-3 rounded-xl"):
-            ui.label("Error").classes("text-headline-small text-weight-bold q-mb-md")
-            ui.label(f"Error checking version: {str(e)}").classes("text-body-medium")
-            ui.button("OK", on_click=dialog.close).classes(
-                "bg-primary text-white rounded-md"
+        with ui.dialog() as dialog, ui.card().classes(
+            "robin-dialog-surface p-4 md:p-5 min-w-[18rem] max-w-md"
+        ):
+            ui.label("Error").classes(
+                "classification-insight-heading text-headline-small q-mb-sm"
             )
+            ui.label(f"Error checking version: {str(e)}").classes(
+                "classification-insight-foot"
+            )
+            ui.button("OK", on_click=dialog.close).props("color=primary no-caps")
         dialog.open()
 
     # Mark version as checked for this app session
@@ -346,6 +361,13 @@ STYLE_CSS = (Path(__file__).parent / "static" / "styles.css").read_text()
 M3_COMPONENTS_CSS = (Path(__file__).parent / "static" / "m3-components.css").read_text()
 MOSAIC_COMPONENTS_CSS = (Path(__file__).parent / "static" / "mosaic-components.css").read_text()
 
+# Google Fonts: Manrope (headlines), Inter (UI/data labels), JetBrains Mono (technical strings)
+EDITORIAL_FONTS_HTML = """
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
+"""
+
 
 @contextmanager
 def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, setup_notifications=None):
@@ -375,8 +397,9 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, se
 
     # Add custom HTML and CSS to the head of the page
     ui.add_head_html(
-        '<script src="https://cdn.jsdelivr.net/npm/igv@3.2.0/dist/igv.min.js"></script>'
+        '<script src="https://cdn.jsdelivr.net/npm/igv@3.7.0/dist/igv.min.js"></script>'
     )
+    ui.add_head_html(EDITORIAL_FONTS_HTML)
     ui.add_head_html(
         HEADER_HTML + f"<style>{STYLE_CSS}</style><style>{M3_COMPONENTS_CSS}</style><style>{MOSAIC_COMPONENTS_CSS}</style>"
     )
@@ -398,7 +421,7 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, se
         /* Ensure proper spacing on mobile */
         @media (max-width: 480px) {
             .mobile-padding {
-                padding: 0.5rem !important;
+                padding: 0.375rem !important;
             }
             .mobile-text {
                 font-size: 0.75rem !important;
@@ -578,44 +601,44 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, se
             }
             /* Add padding to main content to account for fixed header/footer */
             .q-page {
-                padding-top: 32px !important;
-                padding-bottom: 32px !important;
-            }
-        }
-        
-        @media (max-width: 480px) {
-            .q-page {
-                padding-top: 28px !important;
-                padding-bottom: 28px !important;
-            }
-        }
-        
-        /* Landscape phone content padding */
-        @media (max-width: 896px) and (orientation: landscape) {
-            .q-page {
                 padding-top: 24px !important;
                 padding-bottom: 24px !important;
             }
         }
         
-        @media (max-width: 667px) and (orientation: landscape) {
+        @media (max-width: 480px) {
             .q-page {
                 padding-top: 20px !important;
                 padding-bottom: 20px !important;
             }
         }
         
+        /* Landscape phone content padding */
+        @media (max-width: 896px) and (orientation: landscape) {
+            .q-page {
+                padding-top: 18px !important;
+                padding-bottom: 18px !important;
+            }
+        }
+        
+        @media (max-width: 667px) and (orientation: landscape) {
+            .q-page {
+                padding-top: 16px !important;
+                padding-bottom: 16px !important;
+            }
+        }
+        
         /* Ultra-compact header text on mobile */
         @media (max-width: 768px) {
             .q-header .text-headline-medium {
-                font-size: 1.125rem !important;
+                font-size: 1.25rem !important;
                 line-height: 1.2 !important;
             }
         }
         
         @media (max-width: 480px) {
             .q-header .text-headline-medium {
-                font-size: 1rem !important;
+                font-size: 1.125rem !important;
                 line-height: 1.1 !important;
             }
         }
@@ -623,14 +646,14 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, se
         /* Ultra-compact header text for landscape phones */
         @media (max-width: 896px) and (orientation: landscape) {
             .q-header .text-headline-medium {
-                font-size: 0.875rem !important;
+                font-size: 1rem !important;
                 line-height: 1 !important;
             }
         }
         
         @media (max-width: 667px) and (orientation: landscape) {
             .q-header .text-headline-medium {
-                font-size: 0.75rem !important;
+                font-size: 0.875rem !important;
                 line-height: 1 !important;
             }
         }
@@ -657,18 +680,18 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, se
         /* Ensure proper centering of main content */
         @media (max-width: 768px) {
             .main-content-card {
-                margin-left: 1rem !important;
-                margin-right: 1rem !important;
-                max-width: calc(100% - 2rem) !important;
+                margin-left: 0.25rem !important;
+                margin-right: 0.25rem !important;
+                max-width: calc(100% - 0.5rem) !important;
             }
         }
-        
+
         /* Better centering on very small screens */
         @media (max-width: 480px) {
             .main-content-card {
-                margin-left: 0.5rem !important;
-                margin-right: 0.5rem !important;
-                max-width: calc(100% - 1rem) !important;
+                margin-left: 0.125rem !important;
+                margin-right: 0.125rem !important;
+                max-width: calc(100% - 0.25rem) !important;
             }
         }
         </style>
@@ -703,9 +726,11 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, se
         if not disclaimer_acknowledged:
             with ui.dialog().props(
                 "persistent"
-            ) as disclaimer_dialog, ui.card().classes("w-160 elevation-4 rounded-xl"):
-                ui.label("DISCLAIMER").classes(
-                    "text-headline-small text-weight-bold q-mb-md"
+            ) as disclaimer_dialog, ui.card().classes(
+                "robin-dialog-surface p-4 md:p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto"
+            ):
+                ui.label("Disclaimer").classes(
+                    "classification-insight-heading text-headline-small q-mb-sm"
                 )
                 ui.label(
                     "This tool and the data generated by it are intended for research use only and should not be used for "
@@ -714,27 +739,27 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, se
                     "diagnostic assessment, which should include clinical history, radiological findings, and complete "
                     "histopathological and molecular evaluation. The final interpretation and diagnosis should always be "
                     "made by qualified healthcare professionals based on all available information."
-                ).classes("text-body-medium q-mb-md")
+                ).classes("classification-insight-foot q-mb-md")
 
                 if batphone:
-                    ui.label("BATMAN Mode").classes(
-                        "text-headline-small text-weight-bold q-mb-md"
+                    ui.label("BATMAN mode").classes(
+                        "target-coverage-panel__meta-label q-mb-sm"
                     )
                     ui.label(
                         "You are running this tool in BATMAN mode. "
                         "This is a beta version of the tool and may not be fully functional. "
                         "BATMAN means: Breakpoint Adaptive Targeting alongside Methylation Analysis on Nanopore. "
-                        "This means that the target regions will be updated in real-time based on detected breakpoints. "
-                        "This code only works with ReadFish at this time. "
-                    ).classes("text-body-medium")
+                        "Target regions update in real time based on detected breakpoints. "
+                        "This code only works with ReadFish at this time."
+                    ).classes("classification-insight-foot q-mb-md")
 
                 if _process_large_bams_enabled:
                     ui.label("Process large BAMs").classes(
-                        "text-headline-small text-weight-bold q-mb-md"
+                        "target-coverage-panel__meta-label q-mb-sm"
                     )
                     ui.label(
                         "ROBIN_PROCESS_LARGE_BAMS is enabled. Do not use this option alongside live runs."
-                    ).classes("text-body-medium text-warning q-mb-md")
+                    ).classes("text-amber-700 q-mb-md")
 
                 def acknowledge():
                     try:
@@ -744,8 +769,8 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, se
                         pass
                     disclaimer_dialog.close()
 
-                ui.button("I agree", on_click=acknowledge).classes(
-                    "bg-primary text-white rounded-md elevation-2"
+                ui.button("I agree", on_click=acknowledge, icon="check_circle").props(
+                    "color=primary no-caps"
                 )
             disclaimer_dialog.open()
 
@@ -781,68 +806,38 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, se
             pass
         ui.navigate.to("/login")
 
-    with quitdialog, ui.card().classes("elevation-4 rounded-xl"):
+    with quitdialog, ui.card().classes(
+        "robin-dialog-surface p-4 md:p-5 min-w-[18rem] max-w-md"
+    ):
+        ui.label("Quit R.O.B.I.N?").classes(
+            "classification-insight-heading text-headline-small q-mb-sm"
+        )
         ui.label(
-            "Quitting the app will stop running methylation analysis. Are you sure?"
-        ).classes("text-headline-small text-weight-bold q-mb-md")
+            "Quitting the app will stop running methylation analysis."
+        ).classes("classification-insight-foot")
         ui.label("If you want to keep analysis running, click Cancel.").classes(
-            "text-body-medium"
+            "classification-insight-foot"
         )
         ui.label(
             "You can safely close this window and analysis will keep running in the background."
-        ).classes("text-body-medium q-mb-md")
-        with ui.row().classes("w-full justify-center gap-3"):
-            ui.button("Cancel", on_click=quitdialog.close).classes("rounded-md")
-            ui.button("Really Quit", icon="logout", on_click=quit_app).classes(
-                "bg-error text-white rounded-md elevation-2"
+        ).classes("classification-insight-foot q-mb-md")
+        with ui.row().classes("w-full justify-center gap-2 flex-wrap"):
+            ui.button("Cancel", on_click=quitdialog.close).props("flat no-caps outline")
+            ui.button("Really quit", icon="logout", on_click=quit_app).props(
+                "color=negative no-caps"
             )
 
     # Create a header with navigation title and menu using M3 styling
-    header_classes = "items-center duration-200 p-0 px-4 no-wrap elevation-1"
+    header_classes = "items-center duration-200 p-0 px-2 no-wrap elevation-1"
     if batphone:
         header_classes += " batphone"
 
     with ui.header(elevated=True).classes(header_classes):
         # Use flexbox layout instead of grid to prevent overlap
-        with ui.row().classes("w-full items-center justify-between px-1 py-0.5 sm:px-4 sm:py-2"):
-            # Left side: Title (responsive)
-            with ui.row().classes("items-center flex-shrink-0"):
-                ui.html(navtitle, sanitize=False).classes(
-                    f"max-[{MENU_BREAKPOINT}px]:hidden text-headline-medium drop-shadow font-bold"
-                ).style("font-weight: 600; font-family: var(--font-primary)")
-                ui.html(smalltitle, sanitize=False).classes(
-                    f"min-[{MENU_BREAKPOINT+1}px]:hidden text-headline-medium drop-shadow font-bold"
-                ).style("font-weight: 600; font-family: var(--font-primary)")
-            
-            # Right side: Metrics and controls
-            with ui.row().classes("items-center gap-2 flex-shrink-0"):
-                # System metrics (hidden on mobile)
-                ui.label(f"Viewing: {platform.node()}").classes(
-                    f"max-[{MENU_BREAKPOINT}px]:hidden text-body-medium"
-                )
-                ui.label("CPU").classes(
-                    f"max-[{MENU_BREAKPOINT}px]:hidden text-body-small"
-                )
-                cpu_activity = ui.circular_progress(max=100).classes(
-                    f"max-[{MENU_BREAKPOINT}px]:hidden"
-                )
-                
-                ui.label("RAM").classes(
-                    f"max-[{MENU_BREAKPOINT}px]:hidden text-body-small"
-                )
-                ram_utilisation = ui.circular_progress(max=100).classes(
-                    f"max-[{MENU_BREAKPOINT}px]:hidden"
-                )
-
-                # Start global metrics timer if not already running
-                global_metrics.start_timer()
-
-                # Bind the progress indicators to the global metrics
-                cpu_activity.bind_value_from(global_metrics, "cpu")
-                ram_utilisation.bind_value_from(global_metrics, "ram")
-
-                # Menu button
-                with ui.button(icon="menu").classes("rounded-md"):
+        with ui.row().classes("w-full items-center justify-between px-1 py-0.5 sm:px-3 sm:py-1.5"):
+            # Left: Hamburger, then title (responsive)
+            with ui.row().classes("items-center gap-1 sm:gap-2 min-w-0 flex-1"):
+                with ui.button(icon="menu").classes("rounded-md flex-shrink-0"):
                     with ui.menu() as menu:
                         ui.menu_item("Home", lambda: ui.navigate.to("/")).classes(
                             "text-body-medium"
@@ -853,6 +848,10 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, se
                         ui.menu_item(
                             "Generate Sample ID",
                             lambda: ui.navigate.to("/sample_id_generator"),
+                        ).classes("text-body-medium")
+                        ui.menu_item(
+                            "Watched Folders",
+                            lambda: ui.navigate.to("/watched_folders"),
                         ).classes("text-body-medium")
                         ui.menu_item(
                             "Activity Monitor",
@@ -877,8 +876,8 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, se
                         ui.separator()
                         ui.switch("Dark Mode").classes("ml-4 bg-transparent").props(
                             'color="primary"'
-                        ).bind_value(app.storage.browser, "dark_mode")
-                        ui.dark_mode().bind_value(app.storage.browser, "dark_mode")
+                        ).bind_value(app.storage.user, "dark_mode")
+                        ui.dark_mode().bind_value(app.storage.user, "dark_mode")
                         ui.separator()
                         ui.menu_item("Close", menu.close).classes(
                             "text-body-medium"
@@ -890,12 +889,45 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, se
                             ui.button(
                                 "Quit", icon="logout", on_click=quitdialog.open
                             ).classes("bg-error text-white rounded-md")
-                
-                # Logo - ultra-small on mobile
-                ui.image(get_imagefile()).style("width: 32px").classes("flex-shrink-0 sm:w-12")
+
+                with ui.row().classes("items-center min-w-0 shrink"):
+                    ui.html(navtitle, sanitize=False).classes(
+                        f"max-[{MENU_BREAKPOINT}px]:hidden text-headline-medium drop-shadow font-bold truncate"
+                    ).style("font-weight: 700; font-family: var(--font-display)")
+                    ui.html(smalltitle, sanitize=False).classes(
+                        f"min-[{MENU_BREAKPOINT+1}px]:hidden text-headline-medium drop-shadow font-bold truncate"
+                    ).style("font-weight: 700; font-family: var(--font-display)")
+
+            # Right: Metrics and logo
+            with ui.row().classes("items-center gap-2 flex-shrink-0"):
+                ui.label(f"Viewing: {platform.node()}").classes(
+                    f"max-[{MENU_BREAKPOINT}px]:hidden text-body-medium"
+                )
+                ui.label("CPU").classes(
+                    f"max-[{MENU_BREAKPOINT}px]:hidden text-body-small"
+                )
+                cpu_activity = ui.circular_progress(max=100).classes(
+                    f"max-[{MENU_BREAKPOINT}px]:hidden"
+                )
+
+                ui.label("RAM").classes(
+                    f"max-[{MENU_BREAKPOINT}px]:hidden text-body-small"
+                )
+                ram_utilisation = ui.circular_progress(max=100).classes(
+                    f"max-[{MENU_BREAKPOINT}px]:hidden"
+                )
+
+                global_metrics.start_timer()
+                cpu_activity.bind_value_from(global_metrics, "cpu")
+                ram_utilisation.bind_value_from(global_metrics, "ram")
+
+                ui.image(get_imagefile()).classes(
+                    "flex-shrink-0 w-10 sm:w-14 object-contain"
+                )
 
     with ui.column().classes(
-        "w-full h-full max-w-full overflow-hidden flex flex-col items-center px-2"
+        "w-full h-full max-w-full overflow-hidden flex flex-col items-center "
+        "px-1"
     ) as main_content:
         pass
 
@@ -908,49 +940,56 @@ def frame(navtitle: str, batphone=False, smalltitle=None, center: str = None, se
         setup_notifications(notification_container)
 
     # Create a footer with useful information and quit button using M3 styling
-    footer_classes = "items-center elevation-1"
+    footer_classes = "items-center duration-200 p-0 px-2 no-wrap elevation-1"
     if batphone:
         footer_classes += " batphone"
     with ui.footer().classes(footer_classes):
-        with ui.dialog() as dialog, ui.card().classes("elevation-3 rounded-xl"):
-            ui.label("Links").classes("text-headline-small text-weight-bold q-mb-md")
-            ui.separator()
-            ui.link("Code on GitHub", "https://github.com/looselab/robin").classes(
-                "text-body-medium"
+        with ui.dialog() as dialog, ui.card().classes(
+            "robin-dialog-surface p-4 md:p-5 min-w-[16rem] max-w-sm"
+        ):
+            ui.label("Links").classes(
+                "classification-insight-heading text-headline-small q-mb-sm"
             )
-            ui.link(
-                "Rapid CNS2 Paper",
-                "https://link.springer.com/article/10.1007/s00401-022-02415-6",
-            ).classes("text-body-medium")
-            ui.link(
-                "Sturgeon Classifier",
-                "https://www.nature.com/articles/s41586-023-06615-2",
-            ).classes("text-body-medium")
-            ui.link(
-                "Protocol",
-                "https://www.protocols.io/view/intra-operative-nanopore-sequencing-to-classify-br-c65qzg5w",
-            ).classes("text-body-medium")
-            ui.link("Oxford Nanopore", "https://nanoporetech.com/").classes(
-                "text-body-medium"
-            )
-            ui.link("epi2me labs", "https://labs.epi2me.io/").classes(
-                "text-body-medium"
-            )
-            ui.link("Looselab", "https://looselab.github.io/").classes(
-                "text-body-medium"
-            )
-            ui.button("Close", on_click=dialog.close).classes(
-                "bg-primary text-white rounded-md"
-            )
+            ui.separator().classes("mgmt-detail-separator")
+            with ui.column().classes("gap-2"):
+                ui.link("Code on GitHub", "https://github.com/looselab/robin").classes(
+                    "classification-insight-foot"
+                )
+                ui.link(
+                    "Rapid CNS2 Paper",
+                    "https://link.springer.com/article/10.1007/s00401-022-02415-6",
+                ).classes("classification-insight-foot")
+                ui.link(
+                    "Sturgeon Classifier",
+                    "https://www.nature.com/articles/s41586-023-06615-2",
+                ).classes("classification-insight-foot")
+                ui.link(
+                    "Protocol",
+                    "https://www.protocols.io/view/intra-operative-nanopore-sequencing-to-classify-br-c65qzg5w",
+                ).classes("classification-insight-foot")
+                ui.link("Oxford Nanopore", "https://nanoporetech.com/").classes(
+                    "classification-insight-foot"
+                )
+                ui.link("epi2me labs", "https://labs.epi2me.io/").classes(
+                    "classification-insight-foot"
+                )
+                ui.link("Looselab", "https://looselab.github.io/").classes(
+                    "classification-insight-foot"
+                )
+            ui.button("Close", on_click=dialog.close).props("color=primary no-caps")
         
         # Footer content - ultra-compact on mobile
-        with ui.row().classes("w-full items-center justify-between px-0.5 py-0.25 sm:px-2 sm:py-1 gap-0.5 no-wrap footer-compact"):
+        with ui.row().classes(
+            "w-full items-center justify-between px-1 py-0.5 sm:px-3 sm:py-1.5 gap-0.5 no-wrap footer-compact"
+        ):
             # Left side: Logo (ultra-small on mobile)
-            ui.image(get_imagefile()).style("width: 20px").classes("flex-shrink-0 sm:w-8")
+            ui.image(get_imagefile()).classes(
+                "flex-shrink-0 w-7 sm:w-10 object-contain"
+            )
             
             # Center: Buttons with proper spacing
             with ui.row().classes("items-center gap-2 flex-shrink-0"):
-                ui.colors(primary="#4F9153")  # Green primary color
+                ui.colors(primary="#16A34A")  # Emerald 600 (Editorial Bioinformatics primary)
                 ui.button("Links", on_click=dialog.open).classes("rounded-md mobile-button text-xs px-2 py-1")
 
                 with ui.button(icon="info").classes("rounded-md mobile-button px-2 py-1"):
@@ -991,14 +1030,14 @@ async def cleanup_and_exit():
 
     # Create and show shutdown modal with M3 styling
     with ui.dialog().props("persistent") as shutdown_dialog, ui.card().classes(
-        "w-96 elevation-4 rounded-xl"
+        "robin-dialog-surface p-4 md:p-5 w-full max-w-sm"
     ):
-        ui.label("Shutting Down").classes(
-            "text-headline-small text-weight-bold q-mb-md"
+        ui.label("Shutting down").classes(
+            "classification-insight-heading text-headline-small q-mb-sm"
         )
-        ui.label("ROBIN is shutting down. Please wait while we clean up...").classes(
-            "text-body-medium q-mb-md"
-        )
+        ui.label(
+            "R.O.B.I.N is shutting down. Please wait while we clean up…"
+        ).classes("classification-insight-foot q-mb-md")
         with ui.row().classes("w-full justify-center"):
             ui.spinner(size="lg", color="primary")
 
@@ -1124,7 +1163,7 @@ def create_home_page():
     ):
         
         ui.label("Welcome to the Application").classes(
-            "text-headline-large text-center px-4"
+            "text-headline-large text-center px-3"
         )
         with ui.row().classes('items-center m-auto'):
             ui.circular_progress(value=0.1, show_value=False, size="xs")
@@ -1143,7 +1182,7 @@ def create_home_page():
             ui.separator().classes().style("border: 1px solid var(--md-primary)")
             with ui.card().classes("w-full bg-gradient-to-r from-blue-50 to-indigo-50 mobile-padding"):
                 ui.label("Run Information").classes("text-lg font-semibold mb-3 text-blue-800")
-                with ui.row().classes("w-full gap-2 sm:gap-8 items-center flex-wrap"):
+                with ui.row().classes("w-full gap-2 sm:gap-6 items-center flex-wrap"):
                     ui.label("Run").classes("text-body-medium text-xs sm:text-sm")
                     ui.label("Model").classes("text-body-medium text-xs sm:text-sm")
                     ui.label("Device").classes("text-body-medium text-xs sm:text-sm")
@@ -1154,7 +1193,7 @@ def create_home_page():
             with ui.card().classes("w-full mobile-padding"):
                 ui.label("Classification Results").classes("text-lg font-semibold mb-3 text-blue-800")
                 # Use responsive grid: 2 columns on desktop, 1 column on mobile
-                with ui.row().classes("w-full gap-2 sm:gap-4 flex-wrap classification-cards"):
+                with ui.row().classes("w-full gap-2 sm:gap-3 flex-wrap classification-cards"):
                     # Sturgeon Classification
                     with ui.card().classes("flex-1 min-w-0 elevation-4 rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50 border-l-4 border-blue-500 classification-card"):
                         ui.label("Sturgeon Classification").classes("font-bold text-blue-800 mb-2 text-sm sm:text-base")
@@ -1192,8 +1231,8 @@ def create_home_page():
                         ui.label("Features: --").classes("text-xs sm:text-sm text-orange-600")
 
 
-            ui.label('text below').classes("text-body-medium px-4")
-            with ui.card_section().classes("px-4"):
+            ui.label('text below').classes("text-body-medium px-3")
+            with ui.card_section().classes("px-3"):
                 ui.image('https://picsum.photos/id/684/640/360').classes("w-full h-auto rounded-lg")
                 ui.label('Lorem ipsum dolor sit amet, consectetur adipiscing elit, ...').classes("text-body-medium mobile-text")
 
@@ -1202,33 +1241,36 @@ def create_standalone_page():
     """Create a simplified standalone page without storage dependencies."""
     # Add custom HTML and CSS to the head of the page
     ui.add_head_html(
-        '<script src="https://cdn.jsdelivr.net/npm/igv@3.2.0/dist/igv.min.js"></script>'
+        '<script src="https://cdn.jsdelivr.net/npm/igv@3.7.0/dist/igv.min.js"></script>'
     )
+    ui.add_head_html(EDITORIAL_FONTS_HTML)
     ui.add_head_html(
         HEADER_HTML + f"<style>{STYLE_CSS}</style><style>{M3_COMPONENTS_CSS}</style><style>{MOSAIC_COMPONENTS_CSS}</style>"
     )
     
-    # Create a simple header
-    with ui.header(elevated=True).classes("items-center duration-200 p-0 px-4 no-wrap elevation-1"):
-        ui.html("<strong>R.O.B.I.N</strong>", sanitize=False).classes("text-headline-medium drop-shadow font-bold").style(
-            "font-weight: 600; font-family: var(--font-primary)"
-        )
-        ui.image(get_imagefile()).style("width: 50px").classes("ml-auto")
+    # Create a simple header (same shell padding pattern as frame())
+    with ui.header(elevated=True).classes("items-center duration-200 p-0 px-2 no-wrap elevation-1"):
+        with ui.row().classes("w-full items-center justify-between px-1 py-0.5 sm:px-3 sm:py-1.5"):
+            ui.html("<strong>R.O.B.I.N</strong>", sanitize=False).classes("text-headline-medium drop-shadow font-bold").style(
+                "font-weight: 700; font-family: var(--font-display)"
+            )
+            ui.image(get_imagefile()).style("width: 50px").classes("ml-auto")
     
     # Create main content
-    with ui.column().classes("w-full h-full max-w-full overflow-hidden p-8"):
+    with ui.column().classes("w-full h-full max-w-full overflow-hidden p-6"):
         ui.label("Welcome to ROBIN Theme Test").classes("text-headline-large text-center")
         ui.label("This is a standalone test of the ROBIN theme system.").classes("text-body-large text-center mt-4")
         ui.label(f"Version: {get_about().__version__}").classes("text-body-medium text-center mt-2")
     
-    # Create a simple footer
-    with ui.footer().classes("items-center elevation-1"):
-        ui.image(get_imagefile()).style("width: 40px")
-        ui.label("ROBIN Theme Test - Standalone Mode").classes("text-body-small")
+    # Create a simple footer (same shell padding pattern as frame())
+    with ui.footer().classes("items-center duration-200 p-0 px-2 no-wrap elevation-1"):
+        with ui.row().classes("w-full items-center justify-between px-1 py-0.5 sm:px-3 sm:py-1.5"):
+            ui.image(get_imagefile()).style("width: 40px")
+            ui.label("ROBIN Theme Test - Standalone Mode").classes("text-body-small")
 
 
 def create_workflow_page():
-    """Display the ROBIN workflow diagram with M3 styling."""
+    """Display the ROBIN workflow diagram with editorial insight styling."""
     with frame(
         "ROBIN Workflow",
         smalltitle="Workflow",
@@ -1238,7 +1280,46 @@ def create_workflow_page():
         crossnn_version = get_crossnn_version()
         cnv_from_bam_version = get_cnv_from_bam_version()
 
-        ui.mermaid(
+        with ui.element("div").classes("w-full min-w-0").props(
+            "id=workflow-diagram-page"
+        ):
+            with ui.column().classes(
+                "w-full max-w-6xl mx-auto gap-3 p-2 md:p-3"
+            ):
+                with ui.element("div").classes(
+                    "classification-insight-shell w-full min-w-0"
+                ):
+                    ui.label("Pipeline overview").classes(
+                        "classification-insight-heading text-headline-small"
+                    )
+                    ui.label(
+                        "From MinKNOW through R.O.B.I.N: sequencing, alignment, "
+                        "preprocessing, classifiers, analyses, and report generation."
+                    ).classes("classification-insight-foot")
+
+                with ui.element("div").classes(
+                    "classification-insight-card w-full min-w-0"
+                ):
+                    with ui.column().classes(
+                        "w-full min-w-0 gap-3 p-2 md:p-3"
+                    ):
+                        with ui.row().classes(
+                            "items-center gap-2 min-w-0"
+                        ):
+                            ui.icon("account_tree").classes(
+                                "classification-insight-icon"
+                            )
+                            ui.label("Workflow diagram").classes(
+                                "classification-insight-model flex-1 min-w-0"
+                            )
+                        ui.label(
+                            "Interactive chart: pan and zoom if your browser supports it."
+                        ).classes("classification-insight-foot")
+
+                        with ui.element("div").classes(
+                            "w-full min-w-0 overflow-x-auto workflow-diagram-scroll"
+                        ):
+                            ui.mermaid(
             f"""
 flowchart TD
     %% Style definitions with M3 color palette
@@ -1325,7 +1406,7 @@ flowchart TD
                 "look": "neo",
                 "flowchart": {"curve": "basis", "defaultRenderer": "elk"},
             },
-        ).classes("w-full elevation-2 rounded-xl")
+        ).classes("w-full min-w-0 workflow-diagram-mermaid")
 
 
 def register_theme_pages():
@@ -1418,21 +1499,7 @@ def main():
         >>> main()
         None
     """
-    # Add Apple HIG + Material Design 3 fonts
-    ui.add_head_html(
-        """
-        <link rel="preconnect" href="https://fonts.googleapis.com">
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-        <style>
-            /* Apple HIG: System font fallbacks */
-            :root {
-                --font-primary: "Inter", "SF Pro Display", "SF Pro", -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-                --font-mono: "JetBrains Mono", "SF Mono", "Monaco", "Menlo", "Consolas", "Liberation Mono", "Courier New", monospace;
-            }
-        </style>
-    """
-    )
+    ui.add_head_html(EDITORIAL_FONTS_HTML)
 
     # Register some fonts that we might need later on (guarded)
     fonts_dir = Path(__file__).parent / "fonts"

@@ -83,12 +83,16 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
     display_file = clair3_dir / "snpsift_output_display.json"
 
     if not display_file.exists():
-        with ui.card().classes("w-full"):
-            ui.label("SNP Analysis").classes("text-lg font-semibold text-blue-800")
-            ui.separator().classes().style("border: 1px solid var(--md-primary)")
-            ui.label(
-                "Precomputed SNP display data was not found. Ensure SNP analysis has completed."
-            ).classes("text-body-medium text-gray-600")
+        with ui.element("div").classes("classification-insight-shell w-full min-w-0"):
+            ui.label("SNP analysis").classes(
+                "classification-insight-heading text-headline-small"
+            )
+            with ui.element("div").classes("classification-insight-card w-full min-w-0"):
+                with ui.column().classes("w-full min-w-0 gap-2 p-2 md:p-3"):
+                    ui.label(
+                        "Precomputed SNP display data was not found. "
+                        "Ensure SNP analysis has completed."
+                    ).classes("classification-insight-meta")
         return
 
     try:
@@ -96,12 +100,15 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
             snp_display = json.load(f_in)
     except Exception as exc:
         logger.error(f"Failed to load SNP display data: {exc}")
-        with ui.card().classes("w-full"):
-            ui.label("SNP Analysis").classes("text-lg font-semibold text-blue-800")
-            ui.separator().classes().style("border: 1px solid var(--md-primary)")
-            ui.label(
-                "Could not load SNP variant data. Check logs for details."
-            ).classes("text-body-medium text-red-600")
+        with ui.element("div").classes("classification-insight-shell w-full min-w-0"):
+            ui.label("SNP analysis").classes(
+                "classification-insight-heading text-headline-small"
+            )
+            with ui.element("div").classes("classification-insight-card w-full min-w-0"):
+                with ui.column().classes("w-full min-w-0 gap-2 p-2 md:p-3"):
+                    ui.label(
+                        "Could not load SNP variant data. Check logs for details."
+                    ).classes("classification-insight-level classification-insight-level--low w-full")
         return
 
     columns: List[Dict[str, Any]] = snp_display.get("columns", [])
@@ -209,17 +216,18 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
         full_row_lookup[row_id] = row
         display_rows_all.append(_compact_row(row, row_id))
 
-    with ui.card().classes("w-full"):
-        ui.label("SNP Analysis").classes("text-lg font-semibold text-blue-800")
-        ui.separator().classes().style("border: 1px solid var(--md-primary)")
+    with ui.element("div").classes("classification-insight-shell w-full min-w-0"):
+        ui.label("SNP analysis").classes(
+            "classification-insight-heading text-headline-small"
+        )
 
-        with ui.row().classes("w-full gap-4 mb-4"):
-            ui.label(f"Total Variants: {total_variants}").classes(
-                "text-body-medium font-semibold"
+        with ui.row().classes("w-full gap-3 mb-3 flex-wrap items-baseline"):
+            ui.label(f"Total variants: {total_variants}").classes(
+                "classification-insight-meta"
             )
             if pathogenic_count > 0:
-                ui.label(f"Pathogenic Variants: {pathogenic_count}").classes(
-                    "text-body-medium font-semibold text-red-600"
+                ui.label(f"Pathogenic variants: {pathogenic_count}").classes(
+                    "classification-insight-level classification-insight-level--low w-auto"
                 )
 
         from robin.gui.theme import styled_table
@@ -230,18 +238,29 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
             pagination=25,
             class_size="table-xs",
         )
+        try:
+            with snp_table.add_slot("top-right"):
+                with ui.input(placeholder="Search variants…").props(
+                    "borderless dense clearable type=search"
+                ).bind_value(snp_table, "filter").add_slot("append"):
+                    ui.icon("search")
+        except Exception:
+            pass
 
         if any(col.get("field") in {"action", "details"} for col in display_columns):
             try:
                 with ui.dialog() as details_dialog, ui.card().classes(
-                    "w-[95vw] max-w-6xl max-h-[85vh] overflow-auto"
+                    "robin-dialog-surface w-[95vw] max-w-6xl max-h-[85vh] overflow-auto "
+                    "p-4 md:p-5"
                 ):
-                    ui.label("Variant Details").classes("text-lg font-semibold")
-                    ui.separator()
+                    ui.label("Variant details").classes(
+                        "classification-insight-heading text-headline-small"
+                    )
+                    ui.separator().classes("mgmt-detail-separator")
                     details_container = ui.column().classes("w-full gap-2")
                     with ui.row().classes("w-full justify-end pt-2"):
                         ui.button("Close", on_click=details_dialog.close).props(
-                            "color=primary"
+                            "color=primary no-caps outline"
                         )
 
                 def show_variant_details(row_id: str) -> None:
@@ -352,27 +371,32 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
         for col in snp_table.columns:
             col["sortable"] = True
 
+    ui.separator().classes("mgmt-detail-separator")
+
     # INDEL table for More Details page.
     indel_vcf = clair3_dir / "snpsift_indel_output.vcf"
-    with ui.card().classes("w-full"):
-        ui.label("INDEL Analysis").classes("text-lg font-semibold text-blue-800")
-        ui.separator().classes().style("border: 1px solid var(--md-primary)")
+    with ui.element("div").classes("classification-insight-shell w-full min-w-0"):
+        ui.label("INDEL analysis").classes(
+            "classification-insight-heading text-headline-small"
+        )
 
         if not indel_vcf.exists():
             ui.label(
                 "INDEL VCF was not found. Run SNP analysis to generate INDEL output."
-            ).classes("text-body-medium text-gray-600")
+            ).classes("classification-insight-meta")
             return
 
         indel_df = parse_vcf(indel_vcf)
         if indel_df is None:
-            ui.label("Could not parse INDEL VCF data. Check logs for details.").classes(
-                "text-body-medium text-red-600"
-            )
+            ui.label(
+                "Could not parse INDEL VCF data. Check logs for details."
+            ).classes("classification-insight-level classification-insight-level--low w-full")
             return
 
         if indel_df.empty:
-            ui.label("No INDEL variants were found.").classes("text-body-medium text-gray-600")
+            ui.label("No INDEL variants were found.").classes(
+                "classification-insight-meta"
+            )
             return
 
         indel_column_lookup = {
@@ -469,13 +493,15 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
                 except (TypeError, ValueError):
                     pass
 
-        with ui.row().classes("w-full gap-4 mb-4"):
-            ui.label(f"Total Variants: {len(indel_rows_all)}").classes(
-                "text-body-medium font-semibold"
+        with ui.row().classes("w-full gap-3 mb-3 flex-wrap items-baseline"):
+            ui.label(f"Total variants: {len(indel_rows_all)}").classes(
+                "classification-insight-meta"
             )
             if indel_rows_pathogenic:
-                ui.label(f"Pathogenic Variants: {len(indel_rows_pathogenic)}").classes(
-                    "text-body-medium font-semibold text-red-600"
+                ui.label(
+                    f"Pathogenic variants: {len(indel_rows_pathogenic)}"
+                ).classes(
+                    "classification-insight-level classification-insight-level--low w-auto"
                 )
 
         from robin.gui.theme import styled_table
@@ -486,15 +512,28 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
             pagination=25,
             class_size="table-xs",
         )
+        try:
+            with indel_table.add_slot("top-right"):
+                with ui.input(placeholder="Search INDELs…").props(
+                    "borderless dense clearable type=search"
+                ).bind_value(indel_table, "filter").add_slot("append"):
+                    ui.icon("search")
+        except Exception:
+            pass
 
         with ui.dialog() as indel_details_dialog, ui.card().classes(
-            "w-[95vw] max-w-6xl max-h-[85vh] overflow-auto"
+            "robin-dialog-surface w-[95vw] max-w-6xl max-h-[85vh] overflow-auto "
+            "p-4 md:p-5"
         ):
-            ui.label("INDEL Details").classes("text-lg font-semibold")
-            ui.separator()
+            ui.label("INDEL details").classes(
+                "classification-insight-heading text-headline-small"
+            )
+            ui.separator().classes("mgmt-detail-separator")
             indel_details_container = ui.column().classes("w-full gap-2")
             with ui.row().classes("w-full justify-end pt-2"):
-                ui.button("Close", on_click=indel_details_dialog.close).props("color=primary")
+                ui.button("Close", on_click=indel_details_dialog.close).props(
+                    "color=primary no-caps outline"
+                )
 
         def show_indel_details(row_id: str) -> None:
             row_data = indel_full_row_lookup.get(row_id)

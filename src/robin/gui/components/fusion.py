@@ -40,6 +40,58 @@ except ImportError:  # pragma: no cover
     ui = None
 
 
+def _is_dark_mode() -> bool:
+    """Match Quasar ``body--dark`` via app storage (see theme.frame)."""
+    try:
+        from nicegui import app
+
+        return bool(app.storage.user.get("dark_mode"))
+    except Exception:
+        return False
+
+
+def _apply_fusion_figure_theme(fig: Any, dark: bool) -> None:
+    """Adjust matplotlib fusion figure for light vs dark UI (same surface as MGMT, design.md §6)."""
+    if fig is None:
+        return
+    if dark:
+        bg = "#0f172a"
+        fg = "#e2e8f0"
+        fg_muted = "#94a3b8"
+    else:
+        bg = "#ffffff"
+        fg = "#0f172a"
+        fg_muted = "#475569"
+    try:
+        fig.patch.set_facecolor(bg)
+        for ax in fig.get_axes():
+            try:
+                ax.set_facecolor(bg)
+                ax.tick_params(colors=fg_muted)
+                ax.xaxis.label.set_color(fg_muted)
+                ax.yaxis.label.set_color(fg_muted)
+                ax.title.set_color(fg)
+                for spine in ax.spines.values():
+                    spine.set_color(fg_muted)
+                leg = ax.get_legend()
+                if leg is not None:
+                    fr = leg.get_frame()
+                    if fr is not None:
+                        fr.set_facecolor(bg)
+                        fr.set_edgecolor(fg_muted)
+                    for t in leg.get_texts():
+                        t.set_color(fg)
+            except Exception:
+                continue
+        for txt in getattr(fig, "texts", []) or []:
+            try:
+                txt.set_color(fg)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def _rename_and_sort(df: pd.DataFrame) -> pd.DataFrame:
     """Rename columns to friendly names and sort for display."""
     if df is None or df.empty:
@@ -1807,6 +1859,7 @@ def _plot_gene_group(
     gene_group: List[str],
     annotated_data: pd.DataFrame,
     goodpairs: pd.Series,
+    section_state: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Advanced fusion visualization matching the original sophisticated plotting code.
 
@@ -1865,12 +1918,17 @@ def _plot_gene_group(
                         gene_group, subset, annotated_data, goodpairs
                     )
 
+                    _dark = _is_dark_mode()
+                    _apply_fusion_figure_theme(fig, _dark)
                     # Update the matplotlib element
                     # Close previous figure if it exists before assigning new one
                     if hasattr(mpl_element, 'figure') and mpl_element.figure is not None:
                         plt.close(mpl_element.figure)
                     mpl_element.figure = fig
                     mpl_element.update()
+                    if section_state is not None:
+                        section_state["fusion_mpl"] = mpl_element
+                        section_state["fusion_plot_theme_dark"] = _dark
                 
                 with ui.tab_panel(reads_tab):
                     # Create reads table
@@ -2670,6 +2728,7 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 gene_pair,
                 data.get("annotated_data"),
                 data.get("goodpairs"),
+                section_state=state[section],
             )
         except Exception as e:
             logging.exception(f"[Fusion] Failed to handle gene pair selection: {e}")
@@ -3224,57 +3283,67 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
         except Exception as e:
             logging.exception(f"[Fusion] Refresh failed: {e}")
 
-    # Build UI
-    with ui.card().classes("w-full"):
-        ui.label("🧪 Fusions").classes("text-lg font-semibold mb-2")
-        # Summary row (counts)
-        with ui.row().classes("w-full items-center justify-between mb-2"):
-            with ui.column().classes("gap-1"):
-                ui.label("Fusion Analysis").classes("text-sm font-medium")
-            with ui.column().classes("gap-1 items-end"):
-                state.setdefault("summary", {})
-                state["summary"]["target_lbl"] = ui.label(
-                    "Target: -- pairs, -- groups"
-                ).classes("text-sm text-gray-600")
-                state["summary"]["genome_lbl"] = ui.label(
-                    "Genome-wide: -- pairs, -- groups"
-                ).classes("text-sm text-gray-600")
-                # Master BED label has been deprecated - hide it
-                state["summary"]["master_bed_lbl"] = ui.label("Master BED: (deprecated)").classes("hidden")
+    # Build UI — design.md §6–§9 (Digital Curator shell; no emoji in title)
+    with ui.element("div").classes("w-full min-w-0").props("id=analysis-detail-fusion"):
+        with ui.element("div").classes("classification-insight-shell w-full min-w-0"):
+            ui.label("Fusion analysis").classes(
+                "classification-insight-heading text-headline-small"
+            )
+            with ui.element("div").classes(
+                "classification-insight-card w-full min-w-0"
+            ):
+                with ui.column().classes("w-full min-w-0 gap-2 p-2 md:p-3"):
+                    with ui.row().classes("items-center gap-2 min-w-0"):
+                        ui.icon("merge").classes("classification-insight-icon")
+                        ui.label("Candidate summary").classes(
+                            "classification-insight-model flex-1 min-w-0"
+                        )
+                    state.setdefault("summary", {})
+                    state["summary"]["target_lbl"] = ui.label(
+                        "Target: -- pairs, -- groups"
+                    ).classes("classification-insight-meta w-full")
+                    state["summary"]["genome_lbl"] = ui.label(
+                        "Genome-wide: -- pairs, -- groups"
+                    ).classes("classification-insight-meta w-full")
+                    state["summary"]["master_bed_lbl"] = ui.label(
+                        "Master BED: (deprecated)"
+                    ).classes("hidden")
+                    ui.label(
+                        "From supplementary alignments; tables and plots below."
+                    ).classes("classification-insight-foot")
 
-        # Target Panel
-        ui.label("Target Panel").classes("text-base font-medium mt-1 mb-1")
-        state["target"]["summary_table_container"] = ui.column().classes("w-full")
-        state["target"]["groups_table_container"] = ui.column().classes("w-full mt-2")
-        state["target"]["plot_container"] = ui.column().classes("w-full")
-        state["target"]["table_container"] = ui.column().classes("w-full mt-2")
-        state["target"]["status_container"] = ui.column().classes("w-full mt-2")
+            ui.label("Target panel").classes(
+                "target-coverage-panel__meta-label mt-4 mb-1"
+            )
+            state["target"]["summary_table_container"] = ui.column().classes("w-full")
+            state["target"]["groups_table_container"] = ui.column().classes(
+                "w-full mt-2"
+            )
+            state["target"]["plot_container"] = ui.column().classes("w-full")
+            state["target"]["table_container"] = ui.column().classes("w-full mt-2")
+            state["target"]["status_container"] = ui.column().classes("w-full mt-2")
 
-        # Genome-wide
-        ui.separator()
-        ui.label("Genome-wide").classes("text-base font-medium mt-2 mb-1")
-        state["genome"]["summary_table_container"] = ui.column().classes("w-full")
-        state["genome"]["groups_table_container"] = ui.column().classes("w-full mt-2")
-        state["genome"]["plot_container"] = ui.column().classes("w-full")
-        state["genome"]["table_container"] = ui.column().classes("w-full mt-2")
-        state["genome"]["status_container"] = ui.column().classes("w-full mt-2")
+            # Genome-wide
+            ui.separator().classes("mgmt-detail-separator")
+            ui.label("Genome-wide").classes(
+                "target-coverage-panel__meta-label mt-2 mb-1"
+            )
+            state["genome"]["summary_table_container"] = ui.column().classes("w-full")
+            state["genome"]["groups_table_container"] = ui.column().classes(
+                "w-full mt-2"
+            )
+            state["genome"]["plot_container"] = ui.column().classes("w-full")
+            state["genome"]["table_container"] = ui.column().classes("w-full mt-2")
+            state["genome"]["status_container"] = ui.column().classes("w-full mt-2")
 
-        # Master BED Targets section has been deprecated
-        # The table display has been removed, but data is still processed for BED generation
-        # Uncomment the section below if you need to re-enable it:
-        # ui.separator()
-        # ui.label("Master BED Targets").classes("text-base font-medium mt-2 mb-1")
-        # ui.label(
-        #     "Detected breakpoint events from high-quality supplementary mappings (MapQ ≥ 50). "
-        #     "Each event represents a genomic region supported by multiple reads (minimum 3 reads). "
-        #     "Events are grouped by chromosome and position."
-        # ).classes("text-xs text-gray-600 mb-2")
-        # state["master_bed"]["table_container"] = ui.column().classes("w-full")
-        # state["master_bed"]["status_container"] = ui.column().classes("w-full mt-2")
-        
-        # Keep containers initialized for backward compatibility (in case code references them)
-        state["master_bed"]["table_container"] = ui.column().classes("w-full hidden")
-        state["master_bed"]["status_container"] = ui.column().classes("w-full mt-2 hidden")
+            # Master BED Targets section has been deprecated
+            # Keep containers initialized for backward compatibility
+            state["master_bed"]["table_container"] = ui.column().classes(
+                "w-full hidden"
+            )
+            state["master_bed"]["status_container"] = ui.column().classes(
+                "w-full mt-2 hidden"
+            )
 
     # Initial refresh and timer
     try:
@@ -3317,8 +3386,40 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
         logging.info("[Fusion] Setting up refresh timer (30s interval + 0.5s deferred + immediate)")
         refresh_timer = ui.timer(30.0, refresh_fusion, active=True, immediate=False)
         ui.timer(0.5, refresh_fusion, once=True)
+
+        def _sync_fusion_plot_theme_if_needed() -> None:
+            try:
+                dark = _is_dark_mode()
+            except Exception:
+                dark = False
+            for sec in ("target", "genome"):
+                st = state.get(sec, {})
+                if st.get("fusion_plot_theme_dark") == dark:
+                    continue
+                mpl = st.get("fusion_mpl")
+                if mpl is None:
+                    continue
+                fig = getattr(mpl, "figure", None)
+                if fig is None:
+                    continue
+                _apply_fusion_figure_theme(fig, dark)
+                try:
+                    mpl.update()
+                except Exception:
+                    pass
+                st["fusion_plot_theme_dark"] = dark
+
+        fusion_plot_theme_timer = ui.timer(
+            0.5, _sync_fusion_plot_theme_if_needed, active=True
+        )
+        ui.timer(0.05, _sync_fusion_plot_theme_if_needed, once=True)
         try:
-            ui.context.client.on_disconnect(lambda: refresh_timer.deactivate())
+            ui.context.client.on_disconnect(
+                lambda: (
+                    refresh_timer.deactivate(),
+                    fusion_plot_theme_timer.deactivate(),
+                )
+            )
         except Exception:
             pass
         logging.info("[Fusion] Timer set up successfully")
