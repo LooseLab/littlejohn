@@ -270,6 +270,16 @@ def _check_models_or_exit():
             print("ROBIN cannot run without the required model files.")
             sys.exit(1)
 
+    # Ensure ClinVar is present for variant annotation/reporting.
+    # (Best-effort download + local format conversion.)
+    try:
+        from robin.utils.clinvar_manager import ensure_clinvar_files
+
+        ensure_clinvar_files(download_if_missing=True)
+    except Exception as e:
+        click.echo(f"❌ Failed to set up ClinVar VCF files: {e}", err=True)
+        sys.exit(1)
+
 
 # Constants
 VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR"}
@@ -566,6 +576,23 @@ def mgmt(output_dir: Path, recursive: bool, out_path: Path) -> None:
     finally:
         if output_stream is not sys.stdout:
             output_stream.close()
+
+
+@utils.command("update-clinvar")
+def update_clinvar() -> None:
+    """Update ClinVar to the newest available NCBI version (best-effort)."""
+
+    try:
+        from robin.utils.clinvar_manager import update_clinvar_if_newer
+
+        updated = update_clinvar_if_newer(download_if_missing=True)
+        if updated:
+            click.echo("ClinVar updated successfully.")
+        else:
+            click.echo("ClinVar is already up to date.")
+    except Exception as e:
+        click.echo(f"Failed to update ClinVar: {e}", err=True)
+        sys.exit(1)
 
 
 def _remove_panel_from_system(panel_name: str) -> bool:

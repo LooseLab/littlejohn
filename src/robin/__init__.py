@@ -14,8 +14,15 @@ __version__ = "0.4.1"
 __author__ = "Matt Loose"
 __email__ = "matt.loose@nottingham.ac.uk"
 
-# Import analysis modules via consolidated analysis package
-from . import analysis  # noqa: F401
+#
+# Import analysis modules via consolidated analysis package.
+#
+# Some analysis dependencies are optional and may not be installed in minimal
+# environments (e.g. when only utility modules are imported).
+try:
+    from . import analysis  # noqa: F401
+except ModuleNotFoundError:
+    analysis = None  # type: ignore[assignment]
 
 # Export key modules
 __all__ = [

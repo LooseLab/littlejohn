@@ -3409,15 +3409,19 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     pass
                 st["fusion_plot_theme_dark"] = dark
 
-        fusion_plot_theme_timer = ui.timer(
-            0.5, _sync_fusion_plot_theme_if_needed, active=True
+        from robin.gui.theme import register_theme_sync_callback
+
+        unregister_fusion_theme_sync = register_theme_sync_callback(
+            _sync_fusion_plot_theme_if_needed,
+            element=state.get("target", {}).get("fusion_mpl"),
+            interval_s=0.5,
+            immediate=True,
         )
-        ui.timer(0.05, _sync_fusion_plot_theme_if_needed, once=True)
         try:
             ui.context.client.on_disconnect(
                 lambda: (
                     refresh_timer.deactivate(),
-                    fusion_plot_theme_timer.deactivate(),
+                    unregister_fusion_theme_sync(),
                 )
             )
         except Exception:

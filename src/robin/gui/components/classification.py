@@ -631,14 +631,14 @@ def add_classification_section(sample_dir: Path, launcher: Any = None) -> None:
             except Exception:
                 pass
 
-    ui.timer(0.05, lambda: _sync_classification_theme(True), once=True)
-    ui.timer(0.2, lambda: _sync_classification_theme(True), once=True)
-    ui.timer(0.45, lambda: _sync_classification_theme(True), once=True)
-    try:
-        ui.context.client.on_connect(lambda: _sync_classification_theme(True))
-    except Exception:
-        pass
-    theme_timer = ui.timer(1.0, _sync_classification_theme, active=True)
+    from robin.gui.theme import register_theme_sync_callback
+
+    unregister_classification_theme_sync = register_theme_sync_callback(
+        _sync_classification_theme,
+        element=next(iter(charts.values()))["bar"] if charts else None,
+        interval_s=1.0,
+        immediate=True,
+    )
 
     def _read_scores_csv(csv_path: Path, mode: str):
         try:
@@ -1066,7 +1066,7 @@ def add_classification_section(sample_dir: Path, launcher: Any = None) -> None:
     ui.timer(0.5, _refresh_classification, once=True)
     try:
         ui.context.client.on_disconnect(
-            lambda: (refresh_timer.deactivate(), theme_timer.deactivate())
+            lambda: (refresh_timer.deactivate(), unregister_classification_theme_sync())
         )
     except Exception:
         pass

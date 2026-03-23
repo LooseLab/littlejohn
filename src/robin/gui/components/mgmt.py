@@ -13,7 +13,7 @@ try:
 except ImportError:  # pragma: no cover
     ui = None
 
-from robin.gui.theme import styled_table
+from robin.gui.theme import styled_table, register_theme_sync_callback
 
 
 def _is_dark_mode() -> bool:
@@ -711,10 +711,15 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
             pass
         launcher._mgmt_state.setdefault(key, {})["mgmt_plot_theme_dark"] = dark
 
-    mgmt_theme_timer = ui.timer(0.5, _sync_mgmt_plot_theme_if_needed, active=True)
+    unregister_mgmt_theme_sync = register_theme_sync_callback(
+        _sync_mgmt_plot_theme_if_needed,
+        element=mgmt_mpl,
+        interval_s=0.5,
+        immediate=True,
+    )
     try:
         ui.context.client.on_disconnect(
-            lambda: (refresh_timer.deactivate(), mgmt_theme_timer.deactivate())
+            lambda: (refresh_timer.deactivate(), unregister_mgmt_theme_sync())
         )
     except Exception:
         pass

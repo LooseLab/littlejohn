@@ -15,6 +15,10 @@ from pathlib import Path
 from typing import List, Tuple, Optional
 
 
+CLINVAR_VCF_GZ_NAME = "clinvar.vcf.gz"
+CLINVAR_VCF_NAME = "clinvar.vcf"
+
+
 def get_models_directory(project_root: Optional[Path] = None) -> Path:
     """
     Get the path to the models directory.
@@ -67,6 +71,99 @@ def get_required_models() -> List[Tuple[str, str]]:
         ("capper_model", "Capper_et_al_NN_v2.pkl"),
         ("pancan_model", "pancan_devel_v5i_NN_v2.pkl")
     ]
+
+
+def get_resources_directory(project_root: Optional[Path] = None) -> Path:
+    """
+    Get the path to the robin resources directory.
+
+    Uses a file-relative strategy to avoid importing `robin` (which may import
+    optional heavy dependencies).
+    """
+
+    # This file is src/robin/utils/model_checker.py
+    # -> project root is src/robin/.. (or use `project_root` if provided)
+    if project_root is None:
+        this_file = Path(__file__).resolve()
+        # .../src/robin/utils/model_checker.py -> .../src/robin
+        robin_dir = this_file.parent.parent
+        resources_dir = robin_dir / "resources"
+        return resources_dir
+
+    # Provided project_root strategy (dev / alternate layouts)
+    return project_root / "src" / "robin" / "resources"
+
+
+def check_clinvar_files(resources_dir: Optional[Path] = None) -> Tuple[bool, List[str], List[str]]:
+    """
+    Check if required ClinVar VCF files exist.
+
+    Returns:
+        (all_present, missing_files, present_files)
+    """
+
+    resources_dir = resources_dir or get_resources_directory()
+    required = [CLINVAR_VCF_GZ_NAME, CLINVAR_VCF_NAME]
+
+    missing_files: List[str] = []
+    present_files: List[str] = []
+
+    for filename in required:
+        path = resources_dir / filename
+        if path.exists() and path.is_file() and path.stat().st_size > 0:
+            present_files.append(filename)
+        else:
+            missing_files.append(filename)
+
+    return (len(missing_files) == 0, missing_files, present_files)
+
+
+def _ensure_clinvar_or_exit(resources_dir: Optional[Path] = None) -> None:
+    """
+    Ensure ClinVar VCF files exist; if missing, warn and attempt download.
+    """
+
+    resources_dir = resources_dir or get_resources_directory()
+    all_present, missing_files, present_files = check_clinvar_files(resources_dir)
+
+    if all_present:
+        return
+
+    print("\n" + "=" * 60)
+    print("ROBIN CLINVAR STATUS CHECK")
+    print("=" * 60)
+    print("❌ Missing required ClinVar VCF files:")
+    for filename in missing_files:
+        print(f"   ✗ {filename}")
+
+    if present_files:
+        print("\n✅ Present ClinVar files:")
+        for filename in present_files:
+            print(f"   ✓ {filename}")
+
+    print(f"\n📁 ClinVar resources directory: {resources_dir}")
+
+    print("\n⚠️  Attempting to download/generate missing ClinVar files...")
+    try:
+        from robin.utils.clinvar_manager import ensure_clinvar_files
+
+        # download_if_missing=True will either download or convert formats
+        ensure_clinvar_files(
+            resources_dir=resources_dir, download_if_missing=True
+        )
+    except Exception as e:
+        print(f"\n❌ Failed to download/generate ClinVar files: {e}")
+        sys.exit(1)
+
+    all_present_after, missing_after, _present_after = check_clinvar_files(resources_dir)
+    if not all_present_after:
+        print("\n❌ ClinVar files are still missing after download attempt:")
+        for filename in missing_after:
+            print(f"   ✗ {filename}")
+        print("Please ensure network access is available and retry.")
+        sys.exit(1)
+
+    print("\n🎉 ClinVar files are now available.")
 
 
 def check_model_files(project_root: Optional[Path] = None) -> Tuple[bool, List[str], List[str]]:
@@ -295,6 +392,9 @@ def validate_models_or_exit(project_root: Optional[Path] = None) -> None:
     Args:
         project_root: Path to the project root directory
     """
+    # ClinVar is required for target/variant annotation steps.
+    _ensure_clinvar_or_exit()
+
     if not print_model_status(project_root):
         print("\n⚠️  ROBIN cannot run without the required model files.")
         print("Please download them using one of the methods above and try again.")

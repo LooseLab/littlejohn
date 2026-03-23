@@ -15,7 +15,7 @@ try:
 except ImportError:  # pragma: no cover
     ui = None
 
-from robin.gui.theme import styled_table
+from robin.gui.theme import styled_table, register_theme_sync_callback
 from robin.analysis.cnv_classification import detect_cnv_events, get_cnv_summary, CNVEvent
 from robin.classification_config import get_cnv_thresholds
 
@@ -2459,12 +2459,15 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
     # Start the refresh timer (every 30 seconds)
     refresh_timer = ui.timer(30.0, _refresh_cnv, active=True, immediate=False)
     ui.timer(0.5, _refresh_cnv, once=True)
-    cnv_theme_timer = ui.timer(0.5, _sync_cnv_echarts_theme_if_needed, active=True)
-    ui.timer(0.05, lambda: _sync_cnv_echarts_theme_if_needed(), once=True)
-    ui.timer(0.45, lambda: _sync_cnv_echarts_theme_if_needed(), once=True)
+    unregister_cnv_theme_sync = register_theme_sync_callback(
+        _sync_cnv_echarts_theme_if_needed,
+        element=cnv_abs,
+        interval_s=0.5,
+        immediate=True,
+    )
     try:
         ui.context.client.on_disconnect(
-            lambda: (refresh_timer.deactivate(), cnv_theme_timer.deactivate())
+            lambda: (refresh_timer.deactivate(), unregister_cnv_theme_sync())
         )
     except Exception:
         pass

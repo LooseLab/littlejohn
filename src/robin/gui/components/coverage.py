@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover
     ui = None
     app = None
 
-from robin.gui.theme import styled_table
+from robin.gui.theme import styled_table, register_theme_sync_callback
 
 # --- Coverage charts (design.md §9.5): on/off colours, mean line, gene palette ---
 _COV_GENE_LINE_PALETTE = [
@@ -6914,20 +6914,16 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
         30.0, _refresh_coverage_async, active=True, immediate=False
     )  # Periodic refresh every 30 seconds
     ui.timer(0.5, _refresh_coverage_async, once=True)
-    # Re-sync ECharts after storage / Quasar dark mode settle (fixes first-load mismatch).
-    ui.timer(0.05, lambda: _sync_coverage_echarts_theme(True), once=True)
-    ui.timer(0.2, lambda: _sync_coverage_echarts_theme(True), once=True)
-    ui.timer(0.45, lambda: _sync_coverage_echarts_theme(True), once=True)
-    # After 0.5s data refresh, charts may still settle; one more forced sync for light mode clarity.
-    ui.timer(0.65, lambda: _sync_coverage_echarts_theme(True), once=True)
-    try:
-        ui.context.client.on_connect(lambda: _sync_coverage_echarts_theme(True))
-    except Exception:
-        pass
-    cov_theme_timer = ui.timer(1.0, _sync_coverage_echarts_theme, active=True)
+    # Theme sync is centralized via a single global timer in theme.py.
+    unregister_cov_theme_sync = register_theme_sync_callback(
+        _sync_coverage_echarts_theme,
+        element=echart_target_cov,
+        interval_s=1.0,
+        immediate=True,
+    )
     try:
         ui.context.client.on_disconnect(
-            lambda: (refresh_timer.deactivate(), cov_theme_timer.deactivate())
+            lambda: (refresh_timer.deactivate(), unregister_cov_theme_sync())
         )
     except Exception:
         pass

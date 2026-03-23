@@ -425,9 +425,14 @@ def add_bed_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 pass
         state["bed_cov_plot_theme_dark"] = dark
 
-    bed_cov_theme_timer = ui.timer(0.5, _sync_bed_cov_echarts_theme_if_needed, active=True)
-    ui.timer(0.05, _sync_bed_cov_echarts_theme_if_needed, once=True)
-    ui.timer(0.45, _sync_bed_cov_echarts_theme_if_needed, once=True)
+    from robin.gui.theme import register_theme_sync_callback
+
+    unregister_bed_cov_theme_sync = register_theme_sync_callback(
+        _sync_bed_cov_echarts_theme_if_needed,
+        element=state.get("chart"),
+        interval_s=0.5,
+        immediate=True,
+    )
 
     # Initial load - use a small delay to ensure chart is fully initialized
     def initial_load():
@@ -452,7 +457,7 @@ def add_bed_coverage_section(launcher: Any, sample_dir: Path) -> None:
             lambda: (
                 result_timer.deactivate(),
                 refresh_timer.deactivate(),
-                bed_cov_theme_timer.deactivate(),
+                unregister_bed_cov_theme_sync(),
             )
         )
     except Exception:

@@ -45,6 +45,9 @@ import asyncio
 import logging
 import subprocess
 import importlib.metadata
+import weakref
+import time
+from typing import Callable, Optional, Any, Dict, List
 
 
 from nicegui import ui, app, events, core, run, background_tasks
@@ -66,6 +69,106 @@ is_development_mode = os.environ.get("ROBIN_DEV_MODE", "").lower() in ("1", "tru
 
 # Process large BAMs individually (do not use alongside live runs)
 _process_large_bams_enabled = os.environ.get("ROBIN_PROCESS_LARGE_BAMS", "0").strip().lower() in ("1", "true", "yes", "on")
+
+# Single global theme sync timer state
+_theme_sync_callbacks: Dict[int, Dict[str, Any]] = {}
+_theme_sync_next_id = 0
+_theme_sync_timer_started = False
+_THEME_SYNC_TICK_SECONDS = 0.5
+
+
+def ui_element_exists(element: Any) -> bool:
+    """Best-effort check that a NiceGUI element still exists."""
+    if element is None:
+        return True
+    try:
+        if getattr(element, "_deleted", False):
+            return False
+        if getattr(element, "client", None) is None:
+            return False
+        # Access id to force resolution for stale/disconnected elements.
+        _ = element.id
+        return True
+    except Exception:
+        return False
+
+
+def _run_theme_sync_callbacks() -> None:
+    """Run registered theme sync callbacks from a single global timer."""
+    now = time.monotonic()
+    dead_ids: List[int] = []
+    for callback_id, item in list(_theme_sync_callbacks.items()):
+        element_ref = item.get("element_ref")
+        interval_s = float(item.get("interval_s", 1.0))
+        last_run = float(item.get("last_run", 0.0))
+
+        if now - last_run < interval_s:
+            continue
+
+        target_element = element_ref() if element_ref else None
+        if element_ref and not ui_element_exists(target_element):
+            dead_ids.append(callback_id)
+            continue
+
+        cb = item.get("callback")
+        if cb is None:
+            dead_ids.append(callback_id)
+            continue
+
+        try:
+            cb()
+            item["last_run"] = now
+        except Exception:
+            # Keep UI responsive; callback owners can re-register if needed.
+            pass
+
+    for callback_id in dead_ids:
+        _theme_sync_callbacks.pop(callback_id, None)
+
+
+def ensure_theme_sync_timer() -> None:
+    """Ensure the single global theme sync timer is started."""
+    global _theme_sync_timer_started
+    if _theme_sync_timer_started:
+        return
+    ui.timer(_THEME_SYNC_TICK_SECONDS, _run_theme_sync_callbacks, active=True)
+    _theme_sync_timer_started = True
+
+
+def register_theme_sync_callback(
+    callback: Callable[[], None],
+    *,
+    element: Optional[Any] = None,
+    interval_s: float = 1.0,
+    immediate: bool = False,
+) -> Callable[[], None]:
+    """
+    Register a callback to run from the single global theme timer.
+
+    If `element` is provided, callback execution stops automatically once that
+    element no longer exists.
+    """
+    global _theme_sync_next_id
+    ensure_theme_sync_timer()
+    _theme_sync_next_id += 1
+    callback_id = _theme_sync_next_id
+    _theme_sync_callbacks[callback_id] = {
+        "callback": callback,
+        "interval_s": max(0.1, float(interval_s)),
+        "last_run": 0.0,
+        "element_ref": weakref.ref(element) if element is not None else None,
+    }
+
+    if immediate:
+        try:
+            callback()
+        except Exception:
+            pass
+
+    def _unregister() -> None:
+        _theme_sync_callbacks.pop(callback_id, None)
+
+    return _unregister
 
 
 def get_imagefile():

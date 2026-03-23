@@ -4558,6 +4558,16 @@ def parse_args():
         "--ray-address", default=None, help="Ray cluster address (None = local)"
     )
     p.add_argument(
+        "--no-clinvar-download",
+        action="store_true",
+        help="Do not auto-download ClinVar VCF files if missing",
+    )
+    p.add_argument(
+        "--update-clinvar-if-newer",
+        action="store_true",
+        help="If available, update ClinVar to the newest NCBI version (best-effort Last-Modified check)",
+    )
+    p.add_argument(
         "--preset",
         default=None,
         choices=["p2i", "standard", "high"],
@@ -4578,6 +4588,18 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
+
+    # Ensure ClinVar is present for variant annotation/reporting.
+    if not args.no_clinvar_download:
+        from robin.utils.clinvar_manager import (
+            ensure_clinvar_files,
+            update_clinvar_if_newer,
+        )
+
+        ensure_clinvar_files(download_if_missing=True)
+        if args.update_clinvar_if_newer:
+            update_clinvar_if_newer(download_if_missing=True)
+
     # Raise dashboard/State API job list limit (Ray default 10k) if not set
     if os.environ.get("RAY_MAX_LIMIT_FROM_DATA_SOURCE") is None:
         os.environ["RAY_MAX_LIMIT_FROM_DATA_SOURCE"] = "100000"
