@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+import logging
 import requests
 
 
@@ -194,14 +195,31 @@ class MNPFlexClient:
         url = self._url(
             f"/api/v1/mnpflex_sample/analysis/bundle_summary/{workflow_run_id}/{task_result_id}"
         )
-        resp = self.session.get(
-            url,
-            headers=self._auth_headers(),
-            verify=self.verify_ssl,
-            timeout=self.timeout,
-        )
-        resp.raise_for_status()
-        return resp.json()
+        try:
+            resp = self.session.get(
+                url,
+                headers=self._auth_headers(),
+                verify=self.verify_ssl,
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except requests.HTTPError:
+            status = getattr(resp, "status_code", None) if "resp" in locals() else None
+            # Response text is usually safe; still trim to a small window.
+            text_snippet = ""
+            try:
+                text_snippet = (resp.text or "")[:500] if "resp" in locals() else ""
+            except Exception:
+                text_snippet = ""
+            logging.error(
+                "MNPFlex get_bundle_summary failed: status=%s url=%s body_snippet=%r",
+                status,
+                url,
+                text_snippet,
+                exc_info=True,
+            )
+            raise
 
     def get_plot(
         self,
@@ -329,28 +347,70 @@ class MNPFlexClient:
             max_wait_seconds=max_wait_seconds,
         )
 
-        summary = self.get_bundle_summary(workflow_run_id, task_result_id)
+        # MNP-Flex occasionally returns transient 5xx for result materialization.
+        # Keep a small retry window so a single backend hiccup doesn't fail the whole sample.
+        def _retry(callable_fn, *, what: str, attempts: int = 3, base_sleep_s: float = 2.0):
+            last_exc: Optional[Exception] = None
+            for attempt in range(1, attempts + 1):
+                try:
+                    return callable_fn()
+                except requests.HTTPError as e:
+                    last_exc = e
+                    status = getattr(getattr(e, "response", None), "status_code", None)
+                    if status is not None and status >= 500 and attempt < attempts:
+                        sleep_s = base_sleep_s * attempt
+                        logging.warning(
+                            "MNPFlex transient 5xx during %s for sample_id=%s (attempt %d/%d, status=%s). Sleeping %.1fs",
+                            what,
+                            sample_id,
+                            attempt,
+                            attempts,
+                            status,
+                            sleep_s,
+                        )
+                        time.sleep(sleep_s)
+                        continue
+                    raise
+                except Exception as e:
+                    last_exc = e
+                    raise
+            if last_exc:
+                raise last_exc
+
+        summary = _retry(
+            lambda: self.get_bundle_summary(workflow_run_id, task_result_id),
+            what="get_bundle_summary",
+        )
         summary_path = os.path.join(output_dir, "bundle_summary.json")
         with open(summary_path, "w") as f:
             json.dump(summary, f, indent=2)
 
-        self.get_plot(
-            plot_type="qc_coverage",
-            workflow_run_id=workflow_run_id,
-            task_result_id=task_result_id,
-            save_path=os.path.join(output_dir, "qc_coverage_plot.png"),
+        _retry(
+            lambda: self.get_plot(
+                plot_type="qc_coverage",
+                workflow_run_id=workflow_run_id,
+                task_result_id=task_result_id,
+                save_path=os.path.join(output_dir, "qc_coverage_plot.png"),
+            ),
+            what="get_plot(qc_coverage)",
         )
-        self.get_plot(
-            plot_type="qc_methylation_density",
-            workflow_run_id=workflow_run_id,
-            task_result_id=task_result_id,
-            save_path=os.path.join(output_dir, "qc_methylation_density_plot.png"),
+        _retry(
+            lambda: self.get_plot(
+                plot_type="qc_methylation_density",
+                workflow_run_id=workflow_run_id,
+                task_result_id=task_result_id,
+                save_path=os.path.join(output_dir, "qc_methylation_density_plot.png"),
+            ),
+            what="get_plot(qc_methylation_density)",
         )
-        self.get_plot(
-            plot_type="mgmt_region",
-            workflow_run_id=workflow_run_id,
-            task_result_id=task_result_id,
-            save_path=os.path.join(output_dir, "mgmt_region_plot.png"),
+        _retry(
+            lambda: self.get_plot(
+                plot_type="mgmt_region",
+                workflow_run_id=workflow_run_id,
+                task_result_id=task_result_id,
+                save_path=os.path.join(output_dir, "mgmt_region_plot.png"),
+            ),
+            what="get_plot(mgmt_region)",
         )
 
         return {

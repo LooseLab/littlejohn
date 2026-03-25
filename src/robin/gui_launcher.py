@@ -34,6 +34,8 @@ from enum import Enum
 import os
 import secrets
 import sys
+import tempfile
+import zipfile
 import json
 import pickle
 import getpass
@@ -468,10 +470,19 @@ class GUILauncher:
         
         # Master record system - centralized source of truth for samples
         self._samples_master_record: Dict[str, SampleRecord] = {}
+        # Per-GUI-process snapshot of on-disk totals from master.csv at first use per sample.
+        # Coordinator stats are session-only; merged display = baseline + session counters.
+        self._samples_job_baseline: Dict[str, Dict[str, int]] = {}
         self._samples_record_lock = threading.Lock()
         self._master_record_cache_file: Optional[Path] = None  # Set when monitored_directory is known
         self._background_scan_interval: float = 10.0  # Scan every 10 seconds
         self._background_scan_in_progress: bool = False
+        # Sequential bulk SNP (one sample at a time; guard concurrent runs)
+        self._bulk_snp_worker_running: bool = False
+
+        # Sequential bulk MNP-Flex (one sample at a time; guard concurrent runs)
+        self._bulk_mnpflex_worker_running: bool = False
+
         # MGMT per-sample cache (latest count seen)
         self._mgmt_state: Dict[str, Dict[str, Any]] = {}
         # Coverage per-sample cache (file mtimes, computed metrics)
@@ -631,6 +642,122 @@ class GUILauncher:
         except Exception as e:
             logging.debug(f"Error saving master record cache: {e}")
 
+    def _ensure_job_baseline(self, sid: str) -> Dict[str, int]:
+        """
+        Freeze per-process baseline totals from master.csv the first time we see a sample.
+
+        Coordinator job totals are session-only; merged lifetime totals are baseline + session.
+        Baseline is captured once per process so later persisted CSV updates do not inflate it.
+        """
+        if sid in self._samples_job_baseline:
+            return self._samples_job_baseline[sid]
+        bt = bc = bf = 0
+        base = self.monitored_directory
+        if base:
+            csv_path = Path(base) / sid / "master.csv"
+            if csv_path.exists():
+                try:
+                    with csv_path.open("r", newline="") as fh:
+                        reader = csv.DictReader(fh)
+                        row = next(reader, None)
+                    if row:
+                        bt = int(row.get("samples_overview_total_jobs", 0) or 0)
+                        bc = int(row.get("samples_overview_completed_jobs", 0) or 0)
+                        bf = int(row.get("samples_overview_failed_jobs", 0) or 0)
+                except Exception:
+                    pass
+        self._samples_job_baseline[sid] = {"total": bt, "completed": bc, "failed": bf}
+        return self._samples_job_baseline[sid]
+
+    def _merge_workflow_sample_job_counts(
+        self, sid: str, workflow: Dict[str, Any]
+    ) -> Dict[str, int]:
+        """Merge session-only coordinator counts with frozen on-disk baseline for this process."""
+        b = self._ensure_job_baseline(sid)
+        wt = int(workflow.get("total_jobs", 0) or 0)
+        wc = int(workflow.get("completed_jobs", 0) or 0)
+        wf = int(workflow.get("failed_jobs", 0) or 0)
+        wa = int(workflow.get("active_jobs", 0) or 0)
+        wp = int(workflow.get("pending_jobs", 0) or 0)
+        return {
+            "total_jobs": b["total"] + wt,
+            "completed_jobs": b["completed"] + wc,
+            "failed_jobs": b["failed"] + wf,
+            "active_jobs": wa,
+            "pending_jobs": wp,
+        }
+
+    def _is_target_bam_finalize_redundant(self, sample_id: str) -> bool:
+        """
+        True when target.bam is already merged/indexed and no batch_*.bam remain.
+        In that case running finalize again only queues noise jobs and confuses the samples table.
+        """
+        if not self.monitored_directory:
+            return False
+        sample_dir = Path(self.monitored_directory) / sample_id
+        tb = sample_dir / "target.bam"
+        bai = sample_dir / "target.bam.bai"
+        if not (tb.exists() and tb.is_file() and bai.exists() and bai.is_file()):
+            return False
+        try:
+            batch_bams = list(sample_dir.glob("batch_*.bam"))
+        except Exception:
+            return False
+        return len(batch_bams) == 0
+
+    def _seed_finalized_samples_from_disk(self) -> None:
+        """Populate _finalized_samples from disk so restarts do not re-trigger finalization."""
+        if not self.monitored_directory:
+            return
+        base = Path(self.monitored_directory)
+        if not base.exists():
+            return
+        try:
+            for d in base.iterdir():
+                if not d.is_dir():
+                    continue
+                sid = d.name
+                if self._is_target_bam_finalize_redundant(sid):
+                    self._finalized_samples.add(sid)
+        except Exception as e:
+            logging.debug(f"Seed finalized samples from disk: {e}")
+
+    def _merge_job_types_with_persisted(
+        self, sid: str, workflow: Dict[str, Any]
+    ) -> str:
+        """Union persisted job_types (record or CSV) with workflow job types."""
+        prev = ""
+        try:
+            with self._samples_record_lock:
+                rec = self._samples_master_record.get(sid)
+                if rec and rec.job_types:
+                    prev = str(rec.job_types)
+        except Exception:
+            pass
+        if not prev and self.monitored_directory:
+            p = Path(self.monitored_directory) / sid / "master.csv"
+            if p.exists():
+                try:
+                    with p.open("r", newline="") as fh:
+                        reader = csv.DictReader(fh)
+                        row = next(reader, None)
+                    if row:
+                        prev = str(row.get("samples_overview_job_types", "") or "")
+                except Exception:
+                    pass
+        wts = workflow.get("job_types", [])
+        if isinstance(wts, list):
+            wjn = ",".join(sorted({str(x).strip() for x in wts if str(x).strip()}))
+        else:
+            wjn = str(wts or "").strip()
+        parts: Set[str] = set()
+        for chunk in (prev, wjn):
+            for piece in (chunk or "").replace(", ", ",").split(","):
+                p2 = piece.strip()
+                if p2:
+                    parts.add(p2)
+        return ", ".join(sorted(parts))
+
     def _background_scan_samples(self) -> None:
         """Schedule a background scan without blocking the UI thread."""
         try:
@@ -764,6 +891,28 @@ class GUILauncher:
                         # Load test_id from sample_identifier_manifest.json if present
                         record.test_id = _get_test_id_from_manifest(sample_dir)
                         
+                        # Do not leave new records as default "Live" when this folder is already
+                        # finished on disk — that would look like a Live→Complete transition and
+                        # re-run target.bam finalization on every restart.
+                        if record.origin == "Live" and (now_ts - record._last_seen_raw) >= self.completion_timeout_seconds:
+                            if record.active_jobs == 0 and record.pending_jobs == 0:
+                                expected = self._get_expected_completion_job_types()
+                                if expected:
+                                    complete_on_disk = self._expected_jobs_completed(
+                                        sample_dir, expected
+                                    )
+                                else:
+                                    complete_on_disk = self._is_target_bam_finalize_redundant(
+                                        sid
+                                    )
+                                if not complete_on_disk:
+                                    complete_on_disk = self._is_target_bam_finalize_redundant(
+                                        sid
+                                    )
+                                if complete_on_disk:
+                                    record.origin = "Complete"
+                                    record._dirty = True
+
                         # Update origin based on inactivity timeout AND active jobs status
                         prev_origin = record.origin
                         # Only mark as Complete if timeout passed AND no active jobs
@@ -875,23 +1024,20 @@ class GUILauncher:
                         else:
                             record.origin = "Live"
                     
-                    # Update job counts from workflow data (these are more current than file scans)
-                    record.active_jobs = s.get("active_jobs", 0)
-                    record.pending_jobs = s.get("pending_jobs", 0)
-                    record.total_jobs = s.get("total_jobs", 0)
-                    record.completed_jobs = s.get("completed_jobs", 0)
-                    record.failed_jobs = s.get("failed_jobs", 0)
+                    # Merge session-only coordinator stats with on-disk baseline (see _ensure_job_baseline)
+                    merged = self._merge_workflow_sample_job_counts(sid, s)
+                    record.active_jobs = merged["active_jobs"]
+                    record.pending_jobs = merged["pending_jobs"]
+                    record.total_jobs = merged["total_jobs"]
+                    record.completed_jobs = merged["completed_jobs"]
+                    record.failed_jobs = merged["failed_jobs"]
                     
                     # Update file progress from job counts (same data source as other columns)
                     record.files_seen = record.total_jobs
                     record.files_processed = record.completed_jobs
                     
-                    # Update job types
-                    job_types = s.get("job_types", [])
-                    if isinstance(job_types, list):
-                        record.job_types = ", ".join(sorted(set(str(x) for x in job_types)))
-                    else:
-                        record.job_types = str(job_types or "")
+                    # Union with persisted job types so restarts do not drop history
+                    record.job_types = self._merge_job_types_with_persisted(sid, s)
                     # Load test_id from sample_identifier_manifest.json if present
                     if self.monitored_directory:
                         sample_dir = Path(self.monitored_directory) / sid
@@ -977,6 +1123,8 @@ class GUILauncher:
             # Try to load cache immediately for fast startup
             if self._load_master_record_cache():
                 logging.info("Loaded samples from cache - table will populate immediately")
+            # Skip spurious target.bam finalization on restart when outputs already exist
+            self._seed_finalized_samples_from_disk()
 
         try:
             # When reload is requested, we must run in the main thread
@@ -1788,6 +1936,7 @@ class GUILauncher:
             def samples_overview():
                 """Samples overview page showing all tracked samples."""
                 _setup_global_resources()
+                logging.info("[samples_overview] building page /live_data")
                 self._create_samples_overview()
 
             # Create individual sample detail pages
@@ -2059,6 +2208,7 @@ class GUILauncher:
 
     def _create_samples_overview(self):
         """Create the samples overview page showing all tracked samples (design.md Editorial Bioinformatics)."""
+        logging.info("[samples_overview] _create_samples_overview() started")
         with theme.frame(
             "R.O.B.I.N - Sample Tracking Overview",
             smalltitle="Samples",
@@ -2086,21 +2236,65 @@ class GUILauncher:
 
                 # Samples table section — outer column keeps mobile scroll behavior
                 with ui.column().classes("w-full max-w-7xl mx-auto gap-3"):
+                    # Title + export/SNP actions on one row (must stay visible; a separate row below filters was easy to miss)
                     with ui.row().classes(
-                        "w-full items-center justify-between flex-wrap gap-2 mb-1"
+                        "w-full items-center justify-between flex-wrap gap-3 mb-2"
                     ):
                         ui.label("All tracked samples").classes(
-                            "text-headline-medium text-slate-900 dark:text-slate-50"
+                            "text-headline-medium text-slate-900 dark:text-slate-50 shrink-0"
                         )
-                        
-                        # Loading indicator
-                        self.samples_loading_indicator = ui.spinner(size="sm", color="primary")
-                        self.samples_loading_indicator.set_visibility(False)
-                        
-                        #ui.button(
-                        #    "Refresh All Plots",
-                        #    on_click=lambda: self._refresh_all_sample_plots(),
-                        #).classes("q-btn--secondary")
+                        with ui.row().classes(
+                            "gap-2 flex-wrap items-center justify-end min-w-0 flex-1"
+                        ):
+                            self.samples_loading_indicator = ui.spinner(
+                                size="sm", color="primary"
+                            )
+                            self.samples_loading_indicator.set_visibility(False)
+                            ui.button(
+                                "Select all",
+                                on_click=lambda: self._samples_select_all_visible_for_export(),
+                            ).props("flat dense no-caps outline")
+                            ui.button(
+                                "Clear selection",
+                                on_click=lambda: self._samples_clear_export_selection(),
+                            ).props("flat dense no-caps outline")
+                            self.bulk_snp_button = ui.button(
+                                "SNP: all missing",
+                                icon="biotech",
+                                on_click=lambda: None,
+                            ).props("color=secondary dense no-caps").classes(
+                                "border border-slate-300 dark:border-slate-600"
+                            )
+                            # Optional bulk MNP-Flex action (only if credentials are available)
+                            _mnpflex_username = (
+                                os.getenv("MNPFLEX_USERNAME") or os.getenv("EPIGNOSTIX_USERNAME")
+                            )
+                            _mnpflex_password = (
+                                os.getenv("MNPFLEX_PASSWORD") or os.getenv("EPIGNOSTIX_PASSWORD")
+                            )
+                            if _mnpflex_username and _mnpflex_password:
+                                self.bulk_mnpflex_button = ui.button(
+                                    "mnpflex run all",
+                                    on_click=lambda: None,
+                                ).props(
+                                    "color=secondary dense no-caps"
+                                ).classes(
+                                    "border border-slate-300 dark:border-slate-600"
+                                )
+                            else:
+                                self.bulk_mnpflex_button = None
+
+                            self.export_reports_button = ui.button(
+                                "Export reports",
+                                on_click=lambda: None,
+                            ).props("color=primary").classes(
+                                "rounded-lg px-4 text-title-medium"
+                            )
+                            self.export_reports_button.disable()
+                            logging.info(
+                                "[samples_overview] toolbar controls created "
+                                "(Select all / Clear / SNP / Export)"
+                            )
 
                     # Filters row (search left, origin right — read .value in handlers; Quasar
                     # update:model-value payloads are not reliably parsed by _extract_event_value)
@@ -2128,8 +2322,10 @@ class GUILauncher:
                             current_query = self._samples_filters.get("query", "")
                             if current_query:
                                 self.samples_search.value = current_query
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logging.debug(
+                                "[samples_overview] could not preset search filter: %s", e
+                            )
 
                         # Origin filter
                         self.origin_filter = (
@@ -2280,10 +2476,20 @@ class GUILauncher:
                         class_size="table-xs",
                         row_key="sample_id",
                     )
+                    _export_col = any(
+                        (c.get("name") == "export") for c in self.samples_table.columns
+                    )
+                    logging.info(
+                        "[samples_overview] styled_table ready: %d columns, export_col=%s",
+                        len(self.samples_table.columns),
+                        _export_col,
+                    )
                     try:
                         self.samples_table.props("rows-per-page-options=[10,20,50,0]")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logging.debug(
+                            "[samples_overview] rows-per-page-options props: %s", e
+                        )
                     
                     # Set default sorting by last activity in reverse chronological order
                     try:
@@ -2296,8 +2502,8 @@ class GUILauncher:
                             if col.get("field") == "last_seen":
                                 col["sort"] = "desc"
                                 break
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logging.debug("[samples_overview] default sort props: %s", e)
                     
                     # Populate table from master record if available (fast initial load)
                     try:
@@ -2323,8 +2529,12 @@ class GUILauncher:
 </q-td>
 """,
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logging.warning(
+                            "[samples_overview] add_slot body-cell-actions failed: %s",
+                            e,
+                            exc_info=True,
+                        )
                     
                     # Add file progress column with linear progress bar
                     try:
@@ -2346,8 +2556,12 @@ class GUILauncher:
 </q-td>
 """,
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logging.warning(
+                            "[samples_overview] add_slot body-cell-file_progress failed: %s",
+                            e,
+                            exc_info=True,
+                        )
 
                     # Job types: allow wrapping (comma+space separated in row data)
                     try:
@@ -2362,11 +2576,30 @@ class GUILauncher:
 </q-td>
 """,
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logging.warning(
+                            "[samples_overview] add_slot body-cell-job_types failed: %s",
+                            e,
+                            exc_info=True,
+                        )
                     
-                    # Add export checkbox as rightmost column
+                    # Add export checkbox as rightmost column + header "select all" checkbox
                     try:
+                        self.samples_table.add_slot(
+                            "header-cell-export",
+                            """
+<q-th :props="props">
+  <div class="column items-center q-gutter-xs">
+    <span class="text-caption text-slate-500">All</span>
+    <q-checkbox
+      dense
+      size="sm"
+      @update:model-value="$parent.$emit('export-header-toggle', $event)"
+    />
+  </div>
+</q-th>
+""",
+                        )
                         self.samples_table.add_slot(
                             "body-cell-export",
                             """
@@ -2377,8 +2610,12 @@ class GUILauncher:
 </q-td>
 """,
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logging.warning(
+                            "[samples_overview] add_slot export column failed: %s",
+                            e,
+                            exc_info=True,
+                        )
                     
                     # Handle finalize-target action
                     def _on_finalize_target(event):
@@ -2411,8 +2648,12 @@ class GUILauncher:
                     
                     try:
                         self.samples_table.on("finalize-target", _on_finalize_target)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logging.warning(
+                            "[samples_overview] bind finalize-target failed: %s",
+                            e,
+                            exc_info=True,
+                        )
 
                     # Track multi-selection for batch export via custom checkbox column
                     try:
@@ -2441,31 +2682,233 @@ class GUILauncher:
                                                         sid in self._selected_sample_ids
                                                     )
                                             self.samples_table.update()
-                                        except Exception:
-                                            pass
+                                        except Exception as ue:
+                                            logging.debug(
+                                                "[samples_overview] export row sync failed: %s",
+                                                ue,
+                                                exc_info=True,
+                                            )
                                         if self._selected_sample_ids:
                                             self.export_reports_button.enable()
                                         else:
                                             self.export_reports_button.disable()
-                            except Exception:
-                                pass
+                                        logging.info(
+                                            "[samples_overview] export-toggled id=%s value=%s "
+                                            "selected_count=%s",
+                                            sid,
+                                            val,
+                                            len(self._selected_sample_ids),
+                                        )
+                            except Exception as e:
+                                logging.warning(
+                                    "[samples_overview] export-toggled handler error: %s",
+                                    e,
+                                    exc_info=True,
+                                )
 
                         self.samples_table.on("export-toggled", _on_export_toggled)
-                    except Exception:
-                        pass
 
-                    # Primary action: high-contrast emerald (shell palette §4)
-                    with ui.row().classes("w-full justify-end mt-2"):
-                        self.export_reports_button = ui.button(
-                            "Export reports",
-                            on_click=lambda: None,
-                        ).props("color=primary").classes(
-                            "rounded-lg px-5 text-title-medium"
+                        def _on_export_header_toggle(event):
+                            try:
+                                logging.info(
+                                    "[samples_overview] export-header-toggle raw_args=%r",
+                                    getattr(event, "args", None)
+                                    if hasattr(event, "args")
+                                    else event,
+                                )
+                                val = True
+                                if hasattr(event, "args"):
+                                    a = getattr(event, "args", None)
+                                    if isinstance(a, (list, tuple)) and len(a) > 0:
+                                        val = bool(a[0])
+                                    elif isinstance(a, dict):
+                                        val = bool(a.get("value", True))
+                                    else:
+                                        val = bool(a)
+                                elif isinstance(event, dict):
+                                    val = bool(event.get("value", True))
+                                if val:
+                                    self._samples_select_all_visible_for_export()
+                                else:
+                                    self._samples_clear_export_selection()
+                            except Exception as e:
+                                logging.warning(
+                                    "[samples_overview] export-header-toggle failed (%s); "
+                                    "falling back to select-all",
+                                    e,
+                                    exc_info=True,
+                                )
+                                self._samples_select_all_visible_for_export()
+
+                        self.samples_table.on(
+                            "export-header-toggle", _on_export_header_toggle
                         )
-                        self.export_reports_button.disable()
+                        logging.info(
+                            "[samples_overview] export-toggled and export-header-toggle "
+                            "handlers registered"
+                        )
+                    except Exception as e:
+                        logging.warning(
+                            "[samples_overview] export checkbox table.on wiring failed: %s",
+                            e,
+                            exc_info=True,
+                        )
 
-                    # Batch export selected reports
+                    # Batch export selected reports + wire SNP bulk (separate try so one failure does not block the other)
                     try:
+                        logging.info(
+                            "[samples_overview] wiring bulk_snp and export_reports "
+                            "on_click handlers"
+                        )
+
+                        async def _ask_run_bulk_snp():
+                            logging.info("[samples_overview] SNP: all missing clicked")
+                            if self._bulk_snp_worker_running:
+                                ui.notify(
+                                    "SNP batch is already running.",
+                                    type="warning",
+                                )
+                                return
+                            missing = self._list_samples_needing_snp_calling()
+                            if not missing:
+                                ui.notify(
+                                    "No samples need SNP calling (outputs exist or prerequisites missing).",
+                                    type="info",
+                                )
+                                return
+                            n = len(missing)
+                            with ui.dialog() as dlg:
+                                with ui.card().classes(
+                                    "robin-dialog-surface w-96 max-w-[95vw] p-4"
+                                ):
+                                    ui.label("Run SNP for all missing samples?").classes(
+                                        "classification-insight-heading text-headline-small mb-2"
+                                    )
+                                    ui.label(
+                                        f"{n} sample(s) will be processed one after another "
+                                        "(same as triggering SNP manually each time). "
+                                        "This may take a long time overall."
+                                    ).classes("text-sm text-gray-600 mb-4")
+                                    with ui.row().classes("justify-end gap-2 flex-wrap"):
+                                        ui.button(
+                                            "Cancel",
+                                            on_click=lambda: dlg.submit(False),
+                                        ).props("flat no-caps outline")
+                                        ui.button(
+                                            "Start",
+                                            on_click=lambda: dlg.submit(True),
+                                        ).props("color=primary no-caps")
+                            if not await dlg:
+                                return
+                            self._bulk_snp_worker_running = True
+                            ids_copy = list(missing)
+
+                            def _run():
+                                self._bulk_snp_sequential_run(ids_copy)
+
+                            threading.Thread(
+                                target=_run,
+                                daemon=True,
+                                name="robin-bulk-snp",
+                            ).start()
+                            ui.notify(
+                                f"Started sequential SNP batch for {n} sample(s).",
+                                type="positive",
+                            )
+
+                        try:
+                            self.bulk_snp_button.on_click(_ask_run_bulk_snp)
+                        except Exception as e:
+                            logging.warning(
+                                "Could not wire SNP bulk button (export still works): %s",
+                                e,
+                            )
+
+                        # Optional MNP-Flex bulk run (same pattern as SNP)
+                        try:
+                            if getattr(self, "bulk_mnpflex_button", None) is not None:
+
+                                async def _ask_run_bulk_mnpflex():
+                                    logging.info(
+                                        "[samples_overview] mnpflex run all clicked"
+                                    )
+                                    if self._bulk_mnpflex_worker_running:
+                                        ui.notify(
+                                            "MNP-Flex batch is already running.",
+                                            type="warning",
+                                        )
+                                        return
+                                    if not self._is_mnpflex_enabled_for_gui():
+                                        ui.notify(
+                                            "MNP-Flex is not enabled (missing credentials).",
+                                            type="warning",
+                                        )
+                                        return
+
+                                    missing = self._list_samples_needing_mnpflex_for_visible()
+                                    if not missing:
+                                        ui.notify(
+                                            "No samples need MNP-Flex (results exist or prerequisites missing).",
+                                            type="info",
+                                        )
+                                        return
+                                    n = len(missing)
+
+                                    with ui.dialog() as dlg:
+                                        with ui.card().classes(
+                                            "robin-dialog-surface w-96 max-w-[95vw] p-4"
+                                        ):
+                                            ui.label(
+                                                "Run MNP-Flex for eligible missing samples?"
+                                            ).classes(
+                                                "classification-insight-heading text-headline-small mb-2"
+                                            )
+                                            ui.label(
+                                                f"{n} sample(s) will be processed one after another. "
+                                                "This can take a long time overall."
+                                            ).classes(
+                                                "text-sm text-gray-600 mb-4"
+                                            )
+                                            with ui.row().classes(
+                                                "justify-end gap-2 flex-wrap"
+                                            ):
+                                                ui.button(
+                                                    "Cancel",
+                                                    on_click=lambda: dlg.submit(False),
+                                                ).props(
+                                                    "flat no-caps outline"
+                                                )
+                                                ui.button(
+                                                    "Start",
+                                                    on_click=lambda: dlg.submit(True),
+                                                ).props("color=primary no-caps")
+
+                                    if not await dlg:
+                                        return
+
+                                    self._bulk_mnpflex_worker_running = True
+                                    ids_copy = list(missing)
+
+                                    def _run():
+                                        self._bulk_mnpflex_sequential_run(ids_copy)
+
+                                    threading.Thread(
+                                        target=_run,
+                                        daemon=True,
+                                        name="robin-bulk-mnpflex",
+                                    ).start()
+                                    ui.notify(
+                                        f"Started sequential MNP-Flex batch for {n} sample(s).",
+                                        type="positive",
+                                    )
+
+                                self.bulk_mnpflex_button.on_click(_ask_run_bulk_mnpflex)
+                        except Exception as e:
+                            logging.warning(
+                                "Could not wire MNP-Flex bulk button: %s",
+                                e,
+                                exc_info=True,
+                            )
 
                         async def _export_selected_reports(state: Dict[str, Any], progress_dialog, files_to_download, download_complete, progress_callback, progress_updates):
                             try:
@@ -2601,6 +3044,13 @@ class GUILauncher:
                                 download_complete["done"] = True
 
                         async def _confirm_bulk_export():
+                            logging.info(
+                                "[samples_overview] Export reports clicked "
+                                "selected=%s",
+                                len(
+                                    getattr(self, "_selected_sample_ids", None) or []
+                                ),
+                            )
                             # Ensure there is at least one selection before opening
                             if not getattr(self, "_selected_sample_ids", None):
                                 ui.notify("No samples selected", type="warning")
@@ -2794,13 +3244,32 @@ class GUILauncher:
                                         """Handle downloads in UI context once generation is complete."""
                                         if download_complete["done"] and files_to_download:
                                             # Log that export is complete
-                                            file_count = len([f for f in files_to_download if f is not None])
-                                            logging.info(f"Bulk export complete. {file_count} file(s) ready for download.")
-                                            
-                                            for file_path in files_to_download:
-                                                if file_path is not None:
-                                                    logging.debug(f"Initiating download: {file_path}")
-                                                    ui.download(file_path)
+                                            valid_files = [
+                                                f
+                                                for f in files_to_download
+                                                if f is not None and os.path.isfile(f)
+                                            ]
+                                            logging.info(
+                                                f"Bulk export complete. {len(valid_files)} file(s) ready for download."
+                                            )
+                                            # Safari blocks multiple programmatic downloads; use one ZIP when needed.
+                                            bundle = self._zip_paths_for_bulk_download(valid_files)
+                                            if bundle:
+                                                if len(valid_files) > 1:
+                                                    ui.notify(
+                                                        "Downloading a single ZIP (works in Safari; multiple separate downloads are blocked there).",
+                                                        type="info",
+                                                    )
+                                                logging.debug(f"Initiating download: {bundle}")
+                                                ui.download(bundle)
+                                                if bundle.endswith(".zip") and "robin_reports_" in os.path.basename(
+                                                    bundle
+                                                ):
+                                                    ui.timer(
+                                                        120.0,
+                                                        lambda p=bundle: self._unlink_quiet(p),
+                                                        once=True,
+                                                    )
                                             # Close dialog after 3 seconds
                                             ui.timer(3.0, lambda: progress_dialog.submit(None), once=True)
                                             download_timer.deactivate()
@@ -2823,8 +3292,15 @@ class GUILauncher:
 
                         # Wire the button now that handlers exist
                         self.export_reports_button.on_click(_confirm_bulk_export)
+                        logging.info(
+                            "[samples_overview] bulk SNP and Export reports buttons "
+                            "on_click wired successfully"
+                        )
                     except Exception:
-                        pass
+                        logging.exception(
+                            "[samples_overview] bulk export / SNP wiring failed — "
+                            "Export and SNP buttons may still use placeholder handlers"
+                        )
 
                     # If we have cached rows, show them immediately for instant UX
                     if self._last_samples_rows:
@@ -2834,8 +3310,10 @@ class GUILauncher:
                             if hasattr(self, "samples_loading_container"):
                                 self.samples_loading_container.set_visibility(False)
                             # No selection behavior needed; per-row buttons handle navigation
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logging.debug(
+                                "[samples_overview] apply cached rows on load: %s", e
+                            )
                     else:
                         # Show loading container if no cached data
                         if hasattr(self, "samples_loading_container"):
@@ -2876,9 +3354,31 @@ class GUILauncher:
                             if prev_row.get("sample_id") == sid:
                                 prev_origin = prev_row.get("origin")
                                 break
+                    merged = self._merge_workflow_sample_job_counts(sid, s)
+                    if (
+                        origin_value == "Live"
+                        and base is not None
+                        and (time.time() - last_seen) >= self.completion_timeout_seconds
+                    ):
+                        if merged["active_jobs"] == 0 and merged["pending_jobs"] == 0:
+                            sample_dir = base / sid
+                            if expected_job_types:
+                                complete_on_disk = self._expected_jobs_completed(
+                                    sample_dir, expected_job_types
+                                )
+                            else:
+                                complete_on_disk = self._is_target_bam_finalize_redundant(
+                                    sid
+                                )
+                            if not complete_on_disk:
+                                complete_on_disk = self._is_target_bam_finalize_redundant(
+                                    sid
+                                )
+                            if complete_on_disk:
+                                origin_value = "Complete"
                     try:
-                        active_jobs_count = s.get("active_jobs", 0)
-                        pending_jobs_count = s.get("pending_jobs", 0)
+                        active_jobs_count = merged["active_jobs"]
+                        pending_jobs_count = merged["pending_jobs"]
                         # Only mark as Complete if timeout passed AND no active jobs
                         if origin_value == "Live" and (time.time() - last_seen) >= self.completion_timeout_seconds:
                             if active_jobs_count == 0 and pending_jobs_count == 0:
@@ -2890,15 +3390,15 @@ class GUILauncher:
                                     )
                                 if should_complete:
                                     origin_value = "Complete"
-                                    # Trigger finalization if transitioning from Live to Complete
-                                    if prev_origin == "Live" or prev_origin is None:
+                                    # Trigger finalization only on a real Live→Complete transition
+                                    if prev_origin == "Live":
                                         self._trigger_target_bam_finalization(sid)
                             # If there are active jobs, keep as Live even if timeout passed
                     except Exception:
                         pass
-                    # Get job counts
-                    total_jobs = s.get("total_jobs", 0)
-                    completed_jobs = s.get("completed_jobs", 0)
+                    total_jobs = merged["total_jobs"]
+                    completed_jobs = merged["completed_jobs"]
+                    failed_jobs = merged["failed_jobs"]
                     
                     # Set file progress directly from job counts (same data source as other columns)
                     files_seen = total_jobs
@@ -2912,18 +3412,12 @@ class GUILauncher:
                         "run_start": "",
                         "device": "",
                         "flowcell": "",
-                        "active_jobs": s.get("active_jobs", 0),
-                        "pending_jobs": s.get("pending_jobs", 0),
+                        "active_jobs": merged["active_jobs"],
+                        "pending_jobs": merged["pending_jobs"],
                         "total_jobs": total_jobs,
                         "completed_jobs": completed_jobs,
-                        "failed_jobs": s.get("failed_jobs", 0),
-                        "job_types": (
-                            ", ".join(
-                                sorted(set(str(x) for x in s.get("job_types", [])))
-                            )
-                            if isinstance(s.get("job_types", []), list)
-                            else str(s.get("job_types", ""))
-                        ),
+                        "failed_jobs": failed_jobs,
+                        "job_types": self._merge_job_types_with_persisted(sid, s),
                         "last_seen": time.strftime(
                             "%Y-%m-%d %H:%M:%S", time.localtime(last_seen)
                         ),
@@ -3183,9 +3677,34 @@ class GUILauncher:
             logging.error(f"Error setting samples job type filter: {e}")
             pass
 
+    def _dedupe_samples_rows_by_id(
+        self, rows: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Keep one row per sample_id (newest _last_seen_raw wins) to avoid duplicate keys."""
+        by_id: Dict[str, Dict[str, Any]] = {}
+        for r in rows or []:
+            sid = str(r.get("sample_id", "") or "").strip()
+            if not sid or sid == "unknown":
+                continue
+            prev = by_id.get(sid)
+            if prev is None:
+                by_id[sid] = r
+            else:
+                try:
+                    if float(r.get("_last_seen_raw", 0)) >= float(
+                        prev.get("_last_seen_raw", 0)
+                    ):
+                        by_id[sid] = r
+                except Exception:
+                    by_id[sid] = r
+        return list(by_id.values())
+
     def _apply_samples_table_filters(self) -> None:
         try:
-            base_rows = getattr(self, "_last_samples_rows", []) or []
+            base_rows = self._dedupe_samples_rows_by_id(
+                getattr(self, "_last_samples_rows", []) or []
+            )
+            self._last_samples_rows = base_rows
             rows = self._normalize_rows_for_display(base_rows)
             
             logging.debug(f"Applying filters to {len(rows)} base rows")
@@ -6040,9 +6559,526 @@ class GUILauncher:
 
         return None
 
+    def _sample_has_snp_calling_outputs(self, sample_id: str) -> bool:
+        """True when Clair3 / SNP pipeline outputs exist (same check as coverage UI)."""
+        if not self.monitored_directory:
+            return False
+        clair = Path(self.monitored_directory) / sample_id / "clair3"
+        snp_vcf = clair / "snpsift_output.vcf"
+        indel_vcf = clair / "snpsift_indel_output.vcf"
+        return snp_vcf.is_file() and indel_vcf.is_file()
+
+    def _sample_snp_prerequisites_met(self, sample_dir: Path) -> tuple[bool, str]:
+        """target.bam + non-empty targets_exceeding_threshold.bed (matches per-sample SNP UI)."""
+        target_bam = sample_dir / "target.bam"
+        targets_bed = sample_dir / "targets_exceeding_threshold.bed"
+        if not target_bam.is_file():
+            return False, "missing target.bam"
+        if not targets_bed.is_file():
+            return False, "missing targets_exceeding_threshold.bed"
+        try:
+            if not targets_bed.read_text(encoding="utf-8", errors="replace").strip():
+                return False, "empty targets BED"
+        except OSError as e:
+            return False, f"cannot read targets BED: {e}"
+        return True, ""
+
+    def _list_samples_needing_snp_calling(self) -> List[str]:
+        """Samples under work dir that are ready for SNP but lack Clair3 outputs."""
+        if not self.monitored_directory:
+            return []
+        base = Path(self.monitored_directory)
+        if not base.is_dir():
+            return []
+        need: List[str] = []
+        try:
+            for d in sorted(base.iterdir()):
+                if not d.is_dir():
+                    continue
+                sid = d.name
+                if self._sample_has_snp_calling_outputs(sid):
+                    continue
+                ok, _ = self._sample_snp_prerequisites_met(d)
+                if ok:
+                    need.append(sid)
+        except Exception as e:
+            logging.debug(f"List samples needing SNP: {e}")
+        return need
+
+    def _is_mnpflex_enabled_for_gui(self) -> bool:
+        """True when MNP-Flex credentials exist in the server environment."""
+        username = os.getenv("MNPFLEX_USERNAME") or os.getenv("EPIGNOSTIX_USERNAME")
+        password = os.getenv("MNPFLEX_PASSWORD") or os.getenv("EPIGNOSTIX_PASSWORD")
+        return bool(username and password)
+
+    def _mnpflex_results_dir_for_sample(
+        self, sample_dir: Path, sample_id: str
+    ) -> Optional[Path]:
+        """Return directory containing `bundle_summary.json` (if results exist)."""
+        try:
+            candidates = [
+                sample_dir / f"mnpflex_results_{sample_id}",
+                sample_dir / "mnpflex_results",
+                sample_dir,
+            ]
+            for candidate in candidates:
+                if (candidate / "bundle_summary.json").exists():
+                    return candidate
+            for candidate in sorted(sample_dir.glob("mnpflex_results_*")):
+                if (candidate / "bundle_summary.json").exists():
+                    return candidate
+        except Exception:
+            return None
+        return None
+
+    def _mnpflex_parquet_path_for_sample(
+        self, sample_dir: Path, sample_id: str
+    ) -> Optional[Path]:
+        """Preferred parquet is `<sample_id>.parquet`, else any `*.parquet`."""
+        preferred = sample_dir / f"{sample_id}.parquet"
+        if preferred.exists():
+            return preferred
+        try:
+            matches = list(sample_dir.glob("*.parquet"))
+            return matches[0] if matches else None
+        except Exception:
+            return None
+
+    def _list_samples_needing_mnpflex_for_visible(self) -> List[str]:
+        """Eligible samples in the current table view that lack MNP-Flex results."""
+        if not self.monitored_directory:
+            return []
+        if not self._is_mnpflex_enabled_for_gui():
+            return []
+
+        try:
+            rows = getattr(self.samples_table, "rows", None) or []
+        except Exception:
+            rows = []
+        if not rows:
+            rows = getattr(self, "_last_samples_rows", []) or []
+
+        need: List[str] = []
+        try:
+            for r in rows:
+                sid = str(r.get("sample_id") or "").strip()
+                if not sid or sid == "unknown":
+                    continue
+                sample_dir = Path(self.monitored_directory) / sid
+                if not sample_dir.exists():
+                    continue
+
+                if (
+                    self._mnpflex_results_dir_for_sample(sample_dir, sid) is not None
+                ):
+                    continue
+
+                try:
+                    total_jobs = int(r.get("total_jobs") or 0)
+                    completed_jobs = int(r.get("completed_jobs") or 0)
+                    active_jobs = int(r.get("active_jobs") or 0)
+                    pending_jobs = int(r.get("pending_jobs") or 0)
+                except Exception:
+                    continue
+
+                # Only run once the sample workflow is fully complete/inactive.
+                if total_jobs <= 0:
+                    continue
+                if not (
+                    active_jobs == 0
+                    and pending_jobs == 0
+                    and completed_jobs >= total_jobs
+                ):
+                    continue
+
+                if self._mnpflex_parquet_path_for_sample(sample_dir, sid) is None:
+                    continue
+
+                need.append(sid)
+        except Exception as e:
+            logging.debug(f"List samples needing MNP-Flex: {e}")
+
+        return sorted(set(need))
+
+    def _zip_paths_for_bulk_download(self, paths: List[str]) -> Optional[str]:
+        """
+        Safari blocks multiple programmatic downloads; package multiple files into one ZIP.
+        Single file: return path unchanged.
+        """
+        valid = [p for p in paths if p and os.path.isfile(p)]
+        if not valid:
+            return None
+        if len(valid) == 1:
+            return valid[0]
+        try:
+            # Deterministic ZIP name: includes current date/time (no random mkstemp id).
+            # If multiple exports happen in the same second, append a small counter.
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            base_name = f"robin_reports_{timestamp}"
+            zpath = os.path.join(tempfile.gettempdir(), f"{base_name}.zip")
+            if os.path.exists(zpath):
+                i = 2
+                while os.path.exists(zpath):
+                    zpath = os.path.join(
+                        tempfile.gettempdir(), f"{base_name}_{i}.zip"
+                    )
+                    i += 1
+            used_names: Set[str] = set()
+            with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as zf:
+                for fp in valid:
+                    base_name = Path(fp).name
+
+                    # The export file names already include the sample id (e.g. "<sid>_run_report.pdf").
+                    # Avoid prefixing with the parent folder name again, which caused duplicates like:
+                    # "<sid>_<sid>_run_report.pdf".
+                    arcname = base_name
+                    if arcname in used_names:
+                        # Collision: preserve both by adding a suffix.
+                        i = 2
+                        stem, ext = os.path.splitext(base_name)
+                        while f"{stem}.{i}{ext}" in used_names:
+                            i += 1
+                        arcname = f"{stem}.{i}{ext}"
+                    used_names.add(arcname)
+                    zf.write(fp, arcname=arcname)
+            return zpath
+        except Exception as e:
+            logging.error(f"Could not zip export files: {e}")
+            return None
+
+    def _wait_for_snp_outputs_or_timeout(
+        self,
+        sample_id: str,
+        *,
+        poll_s: float = 5.0,
+        max_wait_s: float = 86400.0,
+    ) -> bool:
+        """Poll disk for SNP outputs after job submission (Ray submit returns before job finishes)."""
+        deadline = time.time() + max_wait_s
+        while time.time() < deadline:
+            if self._sample_has_snp_calling_outputs(sample_id):
+                return True
+            time.sleep(poll_s)
+        return False
+
+    def _bulk_snp_sequential_run(self, sample_ids: List[str]) -> None:
+        """Run SNP analysis one sample at a time (sequential, like manual triggers)."""
+        try:
+            from robin.analysis.target_analysis import is_docker_available_for_snp_analysis
+
+            docker_ok, docker_error = is_docker_available_for_snp_analysis()
+            if not docker_ok:
+                logging.warning(
+                    "Bulk SNP skipped: Docker not available. %s", docker_error or ""
+                )
+                self.send_update(
+                    UpdateType.WARNING_NOTIFICATION,
+                    {
+                        "title": "SNP batch skipped",
+                        "message": f"Docker is required for SNP calling. {docker_error or ''}",
+                        "level": "warning",
+                    },
+                    priority=6,
+                )
+                return
+
+            workflow_runner = getattr(self, "workflow_runner", None)
+            if not workflow_runner or not hasattr(
+                workflow_runner, "submit_snp_analysis_job"
+            ):
+                logging.warning("Bulk SNP: no workflow_runner.submit_snp_analysis_job")
+                self.send_update(
+                    UpdateType.WARNING_NOTIFICATION,
+                    {
+                        "title": "SNP batch skipped",
+                        "message": "Workflow runner is not available for SNP jobs.",
+                        "level": "warning",
+                    },
+                    priority=6,
+                )
+                return
+
+            total = len(sample_ids)
+            for idx, sid in enumerate(sample_ids, start=1):
+                sample_dir = Path(self.monitored_directory) / sid
+                ok, reason = self._sample_snp_prerequisites_met(sample_dir)
+                if not ok:
+                    logging.info("Bulk SNP skip %s: %s", sid, reason)
+                    continue
+                if self._sample_has_snp_calling_outputs(sid):
+                    continue
+
+                reference_path = self._locate_reference_for_sample(sample_dir)
+                if not reference_path:
+                    logging.warning("Bulk SNP skip %s: no reference genome", sid)
+                    continue
+
+                with self._snp_analysis_lock:
+                    self._snp_analysis_running_sample = sid
+                try:
+                    logging.info(
+                        "Bulk SNP (%d/%d): submitting %s", idx, total, sid
+                    )
+                    submitted = workflow_runner.submit_snp_analysis_job(
+                        sample_dir=str(sample_dir),
+                        sample_id=sid,
+                        reference=reference_path,
+                        threads=4,
+                        force_regenerate=False,
+                    )
+                    if not submitted:
+                        logging.warning("Bulk SNP: submit failed for %s", sid)
+                        continue
+                    finished = self._wait_for_snp_outputs_or_timeout(
+                        sid, poll_s=5.0, max_wait_s=86400.0
+                    )
+                    if finished:
+                        logging.info("Bulk SNP: completed %s", sid)
+                    else:
+                        logging.warning(
+                            "Bulk SNP: timeout waiting for outputs for %s — continuing",
+                            sid,
+                        )
+                finally:
+                    with self._snp_analysis_lock:
+                        self._snp_analysis_running_sample = None
+
+            self.send_update(
+                UpdateType.WARNING_NOTIFICATION,
+                {
+                    "title": "SNP batch finished",
+                    "message": f"Processed queue of {total} sample(s). Check logs for any skips or timeouts.",
+                    "level": "info",
+                },
+                priority=4,
+            )
+        except Exception as e:
+            logging.error(f"Bulk SNP sequential run failed: {e}", exc_info=True)
+            self.send_update(
+                UpdateType.WARNING_NOTIFICATION,
+                {
+                    "title": "SNP batch error",
+                    "message": str(e)[:500],
+                    "level": "negative",
+                },
+                priority=6,
+            )
+        finally:
+            self._bulk_snp_worker_running = False
+
+    def _bulk_mnpflex_sequential_run(self, sample_ids: List[str]) -> None:
+        """Run MNP-Flex sequentially for samples missing results."""
+        try:
+            if not self._is_mnpflex_enabled_for_gui():
+                self.send_update(
+                    UpdateType.WARNING_NOTIFICATION,
+                    {
+                        "title": "MNP-Flex batch skipped",
+                        "message": "Missing MNP-Flex credentials in the server environment.",
+                        "level": "warning",
+                    },
+                    priority=6,
+                )
+                return
+
+            username = os.getenv("MNPFLEX_USERNAME") or os.getenv("EPIGNOSTIX_USERNAME")
+            password = os.getenv("MNPFLEX_PASSWORD") or os.getenv("EPIGNOSTIX_PASSWORD")
+            base_url = os.getenv("MNPFLEX_BASE_URL", "https://app.epignostix.com")
+            workflow_id_env = os.getenv("MNPFLEX_WORKFLOW_ID", "18")
+            try:
+                workflow_id = int(workflow_id_env)
+            except ValueError:
+                workflow_id = 18
+                logging.warning(
+                    "MNPFLEX_WORKFLOW_ID invalid (%s); defaulting to %s",
+                    workflow_id_env,
+                    workflow_id,
+                )
+            client_id = os.getenv("MNPFLEX_CLIENT_ID", "ROBIN")
+            client_secret = os.getenv("MNPFLEX_CLIENT_SECRET", "SECRET")
+            scope = os.getenv("MNPFLEX_SCOPE", "")
+
+            from robin import resources as robin_resources
+            from robin.analysis.utilities.matkit import (
+                reconstruct_full_bedmethyl_for_mnpflex,
+            )
+            from robin.analysis.utilities.mnp_flex import APIClient as MnpFlexApiClient
+            from robin.utils.mnpflex_client_standalone import MNPFlexClient
+
+            reference_bed = os.path.join(
+                os.path.dirname(os.path.abspath(robin_resources.__file__)),
+                "mnp_flex_sample_clean.bed",
+            )
+
+            # Reuse streaming API client across samples.
+            api_client = MnpFlexApiClient(base_url="https://mnp-flex.org", verify_ssl=False)
+
+            total = len(sample_ids)
+            processed = 0
+            skipped = 0
+            errors = 0
+
+            for idx, sid in enumerate(sample_ids, start=1):
+                sample_dir = (
+                    Path(self.monitored_directory) / sid
+                    if self.monitored_directory
+                    else None
+                )
+                if not sample_dir or not sample_dir.exists():
+                    skipped += 1
+                    logging.warning("Bulk MNP-Flex skip %s: missing sample dir", sid)
+                    continue
+
+                if self._mnpflex_results_dir_for_sample(sample_dir, sid) is not None:
+                    skipped += 1
+                    continue
+
+                parquet_path = self._mnpflex_parquet_path_for_sample(sample_dir, sid)
+                if parquet_path is None:
+                    skipped += 1
+                    logging.warning("Bulk MNP-Flex skip %s: no parquet file", sid)
+                    continue
+
+                try:
+                    logging.info(
+                        "Bulk MNP-Flex (%d/%d): running %s", idx, total, sid
+                    )
+
+                    output_dir = sample_dir / f"mnpflex_results_{sid}"
+                    output_dir.mkdir(parents=True, exist_ok=True)
+
+                    # Build full bedmethyl BED from the parquet, then create the MNP-Flex subset BED.
+                    bed_path = sample_dir / f"{sid}.mnpflex.bed"
+                    bed_df = reconstruct_full_bedmethyl_for_mnpflex(str(parquet_path))
+                    bed_df.to_csv(bed_path, sep="\t", index=False, header=False)
+
+                    subset_path = sample_dir / f"{sid}.MNPFlex.subset.bed"
+                    api_client.process_streaming(
+                        reference_bed, str(bed_path), str(subset_path)
+                    )
+
+                    client = MNPFlexClient(
+                        base_url=base_url,
+                        username=username,
+                        password=password,
+                        verify_ssl=False,
+                        client_id=client_id,
+                        client_secret=client_secret,
+                        scope=scope,
+                    )
+                    client.authenticate(
+                        username=username,
+                        password=password,
+                        client_id=client_id,
+                        client_secret=client_secret,
+                    )
+                    logging.info(
+                        "Bulk MNP-Flex (%d/%d): submitting sample=%s workflow_id=%s subset_bed=%s output_dir=%s",
+                        idx,
+                        total,
+                        sid,
+                        workflow_id,
+                        str(subset_path),
+                        str(output_dir),
+                    )
+                    client.upload_retrieve_cleanup(
+                        bed_file_path=str(subset_path),
+                        sample_identifier=sid,
+                        workflow_id=workflow_id,
+                        output_dir=str(output_dir),
+                    )
+                    processed += 1
+                except Exception as exc:
+                    errors += 1
+                    logging.error(
+                        "Bulk MNP-Flex error for %s: %s", sid, exc, exc_info=True
+                    )
+
+            self.send_update(
+                UpdateType.WARNING_NOTIFICATION,
+                {
+                    "title": "MNP-Flex batch finished",
+                    "message": (
+                        f"Processed {processed} sample(s), skipped {skipped}, errors {errors}. "
+                        "Check logs for any failures."
+                    ),
+                    "level": "info",
+                },
+                priority=4,
+            )
+        except Exception as e:
+            logging.error("Bulk MNP-Flex sequential run failed: %s", e, exc_info=True)
+            self.send_update(
+                UpdateType.WARNING_NOTIFICATION,
+                {
+                    "title": "MNP-Flex batch error",
+                    "message": str(e)[:500],
+                    "level": "negative",
+                },
+                priority=6,
+            )
+        finally:
+            self._bulk_mnpflex_worker_running = False
+
+    def _samples_select_all_visible_for_export(self) -> None:
+        """Select every sample_id in the current (filtered) table rows for report export."""
+        try:
+            rows = getattr(self.samples_table, "rows", None) or []
+            visible_ids = {str(r.get("sample_id")) for r in rows if r.get("sample_id")}
+            self._selected_sample_ids = set(visible_ids)
+            for r in self._last_samples_rows or []:
+                sid = r.get("sample_id")
+                if sid:
+                    r["export"] = str(sid) in self._selected_sample_ids
+            if self._selected_sample_ids:
+                self.export_reports_button.enable()
+            else:
+                self.export_reports_button.disable()
+            self._apply_samples_table_filters()
+            logging.info(
+                "[samples_overview] Select all (toolbar): %d sample(s) "
+                "(visible filtered rows=%d)",
+                len(self._selected_sample_ids),
+                len(rows),
+            )
+        except Exception as e:
+            logging.warning(
+                "[samples_overview] Select all for export failed: %s", e, exc_info=True
+            )
+
+    def _samples_clear_export_selection(self) -> None:
+        try:
+            self._selected_sample_ids.clear()
+            for r in self._last_samples_rows or []:
+                r["export"] = False
+            self.export_reports_button.disable()
+            self._apply_samples_table_filters()
+            logging.info("[samples_overview] Clear selection (toolbar)")
+        except Exception as e:
+            logging.warning(
+                "[samples_overview] Clear export selection failed: %s",
+                e,
+                exc_info=True,
+            )
+
+    def _unlink_quiet(self, path: str) -> None:
+        try:
+            if path and os.path.isfile(path):
+                os.remove(path)
+        except OSError:
+            pass
+
     def _trigger_target_bam_finalization(self, sample_id: str, *, trigger_snp: bool = False) -> None:
         """Trigger target.bam finalization for a sample. Optionally start SNP analysis afterwards."""
         if not self.monitored_directory:
+            return
+
+        if self._is_target_bam_finalize_redundant(sample_id):
+            self._finalized_samples.add(sample_id)
+            logging.info(
+                f"Sample {sample_id} already has finalized target.bam on disk; "
+                "skipping target.bam finalization"
+            )
             return
         
         try:
@@ -6354,6 +7390,23 @@ class GUILauncher:
                         if sid in self._preexisting_sample_ids and (time.time() - last_seen) >= self.completion_timeout_seconds
                         else "Live"
                     )
+                    if origin_value == "Live" and (time.time() - last_seen) >= self.completion_timeout_seconds:
+                        if ov_active == 0 and ov_pending == 0:
+                            expected = self._get_expected_completion_job_types()
+                            if expected:
+                                complete_on_disk = self._expected_jobs_completed(
+                                    sample_dir, expected
+                                )
+                            else:
+                                complete_on_disk = self._is_target_bam_finalize_redundant(
+                                    sid
+                                )
+                            if not complete_on_disk:
+                                complete_on_disk = self._is_target_bam_finalize_redundant(
+                                    sid
+                                )
+                            if complete_on_disk:
+                                origin_value = "Complete"
                     try:
                         # Only mark as Complete if timeout passed AND no active jobs
                         if origin_value == "Live" and (time.time() - last_seen) >= self.completion_timeout_seconds:
@@ -6366,8 +7419,8 @@ class GUILauncher:
                                     if prev_row.get("sample_id") == sid:
                                         prev_origin = prev_row.get("origin")
                                         break
-                                # Trigger finalization if transitioning from Live to Complete
-                                if prev_origin == "Live" or prev_origin is None:
+                                # Trigger finalization only on a real Live→Complete transition
+                                if prev_origin == "Live":
                                     self._trigger_target_bam_finalization(sid)
                             # If there are active jobs, keep as Live even if timeout passed
                     except Exception:
