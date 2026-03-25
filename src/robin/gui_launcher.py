@@ -473,7 +473,9 @@ class GUILauncher:
         # Per-GUI-process snapshot of on-disk totals from master.csv at first use per sample.
         # Coordinator stats are session-only; merged display = baseline + session counters.
         self._samples_job_baseline: Dict[str, Dict[str, int]] = {}
-        self._samples_record_lock = threading.Lock()
+        # RLock: _merge_job_types_with_persisted and other helpers acquire this while callers
+        # (e.g. _update_master_record_from_workflow) may already hold it — plain Lock deadlocks.
+        self._samples_record_lock = threading.RLock()
         self._master_record_cache_file: Optional[Path] = None  # Set when monitored_directory is known
         self._background_scan_interval: float = 10.0  # Scan every 10 seconds
         self._background_scan_in_progress: bool = False
