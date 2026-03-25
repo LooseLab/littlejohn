@@ -212,12 +212,19 @@ class MNPFlexClient:
                 text_snippet = (resp.text or "")[:500] if "resp" in locals() else ""
             except Exception:
                 text_snippet = ""
-            logging.error(
+
+            log_fn = logging.warning if status is not None and status >= 500 else logging.error
+            # Avoid exc_info on every transient 5xx; the bulk runner will capture the final traceback.
+            log_kwargs = {}
+            if not (status is not None and status >= 500):
+                log_kwargs["exc_info"] = True
+
+            log_fn(
                 "MNPFlex get_bundle_summary failed: status=%s url=%s body_snippet=%r",
                 status,
                 url,
                 text_snippet,
-                exc_info=True,
+                **log_kwargs,
             )
             raise
 
@@ -349,7 +356,13 @@ class MNPFlexClient:
 
         # MNP-Flex occasionally returns transient 5xx for result materialization.
         # Keep a small retry window so a single backend hiccup doesn't fail the whole sample.
-        def _retry(callable_fn, *, what: str, attempts: int = 3, base_sleep_s: float = 2.0):
+        def _retry(
+            callable_fn,
+            *,
+            what: str,
+            attempts: int = 3,
+            base_sleep_s: float = 2.0,
+        ):
             last_exc: Optional[Exception] = None
             for attempt in range(1, attempts + 1):
                 try:
@@ -370,6 +383,15 @@ class MNPFlexClient:
                         )
                         time.sleep(sleep_s)
                         continue
+                    # Either non-5xx, or we ran out of retries.
+                    logging.debug(
+                        "MNPFlex not retrying %s for sample_id=%s (attempt %d/%d, status=%s)",
+                        what,
+                        sample_id,
+                        attempt,
+                        attempts,
+                        status,
+                    )
                     raise
                 except Exception as e:
                     last_exc = e
@@ -380,6 +402,8 @@ class MNPFlexClient:
         summary = _retry(
             lambda: self.get_bundle_summary(workflow_run_id, task_result_id),
             what="get_bundle_summary",
+            attempts=6,
+            base_sleep_s=5.0,
         )
         summary_path = os.path.join(output_dir, "bundle_summary.json")
         with open(summary_path, "w") as f:

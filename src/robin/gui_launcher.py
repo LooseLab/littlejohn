@@ -2763,13 +2763,26 @@ class GUILauncher:
 
                         async def _ask_run_bulk_snp():
                             logging.info("[samples_overview] SNP: all missing clicked")
+                            logging.info(
+                                "[samples_overview] SNP click handler thread=%s",
+                                threading.current_thread().name,
+                            )
                             if self._bulk_snp_worker_running:
                                 ui.notify(
                                     "SNP batch is already running.",
                                     type="warning",
                                 )
                                 return
-                            missing = self._list_samples_needing_snp_calling()
+                            t0 = time.time()
+                            # Offload filesystem scan so we don't block the NiceGUI/UI event loop.
+                            missing = await asyncio.to_thread(
+                                self._list_samples_needing_snp_calling
+                            )
+                            logging.info(
+                                "[samples_overview] SNP missing scan done in %.2fs (n=%d)",
+                                time.time() - t0,
+                                len(missing or []),
+                            )
                             if not missing:
                                 ui.notify(
                                     "No samples need SNP calling (outputs exist or prerequisites missing).",
@@ -2832,6 +2845,10 @@ class GUILauncher:
                                     logging.info(
                                         "[samples_overview] mnpflex run all clicked"
                                     )
+                                    logging.info(
+                                        "[samples_overview] mnpflex click handler thread=%s",
+                                        threading.current_thread().name,
+                                    )
                                     if self._bulk_mnpflex_worker_running:
                                         ui.notify(
                                             "MNP-Flex batch is already running.",
@@ -2845,7 +2862,22 @@ class GUILauncher:
                                         )
                                         return
 
-                                    missing = self._list_samples_needing_mnpflex_for_visible()
+                                    t0 = time.time()
+                                    # Offload disk checks so the UI thread stays responsive.
+                                    rows_override = list(
+                                        getattr(self.samples_table, "rows", None)
+                                        or getattr(self, "_last_samples_rows", [])
+                                        or []
+                                    )
+                                    missing = await asyncio.to_thread(
+                                        self._list_samples_needing_mnpflex_for_visible,
+                                        rows_override,
+                                    )
+                                    logging.info(
+                                        "[samples_overview] mnpflex missing scan done in %.2fs (n=%d)",
+                                        time.time() - t0,
+                                        len(missing or []),
+                                    )
                                     if not missing:
                                         ui.notify(
                                             "No samples need MNP-Flex (results exist or prerequisites missing).",
@@ -6585,6 +6617,10 @@ class GUILauncher:
 
     def _list_samples_needing_snp_calling(self) -> List[str]:
         """Samples under work dir that are ready for SNP but lack Clair3 outputs."""
+        logging.info(
+            "[missing_snp_scan] thread=%s",
+            threading.current_thread().name,
+        )
         if not self.monitored_directory:
             return []
         base = Path(self.monitored_directory)
@@ -6644,19 +6680,35 @@ class GUILauncher:
         except Exception:
             return None
 
-    def _list_samples_needing_mnpflex_for_visible(self) -> List[str]:
-        """Eligible samples in the current table view that lack MNP-Flex results."""
+    def _list_samples_needing_mnpflex_for_visible(
+        self,
+        rows_override: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[str]:
+        """Eligible samples in the current table view that lack MNP-Flex results.
+
+        `rows_override` allows the caller to pass a UI-thread-copied snapshot of rows
+        (safer than touching NiceGUI objects from a background thread).
+        """
         if not self.monitored_directory:
             return []
         if not self._is_mnpflex_enabled_for_gui():
             return []
 
-        try:
-            rows = getattr(self.samples_table, "rows", None) or []
-        except Exception:
-            rows = []
-        if not rows:
-            rows = getattr(self, "_last_samples_rows", []) or []
+        logging.info(
+            "[missing_mnpflex_scan] thread=%s rows_override=%s",
+            threading.current_thread().name,
+            "provided" if rows_override is not None else "none",
+        )
+
+        if rows_override is not None:
+            rows = rows_override
+        else:
+            try:
+                rows = getattr(self.samples_table, "rows", None) or []
+            except Exception:
+                rows = []
+            if not rows:
+                rows = getattr(self, "_last_samples_rows", []) or []
 
         need: List[str] = []
         try:
@@ -6764,6 +6816,11 @@ class GUILauncher:
     def _bulk_snp_sequential_run(self, sample_ids: List[str]) -> None:
         """Run SNP analysis one sample at a time (sequential, like manual triggers)."""
         try:
+            logging.info(
+                "[bulk_snp] worker start thread=%s n=%d",
+                threading.current_thread().name,
+                len(sample_ids or []),
+            )
             from robin.analysis.target_analysis import is_docker_available_for_snp_analysis
 
             docker_ok, docker_error = is_docker_available_for_snp_analysis()
@@ -6869,6 +6926,11 @@ class GUILauncher:
     def _bulk_mnpflex_sequential_run(self, sample_ids: List[str]) -> None:
         """Run MNP-Flex sequentially for samples missing results."""
         try:
+            logging.info(
+                "[bulk_mnpflex] worker start thread=%s n=%d",
+                threading.current_thread().name,
+                len(sample_ids or []),
+            )
             if not self._is_mnpflex_enabled_for_gui():
                 self.send_update(
                     UpdateType.WARNING_NOTIFICATION,
