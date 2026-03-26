@@ -40,6 +40,18 @@ except ImportError as e:
 from robin.logging_config import get_job_logger
 
 
+def _is_fail_only_expected(job) -> bool:
+    """True when errors are expected for fail-only BAM submissions."""
+    try:
+        if not bool(job.context.metadata.get("fail_only_bam_submission", False)):
+            return False
+        fp = getattr(job.context, "filepath", "") or ""
+        base = os.path.basename(fp).lower()
+        return ("fail" in base) and ("pass" not in base)
+    except Exception:
+        return False
+
+
 @dataclass
 class NanodxMetadata:
     """Container for NanoDX analysis metadata and results"""
@@ -589,6 +601,7 @@ def nanodx_handler(job, work_dir=None):
     """
     # Get job-specific logger first, before any potential exceptions
     logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
+    suppress_expected = _is_fail_only_expected(job)
 
     try:
         # Check if this is a batched job
@@ -637,8 +650,15 @@ def nanodx_handler(job, work_dir=None):
             
             if not parquet_paths:
                 error_msg = "No parquet paths found from bed conversion results in batch"
-                logger.error(error_msg)
-                job.context.add_error("nanodx_analysis", error_msg)
+                if suppress_expected:
+                    logger.warning(f"{error_msg} (expected for fail-only BAM submission)")
+                    job.context.add_result(
+                        "nanodx_analysis",
+                        {"status": "expected_failure", "reason": error_msg},
+                    )
+                else:
+                    logger.error(error_msg)
+                    job.context.add_error("nanodx_analysis", error_msg)
                 return
             
             # Determine work directory for the batch
@@ -676,8 +696,23 @@ def nanodx_handler(job, work_dir=None):
             logger.info(f"Total features processed: {batch_result.get('total_features', 0)}")
             
             if batch_result.get("error_message"):
-                logger.error(f"Batch processing completed with errors: {batch_result['error_message']}")
-                job.context.add_error("nanodx_analysis", batch_result["error_message"])
+                if suppress_expected:
+                    logger.warning(
+                        f"Batch processing completed with expected errors (fail-only BAM submission): {batch_result['error_message']}"
+                    )
+                    job.context.add_result(
+                        "nanodx_analysis",
+                        {
+                            "status": "expected_failure",
+                            "error_message": batch_result["error_message"],
+                            "sample_id": sample_id,
+                        },
+                    )
+                else:
+                    logger.error(
+                        f"Batch processing completed with errors: {batch_result['error_message']}"
+                    )
+                    job.context.add_error("nanodx_analysis", batch_result["error_message"])
             else:
                 logger.info("Batch processing completed successfully with aggregated NanoDX analysis")
                 job.context.add_result(
@@ -759,6 +794,15 @@ def nanodx_handler(job, work_dir=None):
                 )
 
     except Exception as e:
+        if suppress_expected:
+            logger.warning(
+                f"Expected NanoDX failure for fail-only BAM submission: {e}"
+            )
+            job.context.add_result(
+                "nanodx_analysis",
+                {"status": "expected_failure", "error_message": str(e)},
+            )
+            return
         job.context.add_error("nanodx_analysis", str(e))
         logger.error(f"Error in NanoDX analysis for {job.context.filepath}: {e}")
 
@@ -774,6 +818,7 @@ def pannanodx_handler(job, work_dir=None):
     """
     # Get job-specific logger first, before any potential exceptions
     logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
+    suppress_expected = _is_fail_only_expected(job)
 
     try:
         # Check if this is a batched job
@@ -822,8 +867,15 @@ def pannanodx_handler(job, work_dir=None):
             
             if not parquet_paths:
                 error_msg = "No parquet paths found from bed conversion results in batch"
-                logger.error(error_msg)
-                job.context.add_error("pannanodx_analysis", error_msg)
+                if suppress_expected:
+                    logger.warning(f"{error_msg} (expected for fail-only BAM submission)")
+                    job.context.add_result(
+                        "pannanodx_analysis",
+                        {"status": "expected_failure", "reason": error_msg},
+                    )
+                else:
+                    logger.error(error_msg)
+                    job.context.add_error("pannanodx_analysis", error_msg)
                 return
             
             # Determine work directory for the batch
@@ -861,8 +913,25 @@ def pannanodx_handler(job, work_dir=None):
             logger.info(f"Total features processed: {batch_result.get('total_features', 0)}")
             
             if batch_result.get("error_message"):
-                logger.error(f"Batch processing completed with errors: {batch_result['error_message']}")
-                job.context.add_error("pannanodx_analysis", batch_result["error_message"])
+                if suppress_expected:
+                    logger.warning(
+                        f"Batch processing completed with expected errors (fail-only BAM submission): {batch_result['error_message']}"
+                    )
+                    job.context.add_result(
+                        "pannanodx_analysis",
+                        {
+                            "status": "expected_failure",
+                            "error_message": batch_result["error_message"],
+                            "sample_id": sample_id,
+                        },
+                    )
+                else:
+                    logger.error(
+                        f"Batch processing completed with errors: {batch_result['error_message']}"
+                    )
+                    job.context.add_error(
+                        "pannanodx_analysis", batch_result["error_message"]
+                    )
             else:
                 logger.info("Batch processing completed successfully with aggregated PanNanoDX analysis")
                 job.context.add_result(
@@ -946,6 +1015,15 @@ def pannanodx_handler(job, work_dir=None):
                 )
 
     except Exception as e:
+        if suppress_expected:
+            logger.warning(
+                f"Expected PanNanoDX failure for fail-only BAM submission: {e}"
+            )
+            job.context.add_result(
+                "pannanodx_analysis",
+                {"status": "expected_failure", "error_message": str(e)},
+            )
+            return
         job.context.add_error("pannanodx_analysis", str(e))
         logger.error(f"Error in PanNanoDX analysis for {job.context.filepath}: {e}")
 

@@ -756,9 +756,34 @@ def _wrap_real_handler(
             else:
                 logger.info(f"{job_type} completed")
         except Exception as e:
-            job.context.add_error(job_type, str(e))
-            logger.error(f"{job_type} failed: {e}")
-            raise  # Re-raise so task fails and coordinator gets failure_kind="exception"
+            # Suppress expected downstream failures for fail-only BAM submissions.
+            # Requirement: if *any* BAM in the submission contains 'pass', errors must remain visible.
+            suppress = False
+            try:
+                if job_type in (CLASSIFICATION_TYPES | {"bed_conversion"}):
+                    if bool(job.context.metadata.get("fail_only_bam_submission", False)):
+                        fp = getattr(job.context, "filepath", "") or ""
+                        if _bam_filename_kind(fp) == "fail":
+                            suppress = True
+            except Exception:
+                suppress = False
+
+            if suppress:
+                # Expected: downstream tools may not support fail-only read BAMs.
+                # We still attempted analysis; we just don't treat this as a failing job.
+                try:
+                    job.context.add_result(
+                        job_type, f"{job_type}_expected_failure_fail_only_bam_submission"
+                    )
+                except Exception:
+                    pass
+                logger.warning(
+                    f"{job_type} expected failure for fail-only BAM submission: {e}"
+                )
+            else:
+                job.context.add_error(job_type, str(e))
+                logger.error(f"{job_type} failed: {e}")
+                raise  # Re-raise so task fails and coordinator gets failure_kind="exception"
         finally:
             # Mark result if user handler didn't
             if job_type not in job.context.results:
@@ -3425,6 +3450,72 @@ def _matches_no_ignores(p: Path, ignore_patterns: Optional[List[str]]) -> bool:
         return True
 
 
+def _is_bam_path(p: Path) -> bool:
+    try:
+        return p.suffix.lower() == ".bam"
+    except Exception:
+        return False
+
+
+def _bam_filename_kind(filepath: str) -> str:
+    """Classify BAM filenames by substring: 'pass' | 'fail' | 'unknown'."""
+    try:
+        n = os.path.basename(filepath).lower()
+    except Exception:
+        return "unknown"
+    if "pass" in n:
+        return "pass"
+    if "fail" in n:
+        return "fail"
+    return "unknown"
+
+
+def _detect_fail_only_bam_submission(
+    paths: List[str],
+    patterns: Optional[List[str]],
+    ignore_patterns: Optional[List[str]],
+    recursive: bool,
+) -> bool:
+    """
+    True iff this submission contains BAMs and *all* BAM filenames contain 'fail'
+    and none contain 'pass'. Used to suppress expected downstream failures on
+    fail-only read sets.
+    """
+    bam_total = 0
+    bam_fail = 0
+    bam_pass = 0
+    for p in paths:
+        pth = Path(p)
+        if pth.is_file():
+            files = [pth]
+        elif pth.is_dir():
+            try:
+                files = list(pth.rglob("*") if recursive else pth.glob("*"))
+            except Exception:
+                files = []
+        else:
+            files = []
+        for f in files:
+            try:
+                if not f.is_file():
+                    continue
+                if not _matches_any_pattern(f, patterns) or not _matches_no_ignores(
+                    f, ignore_patterns
+                ):
+                    continue
+                if not _is_bam_path(f):
+                    continue
+                bam_total += 1
+                k = _bam_filename_kind(str(f))
+                if k == "fail":
+                    bam_fail += 1
+                elif k == "pass":
+                    bam_pass += 1
+            except Exception:
+                continue
+    return bool(bam_total and bam_pass == 0 and bam_fail == bam_total)
+
+
 async def submit_existing_paths(
     coord,
     paths: List[str],
@@ -3446,6 +3537,13 @@ async def submit_existing_paths(
     except Exception:
         pass
     
+    fail_only_bam_submission = _detect_fail_only_bam_submission(
+        paths=paths,
+        patterns=patterns,
+        ignore_patterns=ignore_patterns,
+        recursive=recursive,
+    )
+
     seed_jobs: List[Job] = []
     for p in paths:
         pth = Path(p)
@@ -3457,6 +3555,10 @@ async def submit_existing_paths(
                 if work_dir:
                     for j in jobs:
                         j.context.add_metadata("work_dir", work_dir)
+                # If this submission is fail-only BAMs, downstream errors are expected/noisy.
+                if fail_only_bam_submission and _is_bam_path(pth):
+                    for j in jobs:
+                        j.context.add_metadata("fail_only_bam_submission", True)
                 # Add reference genome to job metadata if available
                 if coord_reference:
                     for j in jobs:
@@ -3481,6 +3583,9 @@ async def submit_existing_paths(
                 if work_dir:
                     for j in jobs:
                         j.context.add_metadata("work_dir", work_dir)
+                if fail_only_bam_submission and _is_bam_path(f):
+                    for j in jobs:
+                        j.context.add_metadata("fail_only_bam_submission", True)
                 # Add reference genome to job metadata if available
                 if coord_reference:
                     for j in jobs:
@@ -3812,6 +3917,10 @@ class RayFileWatcher(FileSystemEventHandler):
         self._last_flush: float = time.time()
         self._flush_interval_s: float = 0.5
         self._batch_size: int = 128
+        # Track whether this watch session has seen any "pass" BAMs.
+        # If a pass BAM is present, we want fail-BAM errors to remain visible.
+        self._watch_seen_bam: bool = False
+        self._watch_seen_pass_bam: bool = False
 
     def _should_process(self, fp: str) -> bool:
         p = Path(fp)
@@ -3847,10 +3956,28 @@ class RayFileWatcher(FileSystemEventHandler):
         if not self._should_process(fp):
             return
         self.processed.add(fp)
+        # Maintain watch-level pass/fail BAM state
+        try:
+            if _is_bam_path(Path(fp)):
+                self._watch_seen_bam = True
+                k = _bam_filename_kind(fp)
+                if k == "pass":
+                    self._watch_seen_pass_bam = True
+        except Exception:
+            pass
         jobs = default_file_classifier(fp, self.plan, self.target_panel)
         if self.work_dir:
             for j in jobs:
                 j.context.add_metadata("work_dir", self.work_dir)
+        # Tag fail-only BAM submissions for this watch session.
+        # If we've seen a pass BAM, do not suppress errors.
+        try:
+            if _is_bam_path(Path(fp)) and self._watch_seen_bam and (not self._watch_seen_pass_bam):
+                if _bam_filename_kind(fp) == "fail":
+                    for j in jobs:
+                        j.context.add_metadata("fail_only_bam_submission", True)
+        except Exception:
+            pass
         # enqueue and flush under rate limiter
         self._pending_jobs.extend(jobs)
         self._flush_if_needed()
@@ -3950,6 +4077,162 @@ def _path_overlaps_work_dir(candidate: Path, work_dir: Optional[str]) -> bool:
     return False
 
 
+def _scan_watch_folder_for_sample_dirs(
+    folder: Path,
+    work_dir: Optional[str],
+    patterns: Optional[List[str]],
+    ignore_patterns: Optional[List[str]],
+    recursive: bool,
+    max_bams_to_probe: int = 5000,
+    max_bams_per_dir: int = 8,
+) -> Tuple[List[Path], List[str], Optional[str]]:
+    """
+    Scan a candidate watch folder and return:
+    - A list of directory paths that are safe to watch (contain BAMs for samples
+      that do NOT appear previously analysed, and contain no BAMs for analysed samples)
+    - A sorted list of analysed sample IDs detected
+    - Optional error message
+
+    Returns:
+        (dirs_to_watch, analysed_sample_ids, error_message)
+    """
+    if not work_dir:
+        return [], [], None
+
+    try:
+        wd = Path(work_dir).resolve()
+    except Exception:
+        return [], [], None
+
+    if not wd.exists() or not wd.is_dir():
+        return [], [], None
+
+    def _sample_dir_has_analysis_artifacts_local(sample_dir: Path) -> bool:
+        """Heuristic: True if sample_dir contains real analysis outputs."""
+        try:
+            if not sample_dir.exists() or not sample_dir.is_dir():
+                return False
+
+            # Strong indicators (target outputs / SNP inputs)
+            if (sample_dir / "target.bam").exists() or (sample_dir / "target.bam.bai").exists():
+                return True
+            if (sample_dir / "targets_exceeding_threshold.bed").exists():
+                return True
+
+            # Fusion outputs
+            if (sample_dir / "target_fusion.csv").exists() or (sample_dir / "genome_wide_fusion.csv").exists():
+                return True
+
+            # Classifier outputs
+            if (sample_dir / "sturgeon_scores.csv").exists():
+                return True
+            if (sample_dir / "NanoDX_scores.csv").exists() or (sample_dir / "PanNanoDX_scores.csv").exists():
+                return True
+            if (sample_dir / "random_forest_scores.csv").exists():
+                return True
+
+            # Common analysis directories
+            if (sample_dir / "bed_files").is_dir():
+                return True
+            if (sample_dir / "igv").is_dir():
+                return True
+            if (sample_dir / "clair3").is_dir():
+                return True
+
+            # CNV outputs
+            try:
+                for child in sample_dir.glob("*_copy_numbers.pkl"):
+                    if child.is_file():
+                        return True
+            except Exception:
+                pass
+
+            return False
+        except Exception:
+            return False
+
+    # Import lazily so workflow can run even if analysis deps aren't present.
+    try:
+        from robin.analysis.bam_preprocessor import _extract_sample_id_from_bam  # type: ignore
+    except Exception:
+        return [], [], None
+
+    analysed_sample_ids: Set[str] = set()
+    unanalysed_sample_ids: Set[str] = set()
+    # Map directory containing BAMs -> set(sample_ids present in that directory)
+    dir_samples: Dict[Path, Set[str]] = {}
+    # To keep folder-add responsive, do not probe every BAM in a directory.
+    # We sample up to max_bams_per_dir BAMs per parent directory. If a directory
+    # contains multiple samples mixed together, this will usually be detected quickly
+    # and we will avoid auto-watching that directory.
+    dir_probe_counts: Dict[Path, int] = {}
+    bams_probed = 0
+    try:
+        walker = folder.rglob("*") if recursive else folder.glob("*")
+        for f in walker:
+            if not f.is_file():
+                continue
+            if not _matches_any_pattern(f, patterns) or not _matches_no_ignores(
+                f, ignore_patterns
+            ):
+                continue
+
+            try:
+                parent_dir = f.parent.resolve()
+            except Exception:
+                parent_dir = f.parent
+
+            # Limit per-directory probing to keep scan fast.
+            seen = int(dir_probe_counts.get(parent_dir, 0))
+            if seen >= max_bams_per_dir:
+                continue
+
+            bams_probed += 1
+            if bams_probed > max_bams_to_probe:
+                break
+
+            try:
+                sid = _extract_sample_id_from_bam(str(f))
+            except Exception:
+                sid = "unknown"
+
+            if not sid or sid == "unknown":
+                dir_probe_counts[parent_dir] = seen + 1
+                continue
+
+            # Track which sample IDs appear in which directories.
+            dir_samples.setdefault(parent_dir, set()).add(sid)
+            dir_probe_counts[parent_dir] = seen + 1
+
+            # Classify sample_id by presence of analysis artifacts in work_dir
+            sample_dir = wd / sid
+            if sample_dir.is_dir() and _sample_dir_has_analysis_artifacts_local(sample_dir):
+                analysed_sample_ids.add(sid)
+            else:
+                unanalysed_sample_ids.add(sid)
+    except Exception as e:
+        return [], [], f"{e}"
+
+    analysed_sorted = sorted(analysed_sample_ids)
+
+    # Choose directories to watch:
+    # Only watch directories that contain BAMs exclusively for unanalysed samples.
+    # This prevents reprocessing if a directory contains mixed samples.
+    dirs_to_watch: List[Path] = []
+    for d, sids_in_dir in dir_samples.items():
+        if not sids_in_dir:
+            continue
+        if any((sid in analysed_sample_ids) for sid in sids_in_dir):
+            continue
+        # Must contain at least one unanalysed sample
+        if any((sid in unanalysed_sample_ids) for sid in sids_in_dir):
+            dirs_to_watch.append(d)
+
+    # Stable ordering for messages/scheduling.
+    dirs_to_watch = sorted(set(dirs_to_watch), key=lambda p: str(p))
+    return dirs_to_watch, analysed_sorted, None
+
+
 def add_watch_path(new_path: str) -> Tuple[bool, str]:
     """
     Add a directory to the running workflow's watch list.
@@ -3989,17 +4272,53 @@ def add_watch_path(new_path: str) -> Tuple[bool, str]:
     ignore_patterns = ctx.get("ignore_patterns") or []
     recursive = ctx.get("recursive", True)
 
-    # Schedule for watching if observer is active
-    path_key = str(pth)
-    if path_key in _GLOBAL_WATCHED_PATHS:
-        return False, f"Path is already being watched: {new_path}"
+    # Option B behavior:
+    # When a user adds a folder that contains a mix of previously-analysed and new samples,
+    # automatically add only those subfolders that contain exclusively un-analysed samples.
+    dirs_to_watch, analysed_sample_ids, scan_err = _scan_watch_folder_for_sample_dirs(
+        folder=pth,
+        work_dir=work_dir,
+        patterns=patterns,
+        ignore_patterns=ignore_patterns,
+        recursive=recursive,
+    )
+    if scan_err:
+        return False, (
+            f"Cannot watch '{new_path}': error while scanning for existing analysed samples: {scan_err}"
+        )
+    if analysed_sample_ids and not dirs_to_watch:
+        shown = analysed_sample_ids[:10]
+        more = len(analysed_sample_ids) - len(shown)
+        shown_str = ", ".join(shown)
+        more_str = f" (+{more} more)" if more > 0 else ""
+        return False, (
+            f"Cannot watch '{new_path}': it contains only previously-analysed sample(s) (no new samples found to watch). "
+            f"Samples: {shown_str}{more_str}. "
+            "Move or delete the corresponding sample output folder(s) in the work directory if you want to reanalyse, "
+            "or choose a different watch folder."
+        )
 
+    # If there are no BAMs (or no sample IDs extracted), fall back to watching the path as-is.
+    if not analysed_sample_ids and not dirs_to_watch:
+        dirs_to_watch = [pth]
+
+    # Schedule for watching if observer is active
+    newly_added: List[Path] = []
+    already_watched: List[Path] = []
     if _GLOBAL_OBSERVER is not None and _GLOBAL_WATCHER is not None:
-        try:
-            watch = _GLOBAL_OBSERVER.schedule(_GLOBAL_WATCHER, str(pth), recursive=recursive)
-            _GLOBAL_WATCHED_PATHS[path_key] = watch
-        except Exception as e:
-            return False, f"Failed to schedule watch: {e}"
+        for d in dirs_to_watch:
+            path_key = str(Path(d).resolve())
+            if path_key in _GLOBAL_WATCHED_PATHS:
+                already_watched.append(d)
+                continue
+            try:
+                watch = _GLOBAL_OBSERVER.schedule(
+                    _GLOBAL_WATCHER, str(d), recursive=recursive
+                )
+                _GLOBAL_WATCHED_PATHS[path_key] = watch
+                newly_added.append(d)
+            except Exception as e:
+                return False, f"Failed to schedule watch for '{d}': {e}"
 
     # Submit existing paths for processing (run in a thread to avoid event loop conflict
     # with NiceGUI or other async frameworks already running an event loop)
@@ -4012,7 +4331,7 @@ def add_watch_path(new_path: str) -> Tuple[bool, str]:
             loop.run_until_complete(
                 submit_existing_paths(
                     coord,
-                    [str(pth)],
+                    [str(d) for d in dirs_to_watch],
                     plan,
                     patterns=patterns,
                     ignore_patterns=ignore_patterns,
@@ -4032,7 +4351,27 @@ def add_watch_path(new_path: str) -> Tuple[bool, str]:
     if _submit_error[0] is not None:
         return False, f"Failed to submit existing files: {_submit_error[0]}"
 
-    return True, f"Added watch path: {new_path}"
+    # Build a user-facing message
+    msg_parts: List[str] = []
+    if newly_added:
+        if len(newly_added) <= 5:
+            msg_parts.append("Added watch path(s): " + "; ".join(str(p) for p in newly_added))
+        else:
+            msg_parts.append(f"Added {len(newly_added)} watch path(s) under: {new_path}")
+    if already_watched:
+        msg_parts.append(f"{len(already_watched)} path(s) were already watched")
+    if analysed_sample_ids:
+        shown = analysed_sample_ids[:10]
+        more = len(analysed_sample_ids) - len(shown)
+        shown_str = ", ".join(shown)
+        more_str = f" (+{more} more)" if more > 0 else ""
+        msg_parts.append(
+            f"Skipped previously-analysed sample(s): {shown_str}{more_str} (not added to watch)"
+        )
+    if not msg_parts:
+        msg_parts.append(f"Added watch path: {new_path}")
+
+    return True, " | ".join(msg_parts)
 
 
 async def _get_coordinator():

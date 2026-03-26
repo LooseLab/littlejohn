@@ -140,37 +140,73 @@ def get_rg_tags_from_bam(sam_file) -> Optional[Tuple[Optional[str], ...]]:
 
 def _extract_sample_id_from_bam(bam_path: str) -> str:
     """
-    Extract sample ID from BAM file read group tags.
-    This is a fallback function when comprehensive processing fails.
+    Extract sample ID from BAM file read group tags (and, if needed, a quick
+    barcode probe).
+
+    This is used both as a fallback when comprehensive processing fails and as
+    an early probe to decide whether this BAM's sample output directory
+    already exists (idempotency for re-adding watch folders).
     """
     try:
+        bam_basename = os.path.basename(bam_path)
+        unknown_fallback = f"unknown_sample_{bam_basename}"
+
         with pysam.AlignmentFile(bam_path, "rb") as bam:
             # Get read group tags
             rg_tags = bam.header.get(_RG_TAG, [])
-            if rg_tags:
-                # Process only the first RG tag for efficiency
-                rg_tag = rg_tags[0]
+            if not rg_tags:
+                return unknown_fallback
 
-                # Look for LB (Library) tag which contains the sample ID
-                lb_tag = rg_tag.get("LB")
-                if lb_tag:
-                    return lb_tag
+            # Process only the first RG tag for efficiency
+            rg_tag = rg_tags[0]
 
+            # Look for LB (Library) tag which contains the sample ID
+            lb_tag = rg_tag.get("LB")
+            if lb_tag:
+                sample_id = lb_tag
+            else:
                 # Fallback to runid from DS tag per ONT specification
                 ds_tag = rg_tag.get("DS", "")
                 if ds_tag:
                     ds_tags = ds_tag.split(" ")
                     if ds_tags and ds_tags[0].startswith(_RUNID_PREFIX):
                         runid = ds_tags[0].removeprefix(_RUNID_PREFIX)
-                        if runid:
-                            return runid
+                        sample_id = runid if runid else unknown_fallback
+                    else:
+                        sample_id = unknown_fallback
+                else:
+                    sample_id = unknown_fallback
 
-            # If no RG tags or no valid sample ID found, return unknown
-            return "unknown"
+            # If the sample_id already ends with a barcode, we are done.
+            if _BARCODE_PATTERN.search(sample_id):
+                return sample_id
+
+            # Quick probe: scan reads until we find a barcode in the RG tag.
+            # This avoids loading/processing the full BAM for idempotency checks.
+            try:
+                for read in bam.fetch(until_eof=True):
+                    if not read.has_tag(_RG_TAG):
+                        continue
+                    rg_value = read.get_tag(_RG_TAG)
+                    barcode_match = _BARCODE_PATTERN.search(rg_value)
+                    if not barcode_match:
+                        continue
+
+                    barcode_num = int(barcode_match.group(1))
+                    if 1 <= barcode_num <= 96:
+                        barcode_str = f"_barcode{barcode_num:02d}"
+                        if not sample_id.endswith(barcode_str):
+                            sample_id = f"{sample_id}{barcode_str}"
+                        return sample_id
+            except Exception:
+                # If the probe scan fails, keep the header-derived sample_id.
+                pass
+
+            return sample_id
 
     except Exception:
-        # If pysam fails, return unknown
-        return "unknown"
+        # If pysam fails, return a stable directory-safe fallback.
+        return f"unknown_sample_{os.path.basename(bam_path)}"
 
 
 # ============================================================================
@@ -621,6 +657,34 @@ def _send_alignment_warning_notification(
         )
     except Exception:
         # Fail silently if GUI is not available - logging already happened
+        pass
+
+
+def _send_skip_notification(
+    warning_msg: str,
+    sample_id: str,
+    filename: str,
+    sample_dir: str,
+) -> None:
+    """
+    Notify GUI that a BAM was skipped due to existing output artifacts.
+    """
+    try:
+        from robin.gui.app import send_gui_update
+        from robin.gui_launcher import UpdateType
+
+        send_gui_update(
+            UpdateType.WARNING_NOTIFICATION,
+            {
+                "message": warning_msg,
+                "sample_id": sample_id,
+                "filename": filename,
+                "sample_dir": sample_dir,
+                "title": "Previously Analysed Sample",
+            },
+            priority=5,
+        )
+    except Exception:
         pass
 
 

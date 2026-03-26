@@ -8466,7 +8466,18 @@ class GUILauncher:
             success, message = add_watch_path(path_val)
 
         if success:
-            self._safe_notify(message, "positive")
+            # If the watch add partially succeeded (e.g. some samples/subfolders were skipped),
+            # surface that as a warning so users get clear visual feedback.
+            try:
+                msg_l = (message or "").lower()
+            except Exception:
+                msg_l = ""
+            notify_type = (
+                "warning"
+                if ("skipped previously-analysed" in msg_l or "skipped previously analyzed" in msg_l)
+                else "positive"
+            )
+            self._safe_notify(message, notify_type)
             try:
                 path_input.value = ""
             except (RuntimeError, Exception) as e:

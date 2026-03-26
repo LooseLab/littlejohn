@@ -42,6 +42,18 @@ _LOGGER = logging.getLogger("robin.analysis.bed_conversion")
 _CPGS_MASTER_FILE_CACHE: Optional[str] = None
 
 
+def _is_fail_only_expected(job) -> bool:
+    """True when conversion 'failures' are expected for fail-only BAM submissions."""
+    try:
+        if not bool(job.context.metadata.get("fail_only_bam_submission", False)):
+            return False
+        fp = getattr(job.context, "filepath", "") or ""
+        base = os.path.basename(fp).lower()
+        return ("fail" in base) and ("pass" not in base)
+    except Exception:
+        return False
+
+
 @dataclass(slots=True)
 class BedConversionMetadata:
     """Container for BAM to parquet conversion metadata and results."""
@@ -318,7 +330,9 @@ class BedConversionAnalysis:
 
         return state
 
-def process_multiple_files(bam_paths, metadata_list, work_dir, logger, threads=4):
+def process_multiple_files(
+    bam_paths, metadata_list, work_dir, logger, threads=4, expected_fail_only: bool = False
+):
     """
     Process multiple BAM files for bed conversion analysis.
     
@@ -420,7 +434,11 @@ def process_multiple_files(bam_paths, metadata_list, work_dir, logger, threads=4
                     parquet_size = os.path.getsize(parquet_path)
                     logger.info(f"Parquet file size: {parquet_size} bytes")
                 else:
-                    logger.error("Parquet file was not created")
+                    msg = "Parquet file was not created"
+                    if expected_fail_only:
+                        logger.warning(f"{msg} (expected for fail-only BAM submission)")
+                    else:
+                        logger.error(msg)
                     analysis_result["error_message"] = "Parquet file creation failed"
                     return analysis_result
                     
@@ -459,6 +477,7 @@ def bed_conversion_handler(job, work_dir=None):
     try:
         # Get job-specific logger
         logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
+        suppress_expected = _is_fail_only_expected(job)
         
         # Check if this is a batched job
         batched_job = job.context.metadata.get("_batched_job")
@@ -499,7 +518,8 @@ def bed_conversion_handler(job, work_dir=None):
                 metadata_list=metadata_list,
                 work_dir=batch_work_dir,
                 logger=logger,
-                threads=1  # Default thread count
+                threads=1,  # Default thread count
+                expected_fail_only=bool(suppress_expected),
             )
             
             # Store batch results in job context (maintain compatibility with existing structure)
@@ -516,8 +536,24 @@ def bed_conversion_handler(job, work_dir=None):
             logger.info(f"Files successfully processed: {batch_result.get('files_processed', batch_size)}/{batch_result.get('total_files', batch_size)}")
             
             if batch_result.get("error_message"):
-                logger.error(f"Batch processing completed with errors: {batch_result['error_message']}")
-                job.context.add_error("bed_conversion", batch_result["error_message"])
+                if suppress_expected:
+                    logger.warning(
+                        f"Batch processing completed with expected errors (fail-only BAM submission): {batch_result['error_message']}"
+                    )
+                    job.context.add_result(
+                        "bed_conversion",
+                        {
+                            "status": "expected_failure",
+                            "error_message": batch_result["error_message"],
+                            "sample_id": sample_id,
+                            "parquet_path": batch_result.get("parquet_path", ""),
+                        },
+                    )
+                else:
+                    logger.error(
+                        f"Batch processing completed with errors: {batch_result['error_message']}"
+                    )
+                    job.context.add_error("bed_conversion", batch_result["error_message"])
             else:
                 logger.info("Batch processing completed successfully with aggregated bed conversion")
                 job.context.add_result(
@@ -566,10 +602,24 @@ def bed_conversion_handler(job, work_dir=None):
             job.context.add_metadata("bed_processing_steps", bed_result.processing_steps)
 
             if bed_result.error_message:
-                job.context.add_error("bed_conversion", bed_result.error_message)
-                logger.error(
-                    f"BAM to parquet conversion failed: {bed_result.error_message}"
-                )
+                if suppress_expected:
+                    logger.warning(
+                        f"Expected BAM->parquet issue for fail-only BAM submission: {bed_result.error_message}"
+                    )
+                    job.context.add_result(
+                        "bed_conversion",
+                        {
+                            "status": "expected_failure",
+                            "error_message": bed_result.error_message,
+                            "sample_id": bed_result.sample_id,
+                            "parquet_path": bed_result.parquet_path,
+                        },
+                    )
+                else:
+                    job.context.add_error("bed_conversion", bed_result.error_message)
+                    logger.error(
+                        f"BAM to parquet conversion failed: {bed_result.error_message}"
+                    )
             else:
                 job.context.add_result(
                     "bed_conversion",
@@ -589,6 +639,17 @@ def bed_conversion_handler(job, work_dir=None):
                 logger.debug(f"Processing steps: {', '.join(bed_result.processing_steps)}")
 
     except Exception as e:
+        suppress_expected = _is_fail_only_expected(job)
+        if suppress_expected:
+            logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
+            logger.warning(
+                f"Expected bed conversion failure for fail-only BAM submission: {e}"
+            )
+            job.context.add_result(
+                "bed_conversion",
+                {"status": "expected_failure", "error_message": str(e)},
+            )
+            return
         job.context.add_error("bed_conversion", str(e))
         logger = logging.getLogger("robin.analysis.bed_conversion")
         logger.error(
