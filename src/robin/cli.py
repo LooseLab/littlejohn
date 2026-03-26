@@ -48,17 +48,36 @@ import logging
 is_development_mode = os.environ.get("ROBIN_DEV_MODE", "").lower() in ("1", "true", "yes", "on")
 
 from robin.workflow_simple import default_file_classifier, Job
-from robin.analysis.bam_preprocessor import bam_preprocessing_handler
-from robin.analysis.mgmt_analysis import mgmt_handler
-from robin.analysis.cnv_analysis import cnv_handler
-from robin.analysis.bed_conversion import bed_conversion_handler
-from robin.analysis.sturgeon_analysis import sturgeon_handler
-from robin.analysis.nanodx_analysis import nanodx_handler, pannanodx_handler
-from robin.analysis.random_forest_analysis import random_forest_handler
-from robin.analysis.target_analysis import target_handler
-from robin.analysis.fusion_analysis import fusion_handler
-from robin.analysis.utilities.matkit import run_matkit
-from robin.analysis.mgmt_analysis import extract_mgmt_site_rows_from_bed
+
+# Many analysis handlers have optional third-party dependencies. Import them lazily
+# so lightweight commands (e.g. `robin utils update-models`) still work.
+_analysis_import_error: Optional[BaseException] = None
+try:
+    from robin.analysis.bam_preprocessor import bam_preprocessing_handler
+    from robin.analysis.mgmt_analysis import mgmt_handler
+    from robin.analysis.cnv_analysis import cnv_handler
+    from robin.analysis.bed_conversion import bed_conversion_handler
+    from robin.analysis.sturgeon_analysis import sturgeon_handler
+    from robin.analysis.nanodx_analysis import nanodx_handler, pannanodx_handler
+    from robin.analysis.random_forest_analysis import random_forest_handler
+    from robin.analysis.target_analysis import target_handler
+    from robin.analysis.fusion_analysis import fusion_handler
+    from robin.analysis.utilities.matkit import run_matkit
+    from robin.analysis.mgmt_analysis import extract_mgmt_site_rows_from_bed
+except Exception as e:
+    _analysis_import_error = e
+    bam_preprocessing_handler = None  # type: ignore[assignment]
+    mgmt_handler = None  # type: ignore[assignment]
+    cnv_handler = None  # type: ignore[assignment]
+    bed_conversion_handler = None  # type: ignore[assignment]
+    sturgeon_handler = None  # type: ignore[assignment]
+    nanodx_handler = None  # type: ignore[assignment]
+    pannanodx_handler = None  # type: ignore[assignment]
+    random_forest_handler = None  # type: ignore[assignment]
+    target_handler = None  # type: ignore[assignment]
+    fusion_handler = None  # type: ignore[assignment]
+    run_matkit = None  # type: ignore[assignment]
+    extract_mgmt_site_rows_from_bed = None  # type: ignore[assignment]
 from robin.logging_config import (
     configure_logging,
 )
@@ -592,6 +611,47 @@ def update_clinvar() -> None:
             click.echo("ClinVar is already up to date.")
     except Exception as e:
         click.echo(f"Failed to update ClinVar: {e}", err=True)
+        sys.exit(1)
+
+
+@utils.command("update-models")
+@click.option(
+    "--models-dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Directory to place model files (defaults to ROBIN's models directory).",
+)
+@click.option(
+    "--manifest",
+    "manifest_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Path to assets.json manifest (defaults to repo-root assets.json or ROBIN_ASSETS_MANIFEST).",
+)
+@click.option(
+    "--overwrite",
+    is_flag=True,
+    help="Overwrite existing model files (default: skip existing).",
+)
+def update_models(models_dir: Optional[Path], manifest_path: Optional[Path], overwrite: bool) -> None:
+    """Download/update ROBIN model files using the assets manifest."""
+    try:
+        from robin.utils.model_checker import get_models_directory
+        from robin.utils.model_updater import update_models as _update_models
+
+        target_dir = models_dir or get_models_directory()
+        ok, msgs = _update_models(
+            models_dir=target_dir,
+            manifest_path=str(manifest_path) if manifest_path else None,
+            overwrite=overwrite,
+        )
+        for m in msgs:
+            click.echo(m)
+        if not ok:
+            sys.exit(1)
+        click.echo("Model update complete.")
+    except Exception as e:
+        click.echo(f"Failed to update models: {e}", err=True)
         sys.exit(1)
 
 
