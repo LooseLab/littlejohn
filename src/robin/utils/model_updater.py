@@ -89,15 +89,56 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def _download(url: str, target_path: Path, github_token: Optional[str]) -> None:
+def _download(url: str, target_path: Path, github_token: Optional[str], *, label: str = "Downloading") -> None:
     headers: Dict[str, str] = {}
     if github_token:
         headers["Authorization"] = f"Bearer {github_token}"
     req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req) as resp:
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        with target_path.open("wb") as f:
-            f.write(resp.read())
+        total: Optional[int] = None
+        try:
+            cl = resp.headers.get("Content-Length")
+            if cl:
+                total = int(cl)
+        except Exception:
+            total = None
+
+        # Import click lazily (keeps module usable outside CLI contexts).
+        try:
+            import click  # type: ignore
+        except Exception:
+            click = None  # type: ignore
+
+        chunk_size = 1024 * 1024  # 1 MiB
+        downloaded = 0
+
+        if click is not None and total and total > 0:
+            with click.progressbar(length=total, label=label, show_eta=True, show_percent=True) as bar:
+                with target_path.open("wb") as f:
+                    while True:
+                        chunk = resp.read(chunk_size)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        bar.update(len(chunk))
+        else:
+            # Fallback: still stream to avoid loading into memory; optionally emit sparse progress.
+            last_reported_mb = -1
+            with target_path.open("wb") as f:
+                while True:
+                    chunk = resp.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    # Report every ~16 MiB if click is available (keeps output minimal).
+                    if click is not None:
+                        mb = downloaded // (1024 * 1024)
+                        if mb // 16 != last_reported_mb // 16:
+                            last_reported_mb = mb
+                            click.echo(f"{label}: {mb} MiB downloaded...")
 
 
 def update_models(
@@ -152,7 +193,7 @@ def update_models(
             messages.append(f"Skipping {filename} (already exists).")
             continue
         try:
-            _download(url, target_path, token)
+            _download(url, target_path, token, label=f"Downloading {filename}")
             got = _sha256_file(target_path)
             if got != expected_sha256:
                 try:
