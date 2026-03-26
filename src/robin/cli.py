@@ -184,119 +184,53 @@ def _download_missing_models(missing_files, models_dir):
 
 
 def _check_models_or_exit():
-    """Check for required model files and offer to download them if missing."""
-    from robin.utils.model_checker import (
-        get_models_directory,
-        check_model_files,
-        validate_models_or_exit,
-    )
-    from pathlib import Path
-    
-    # Get models directory using the centralized function
-    # This uses the models module's DIR constant, which works regardless of
-    # where robin is run from
+    """Ensure required runtime assets exist; auto-download missing ones."""
+    try:
+        from robin.utils.model_checker import get_models_directory, check_model_files
+        from robin.utils.model_updater import update_models as _update_models
+        from robin.utils.clinvar_manager import ensure_clinvar_files
+    except Exception as e:
+        click.echo(f"❌ Could not load asset bootstrap helpers: {e}", err=True)
+        sys.exit(1)
+
+    # 1) Ensure required models are available (auto-download missing on first run).
     try:
         models_dir = get_models_directory()
     except Exception as e:
-        print("❌ Could not locate ROBIN models directory")
-        print(f"Error: {e}")
-        print("Please ensure the models are installed in the correct location.")
+        click.echo(f"❌ Could not locate ROBIN models directory: {e}", err=True)
         sys.exit(1)
-    
-    # Check if models directory exists
-    if not models_dir.exists():
-        print("❌ Could not locate ROBIN models directory")
-        print(f"Expected location: {models_dir}")
-        print("Please ensure the models are installed in the correct location.")
-        sys.exit(1)
-    
-    # Check for missing files using the centralized function
-    all_present, missing_files, present_files = check_model_files()
-    
+
+    all_present, missing_files, _present_files = check_model_files()
     if not all_present:
-        print("\n" + "="*60)
-        print("ROBIN MODEL STATUS CHECK")
-        print("="*60)
-        print("❌ Missing required model files:")
-        for filename in missing_files:
-            print(f"   ✗ {filename}")
-        
-        if present_files:
-            print("\n✅ Present model files:")
-            for filename in present_files:
-                print(f"   ✓ {filename}")
-        
-        print(f"\n📁 Models directory: {models_dir}")
-        print(f"📁 Current working directory: {Path.cwd()}")
-        
-        # Ask user if they want to download
-        print("\n" + "="*60)
-        print("AUTOMATIC DOWNLOAD OPTION")
-        print("="*60)
-        print("Would you like to automatically download the missing model files?")
-        print("This will use the same method as 'python setup_models.py'")
-        
-        try:
-            response = input("\nDownload missing models? [Y/n]: ").strip().lower()
-            if response in ['', 'y', 'yes']:
-                if _download_missing_models(missing_files, models_dir):
-                    print("\n🎉 All models downloaded successfully!")
-                    print("ROBIN is now ready to run.")
-                    return  # Success, continue execution
-                else:
-                    print("\n⚠️  Some downloads failed. Trying alternative method...")
-                    print("\n" + "="*60)
-                    print("FALLBACK TO API METHOD")
-                    print("="*60)
-                    print("The automatic download failed. You can try the API method:")
-                    print()
-                    print("1. Set a GitHub token:")
-                    print("   export GITHUB_TOKEN=your_github_token")
-                    print()
-                    print("2. Run the API download script:")
-                    print("   python setup_models_api.py")
-                    print()
-                    print("3. Or run the original setup script:")
-                    print("   python setup_models.py")
-                    print()
-                    print("After downloading, run ROBIN again.")
-                    print("="*60)
-                    sys.exit(1)
-            else:
-                print("\n" + "="*60)
-                print("MANUAL DOWNLOAD INSTRUCTIONS")
-                print("="*60)
-                print("To download the missing model files manually, run one of these commands:")
-                print()
-                print("Option 1 - Using setup_models.py (works with public repositories):")
-                print("   python setup_models.py")
-                print()
-                print("Option 2 - Using setup_models_api.py (requires GitHub token for private repos):")
-                print("   export GITHUB_TOKEN=your_github_token")
-                print("   python setup_models_api.py")
-                print()
-                print("Note: Option 1 works if the repository is public.")
-                print("Option 2 is needed for private repositories or if you have a GitHub token.")
-                print("You can create a token at: https://github.com/settings/tokens")
-                print()
-                print("After downloading, you can run ROBIN normally.")
-                print("="*60)
-                print("\n⚠️  ROBIN cannot run without the required model files.")
-                print("Please download them using one of the methods above and try again.")
-                sys.exit(1)
-        except KeyboardInterrupt:
-            print("\n\n⚠️  Download cancelled by user.")
-            print("ROBIN cannot run without the required model files.")
+        click.echo("Missing required model files detected. Downloading now...")
+        ok, msgs = _update_models(models_dir=models_dir, overwrite=False)
+        for m in msgs:
+            click.echo(m)
+        if not ok:
+            click.echo(
+                "❌ Failed to download required model files. "
+                "You can retry with: robin utils update-models",
+                err=True,
+            )
             sys.exit(1)
 
-    # Ensure ClinVar is present for variant annotation/reporting.
-    # (Best-effort download + local format conversion.)
-    try:
-        from robin.utils.clinvar_manager import ensure_clinvar_files
+        all_present_after, missing_after, _present_after = check_model_files()
+        if not all_present_after:
+            click.echo(
+                f"❌ Required model files are still missing after download: {', '.join(missing_after)}",
+                err=True,
+            )
+            sys.exit(1)
 
+    # 2) Ensure ClinVar VCF resources are available (download or generate as needed).
+    try:
         ensure_clinvar_files(download_if_missing=True)
     except Exception as e:
-        click.echo(f"❌ Failed to set up ClinVar VCF files: {e}", err=True)
+        click.echo(
+            "❌ Failed to set up ClinVar VCF files automatically. "
+            f"You can retry with: robin utils update-clinvar\nReason: {e}",
+            err=True,
+        )
         sys.exit(1)
 
 

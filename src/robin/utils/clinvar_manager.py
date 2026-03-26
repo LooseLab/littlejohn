@@ -62,9 +62,53 @@ def _download_url_to_file(url: str, target_path: Path, *, timeout_s: int = 600) 
         logger.info("Downloading ClinVar from %s", url)
         req = urllib.request.Request(url, headers={"User-Agent": "robin-clinvar/1.0"})
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            # Stream to disk.
-            with open(tmp_path, "wb") as f:
-                shutil.copyfileobj(resp, f)
+            total: Optional[int] = None
+            try:
+                cl = resp.headers.get("Content-Length")
+                if cl:
+                    total = int(cl)
+            except Exception:
+                total = None
+
+            # Import click lazily to keep module usable in non-CLI contexts.
+            try:
+                import click  # type: ignore
+            except Exception:
+                click = None  # type: ignore
+
+            chunk_size = 1024 * 1024  # 1 MiB
+            downloaded = 0
+
+            if click is not None and total and total > 0:
+                with click.progressbar(
+                    length=total,
+                    label="Downloading ClinVar",
+                    show_eta=True,
+                    show_percent=True,
+                ) as bar:
+                    with open(tmp_path, "wb") as f:
+                        while True:
+                            chunk = resp.read(chunk_size)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            bar.update(len(chunk))
+            else:
+                # Fallback: stream and emit sparse size updates.
+                last_reported_mb = -1
+                with open(tmp_path, "wb") as f:
+                    while True:
+                        chunk = resp.read(chunk_size)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if click is not None:
+                            mb = downloaded // (1024 * 1024)
+                            if mb // 16 != last_reported_mb // 16:
+                                last_reported_mb = mb
+                                click.echo(f"Downloading ClinVar: {mb} MiB downloaded...")
 
         tmp_path.replace(target_path)
         print(f"ClinVar download complete: {target_path}")
