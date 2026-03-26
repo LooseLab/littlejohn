@@ -17,7 +17,7 @@ def _default_repo_root_guess() -> Optional[Path]:
     try:
         here = Path(__file__).resolve()
         # .../src/robin/utils/model_updater.py -> .../ (repo root)
-        return here.parents[4]
+        return here.parents[3]
     except Exception:
         return None
 
