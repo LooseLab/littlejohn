@@ -2622,27 +2622,22 @@ class GUILauncher:
                     # Handle finalize-target action
                     def _on_finalize_target(event):
                         try:
+                            print(f"[DEBUG finalize] event={event!r}", flush=True)
                             sample_id = getattr(event, "args", None) if hasattr(event, "args") else None
+                            print(f"[DEBUG finalize] extracted sample_id={sample_id!r}", flush=True)
                             if isinstance(sample_id, str):
-                                from robin.analysis.target_analysis import is_docker_available_for_snp_analysis
-                                docker_ok, docker_error = is_docker_available_for_snp_analysis()
-                                trigger_snp = docker_ok
-                                if not docker_ok:
-                                    ui.notify(
-                                        f"Docker is not available. Finalization will run; SNP analysis skipped. {docker_error}",
-                                        type="warning",
-                                    )
-                                self._trigger_target_bam_finalization(sample_id, trigger_snp=trigger_snp)
-                                if trigger_snp:
-                                    ui.notify(
-                                        f"Triggered run finalization and SNP analysis for {sample_id}",
-                                        type="positive",
-                                    )
-                                else:
-                                    ui.notify(
-                                        f"Triggered run finalization for {sample_id} (SNP analysis skipped—Docker required)",
-                                        type="positive",
-                                    )
+                                # Keep this UI callback non-blocking.
+                                # All heavyweight checks/submissions run in background logic.
+                                self._trigger_target_bam_finalization(sample_id, trigger_snp=True)
+                                print(
+                                    f"[DEBUG finalize] called _trigger_target_bam_finalization(sample_id={sample_id}, trigger_snp=True)",
+                                    flush=True,
+                                )
+                                ui.notify(
+                                    f"Triggered run finalization for {sample_id}. "
+                                    "SNP analysis will be queued if prerequisites are met.",
+                                    type="positive",
+                                )
                             else:
                                 ui.notify("Invalid sample ID", type="warning")
                         except Exception as e:
@@ -6815,6 +6810,52 @@ class GUILauncher:
             time.sleep(poll_s)
         return False
 
+    def _wait_for_target_bam_or_timeout(
+        self,
+        sample_id: str,
+        *,
+        poll_s: float = 2.0,
+        max_wait_s: float = 3600.0,
+    ) -> bool:
+        """Poll disk until `target.bam` and index exist for sample."""
+        if not self.monitored_directory:
+            return False
+        sample_dir = Path(self.monitored_directory) / sample_id
+        target_bam = sample_dir / "target.bam"
+        target_bai = sample_dir / "target.bam.bai"
+        deadline = time.time() + max_wait_s
+        while time.time() < deadline:
+            if target_bam.exists() and target_bai.exists():
+                return True
+            time.sleep(poll_s)
+        return False
+
+    def _resolve_submission_result(self, maybe_result: Any, operation: str) -> bool:
+        """Normalize workflow submission return (sync bool or async coroutine)."""
+        try:
+            print(
+                f"[DEBUG submit] operation={operation} type={type(maybe_result).__name__}",
+                flush=True,
+            )
+            if asyncio.iscoroutine(maybe_result):
+                print(
+                    f"[DEBUG submit] operation={operation} detected coroutine; running asyncio.run",
+                    flush=True,
+                )
+                result = bool(asyncio.run(maybe_result))
+                print(
+                    f"[DEBUG submit] operation={operation} coroutine result={result}",
+                    flush=True,
+                )
+                return result
+            result = bool(maybe_result)
+            print(f"[DEBUG submit] operation={operation} sync result={result}", flush=True)
+            return result
+        except Exception as e:
+            print(f"[DEBUG submit] operation={operation} exception={e}", flush=True)
+            logging.error(f"{operation} failed: {e}", exc_info=True)
+            return False
+
     def _bulk_snp_sequential_run(self, sample_ids: List[str]) -> None:
         """Run SNP analysis one sample at a time (sequential, like manual triggers)."""
         try:
@@ -6878,12 +6919,15 @@ class GUILauncher:
                     logging.info(
                         "Bulk SNP (%d/%d): submitting %s", idx, total, sid
                     )
-                    submitted = workflow_runner.submit_snp_analysis_job(
-                        sample_dir=str(sample_dir),
-                        sample_id=sid,
-                        reference=reference_path,
-                        threads=4,
-                        force_regenerate=False,
+                    submitted = self._resolve_submission_result(
+                        workflow_runner.submit_snp_analysis_job(
+                            sample_dir=str(sample_dir),
+                            sample_id=sid,
+                            reference=reference_path,
+                            threads=4,
+                            force_regenerate=False,
+                        ),
+                        operation=f"Bulk SNP submission for {sid}",
                     )
                     if not submitted:
                         logging.warning("Bulk SNP: submit failed for %s", sid)
@@ -7134,11 +7178,17 @@ class GUILauncher:
 
     def _trigger_target_bam_finalization(self, sample_id: str, *, trigger_snp: bool = False) -> None:
         """Trigger target.bam finalization for a sample. Optionally start SNP analysis afterwards."""
+        print(
+            f"[DEBUG finalize] _trigger_target_bam_finalization start sample_id={sample_id} trigger_snp={trigger_snp}",
+            flush=True,
+        )
         if not self.monitored_directory:
+            print("[DEBUG finalize] monitored_directory missing, return", flush=True)
             return
 
         if self._is_target_bam_finalize_redundant(sample_id):
             self._finalized_samples.add(sample_id)
+            print(f"[DEBUG finalize] redundant finalize for sample_id={sample_id}, return", flush=True)
             logging.info(
                 f"Sample {sample_id} already has finalized target.bam on disk; "
                 "skipping target.bam finalization"
@@ -7172,22 +7222,39 @@ class GUILauncher:
             import threading
             def finalize_in_background():
                 try:
+                    print(
+                        f"[DEBUG finalize] background thread entered sample_id={sample_id} trigger_snp={trigger_snp} already_finalized={already_finalized}",
+                        flush=True,
+                    )
                     finalization_succeeded = True
 
                     if already_finalized:
+                        print(f"[DEBUG finalize] sample already finalized: {sample_id}", flush=True)
                         logging.info(f"Sample {sample_id} already finalized; skipping target.bam merge")
                     else:
+                        print(f"[DEBUG finalize] processing finalization path sample_id={sample_id}", flush=True)
                         logging.info(
                             f"Triggering target.bam finalization for sample {sample_id} (status: Complete)"
                         )
                         workflow_runner = getattr(self, "workflow_runner", None)
-                        if (not trigger_snp) and workflow_runner and hasattr(
+                        if workflow_runner and hasattr(
                             workflow_runner, "submit_target_bam_finalize_job"
                         ):
-                            submitted = workflow_runner.submit_target_bam_finalize_job(
-                                sample_dir=str(sample_dir),
-                                sample_id=sample_id,
-                                target_panel=target_panel,
+                            print(
+                                f"[DEBUG finalize] attempting submit_target_bam_finalize_job sample_id={sample_id}",
+                                flush=True,
+                            )
+                            submitted = self._resolve_submission_result(
+                                workflow_runner.submit_target_bam_finalize_job(
+                                    sample_dir=str(sample_dir),
+                                    sample_id=sample_id,
+                                    target_panel=target_panel,
+                                ),
+                                operation=f"Target BAM finalize submission for {sample_id}",
+                            )
+                            print(
+                                f"[DEBUG finalize] submit_target_bam_finalize_job returned {submitted!r} type={type(submitted).__name__}",
+                                flush=True,
                             )
                             if submitted:
                                 logging.info(
@@ -7203,17 +7270,40 @@ class GUILauncher:
                                     },
                                     priority=6,
                                 )
-                                finalization_succeeded = False
+                                # Treat queued finalization as success; wait for target.bam before SNP submission.
+                                finalization_succeeded = True
+                                if trigger_snp:
+                                    ready = self._wait_for_target_bam_or_timeout(
+                                        sample_id, poll_s=2.0, max_wait_s=3600.0
+                                    )
+                                    print(
+                                        f"[DEBUG finalize] wait_for_target_bam sample_id={sample_id} ready={ready}",
+                                        flush=True,
+                                    )
+                                    if not ready:
+                                        finalization_succeeded = False
+                                        self.send_update(
+                                            UpdateType.WARNING_NOTIFICATION,
+                                            {
+                                                "title": "Finalization timed out",
+                                                "message": "target.bam was not detected after queued finalization.",
+                                                "sample_id": sample_id,
+                                                "level": "warning",
+                                            },
+                                            priority=6,
+                                        )
                             else:
                                 logging.warning(
                                     f"Target BAM finalization job submission failed for {sample_id}; running inline"
                                 )
                         if finalization_succeeded:
+                            print(f"[DEBUG finalize] running finalize_accumulation_for_sample sample_id={sample_id}", flush=True)
                             result = finalize_accumulation_for_sample(
                                 sample_id=sample_id,
                                 work_dir=str(self.monitored_directory),
                                 target_panel=target_panel,
                             )
+                            print(f"[DEBUG finalize] finalize_accumulation result={result!r}", flush=True)
                             if result.get("status") != "error":
                                 self._finalized_samples.add(sample_id)
                                 logging.info(
@@ -7226,6 +7316,7 @@ class GUILauncher:
                                 )
 
                     if trigger_snp and finalization_succeeded:
+                        print(f"[DEBUG finalize] entering SNP submission path sample_id={sample_id}", flush=True)
                         # Ensure only one SNP analysis submission runs at a time
                         with self._snp_analysis_lock:
                             running_sample = self._snp_analysis_running_sample
@@ -7251,10 +7342,12 @@ class GUILauncher:
                                 return
 
                             self._snp_analysis_running_sample = sample_id
+                            print(f"[DEBUG finalize] snp lock set for sample_id={sample_id}", flush=True)
 
                         try:
                             reference_path = self._locate_reference_for_sample(sample_dir)
                             if not reference_path:
+                                print(f"[DEBUG finalize] no reference for sample_id={sample_id}", flush=True)
                                 message = (
                                     "Reference genome not available; skipping SNP analysis. "
                                     "Please provide a reference via the workflow CLI."
@@ -7274,6 +7367,7 @@ class GUILauncher:
 
                             target_bam = sample_dir / "target.bam"
                             if not target_bam.exists():
+                                print(f"[DEBUG finalize] target.bam missing for sample_id={sample_id}", flush=True)
                                 message = "target.bam not found; cannot run SNP analysis."
                                 logging.warning(message)
                                 self.send_update(
@@ -7291,6 +7385,7 @@ class GUILauncher:
                             from robin.analysis.target_analysis import is_docker_available_for_snp_analysis
                             docker_ok, docker_error = is_docker_available_for_snp_analysis()
                             if not docker_ok:
+                                print(f"[DEBUG finalize] docker unavailable in SNP path sample_id={sample_id}: {docker_error}", flush=True)
                                 message = (
                                     f"SNP analysis requires Docker, but it is not available. {docker_error} "
                                     "Please install Docker and ensure the daemon is running, then run SNP analysis separately."
@@ -7312,20 +7407,36 @@ class GUILauncher:
                             if workflow_runner and hasattr(
                                 workflow_runner, "submit_snp_analysis_job"
                             ):
-                                submitted = workflow_runner.submit_snp_analysis_job(
-                                    sample_dir=str(sample_dir),
-                                    sample_id=sample_id,
-                                    reference=reference_path,
-                                    threads=4,
-                                    force_regenerate=False,
+                                print(f"[DEBUG finalize] attempting submit_snp_analysis_job sample_id={sample_id}", flush=True)
+                                submitted = self._resolve_submission_result(
+                                    workflow_runner.submit_snp_analysis_job(
+                                        sample_dir=str(sample_dir),
+                                        sample_id=sample_id,
+                                        reference=reference_path,
+                                        threads=4,
+                                        force_regenerate=False,
+                                    ),
+                                    operation=f"SNP submission for {sample_id}",
+                                )
+                                print(
+                                    f"[DEBUG finalize] submit_snp_analysis_job returned {submitted!r} type={type(submitted).__name__}",
+                                    flush=True,
                                 )
                             elif workflow_runner and hasattr(
                                 workflow_runner, "submit_sample_job"
                             ):
-                                submitted = workflow_runner.submit_sample_job(
-                                    sample_dir=str(sample_dir),
-                                    job_type="snp_analysis",
-                                    sample_id=sample_id,
+                                print(f"[DEBUG finalize] attempting fallback submit_sample_job(snp_analysis) sample_id={sample_id}", flush=True)
+                                submitted = self._resolve_submission_result(
+                                    workflow_runner.submit_sample_job(
+                                        sample_dir=str(sample_dir),
+                                        job_type="snp_analysis",
+                                        sample_id=sample_id,
+                                    ),
+                                    operation=f"SNP fallback submission for {sample_id}",
+                                )
+                                print(
+                                    f"[DEBUG finalize] fallback submit_sample_job returned {submitted!r} type={type(submitted).__name__}",
+                                    flush=True,
                                 )
                             else:
                                 submitted = False
@@ -7376,13 +7487,18 @@ class GUILauncher:
                         finally:
                             with self._snp_analysis_lock:
                                 self._snp_analysis_running_sample = None
+                            print(f"[DEBUG finalize] snp lock cleared sample_id={sample_id}", flush=True)
                 except Exception as e:
+                    print(f"[DEBUG finalize] background exception sample_id={sample_id}: {e}", flush=True)
                     logging.error(f"Error finalizing target.bam for {sample_id}: {e}")
             
             thread = threading.Thread(target=finalize_in_background, daemon=True)
+            print(f"[DEBUG finalize] starting thread name={thread.name} sample_id={sample_id}", flush=True)
             thread.start()
+            print(f"[DEBUG finalize] thread started sample_id={sample_id}", flush=True)
             
         except Exception as e:
+            print(f"[DEBUG finalize] outer exception sample_id={sample_id}: {e}", flush=True)
             logging.error(f"Failed to trigger target.bam finalization for {sample_id}: {e}")
     
     def _scan_and_seed_samples(self, preexisting: bool = False) -> None:
