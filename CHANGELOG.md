@@ -3,11 +3,16 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+and this project (almost) adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
 ### Added
+- **Watched folders (smart add / Option B):** When adding a folder to watch, ROBIN scans for mixed “already analysed” vs “new” samples and automatically adds only the subfolders that contain exclusively un-analysed samples. Previously-analysed samples are skipped and reported.
+- **Watched folders (GUI feedback):** If adding a folder results in some samples/subfolders being skipped, the GUI now shows a warning notification rather than a plain success.
+- **Job type filtering:** Added job-type filtering to improve workflow/GUI navigation for large runs.
+- **SNP calling global controls:** Added global GUI controls/buttons for SNP calling to simplify starting/monitoring variant calling.
+- **MNP-Flex global controls:** Added global GUI controls/buttons for MNP-Flex workflows.
 - **Process large BAMs option:** When `ROBIN_PROCESS_LARGE_BAMS` is set (e.g. `1`, `true`, `yes`, `on`), BAMs with more than 50,000 reads are no longer skipped. They are processed with per-file batching so each large BAM is sent to workers as a single-file batch (no batching with other files). Default remains to skip BAMs over 50k reads.
 - **Launch warnings for large-BAM mode:** When `ROBIN_PROCESS_LARGE_BAMS` is enabled, the GUI shows a warning in the disclaimer dialog (if shown) and a one-time notification on launch; the CLI prints a warning after the disclaimer when starting the workflow. Users are advised not to use this option alongside live runs.
 - **Fusion GUI delay analysis:** `FUSION_GUI_DELAY_ANALYSIS.md` documenting the cause of the ~29s delay between Summary and Fusion tab updates (30s refresh timer) and the mitigation (immediate refresh on section build).
@@ -32,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `robin utils mgmt` command to summarize MGMT CpG site methylation counts from `mgmt_sorted.bam` outputs.
 
 ### Changed
+- **Design refresh:** Updated GUI styling/layout (design refresh).
+- **Classification scoring:** Improved/fixed classification scoring and aggregation across classifiers (Sturgeon/NanoDX/PanNanoDX/RandomForest).
+- **Background work / scheduling:** Improved background processing behavior (responsiveness/robustness).
+- **Watched folders (performance):** Folder scanning during “Add folder to watch” now probes only a small number of BAMs per directory (sampling) to keep the GUI responsive for large folders.
 - **Batching for large BAMs:** When `ROBIN_PROCESS_LARGE_BAMS` is set, the preprocessor marks large BAMs (>50k reads) with `force_individual_batch`. The Ray and simple workflow batchers now emit single-file batches for such jobs and batch remaining jobs as before, so large BAMs are always processed one per worker.
 - **Report layout and typography:**
   - **Classification:** Methylation classification plots now use seaborn for improved styling; plots show top 3 classes with larger fonts and thicker lines. Detailed classification tables use a 2-column layout (Sturgeon|NanoDX, PanNanoDX|Random Forest) with compact styling and top 10 predictions.
@@ -54,14 +63,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Ray per-job memory (workflow_ray.py):** Configurable memory per job type — 1 GiB default for most jobs (preprocessing, bed_conversion, mgmt, cnv, target, classification, igv_bam, target_bam_finalize), 4 GiB for fusion, 8 GiB for snp_analysis (Clair3/variant calling). Reduces memory pressure on shared nodes while keeping SNP calling at 8 GiB.
 - **CNV plots (GUI):** Bin width selector added to the CNV plots so users can choose the bin width used for visualization (independent of the analysis bin width).
 - **CNV plots (GUI):** Chromosome filtering now matches the report: only chr0–chr22, chrX, and chrY are shown in the chromosome selector and in the "All" view. chrM and other contigs (e.g. unplaced, alt) are excluded.
-- Bump version to 0.4.1.
+- Bump version to 0.5 (major backend upgrade to Python 3.12).
 - **Quit button (menu):** Shown only when the app is opened from localhost or 127.0.0.1 (same device as the server). Hidden when visiting via any other host (e.g. remote or LAN URL) so only someone at the sequencing machine can quit the app.
 - **Python 3.12:** Minimum supported Python version is now 3.12.
+
+### Fixed
+- **GUI locking / concurrency:** Fixes to GUI locking to prevent UI/workflow concurrency issues.
+- **Timer/refresh reliability:** Fixes to timer-driven refresh/update behavior.
+- **Multi-BAM samples:** Removed per-BAM “already analysed” skipping during preprocessing to avoid accidentally skipping valid BAMs from the same sample/run.
+- **Ray dedup for SNP analysis:** Added SNP calling to the dedup list to prevent duplicate SNP runs for a sample.
 
 ### Dependencies
 - Added argon2-cffi for GUI password hashing.
 - Added seaborn for methylation classification plot styling.
 - Added Rich for enhanced CLI progress and styled output (requires updating installation).
+- Updated bundled ClinVar resource (ClinVar VCF + index).
 
 ## [0.0.2] - 2024-12-19
 
