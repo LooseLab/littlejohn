@@ -2484,7 +2484,7 @@ def target_handler(job, work_dir=None, reference=None, target_panel=None):
 
 
 def finalize_accumulation_for_sample(
-    sample_id: str, work_dir: str, target_panel: str
+    sample_id: str, work_dir: str, target_panel: str, reference: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Force final accumulation of any remaining staged files for a sample
@@ -2517,6 +2517,9 @@ def finalize_accumulation_for_sample(
             batch_size=1,  # Force accumulation regardless of count
             use_staging=True
         )
+        if reference:
+            target_analysis.reference = reference
+            logger.info(f"Finalize path using reference genome: {reference}")
         
         # Check if there are pending files
         pending_count = target_analysis._get_pending_count(sample_id)
@@ -2561,43 +2564,99 @@ def finalize_accumulation_for_sample(
             # Create temp merged output
             temp_merged_bam = os.path.join(sample_output_dir, ".final_merged.bam.tmp")
             
-            # Merge all batch BAMs
-            pysam.merge("-o", temp_merged_bam, *batch_bams)
+            # Clean stale temp outputs from a prior interrupted finalize, then force overwrite.
+            if os.path.exists(temp_merged_bam):
+                try:
+                    os.remove(temp_merged_bam)
+                except OSError as e:
+                    logger.warning(f"Could not remove stale temp merged BAM {temp_merged_bam}: {e}")
+            if os.path.exists(f"{temp_merged_bam}.bai"):
+                try:
+                    os.remove(f"{temp_merged_bam}.bai")
+                except OSError as e:
+                    logger.warning(f"Could not remove stale temp merged BAI {temp_merged_bam}.bai: {e}")
+
+            # Merge all batch BAMs (force overwrite in case file appears between checks)
+            pysam.merge("-f", "-o", temp_merged_bam, *batch_bams)
             logger.info("Merged all batch BAMs into temporary file")
             
             # Index the merged BAM
             pysam.index(temp_merged_bam)
             logger.info("Indexed merged target.bam")
-            
-            # Atomically replace target.bam
-            if os.path.exists(target_bam_path):
-                os.remove(target_bam_path)
-                if os.path.exists(f"{target_bam_path}.bai"):
-                    os.remove(f"{target_bam_path}.bai")
-            
-            shutil.move(temp_merged_bam, target_bam_path)
-            if os.path.exists(f"{temp_merged_bam}.bai"):
-                shutil.move(f"{temp_merged_bam}.bai", f"{target_bam_path}.bai")
-            
-            # Verify target.bam was created successfully
-            target_bam_exists = os.path.exists(target_bam_path) and os.path.exists(f"{target_bam_path}.bai")
-            
-            if target_bam_exists:
+
+            existing_target_read_count = 0
+            existing_target_has_reads = False
+            if os.path.exists(target_bam_path) and os.path.exists(f"{target_bam_path}.bai"):
                 try:
                     with pysam.AlignmentFile(target_bam_path, "rb") as bam_file:
-                        read_count = bam_file.count(until_eof=True)
-                        if read_count > 0:
-                            logger.info(f"Successfully created target.bam with {read_count} reads from {len(batch_bams)} batch files")
-                        else:
-                            logger.warning("target.bam created but contains no reads")
+                        existing_target_read_count = bam_file.count(until_eof=True)
+                        existing_target_has_reads = existing_target_read_count > 0
                 except Exception as e:
-                    logger.warning(f"Could not verify target.bam: {e}")
+                    logger.warning(f"Could not read existing target.bam before replacement: {e}")
+
+            merged_read_count = 0
+            try:
+                with pysam.AlignmentFile(temp_merged_bam, "rb") as bam_file:
+                    merged_read_count = bam_file.count(until_eof=True)
+            except Exception as e:
+                logger.warning(f"Could not read merged temp BAM before replacement: {e}")
+
+            replaced_target_bam = False
+
+            # Safety guard: preserve known-good existing BAM if newly merged BAM is empty.
+            if merged_read_count == 0 and existing_target_has_reads:
+                logger.warning(
+                    "Merged BAM for sample %s has 0 reads; preserving existing target.bam with %s reads.",
+                    sample_id,
+                    existing_target_read_count,
+                )
+                try:
+                    if os.path.exists(temp_merged_bam):
+                        os.remove(temp_merged_bam)
+                    if os.path.exists(f"{temp_merged_bam}.bai"):
+                        os.remove(f"{temp_merged_bam}.bai")
+                except OSError as e:
+                    logger.warning(f"Could not clean temp merged BAM after preserve decision: {e}")
+
+                target_bam_exists = os.path.exists(target_bam_path) and os.path.exists(f"{target_bam_path}.bai")
+                result["final_merge"] = "preserved_existing"
+                result["warning"] = (
+                    "Merged BAM was empty; preserved existing target.bam and continued."
+                )
             else:
-                logger.error("Failed to create target.bam file")
+                # Atomically replace target.bam
+                if os.path.exists(target_bam_path):
+                    os.remove(target_bam_path)
+                    if os.path.exists(f"{target_bam_path}.bai"):
+                        os.remove(f"{target_bam_path}.bai")
+
+                shutil.move(temp_merged_bam, target_bam_path)
+                if os.path.exists(f"{temp_merged_bam}.bai"):
+                    shutil.move(f"{temp_merged_bam}.bai", f"{target_bam_path}.bai")
+                replaced_target_bam = True
+
+                # Verify target.bam was created successfully
+                target_bam_exists = os.path.exists(target_bam_path) and os.path.exists(f"{target_bam_path}.bai")
+
+                if target_bam_exists:
+                    try:
+                        with pysam.AlignmentFile(target_bam_path, "rb") as bam_file:
+                            read_count = bam_file.count(until_eof=True)
+                            if read_count > 0:
+                                logger.info(
+                                    f"Successfully created target.bam with {read_count} reads from {len(batch_bams)} batch files"
+                                )
+                            else:
+                                logger.warning("target.bam created but contains no reads")
+                    except Exception as e:
+                        logger.warning(f"Could not verify target.bam: {e}")
+                else:
+                    logger.error("Failed to create target.bam file")
+                result["final_merge"] = "success" if target_bam_exists else "failed"
             
             # Clean up batch BAM files and their associated BAI files
             # Only clean up if target.bam was successfully created
-            if target_bam_exists:
+            if target_bam_exists and replaced_target_bam:
                 logger.info(f"Cleaning up {len(batch_bams)} batch BAM files and their index files after final merge")
                 cleaned_count = 0
                 failed_count = 0
@@ -2623,11 +2682,12 @@ def finalize_accumulation_for_sample(
                 
                 if failed_count > 0:
                     logger.warning(f"Failed to remove {failed_count} batch file(s) - they may need manual cleanup")
+            elif target_bam_exists:
+                logger.info("Preserved existing target.bam; keeping batch files for investigation/retry.")
             else:
                 logger.warning("Skipping batch cleanup - target.bam was not successfully created")
             
             logger.info(f"Final merge complete for {sample_id}")
-            result["final_merge"] = "success" if target_bam_exists else "failed"
             result["batch_files_merged"] = len(batch_bams)
         else:
             logger.info(f"No batch BAM files found for {sample_id}")
@@ -2682,6 +2742,7 @@ def target_bam_finalize_handler(job, work_dir: Optional[str] = None) -> None:
             )
 
         target_panel = metadata.get("target_panel")
+        reference = metadata.get("reference")
         if not target_panel and sample_dir and os.path.isdir(sample_dir):
             try:
                 import csv
@@ -2701,11 +2762,11 @@ def target_bam_finalize_handler(job, work_dir: Optional[str] = None) -> None:
             target_panel = "rCNS2"
 
         logger.info(
-            f"Finalizing target BAM: sample_id={sample_id}, work_dir={base}, target_panel={target_panel}"
+            f"Finalizing target BAM: sample_id={sample_id}, work_dir={base}, target_panel={target_panel}, reference={reference}"
         )
 
         result = finalize_accumulation_for_sample(
-            sample_id=sample_id, work_dir=base, target_panel=target_panel
+            sample_id=sample_id, work_dir=base, target_panel=target_panel, reference=reference
         )
 
         if result.get("status") == "error":

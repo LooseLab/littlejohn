@@ -481,6 +481,8 @@ class GUILauncher:
         self._background_scan_in_progress: bool = False
         # Sequential bulk SNP (one sample at a time; guard concurrent runs)
         self._bulk_snp_worker_running: bool = False
+        # Per-sample manual pipeline status for finalize/SNP visibility in table.
+        self._sample_pipeline_status: Dict[str, Dict[str, Any]] = {}
 
         # Sequential bulk MNP-Flex (one sample at a time; guard concurrent runs)
         self._bulk_mnpflex_worker_running: bool = False
@@ -2421,39 +2423,60 @@ class GUILauncher:
                             },
                             {
                                 "name": "file_progress",
-                                "label": "File Progress",
+                                "label": "Job Progress",
                                 "field": "file_progress",
                                 "sortable": True,
                             },
                             {
+                                "name": "pipeline_progress",
+                                "label": "Finalize/SNP",
+                                "field": "pipeline_progress",
+                                "sortable": True,
+                            },
+                            {
                                 "name": "active_jobs",
-                                "label": "Active",
+                                "label": "A",
                                 "field": "active_jobs",
                                 "sortable": True,
+                                "align": "center",
+                                "style": "width:52px; max-width:52px;",
+                                "headerStyle": "width:52px; max-width:52px;",
                             },
                             {
                                 "name": "pending_jobs",
-                                "label": "Pending",
+                                "label": "P",
                                 "field": "pending_jobs",
                                 "sortable": True,
+                                "align": "center",
+                                "style": "width:52px; max-width:52px;",
+                                "headerStyle": "width:52px; max-width:52px;",
                             },
                             {
                                 "name": "total_jobs",
-                                "label": "Total",
+                                "label": "T",
                                 "field": "total_jobs",
                                 "sortable": True,
+                                "align": "center",
+                                "style": "width:52px; max-width:52px;",
+                                "headerStyle": "width:52px; max-width:52px;",
                             },
                             {
                                 "name": "completed_jobs",
-                                "label": "Completed",
+                                "label": "C",
                                 "field": "completed_jobs",
                                 "sortable": True,
+                                "align": "center",
+                                "style": "width:52px; max-width:52px;",
+                                "headerStyle": "width:52px; max-width:52px;",
                             },
                             {
                                 "name": "failed_jobs",
-                                "label": "Failed",
+                                "label": "F",
                                 "field": "failed_jobs",
                                 "sortable": True,
+                                "align": "center",
+                                "style": "width:52px; max-width:52px;",
+                                "headerStyle": "width:52px; max-width:52px;",
                             },
                             {
                                 "name": "job_types",
@@ -2538,7 +2561,7 @@ class GUILauncher:
                             exc_info=True,
                         )
                     
-                    # Add file progress column with linear progress bar
+                    # Add job progress column with linear progress bar
                     try:
                         self.samples_table.add_slot(
                             "body-cell-file_progress",
@@ -2552,7 +2575,7 @@ class GUILauncher:
       rounded
       class=\"q-mb-xs\" />
     <div class=\"text-center text-[10px] text-slate-600 dark:text-slate-400\">
-      {{ props.row.files_processed || 0 }}/{{ props.row.files_seen || 0 }} files
+      {{ props.row.files_processed || 0 }}/{{ props.row.files_seen || 0 }} jobs
     </div>
   </div>
 </q-td>
@@ -2561,6 +2584,43 @@ class GUILauncher:
                     except Exception as e:
                         logging.warning(
                             "[samples_overview] add_slot body-cell-file_progress failed: %s",
+                            e,
+                            exc_info=True,
+                        )
+
+                    # Finalize/SNP progress indicator per sample
+                    try:
+                        self.samples_table.add_slot(
+                            "body-cell-pipeline_progress",
+                            """
+<q-td key=\"pipeline_progress\" :props=\"props\">
+  <!-- Compact: small state dot + one-line phase (ellipsis) -->
+  <div class=\"flex items-center\" style=\"gap: 8px; max-width: 170px;\">
+    <span
+      :style=\"{
+        width: '10px',
+        height: '10px',
+        borderRadius: '999px',
+        backgroundColor:
+          (props.row.pipeline_status || '').toLowerCase().includes('fail') ? '#f87171' :
+          ((props.row.pipeline_progress || 0) >= 1) ? '#22c55e' :
+          ((props.row.pipeline_status || '') ? '#60a5fa' : '#94a3b8'),
+        boxShadow: '0 0 0 2px rgba(148,163,184,0.15)'
+      }\" />
+    <div
+      class=\"text-[10px] text-slate-700 dark:text-slate-200\"
+      style=\"white-space: nowrap; overflow: hidden; text-overflow: ellipsis;\"
+      :title=\"props.row.pipeline_detail ? (props.row.pipeline_status + ' - ' + props.row.pipeline_detail) : (props.row.pipeline_status || 'Idle')\"
+    >
+      {{ props.row.pipeline_status || 'Idle' }}
+    </div>
+  </div>
+</q-td>
+""",
+                        )
+                    except Exception as e:
+                        logging.warning(
+                            "[samples_overview] add_slot body-cell-pipeline_progress failed: %s",
                             e,
                             exc_info=True,
                         )
@@ -3828,6 +3888,16 @@ class GUILauncher:
                     r["export"] = r.get("sample_id") in selected
                 except Exception:
                     r["export"] = False
+                try:
+                    sid = str(r.get("sample_id") or "")
+                    s = self._sample_pipeline_status.get(sid, {})
+                    r["pipeline_status"] = s.get("phase", "")
+                    r["pipeline_progress"] = float(s.get("progress", 0.0) or 0.0)
+                    r["pipeline_detail"] = s.get("detail", "")
+                except Exception:
+                    r["pipeline_status"] = ""
+                    r["pipeline_progress"] = 0.0
+                    r["pipeline_detail"] = ""
 
             # Sort rows by last activity in reverse chronological order (newest first)
             try:
@@ -6810,6 +6880,27 @@ class GUILauncher:
             time.sleep(poll_s)
         return False
 
+    def _set_pipeline_status(
+        self,
+        sample_id: str,
+        *,
+        phase: str,
+        progress: float,
+        detail: str = "",
+        level: str = "info",
+    ) -> None:
+        """Store lightweight per-sample finalize/SNP progress for GUI table display."""
+        try:
+            self._sample_pipeline_status[sample_id] = {
+                "phase": phase,
+                "progress": max(0.0, min(1.0, float(progress))),
+                "detail": detail,
+                "level": level,
+                "updated_at": time.time(),
+            }
+        except Exception:
+            pass
+
     def _wait_for_target_bam_or_timeout(
         self,
         sample_id: str,
@@ -6900,16 +6991,42 @@ class GUILauncher:
 
             total = len(sample_ids)
             for idx, sid in enumerate(sample_ids, start=1):
+                self._set_pipeline_status(
+                    sid,
+                    phase="SNP preparation",
+                    progress=0.7,
+                    detail=f"Bulk queue item {idx}/{total}",
+                )
                 sample_dir = Path(self.monitored_directory) / sid
                 ok, reason = self._sample_snp_prerequisites_met(sample_dir)
                 if not ok:
+                    self._set_pipeline_status(
+                        sid,
+                        phase="SNP skipped",
+                        progress=0.7,
+                        detail=str(reason)[:120],
+                        level="warning",
+                    )
                     logging.info("Bulk SNP skip %s: %s", sid, reason)
                     continue
                 if self._sample_has_snp_calling_outputs(sid):
+                    self._set_pipeline_status(
+                        sid,
+                        phase="SNP complete",
+                        progress=1.0,
+                        detail="Outputs already present",
+                    )
                     continue
 
                 reference_path = self._locate_reference_for_sample(sample_dir)
                 if not reference_path:
+                    self._set_pipeline_status(
+                        sid,
+                        phase="SNP skipped",
+                        progress=0.7,
+                        detail="No reference genome configured",
+                        level="warning",
+                    )
                     logging.warning("Bulk SNP skip %s: no reference genome", sid)
                     continue
 
@@ -6930,14 +7047,40 @@ class GUILauncher:
                         operation=f"Bulk SNP submission for {sid}",
                     )
                     if not submitted:
+                        self._set_pipeline_status(
+                            sid,
+                            phase="SNP submit failed",
+                            progress=0.8,
+                            detail="Submission failed",
+                            level="warning",
+                        )
                         logging.warning("Bulk SNP: submit failed for %s", sid)
                         continue
+                    self._set_pipeline_status(
+                        sid,
+                        phase="SNP queued",
+                        progress=0.85,
+                        detail="Queued in slow worker",
+                    )
                     finished = self._wait_for_snp_outputs_or_timeout(
                         sid, poll_s=5.0, max_wait_s=86400.0
                     )
                     if finished:
+                        self._set_pipeline_status(
+                            sid,
+                            phase="SNP complete",
+                            progress=1.0,
+                            detail="SNP outputs detected",
+                        )
                         logging.info("Bulk SNP: completed %s", sid)
                     else:
+                        self._set_pipeline_status(
+                            sid,
+                            phase="SNP still running",
+                            progress=0.9,
+                            detail="Timed out waiting for outputs",
+                            level="warning",
+                        )
                         logging.warning(
                             "Bulk SNP: timeout waiting for outputs for %s — continuing",
                             sid,
@@ -7182,18 +7325,42 @@ class GUILauncher:
             f"[DEBUG finalize] _trigger_target_bam_finalization start sample_id={sample_id} trigger_snp={trigger_snp}",
             flush=True,
         )
+        self._set_pipeline_status(
+            sample_id,
+            phase="Finalize requested",
+            progress=0.05,
+            detail="Preparing finalization job",
+        )
         if not self.monitored_directory:
             print("[DEBUG finalize] monitored_directory missing, return", flush=True)
+            self._set_pipeline_status(
+                sample_id,
+                phase="Finalize failed",
+                progress=0.0,
+                detail="No monitored directory available",
+                level="negative",
+            )
             return
 
         if self._is_target_bam_finalize_redundant(sample_id):
             self._finalized_samples.add(sample_id)
             print(f"[DEBUG finalize] redundant finalize for sample_id={sample_id}, return", flush=True)
+            self._set_pipeline_status(
+                sample_id,
+                phase="Finalize already complete",
+                progress=0.6 if trigger_snp else 1.0,
+                detail="target.bam already present",
+            )
             logging.info(
                 f"Sample {sample_id} already has finalized target.bam on disk; "
                 "skipping target.bam finalization"
             )
-            return
+            if not trigger_snp:
+                return
+            print(
+                f"[DEBUG finalize] redundant finalize but trigger_snp=True; continuing to SNP path for sample_id={sample_id}",
+                flush=True,
+            )
         
         try:
             from robin.analysis.target_analysis import finalize_accumulation_for_sample
@@ -7203,6 +7370,11 @@ class GUILauncher:
             sample_dir = Path(self.monitored_directory) / sample_id
             master_csv = sample_dir / "master.csv"
             target_panel = "rCNS2"  # Default
+            reference_path_for_finalize = self._locate_reference_for_sample(sample_dir)
+            print(
+                f"[DEBUG finalize] resolved reference for finalize sample_id={sample_id}: {reference_path_for_finalize}",
+                flush=True,
+            )
             
             if master_csv.exists():
                 try:
@@ -7225,6 +7397,12 @@ class GUILauncher:
                     print(
                         f"[DEBUG finalize] background thread entered sample_id={sample_id} trigger_snp={trigger_snp} already_finalized={already_finalized}",
                         flush=True,
+                    )
+                    self._set_pipeline_status(
+                        sample_id,
+                        phase="Finalizing target.bam",
+                        progress=0.2,
+                        detail="Background worker started",
                     )
                     finalization_succeeded = True
 
@@ -7249,6 +7427,7 @@ class GUILauncher:
                                     sample_dir=str(sample_dir),
                                     sample_id=sample_id,
                                     target_panel=target_panel,
+                                    reference=reference_path_for_finalize,
                                 ),
                                 operation=f"Target BAM finalize submission for {sample_id}",
                             )
@@ -7257,6 +7436,12 @@ class GUILauncher:
                                 flush=True,
                             )
                             if submitted:
+                                self._set_pipeline_status(
+                                    sample_id,
+                                    phase="Finalize queued",
+                                    progress=0.35,
+                                    detail="Queued in slow worker",
+                                )
                                 logging.info(
                                     f"Target BAM finalization job submitted for {sample_id}"
                                 )
@@ -7282,6 +7467,13 @@ class GUILauncher:
                                     )
                                     if not ready:
                                         finalization_succeeded = False
+                                        self._set_pipeline_status(
+                                            sample_id,
+                                            phase="Finalize timeout",
+                                            progress=0.35,
+                                            detail="target.bam not observed after queueing",
+                                            level="warning",
+                                        )
                                         self.send_update(
                                             UpdateType.WARNING_NOTIFICATION,
                                             {
@@ -7306,16 +7498,35 @@ class GUILauncher:
                             print(f"[DEBUG finalize] finalize_accumulation result={result!r}", flush=True)
                             if result.get("status") != "error":
                                 self._finalized_samples.add(sample_id)
+                                self._set_pipeline_status(
+                                    sample_id,
+                                    phase="Finalize complete",
+                                    progress=0.6 if trigger_snp else 1.0,
+                                    detail="target.bam ready",
+                                )
                                 logging.info(
                                     f"Successfully finalized target.bam for sample {sample_id}"
                                 )
                             else:
                                 finalization_succeeded = False
+                                self._set_pipeline_status(
+                                    sample_id,
+                                    phase="Finalize failed",
+                                    progress=0.2,
+                                    detail=str(result.get("error", "unknown error"))[:120],
+                                    level="negative",
+                                )
                                 logging.warning(
                                     f"Target.bam finalization returned error for {sample_id}: {result.get('error', 'Unknown')}"
                                 )
 
                     if trigger_snp and finalization_succeeded:
+                        self._set_pipeline_status(
+                            sample_id,
+                            phase="SNP preparation",
+                            progress=0.7,
+                            detail="Checking prerequisites",
+                        )
                         print(f"[DEBUG finalize] entering SNP submission path sample_id={sample_id}", flush=True)
                         # Ensure only one SNP analysis submission runs at a time
                         with self._snp_analysis_lock:
@@ -7348,6 +7559,13 @@ class GUILauncher:
                             reference_path = self._locate_reference_for_sample(sample_dir)
                             if not reference_path:
                                 print(f"[DEBUG finalize] no reference for sample_id={sample_id}", flush=True)
+                                self._set_pipeline_status(
+                                    sample_id,
+                                    phase="SNP skipped",
+                                    progress=0.7,
+                                    detail="No reference genome configured",
+                                    level="warning",
+                                )
                                 message = (
                                     "Reference genome not available; skipping SNP analysis. "
                                     "Please provide a reference via the workflow CLI."
@@ -7368,6 +7586,13 @@ class GUILauncher:
                             target_bam = sample_dir / "target.bam"
                             if not target_bam.exists():
                                 print(f"[DEBUG finalize] target.bam missing for sample_id={sample_id}", flush=True)
+                                self._set_pipeline_status(
+                                    sample_id,
+                                    phase="SNP skipped",
+                                    progress=0.7,
+                                    detail="target.bam missing",
+                                    level="warning",
+                                )
                                 message = "target.bam not found; cannot run SNP analysis."
                                 logging.warning(message)
                                 self.send_update(
@@ -7386,6 +7611,13 @@ class GUILauncher:
                             docker_ok, docker_error = is_docker_available_for_snp_analysis()
                             if not docker_ok:
                                 print(f"[DEBUG finalize] docker unavailable in SNP path sample_id={sample_id}: {docker_error}", flush=True)
+                                self._set_pipeline_status(
+                                    sample_id,
+                                    phase="SNP skipped",
+                                    progress=0.7,
+                                    detail="Docker unavailable",
+                                    level="warning",
+                                )
                                 message = (
                                     f"SNP analysis requires Docker, but it is not available. {docker_error} "
                                     "Please install Docker and ensure the daemon is running, then run SNP analysis separately."
@@ -7442,6 +7674,37 @@ class GUILauncher:
                                 submitted = False
 
                             if submitted:
+                                self._set_pipeline_status(
+                                    sample_id,
+                                    phase="SNP queued",
+                                    progress=0.85,
+                                    detail="Queued in slow worker",
+                                )
+                                def _mark_snp_completion(_sid: str) -> None:
+                                    finished = self._wait_for_snp_outputs_or_timeout(
+                                        _sid, poll_s=5.0, max_wait_s=86400.0
+                                    )
+                                    if finished:
+                                        self._set_pipeline_status(
+                                            _sid,
+                                            phase="SNP complete",
+                                            progress=1.0,
+                                            detail="SNP outputs detected",
+                                        )
+                                    else:
+                                        self._set_pipeline_status(
+                                            _sid,
+                                            phase="SNP still running",
+                                            progress=0.9,
+                                            detail="Waiting for outputs",
+                                            level="warning",
+                                        )
+
+                                threading.Thread(
+                                    target=_mark_snp_completion,
+                                    args=(sample_id,),
+                                    daemon=True,
+                                ).start()
                                 logging.info(
                                     f"SNP analysis job submitted for {sample_id} using reference {reference_path}"
                                 )
@@ -7456,6 +7719,13 @@ class GUILauncher:
                                     priority=6,
                                 )
                             else:
+                                self._set_pipeline_status(
+                                    sample_id,
+                                    phase="SNP submit failed",
+                                    progress=0.75,
+                                    detail="Workflow runner unavailable",
+                                    level="warning",
+                                )
                                 logging.warning(
                                     "No workflow runner available; SNP analysis not submitted."
                                 )
@@ -7470,6 +7740,13 @@ class GUILauncher:
                                     priority=6,
                                 )
                         except Exception as snp_exc:
+                            self._set_pipeline_status(
+                                sample_id,
+                                phase="SNP failed",
+                                progress=0.75,
+                                detail=str(snp_exc)[:120],
+                                level="negative",
+                            )
                             logging.error(
                                 f"Error submitting SNP analysis for {sample_id}: {snp_exc}",
                                 exc_info=True,
@@ -7490,6 +7767,13 @@ class GUILauncher:
                             print(f"[DEBUG finalize] snp lock cleared sample_id={sample_id}", flush=True)
                 except Exception as e:
                     print(f"[DEBUG finalize] background exception sample_id={sample_id}: {e}", flush=True)
+                    self._set_pipeline_status(
+                        sample_id,
+                        phase="Finalize/SNP failed",
+                        progress=0.1,
+                        detail=str(e)[:120],
+                        level="negative",
+                    )
                     logging.error(f"Error finalizing target.bam for {sample_id}: {e}")
             
             thread = threading.Thread(target=finalize_in_background, daemon=True)

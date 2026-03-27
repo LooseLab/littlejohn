@@ -1832,9 +1832,18 @@ class Coordinator:
         Returns:
             True if job was successfully submitted, False otherwise
         """
+        logger = logging.getLogger("robin.workflow")
         try:
             if sample_id is None:
                 sample_id = Path(sample_dir).name
+            logger.info(
+                "Submitting SNP analysis job: sample_id=%s sample_dir=%s reference=%s threads=%s force_regenerate=%s",
+                sample_id,
+                sample_dir,
+                reference,
+                threads,
+                force_regenerate,
+            )
 
             # Determine target panel from master.csv if present
             target_panel = None
@@ -1871,6 +1880,11 @@ class Coordinator:
             # Add reference genome if provided
             if reference:
                 metadata["reference"] = reference
+            else:
+                logger.warning(
+                    "SNP submission for sample_id=%s has no reference in metadata; downstream handler may skip.",
+                    sample_id,
+                )
 
             context = WorkflowContext(filepath=sample_dir, metadata=metadata)
 
@@ -1886,10 +1900,18 @@ class Coordinator:
 
             # Submit the job
             await self.submit_jobs([job])
+            logger.info("SNP analysis job queued: sample_id=%s job_id=%s", sample_id, job.job_id)
 
             return True
 
-        except Exception:
+        except Exception as e:
+            logger.error(
+                "Failed to submit SNP analysis job: sample_id=%s sample_dir=%s error=%s",
+                sample_id,
+                sample_dir,
+                e,
+                exc_info=True,
+            )
             return False
 
     async def submit_target_bam_finalize_job(
@@ -1897,13 +1919,21 @@ class Coordinator:
         sample_dir: str,
         sample_id: str = None,
         target_panel: str = None,
+        reference: str = None,
     ) -> bool:
         """
         Submit a target BAM finalization job for an existing sample directory.
         """
+        logger = logging.getLogger("robin.workflow")
         try:
             if sample_id is None:
                 sample_id = Path(sample_dir).name
+            logger.info(
+                "Submitting target_bam_finalize job: sample_id=%s sample_dir=%s target_panel=%s",
+                sample_id,
+                sample_dir,
+                target_panel,
+            )
 
             if target_panel is None:
                 try:
@@ -1929,6 +1959,8 @@ class Coordinator:
 
             if target_panel:
                 metadata["target_panel"] = target_panel
+            if reference:
+                metadata["reference"] = reference
 
             context = WorkflowContext(filepath=sample_dir, metadata=metadata)
 
@@ -1942,9 +1974,21 @@ class Coordinator:
             )
 
             await self.submit_jobs([job])
+            logger.info(
+                "target_bam_finalize job queued: sample_id=%s job_id=%s",
+                sample_id,
+                job.job_id,
+            )
             return True
 
-        except Exception:
+        except Exception as e:
+            logger.error(
+                "Failed to submit target_bam_finalize job: sample_id=%s sample_dir=%s error=%s",
+                sample_id,
+                sample_dir,
+                e,
+                exc_info=True,
+            )
             return False
 
     def is_sample_ready_for_snp_analysis(
@@ -2933,6 +2977,54 @@ class Coordinator:
             for entry in active_by_queue[q]:
                 entry.pop("start_time", None)
 
+        # Fallback path: if coordinator active bookkeeping is empty/missing while
+        # queue actors still report running jobs, surface those in monitor stats.
+        try:
+            runtime_rows = await asyncio.gather(
+                *[proc.runtime_status.remote() for proc in self.processors.values()],
+                return_exceptions=True,
+            )
+        except Exception:
+            runtime_rows = []
+        runtime_active_count_by_queue: Dict[str, int] = {}
+        runtime_active_count_by_job_type: Dict[str, int] = {}
+        runtime_active_by_queue: Dict[str, List[Dict[str, Any]]] = {}
+        for row in runtime_rows:
+            if isinstance(row, Exception) or not isinstance(row, dict):
+                continue
+            qn = str(row.get("queue") or "")
+            rc = int(row.get("running_count") or 0)
+            if qn:
+                runtime_active_count_by_queue[qn] = runtime_active_count_by_queue.get(qn, 0) + rc
+            for j in (row.get("inflight") or []):
+                if not isinstance(j, dict):
+                    continue
+                jt = str(j.get("job_type") or "")
+                if jt:
+                    runtime_active_count_by_job_type[jt] = runtime_active_count_by_job_type.get(jt, 0) + 1
+                if qn:
+                    runtime_active_by_queue.setdefault(qn, []).append(
+                        {
+                            "job_id": j.get("job_id"),
+                            "job_type": jt,
+                            "filepath": j.get("filepath", ""),
+                            "duration": int(j.get("duration", 0) or 0),
+                            "dispatch_wait_seconds": None,
+                        }
+                    )
+
+        if len(self.active) == 0:
+            # Use runtime fallback only when primary active map is empty.
+            if runtime_active_count_by_queue:
+                active_count_by_queue = runtime_active_count_by_queue
+            if runtime_active_count_by_job_type:
+                active_count_by_job_type = runtime_active_count_by_job_type
+            if runtime_active_by_queue:
+                active_by_queue = {
+                    q: sorted(v, key=lambda x: x.get("duration", 0), reverse=True)[:2]
+                    for q, v in runtime_active_by_queue.items()
+                }
+
         # A compact dump of the longest-running active jobs (useful for "stuck" debugging)
         active_top_by_duration = sorted(
             [
@@ -3078,10 +3170,14 @@ class Coordinator:
             "running_by_category": running_counts,
             "totals_by_category": totals_counts,
             "samples": samples_payload,
+            "runtime_active_count_by_queue": runtime_active_count_by_queue,
+            "runtime_active_count_by_job_type": runtime_active_count_by_job_type,
             # Failed job tracking: last 500 entries for inspection / OOM diagnosis
             "failed_jobs_list": list(self._failed_jobs_log)[-500:],
             "oom_count": sum(1 for e in self._failed_jobs_log if e.get("is_oom")),
         }
+        if result["active_count"] == 0 and runtime_active_count_by_queue:
+            result["active_count"] = int(sum(runtime_active_count_by_queue.values()))
         
         # Cache the result for future calls
         self._stats_cache = result
@@ -3265,6 +3361,34 @@ class Pool:
         self, job_type: str, remote_func, resource_options: Dict[str, Any]
     ):
         self.handlers[job_type] = (remote_func, resource_options)
+
+    async def runtime_status(self) -> Dict[str, Any]:
+        """
+        Lightweight runtime status for progress fallback/debugging.
+        Returns queue-local running count and a short list of inflight jobs.
+        """
+        now = time.time()
+        inflight: List[Dict[str, Any]] = []
+        try:
+            for ref, (job, start_time) in list(self._inflight_data.items())[:4]:
+                try:
+                    inflight.append(
+                        {
+                            "job_id": job.job_id,
+                            "job_type": job.job_type,
+                            "filepath": job.context.filepath if job.context else "",
+                            "duration": int(now - float(start_time)),
+                        }
+                    )
+                except Exception:
+                    continue
+        except Exception:
+            inflight = []
+        return {
+            "queue": self.queue_name,
+            "running_count": int(self._running_count),
+            "inflight": inflight,
+        }
 
     async def enqueue(self, job: Job):
         # Check if shutdown has been requested

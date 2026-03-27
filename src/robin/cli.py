@@ -1300,6 +1300,10 @@ def _create_ray_workflow_runner(
             ) -> bool:
                 """Submit a SNP analysis job for an existing sample directory using Ray workflow."""
                 try:
+                    sid_for_log = sample_id or Path(sample_dir).name
+                    click.echo(
+                        f"[SNP] Submitting SNP analysis for sample '{sid_for_log}'..."
+                    )
                     # Try to get coordinator with retries
                     import time
                     from robin import workflow_ray as wrn
@@ -1315,7 +1319,7 @@ def _create_ray_workflow_runner(
                             except Exception:
                                 pass
 
-                        if self.coordinator is None:
+                        if self.coordinator is not None:
                             break
 
                         if attempt < max_retries - 1:
@@ -1323,6 +1327,10 @@ def _create_ray_workflow_runner(
                             retry_delay *= 1.5  # Exponential backoff
 
                     if self.coordinator is None:
+                        click.echo(
+                            f"[SNP] Failed to get coordinator for sample '{sid_for_log}'.",
+                            err=True,
+                        )
                         return False
 
                     # Submit the SNP analysis job using the coordinator
@@ -1336,11 +1344,28 @@ def _create_ray_workflow_runner(
 
                     try:
                         final_result = ray.get(result, timeout=30.0)
+                        if final_result:
+                            click.echo(
+                                f"[SNP] Queued SNP analysis for sample '{sid_for_log}'."
+                            )
+                        else:
+                            click.echo(
+                                f"[SNP] Submission returned False for sample '{sid_for_log}'.",
+                                err=True,
+                            )
                         return final_result
-                    except Exception:
+                    except Exception as e:
+                        click.echo(
+                            f"[SNP] Failed waiting for submit confirmation for sample '{sid_for_log}': {e}",
+                            err=True,
+                        )
                         return False
 
-                except Exception:
+                except Exception as e:
+                    click.echo(
+                        f"[SNP] Unexpected submission error for sample '{sample_id or Path(sample_dir).name}': {e}",
+                        err=True,
+                    )
                     return False
 
             def submit_target_bam_finalize_job(
@@ -1348,9 +1373,14 @@ def _create_ray_workflow_runner(
                 sample_dir: str,
                 sample_id: str = None,
                 target_panel: str = None,
+                reference: str = None,
             ) -> bool:
                 """Submit a target BAM finalization job for an existing sample directory using Ray workflow."""
                 try:
+                    sid_for_log = sample_id or Path(sample_dir).name
+                    click.echo(
+                        f"[Finalize] Submitting target BAM finalization for sample '{sid_for_log}'..."
+                    )
                     import time
                     from robin import workflow_ray as wrn
 
@@ -1364,7 +1394,7 @@ def _create_ray_workflow_runner(
                             except Exception:
                                 pass
 
-                        if self.coordinator is None:
+                        if self.coordinator is not None:
                             break
 
                         if attempt < max_retries - 1:
@@ -1372,21 +1402,42 @@ def _create_ray_workflow_runner(
                             retry_delay *= 1.5
 
                     if self.coordinator is None:
+                        click.echo(
+                            f"[Finalize] Failed to get coordinator for sample '{sid_for_log}'.",
+                            err=True,
+                        )
                         return False
 
                     result = self.coordinator.submit_target_bam_finalize_job.remote(
-                        sample_dir, sample_id, target_panel
+                        sample_dir, sample_id, target_panel, reference
                     )
 
                     import ray
 
                     try:
                         final_result = ray.get(result, timeout=30.0)
+                        if final_result:
+                            click.echo(
+                                f"[Finalize] Queued target BAM finalization for sample '{sid_for_log}'."
+                            )
+                        else:
+                            click.echo(
+                                f"[Finalize] Submission returned False for sample '{sid_for_log}'.",
+                                err=True,
+                            )
                         return final_result
-                    except Exception:
+                    except Exception as e:
+                        click.echo(
+                            f"[Finalize] Failed waiting for submit confirmation for sample '{sid_for_log}': {e}",
+                            err=True,
+                        )
                         return False
 
-                except Exception:
+                except Exception as e:
+                    click.echo(
+                        f"[Finalize] Unexpected submission error for sample '{sample_id or Path(sample_dir).name}': {e}",
+                        err=True,
+                    )
                     return False
 
             def is_sample_ready_for_snp_analysis(
