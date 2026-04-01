@@ -55,6 +55,32 @@ def _suppress_methylartist_warnings():
             pass
 
 
+@contextmanager
+def _prepend_conda_env_lib_to_ld_library_path():
+    """
+    Prepend this Python env's lib/ to LD_LIBRARY_PATH so native deps (SciPy, ICU
+    libicui18n, etc.) resolve libstdc++.so.6 from conda (libstdcxx-ng) instead of
+    /lib/x86_64-linux-gnu/ (fixes CXXABI_1.3.15 on older hosts when methylartist
+    loads via runpy).
+    """
+    prefix = os.environ.get("CONDA_PREFIX") or getattr(sys, "base_prefix", None) or sys.prefix
+    lib_dir = os.path.join(prefix, "lib")
+    if not os.path.isdir(lib_dir):
+        yield
+        return
+    previous = os.environ.get("LD_LIBRARY_PATH")
+    os.environ["LD_LIBRARY_PATH"] = (
+        f"{lib_dir}:{previous}" if previous else lib_dir
+    )
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("LD_LIBRARY_PATH", None)
+        else:
+            os.environ["LD_LIBRARY_PATH"] = previous
+
+
 def _find_cli_or_raise() -> str:
     cli = shutil.which("methylartist")
     if not cli:
@@ -228,9 +254,9 @@ def locus_figure(
 
     captured = {"fig": None}
 
-    with _patch_fig_savefig(captured), _patch_argv(
-        argv
-    ), _suppress_methylartist_warnings():
+    with _prepend_conda_env_lib_to_ld_library_path(), _patch_fig_savefig(
+        captured
+    ), _patch_argv(argv), _suppress_methylartist_warnings():
         # Execute the installed CLI script as __main__
         # Catch SystemExit exceptions from methylartist (e.g., when BAM is not indexed)
         try:
