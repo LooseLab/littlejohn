@@ -7,6 +7,11 @@ and this project (almost) adheres to [Semantic Versioning](https://semver.org/sp
 
 ## [Unreleased]
 
+### Important
+- **Main branch merge preparation:** This release line captures the major merge of the `little_john` integration work back into the main repository branch.
+- **Version update:** Project version is now **`0.5`**.
+- **Environment reset required:** **Create a brand-new conda environment for `0.5`. Do not reuse any previous ROBIN/little_john conda environment.**
+
 ### Added
 - **Watched folders (smart add / Option B):** When adding a folder to watch, ROBIN scans for mixed “already analysed” vs “new” samples and automatically adds only the subfolders that contain exclusively un-analysed samples. Previously-analysed samples are skipped and reported.
 - **Watched folders (GUI feedback):** If adding a folder results in some samples/subfolders being skipped, the GUI now shows a warning notification rather than a plain success.

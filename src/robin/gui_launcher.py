@@ -546,7 +546,11 @@ class GUILauncher:
                     except Exception:
                         pass
                 path = request.url.path
-                if path.startswith("/_nicegui") or path in unrestricted_page_routes:
+                if (
+                    path.startswith("/_nicegui")
+                    or path in unrestricted_page_routes
+                    or path.startswith("/api/v1/")
+                ):
                     return await call_next(request)
                 gen = app.storage.general.get("_auth_generation")
                 if not app.storage.user.get("authenticated", False) or gen is None or app.storage.user.get("_auth_generation") != gen:
@@ -2106,6 +2110,14 @@ class GUILauncher:
             # Setup global timers once when the app starts
             _setup_global_timers()
             
+            try:
+                from robin_native_api import attach_native_api
+                attach_native_api(app, self)
+            except Exception as e:
+                logging.warning("Native API not mounted: %s", e)
+            
+            
+            
             # Start the GUI
             ui.run(
                 host=self.host,
@@ -2246,6 +2258,9 @@ class GUILauncher:
                     ):
                         ui.label("All tracked samples").classes(
                             "text-headline-medium text-slate-900 dark:text-slate-50 shrink-0"
+                        )
+                        ui.label("A=Active  P=Pending  T=Total  C=Completed  F=Failed").classes(
+                            "text-[11px] text-slate-600 dark:text-slate-400 shrink-0"
                         )
                         with ui.row().classes(
                             "gap-2 flex-wrap items-center justify-end min-w-0 flex-1"

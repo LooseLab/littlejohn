@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-import gzip
 import logging
 import os
-import shutil
 import tempfile
 import urllib.error
 import urllib.request
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Optional
+import pysam
 
 logger = logging.getLogger("robin.clinvar")
 
@@ -18,7 +17,7 @@ CLINVAR_VCF_GZ_URL = (
 )
 
 CLINVAR_VCF_GZ_NAME = "clinvar.vcf.gz"
-CLINVAR_VCF_NAME = "clinvar.vcf"
+CLINVAR_VCF_GZ_TBI_NAME = "clinvar.vcf.gz.tbi"
 
 
 def get_resources_dir() -> Path:
@@ -122,30 +121,24 @@ def _download_url_to_file(url: str, target_path: Path, *, timeout_s: int = 600) 
         raise
 
 
-def _decompress_gz_to_vcf(gz_path: Path, vcf_path: Path) -> None:
+def _ensure_tabix_index(gz_path: Path, tbi_path: Path) -> None:
     """
-    Decompress `*.vcf.gz` to `*.vcf`.
+    Ensure a tabix index exists for a bgzipped VCF.
     """
+    if _file_ok(tbi_path):
+        return
 
-    vcf_path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"Decompressing {gz_path.name} -> {vcf_path.name}")
-    logger.info("Decompressing %s -> %s", gz_path, vcf_path)
-    with gzip.open(str(gz_path), "rb") as f_in:
-        with open(str(vcf_path), "wb") as f_out:
-            shutil.copyfileobj(f_in, f_out)
+    print(f"Creating tabix index for {gz_path.name}")
+    logger.info("Creating tabix index for %s", gz_path)
+    pysam.tabix_index(
+        str(gz_path),
+        preset="vcf",
+        force=True,
+        keep_original=True,
+    )
 
-
-def _compress_vcf_to_gz(vcf_path: Path, gz_path: Path) -> None:
-    """
-    Compress `*.vcf` to `*.vcf.gz`.
-    """
-
-    gz_path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"Compressing {vcf_path.name} -> {gz_path.name}")
-    logger.info("Compressing %s -> %s", vcf_path, gz_path)
-    with open(str(vcf_path), "rb") as f_in:
-        with gzip.open(str(gz_path), "wb") as f_out:
-            shutil.copyfileobj(f_in, f_out)
+    if not _file_ok(tbi_path):
+        raise RuntimeError(f"Tabix index was not created: {tbi_path}")
 
 
 def ensure_clinvar_files(
@@ -155,48 +148,39 @@ def ensure_clinvar_files(
     url: str = CLINVAR_VCF_GZ_URL,
 ) -> None:
     """
-    Ensure ClinVar files exist in `robin.resources`:
-    - `clinvar.vcf.gz` (required by lightweight gene analysis)
-    - `clinvar.vcf` (required by snpEff/snpSift steps)
+    Ensure required ClinVar files exist in `robin.resources`:
+    - `clinvar.vcf.gz`
+    - `clinvar.vcf.gz.tbi`
 
     Strategy:
-    - If one format is present, create the other locally (compress/decompress).
-    - If neither exists, download `clinvar.vcf.gz`, then generate `clinvar.vcf`.
+    - Download `clinvar.vcf.gz` when missing.
+    - Create tabix index (`.tbi`) when missing.
     """
 
     resources_dir = resources_dir or get_resources_dir()
     gz_path = resources_dir / CLINVAR_VCF_GZ_NAME
-    vcf_path = resources_dir / CLINVAR_VCF_NAME
+    tbi_path = resources_dir / CLINVAR_VCF_GZ_TBI_NAME
 
     # If everything is already present, do nothing.
-    if _file_ok(gz_path) and _file_ok(vcf_path):
+    if _file_ok(gz_path) and _file_ok(tbi_path):
         return
 
     gz_ok = _file_ok(gz_path)
-    vcf_ok = _file_ok(vcf_path)
+    tbi_ok = _file_ok(tbi_path)
 
     print(
         "ClinVar status check: "
         f"{gz_path.name}={'OK' if gz_ok else 'MISSING'}; "
-        f"{vcf_path.name}={'OK' if vcf_ok else 'MISSING'}"
+        f"{tbi_path.name}={'OK' if tbi_ok else 'MISSING'}"
     )
 
-    if not gz_ok and not vcf_ok:
+    if not gz_ok:
         if not download_if_missing:
             raise FileNotFoundError(
-                f"Missing ClinVar files in {resources_dir}: "
-                f"expected {gz_path.name} and {vcf_path.name}"
+                f"Missing ClinVar file in {resources_dir}: expected {gz_path.name}"
             )
         _download_url_to_file(url, gz_path)
-        _decompress_gz_to_vcf(gz_path, vcf_path)
-        return
-
-    if not gz_ok and vcf_ok:
-        # Avoid network if we already have the (uncompressed) VCF.
-        _compress_vcf_to_gz(vcf_path, gz_path)
-
-    if not vcf_ok and gz_ok:
-        _decompress_gz_to_vcf(gz_path, vcf_path)
+    _ensure_tabix_index(gz_path, tbi_path)
 
 
 def _get_remote_last_modified(url: str, *, timeout_s: int = 30) -> Optional[float]:
@@ -239,10 +223,9 @@ def update_clinvar_if_newer(
 
     resources_dir = resources_dir or get_resources_dir()
     gz_path = resources_dir / CLINVAR_VCF_GZ_NAME
-    vcf_path = resources_dir / CLINVAR_VCF_NAME
+    tbi_path = resources_dir / CLINVAR_VCF_GZ_TBI_NAME
 
-    # Ensure we have at least one format locally so we can generate the other
-    # after an update.
+    # Ensure local ClinVar artifacts exist.
     ensure_clinvar_files(
         resources_dir=resources_dir,
         download_if_missing=download_if_missing,
@@ -276,8 +259,7 @@ def update_clinvar_if_newer(
     try:
         _download_url_to_file(url, tmp_path, timeout_s=timeout_s)
         tmp_path.replace(gz_path)
-        # Keep the uncompressed copy in sync.
-        _decompress_gz_to_vcf(gz_path, vcf_path)
+        _ensure_tabix_index(gz_path, tbi_path)
     finally:
         try:
             if tmp_path.exists():

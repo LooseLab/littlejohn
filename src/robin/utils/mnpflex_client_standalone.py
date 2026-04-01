@@ -235,7 +235,8 @@ class MNPFlexClient:
         workflow_run_id: int,
         task_result_id: int,
         save_path: Optional[str] = None,
-    ) -> bytes:
+        optional: bool = False,
+    ) -> Optional[bytes]:
         plot_endpoints = {
             "qc_coverage": "qc_coverage_plot",
             "qc_methylation_density": "qc_methylation_density_plot",
@@ -255,6 +256,16 @@ class MNPFlexClient:
             verify=self.verify_ssl,
             timeout=self.timeout,
         )
+        if optional and resp.status_code == 404:
+            logging.warning(
+                "MNPFlex get_plot(%s) returned 404 (no artifact); skipping. "
+                "workflow_run_id=%s task_result_id=%s url=%s",
+                plot_type,
+                workflow_run_id,
+                task_result_id,
+                url,
+            )
+            return None
         resp.raise_for_status()
         if save_path:
             with open(save_path, "wb") as f:
@@ -427,12 +438,15 @@ class MNPFlexClient:
             ),
             what="get_plot(qc_methylation_density)",
         )
+        # MGMT region PNG is not always exposed at this analysis URL (workflow/version/sample).
+        # Treat 404 as missing optional artifact so QC + bundle still succeed.
         _retry(
             lambda: self.get_plot(
                 plot_type="mgmt_region",
                 workflow_run_id=workflow_run_id,
                 task_result_id=task_result_id,
                 save_path=os.path.join(output_dir, "mgmt_region_plot.png"),
+                optional=True,
             ),
             what="get_plot(mgmt_region)",
         )

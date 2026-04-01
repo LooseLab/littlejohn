@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from pathlib import Path
 import logging
 import json
@@ -143,6 +143,22 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
     """
     ui.run_javascript(js_init_snp_regions, timeout=5.0)
 
+    def _to_float(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        text = str(value).strip().replace(",", "")
+        if text == "":
+            return None
+        try:
+            return float(text)
+        except (TypeError, ValueError):
+            return None
+
+    def _is_truthy(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().upper() in {"YES", "TRUE", "1", "PATHOGENIC"}
+
     # Keep the SNP table readable by showing a concise default column set.
     preferred_display_fields = [
         "CHROM",
@@ -232,12 +248,80 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
 
         from robin.gui.theme import styled_table
 
+        snp_has_dp = "DP" in column_lookup
+
+        with ui.row().classes("w-full gap-2 mb-2 flex-wrap items-end"):
+            snp_pass_only = ui.checkbox("PASS only").props("dense")
+            snp_pathogenic_only = ui.checkbox("Pathogenic only").props("dense")
+            snp_min_qual = ui.number("Min QUAL", value=None).props(
+                "dense outlined clearable"
+            ).classes("w-32")
+            if snp_has_dp:
+                snp_min_dp = ui.number("Min DP", value=None).props(
+                    "dense outlined clearable"
+                ).classes("w-32")
+            else:
+                snp_min_dp = None
+            snp_reset_button = ui.button("Reset").props("dense no-caps")
+
         table_container, snp_table = styled_table(
             columns=display_columns,
             rows=display_rows_all,
             pagination=25,
             class_size="table-xs",
         )
+        snp_filtered_count_label = ui.label(
+            f"Showing {len(display_rows_all)} of {len(display_rows_all)} variants"
+        ).classes("classification-insight-meta")
+
+        def _apply_snp_filters() -> None:
+            pass_only = bool(getattr(snp_pass_only, "value", False))
+            pathogenic_only = bool(getattr(snp_pathogenic_only, "value", False))
+            min_qual = _to_float(getattr(snp_min_qual, "value", None))
+            min_dp = _to_float(getattr(snp_min_dp, "value", None)) if snp_has_dp else None
+
+            filtered_rows: List[Dict[str, Any]] = []
+            for compact_row in display_rows_all:
+                row_id = compact_row.get("__row_id")
+                full_row = full_row_lookup.get(str(row_id), {})
+
+                if pass_only and str(full_row.get("FILTER", "")).strip().upper() != "PASS":
+                    continue
+                if pathogenic_only and not _is_truthy(full_row.get("is_pathogenic", "")):
+                    continue
+
+                qual = _to_float(full_row.get("QUAL"))
+                if min_qual is not None and (qual is None or qual < min_qual):
+                    continue
+
+                if snp_has_dp and min_dp is not None:
+                    dp = _to_float(full_row.get("DP"))
+                    if dp is None or dp < min_dp:
+                        continue
+
+                filtered_rows.append(compact_row)
+
+            snp_table.rows = filtered_rows
+            snp_filtered_count_label.text = (
+                f"Showing {len(filtered_rows)} of {len(display_rows_all)} variants"
+            )
+            snp_table.update()
+
+        snp_pass_only.on("update:model-value", lambda _e: _apply_snp_filters())
+        snp_pathogenic_only.on("update:model-value", lambda _e: _apply_snp_filters())
+        snp_min_qual.on("update:model-value", lambda _e: _apply_snp_filters())
+        if snp_has_dp and snp_min_dp is not None:
+            snp_min_dp.on("update:model-value", lambda _e: _apply_snp_filters())
+        snp_reset_button.on_click(
+            lambda: (
+                setattr(snp_pass_only, "value", False),
+                setattr(snp_pathogenic_only, "value", False),
+                setattr(snp_min_qual, "value", None),
+                snp_has_dp and setattr(snp_min_dp, "value", None),
+                _apply_snp_filters(),
+            )
+        )
+
         try:
             with snp_table.add_slot("top-right"):
                 with ui.input(placeholder="Search variants…").props(
@@ -506,12 +590,82 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
 
         from robin.gui.theme import styled_table
 
+        indel_has_dp = "DP" in indel_column_lookup
+
+        with ui.row().classes("w-full gap-2 mb-2 flex-wrap items-end"):
+            indel_pass_only = ui.checkbox("PASS only").props("dense")
+            indel_pathogenic_only = ui.checkbox("Pathogenic only").props("dense")
+            indel_min_qual = ui.number("Min QUAL", value=None).props(
+                "dense outlined clearable"
+            ).classes("w-32")
+            if indel_has_dp:
+                indel_min_dp = ui.number("Min DP", value=None).props(
+                    "dense outlined clearable"
+                ).classes("w-32")
+            else:
+                indel_min_dp = None
+            indel_reset_button = ui.button("Reset").props("dense no-caps")
+
         _, indel_table = styled_table(
             columns=indel_display_columns,
             rows=indel_rows_all,
             pagination=25,
             class_size="table-xs",
         )
+        indel_filtered_count_label = ui.label(
+            f"Showing {len(indel_rows_all)} of {len(indel_rows_all)} variants"
+        ).classes("classification-insight-meta")
+
+        def _apply_indel_filters() -> None:
+            pass_only = bool(getattr(indel_pass_only, "value", False))
+            pathogenic_only = bool(getattr(indel_pathogenic_only, "value", False))
+            min_qual = _to_float(getattr(indel_min_qual, "value", None))
+            min_dp = (
+                _to_float(getattr(indel_min_dp, "value", None)) if indel_has_dp else None
+            )
+
+            filtered_rows: List[Dict[str, Any]] = []
+            for compact_row in indel_rows_all:
+                row_id = compact_row.get("__row_id")
+                full_row = indel_full_row_lookup.get(str(row_id), {})
+
+                if pass_only and str(full_row.get("FILTER", "")).strip().upper() != "PASS":
+                    continue
+                if pathogenic_only and not _is_truthy(full_row.get("is_pathogenic", "")):
+                    continue
+
+                qual = _to_float(full_row.get("QUAL"))
+                if min_qual is not None and (qual is None or qual < min_qual):
+                    continue
+
+                if indel_has_dp and min_dp is not None:
+                    dp = _to_float(full_row.get("DP"))
+                    if dp is None or dp < min_dp:
+                        continue
+
+                filtered_rows.append(compact_row)
+
+            indel_table.rows = filtered_rows
+            indel_filtered_count_label.text = (
+                f"Showing {len(filtered_rows)} of {len(indel_rows_all)} variants"
+            )
+            indel_table.update()
+
+        indel_pass_only.on("update:model-value", lambda _e: _apply_indel_filters())
+        indel_pathogenic_only.on("update:model-value", lambda _e: _apply_indel_filters())
+        indel_min_qual.on("update:model-value", lambda _e: _apply_indel_filters())
+        if indel_has_dp and indel_min_dp is not None:
+            indel_min_dp.on("update:model-value", lambda _e: _apply_indel_filters())
+        indel_reset_button.on_click(
+            lambda: (
+                setattr(indel_pass_only, "value", False),
+                setattr(indel_pathogenic_only, "value", False),
+                setattr(indel_min_qual, "value", None),
+                indel_has_dp and setattr(indel_min_dp, "value", None),
+                _apply_indel_filters(),
+            )
+        )
+
         try:
             with indel_table.add_slot("top-right"):
                 with ui.input(placeholder="Search INDELs…").props(

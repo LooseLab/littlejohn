@@ -6,6 +6,8 @@
 
 # ***This software is provided as is for research use only.***
 
+**IMPORTANT (v0.5 major merge): This update requires creating a brand-new conda environment. Do not reuse any previous ROBIN/little_john environment.**
+
 **Table of Contents**
 
 - [About](#about)
@@ -60,6 +62,7 @@ This version will replace the code available at https://github.com/LooseLab/ROBI
 ## Installation
 
 **We strongly recommend installing robin in a conda environment to ensure all dependencies are properly managed.**
+**For version `0.5`, you must create a new environment; older environments are not supported for this release.**
 
 ### Prerequisites
 

@@ -16,7 +16,7 @@ from typing import List, Tuple, Optional
 
 
 CLINVAR_VCF_GZ_NAME = "clinvar.vcf.gz"
-CLINVAR_VCF_NAME = "clinvar.vcf"
+CLINVAR_TBI_NAME = "clinvar.vcf.gz.tbi"
 
 
 def get_models_directory(project_root: Optional[Path] = None) -> Path:
@@ -96,14 +96,14 @@ def get_resources_directory(project_root: Optional[Path] = None) -> Path:
 
 def check_clinvar_files(resources_dir: Optional[Path] = None) -> Tuple[bool, List[str], List[str]]:
     """
-    Check if required ClinVar VCF files exist.
+    Check if required ClinVar files exist.
 
     Returns:
         (all_present, missing_files, present_files)
     """
 
     resources_dir = resources_dir or get_resources_directory()
-    required = [CLINVAR_VCF_GZ_NAME, CLINVAR_VCF_NAME]
+    required = [CLINVAR_VCF_GZ_NAME, CLINVAR_TBI_NAME]
 
     missing_files: List[str] = []
     present_files: List[str] = []
@@ -120,7 +120,7 @@ def check_clinvar_files(resources_dir: Optional[Path] = None) -> Tuple[bool, Lis
 
 def _ensure_clinvar_or_exit(resources_dir: Optional[Path] = None) -> None:
     """
-    Ensure ClinVar VCF files exist; if missing, warn and attempt download.
+    Ensure ClinVar files exist; if missing, warn and attempt download.
     """
 
     resources_dir = resources_dir or get_resources_directory()

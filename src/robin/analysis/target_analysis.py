@@ -74,6 +74,70 @@ def json_serializable(obj):
             return obj
 
 
+def _is_non_empty_file(path: Path) -> bool:
+    """Return True when a path exists, is a file, and is non-empty."""
+    return path.exists() and path.is_file() and path.stat().st_size > 0
+
+
+def _resolve_clinvar_db_for_snpsift(logger: logging.Logger) -> Optional[str]:
+    """
+    Resolve ClinVar DB for SnpSift using bgzip + tabix index.
+
+    Preferred and required format is `clinvar.vcf.gz` with a sibling `.tbi` index.
+    If the index is missing, try to generate it in place.
+    """
+    try:
+        # Use an alias to avoid shadowing module-level `resources`.
+        from robin import resources as robin_resources
+
+        resources_dir = Path(os.path.dirname(os.path.abspath(robin_resources.__file__)))
+        clinvar_gz = resources_dir / "clinvar.vcf.gz"
+        clinvar_tbi = resources_dir / "clinvar.vcf.gz.tbi"
+
+        if not _is_non_empty_file(clinvar_gz):
+            logger.warning(
+                "ClinVar bgzipped VCF not found or empty at %s", clinvar_gz
+            )
+            return None
+
+        if not _is_non_empty_file(clinvar_tbi):
+            logger.info(
+                "ClinVar tabix index missing at %s; attempting to generate it.",
+                clinvar_tbi,
+            )
+            try:
+                pysam.tabix_index(
+                    str(clinvar_gz),
+                    preset="vcf",
+                    force=True,
+                    keep_original=True,
+                )
+            except Exception as index_exc:
+                logger.warning(
+                    "Failed to create ClinVar tabix index for %s: %s",
+                    clinvar_gz,
+                    index_exc,
+                )
+                return None
+
+        if not _is_non_empty_file(clinvar_tbi):
+            logger.warning(
+                "ClinVar tabix index still missing/empty after generation attempt: %s",
+                clinvar_tbi,
+            )
+            return None
+
+        logger.info(
+            "Using ClinVar DB for SnpSift: %s (index: %s)",
+            clinvar_gz,
+            clinvar_tbi,
+        )
+        return str(clinvar_gz)
+    except Exception as exc:
+        logger.warning("Could not resolve ClinVar DB for SnpSift: %s", exc)
+        return None
+
+
 class FileLock:
     """
     Simple file-based lock for coordinating access across processes/threads.
@@ -3784,20 +3848,13 @@ def run_snp_analysis(
             else:
                 logger.error(f"snpEff output file does not exist: {snpeff_out}")
 
+            clinvar_db_path = _resolve_clinvar_db_for_snpsift(logger)
             try:
-                # Use an alias to avoid shadowing module-level `resources`.
-                from robin import resources as robin_resources
-
-                clinvar_path = os.path.join(
-                    os.path.dirname(os.path.abspath(robin_resources.__file__)),
-                    "clinvar.vcf",
-                )
-
-                logger.info(f"Looking for ClinVar file at: {clinvar_path}")
-
-                if os.path.exists(clinvar_path):
-                    clinvar_size = os.path.getsize(clinvar_path)
-                    logger.info(f"ClinVar file found, size: {clinvar_size} bytes")
+                if clinvar_db_path:
+                    clinvar_size = os.path.getsize(clinvar_db_path)
+                    logger.info(
+                        f"ClinVar DB found, size: {clinvar_size} bytes"
+                    )
 
                     # Check if SnpSift is available
                     try:
@@ -3831,7 +3888,7 @@ def run_snp_analysis(
                     snpsift_cmd = ["SnpSift", "annotate"]
                     if annotation_verbose:
                         snpsift_cmd.append("-v")
-                    snpsift_cmd.extend([clinvar_path, snpeff_out])
+                    snpsift_cmd.extend([clinvar_db_path, snpeff_out])
                     logger.info(f"Running SnpSift command: {' '.join(snpsift_cmd)}")
 
                     snpsift_env = annotation_env.copy()
@@ -3882,7 +3939,7 @@ def run_snp_analysis(
                             logger.error("SnpSift output file was not created!")
                 else:
                     logger.warning(
-                        f"ClinVar file not found at {clinvar_path}, using snpEff output"
+                        "ClinVar bgzip/tabix database unavailable, using snpEff output"
                     )
                     shutil.copy2(snpeff_out, snpsift_out)
                     logger.info(
@@ -3994,15 +4051,15 @@ def run_snp_analysis(
                 )
 
             try:
-                if os.path.exists(clinvar_path):
+                if clinvar_db_path:
                     logger.info(
-                        f"Using ClinVar file for INDEL annotation: {clinvar_path}"
+                        f"Using ClinVar file for INDEL annotation: {clinvar_db_path}"
                     )
 
                     snpsift_indel_cmd = ["SnpSift", "annotate"]
                     if annotation_verbose:
                         snpsift_indel_cmd.append("-v")
-                    snpsift_indel_cmd.extend([clinvar_path, snpeff_indel_out])
+                    snpsift_indel_cmd.extend([clinvar_db_path, snpeff_indel_out])
                     logger.info(
                         f"Running SnpSift INDEL command: {' '.join(snpsift_indel_cmd)}"
                     )
