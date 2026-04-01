@@ -1,0 +1,42 @@
+name: robin_0_8
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+
+dependencies:
+  - python=3.12
+  - pip
+
+  # runtime/toolchain (>=12 provides GLIBCXX_3.4.29 required by scipy on older Ubuntu)
+  - libstdcxx-ng>=12
+  - libgcc-ng>=12
+
+  # core python scientific stack
+  - numpy
+  - scipy
+  - scikit-learn
+  - ruptures
+
+  # bioinformatics
+  - samtools
+  - bedtools
+  - snpsift
+  - snpeff
+
+  # R + Bioconductor
+  - r-base
+  - r-optparse
+  - r-data.table
+  - r-ranger
+  - r-matrixstats
+  - r-glmnet
+  - bioconductor-genomicranges
+  - bioconductor-genomeinfodb
+
+  # graphics/system deps
+  - git-lfs
+  - pkg-config
+  - cairo
+  - pycairo
+  - gobject-introspection
