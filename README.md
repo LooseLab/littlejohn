@@ -15,6 +15,7 @@
 - [About](#about)
 - [Requirements](#requirements)
 - [Installation](#installation)
+  - [If the `robin` conda environment already exists](#if-the-robin-conda-environment-already-exists)
 - [Common issues](#common-issues)
 - [Usage](#usage)
   - [BAM read limit and MinKNOW](#bam-read-limit-and-minknow-settings)
@@ -95,6 +96,39 @@ For a step-by-step walkthrough, see [`docs/installation_guide.md`](docs/installa
    robin utils update-models
    ```
    To **re-download** models (e.g. after a failed partial run), use `robin utils update-models --overwrite`. Advanced: `python scripts/fetch_asset.py` and [`src/robin/resources/assets.json`](src/robin/resources/assets.json).
+
+### If the `robin` conda environment already exists
+
+`robin.yml` defines `name: robin`. **`conda env create -f robin.yml` will fail** if an environment with that name already exists.
+
+- **Update the existing env** from the current file (keeps the name `robin`):
+
+  ```bash
+  conda env update -n robin -f robin.yml --prune
+  conda activate robin
+  ```
+
+  `--prune` removes packages no longer listed in the YAML (where supported).
+
+- **Remove and recreate** (closest to a clean install; preferred if the old env was from another project or an older ROBIN release):
+
+  ```bash
+  conda deactivate
+  conda env remove -n robin
+  conda env create -f robin.yml
+  conda activate robin
+  ```
+
+- **Use a different env name** (keep your existing `robin` env untouched):
+
+  ```bash
+  conda env create -f robin.yml -n robin_littlejohn
+  conda activate robin_littlejohn
+  ```
+
+After any of these, run **`pip install -e .`** again from the repository root with the env you intend to use.
+
+More detail: [`docs/installation_guide.md` → If the `robin` environment already exists](docs/installation_guide.md#if-the-robin-environment-already-exists).
 
 ---
 
