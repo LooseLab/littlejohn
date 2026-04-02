@@ -37,6 +37,7 @@ warnings.filterwarnings(
 import os
 import sys
 import csv
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple, Any, Iterable
@@ -80,6 +81,16 @@ except Exception as e:
     extract_mgmt_site_rows_from_bed = None  # type: ignore[assignment]
 from robin.logging_config import (
     configure_logging,
+)
+from robin.utils.sequencing_files import (
+    DEFAULT_GRCH38_REFERENCE_URL,
+    copy_panel_bed_to,
+    copy_panel_source_bed_if_present,
+    describe_reference_action,
+    materialize_reference,
+    panel_bed_filename,
+    panel_source_available,
+    panel_source_filename,
 )
 
 
@@ -617,9 +628,13 @@ def _remove_panel_from_system(panel_name: str) -> bool:
             return False
         
         # Confirm removal
+        source_preview = resources_dir / panel_source_filename(panel_name)
         click.echo(f"Panel '{panel_name}' will be removed:")
-        click.echo(f"  File: {panel_path}")
+        click.echo(f"  Processed BED: {panel_path}")
         click.echo(f"  Size: {panel_path.stat().st_size} bytes")
+        if source_preview.exists():
+            click.echo(f"  Original upload: {source_preview}")
+            click.echo(f"  Size: {source_preview.stat().st_size} bytes")
         
         # Ask for confirmation
         try:
@@ -631,12 +646,16 @@ def _remove_panel_from_system(panel_name: str) -> bool:
             click.echo("\nPanel removal cancelled.")
             return False
         
-        # Remove the file
+        # Remove processed BED and optional stored original upload
         panel_path.unlink()
-        
+        source_path = resources_dir / panel_source_filename(panel_name)
+        if source_path.exists():
+            source_path.unlink()
+            click.echo(f"Removed file: {source_path}")
+
         click.echo(f"Panel '{panel_name}' removed successfully")
         click.echo(f"Removed file: {panel_path}")
-        
+
         return True
         
     except Exception as e:
@@ -687,17 +706,21 @@ def remove_panel(panel_name: str, force: bool) -> None:
     # Check if panel exists
     panel_filename = f"{panel_name}_panel_name_uniq.bed"
     panel_path = resources_dir / panel_filename
-    
+    source_path = resources_dir / panel_source_filename(panel_name)
+
     if not panel_path.exists():
         click.echo(f"Error: Panel '{panel_name}' not found", err=True)
         click.echo(f"Expected file: {panel_path}", err=True)
         click.echo("\nUse 'robin list-panels' to see available panels.", err=True)
         sys.exit(1)
-    
+
     # Show panel info
     click.echo(f"Panel '{panel_name}' found:")
-    click.echo(f"  File: {panel_path}")
+    click.echo(f"  Processed BED: {panel_path}")
     click.echo(f"  Size: {panel_path.stat().st_size} bytes")
+    if source_path.exists():
+        click.echo(f"  Original upload: {source_path}")
+        click.echo(f"  Size: {source_path.stat().st_size} bytes")
     
     # Confirm removal unless --force is used
     if not force:
@@ -710,12 +733,15 @@ def remove_panel(panel_name: str, force: bool) -> None:
             click.echo("\nPanel removal cancelled.")
             return
     
-    # Remove the file
+    # Remove processed BED and optional stored original
     try:
         panel_path.unlink()
+        click.echo(f"\nRemoved file: {panel_path}")
+        if source_path.exists():
+            source_path.unlink()
+            click.echo(f"Removed file: {source_path}")
         click.echo(f"\nPanel '{panel_name}' removed successfully!")
-        click.echo(f"Removed file: {panel_path}")
-        click.echo(f"Use 'robin list-panels' to see remaining panels")
+        click.echo("Use 'robin list-panels' to see remaining panels")
     except Exception as e:
         click.echo(f"Error removing panel file: {e}", err=True)
         sys.exit(1)
@@ -974,6 +1000,115 @@ def _get_available_panels() -> List[str]:
     return panels
 
 
+@utils.command("sequencing-files")
+@click.option(
+    "--panel",
+    "-p",
+    "panel",
+    type=click.Choice(_get_available_panels()),
+    required=True,
+    help="Target gene panel (same as ROBIN workflow --target-panel).",
+)
+@click.option(
+    "--reference",
+    "-r",
+    "reference",
+    type=str,
+    default=DEFAULT_GRCH38_REFERENCE_URL,
+    show_default=True,
+    help=(
+        "Reference genome: HTTPS URL to download, or path to a local FASTA "
+        "(e.g. .fa or .fa.gz)."
+    ),
+)
+@click.option(
+    "--output-dir",
+    "-o",
+    "output_dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Directory for outputs (default: ./reference_files in the current working directory).",
+)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    help="Proceed without interactive confirmation (for scripts).",
+)
+def sequencing_files(
+    panel: str,
+    reference: str,
+    output_dir: Optional[Path],
+    yes: bool,
+) -> None:
+    """Copy panel BED(s) and reference genome for sequencing.
+
+    Copies the processed ``*_panel_name_uniq.bed`` and, when packaged, ``*_panel_source.bed``
+    (original / unprocessed design) into one folder for adaptive sampling and aligners.
+    The default reference is NCBI GRCh38 (no-alt analysis set, UCSC-style names), a large download.
+    """
+    out = (output_dir or (Path.cwd() / "reference_files")).resolve()
+    bed_name = panel_bed_filename(panel)
+    source_name = panel_source_filename(panel)
+    has_source = panel_source_available(panel)
+
+    click.echo("")
+    click.echo("Planned actions:")
+    click.echo(f"  Output directory: {out}")
+    step = 1
+    click.echo(
+        f"  {step}. Processed panel BED: copy '{bed_name}' from ROBIN "
+        "(unique genes; used for ROBIN analyses)."
+    )
+    step += 1
+    if has_source:
+        click.echo(
+            f"  {step}. Source panel BED: copy '{source_name}' "
+            "(unprocessed design; shipped with ROBIN or from `robin add-panel`)."
+        )
+        step += 1
+    else:
+        click.echo(
+            f"  — No '{source_name}' in ROBIN for this panel "
+            "(optional file; add it under `robin/resources` to include it here)."
+        )
+    click.echo(f"  {step}. Reference genome:")
+    for line in describe_reference_action(reference, out).split("\n"):
+        click.echo(f"     {line}")
+
+    if not yes:
+        click.echo("")
+        if not click.confirm(
+            "Proceed with copying the panel BED(s) and fetching the reference as described above?",
+            default=False,
+        ):
+            raise click.Abort()
+
+    try:
+        bed_dest = copy_panel_bed_to(panel, out)
+        click.echo(f"Copied processed panel BED to: {bed_dest}")
+    except FileNotFoundError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    src_dest = copy_panel_source_bed_if_present(panel, out)
+    if src_dest:
+        click.echo(f"Copied source panel BED to: {src_dest}")
+
+    try:
+        ref_dest = materialize_reference(reference, out)
+        click.echo(f"Reference genome at: {ref_dest}")
+    except (FileNotFoundError, RuntimeError) as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    click.echo("")
+    click.echo(
+        "Done. Use the source or processed BED as needed for adaptive sampling; "
+        "use the reference FASTA for alignment."
+    )
+
+
 def _register_panel_in_system(panel_name: str, bed_path: Path) -> bool:
     """Register the new panel in ROBIN system by updating relevant files."""
     try:
@@ -1018,6 +1153,9 @@ def add_panel(bed_file: Path, panel_name: str, validate_only: bool) -> None:
     
     Gene names can be comma-separated for regions covering multiple genes.
     The output will be a unique gene list with one entry per gene.
+
+    ROBIN also stores an unmodified copy of your upload as
+    '{panel_name}_panel_source.bed' alongside the processed file.
     """
     if not _get_user_acknowledgment():
         sys.exit(1)
@@ -1062,29 +1200,51 @@ def add_panel(bed_file: Path, panel_name: str, validate_only: bool) -> None:
     
     output_filename = f"{panel_name}_panel_name_uniq.bed"
     output_path = resources_dir / output_filename
-    
+    source_path = resources_dir / panel_source_filename(panel_name)
+
     # Check if panel already exists
     if output_path.exists():
         click.echo(f"Error: Panel '{panel_name}' already exists at {output_path}", err=True)
         click.echo("Please choose a different panel name or remove the existing panel first.", err=True)
         sys.exit(1)
-    
+    if source_path.exists():
+        click.echo(f"Error: File already exists: {source_path}", err=True)
+        click.echo("Remove it or choose a different panel name.", err=True)
+        sys.exit(1)
+
+    click.echo(f"Storing original BED (unprocessed): {source_path}")
+    try:
+        shutil.copy2(bed_file, source_path)
+    except OSError as e:
+        click.echo(f"Error copying original BED file: {e}", err=True)
+        sys.exit(1)
+
     click.echo(f"Generating unique gene BED file: {output_path}")
-    
+
     # Generate unique gene BED file
     if not _generate_unique_gene_bed(bed_file, output_path):
         click.echo("Failed to generate unique gene BED file", err=True)
+        try:
+            source_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         sys.exit(1)
-    
+
     click.echo("Unique gene BED file generated successfully")
-    
+
     # Register panel in system
     if not _register_panel_in_system(panel_name, output_path):
         click.echo("Failed to register panel in system", err=True)
+        try:
+            output_path.unlink(missing_ok=True)
+            source_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         sys.exit(1)
-    
+
     click.echo(f"\nPanel '{panel_name}' added successfully!")
-    click.echo(f"BED file: {output_path}")
+    click.echo(f"  Processed BED (unique genes): {output_path}")
+    click.echo(f"  Original upload: {source_path}")
     click.echo(f"Usage: Use --target-panel {panel_name} in workflow commands")
     click.echo(f"Example: robin workflow /path/to/bams --workflow mgmt,target --target-panel {panel_name}")
     click.echo(f"Remove: robin remove-panel {panel_name}")
