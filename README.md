@@ -101,6 +101,13 @@ For a step-by-step walkthrough, see [`docs/installation_guide.md`](docs/installa
 
 `robin.yml` defines `name: robin`. **`conda env create -f robin.yml` will fail** if an environment with that name already exists.
 
+- **Use a different env name** (keep your existing `robin` env untouched):
+
+  ```bash
+  conda env create -f robin.yml -n robin_littlejohn
+  conda activate robin_littlejohn
+  ```
+  
 - **Update the existing env** from the current file (keeps the name `robin`):
 
   ```bash
@@ -119,12 +126,7 @@ For a step-by-step walkthrough, see [`docs/installation_guide.md`](docs/installa
   conda activate robin
   ```
 
-- **Use a different env name** (keep your existing `robin` env untouched):
 
-  ```bash
-  conda env create -f robin.yml -n robin_littlejohn
-  conda activate robin_littlejohn
-  ```
 
 After any of these, run **`pip install -e .`** again from the repository root with the env you intend to use.
 
@@ -132,7 +134,7 @@ More detail: [`docs/installation_guide.md` → If the `robin` environment alread
 
 ---
 
-## Common issues
+## Possible issue
 
 ### `libstdc++.so.6` / `CXXABI_1.3.15` (Linux: SciPy, ICU, native extensions)
 
@@ -146,19 +148,8 @@ After `conda activate robin`, prefer the env libraries first:
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH}"
 ```
 
-You can add that to your shell config (after conda init). Also install a recent GCC runtime from conda-forge:
+You can add that to your shell config (after conda init). 
 
-```bash
-conda install -c conda-forge "libstdcxx-ng>=13" "libgcc-ng>=13"
-```
-
-Or merge the Linux-only overlay from the repo root:
-
-```bash
-conda env update -n robin -f robin_linux_extras.yml
-```
-
-(`conda env create` does not apply `# [linux]`-style selectors in YAML; see comments in `robin.yml`.)
 
 ---
 
