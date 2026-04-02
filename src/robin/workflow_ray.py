@@ -99,6 +99,7 @@ except ImportError:
 
 # Disable memory manager for testing via env flag
 DISABLE_MEMORY_MANAGER = True #os.getenv("ROBIN_DISABLE_MEMORY_MANAGER", "0") == "1"
+_HANDLER_IMPORT_ERRORS: Dict[str, str] = {}
 
 # Optional GUI hook integration
 try:
@@ -146,11 +147,12 @@ try:
         get_sample_cache_stats,
         cleanup_sample_cache_on_completion
     )
-except Exception:
+except Exception as exc:
     _cnv_handler = None
     clear_sample_cache = None
     get_sample_cache_stats = None
     cleanup_sample_cache_on_completion = None
+    _HANDLER_IMPORT_ERRORS["cnv"] = str(exc)
 
 try:
     from robin.analysis.target_analysis import (
@@ -167,8 +169,9 @@ except Exception:
 
 try:
     from robin.analysis.fusion_analysis import fusion_handler as _fusion_handler
-except Exception:
+except Exception as exc:
     _fusion_handler = None
+    _HANDLER_IMPORT_ERRORS["fusion"] = str(exc)
 
 try:
     from robin.analysis.sturgeon_analysis import (
@@ -673,6 +676,12 @@ def _wrap_real_handler(
             pass
         try:
             if py_handler is None:
+                import_reason = _HANDLER_IMPORT_ERRORS.get(job_type)
+                if import_reason:
+                    raise RuntimeError(
+                        f"No implementation available for job_type='{job_type}'. "
+                        f"Handler import failed: {import_reason}"
+                    )
                 raise RuntimeError(
                     f"No implementation available for job_type='{job_type}'"
                 )
@@ -773,7 +782,12 @@ def _wrap_real_handler(
                 # We still attempted analysis; we just don't treat this as a failing job.
                 try:
                     job.context.add_result(
-                        job_type, f"{job_type}_expected_failure_fail_only_bam_submission"
+                        job_type,
+                        {
+                            "status": "expected_failure",
+                            "reason": "fail_only_bam_submission",
+                            "message": str(e),
+                        },
                     )
                 except Exception:
                     pass
@@ -785,9 +799,14 @@ def _wrap_real_handler(
                 logger.error(f"{job_type} failed: {e}")
                 raise  # Re-raise so task fails and coordinator gets failure_kind="exception"
         finally:
-            # Mark result if user handler didn't
+            # Mark result if user handler didn't add one.
+            # Keep a dict payload so downstream code can safely call .get(...).
             if job_type not in job.context.results:
-                job.context.add_result(job_type, f"{job_type}_ok")
+                had_error = any(
+                    (err.get("job_type") == job_type) for err in (job.context.errors or [])
+                )
+                fallback_result = {"status": "failed"} if had_error else {"status": "success"}
+                job.context.add_result(job_type, fallback_result)
             
             # Trigger memory cleanup after handler execution
             # Let memory manager decide if cleanup is needed based on its heuristics
@@ -820,7 +839,7 @@ def enhanced_handler(job: BatchedJob) -> None:
         try:
             # Process individual file within batch
             process_single_file_in_batch(context, job_type, i, batch_size)
-            context.add_result(job_type, f"{job_type}_ok")
+            context.add_result(job_type, {"status": "success"})
             
         except Exception as e:
             # Fail entire batch if any file fails
@@ -831,7 +850,7 @@ def enhanced_handler(job: BatchedJob) -> None:
     
     # Mark batch as completed
     for context in job.contexts:
-        context.add_result(job_type, f"{job_type}_batch_completed")
+        context.add_result(job_type, {"status": "batch_completed"})
 
 def process_single_file_in_batch(context: WorkflowContext, job_type: str, index: int, total: int) -> None:
     """Process a single file within a batch - to be implemented per job type"""
@@ -2142,51 +2161,110 @@ class Coordinator:
                 print("[SHUTDOWN] No samples to finalize")
                 return
             
-            print(f"[SHUTDOWN] Finalizing target.bam for {len(samples_to_finalize)} sample(s) using work_dir: {work_dir}")
+            total = len(samples_to_finalize)
+            start_time = time.time()
+            heartbeat_seconds = 10
+            last_heartbeat = 0.0
+
+            print(
+                f"[SHUTDOWN] Finalizing target.bam for {total} sample(s) using work_dir: {work_dir}",
+                flush=True,
+            )
+            print(
+                "[SHUTDOWN] Progress updates will appear as each sample finalization completes.",
+                flush=True,
+            )
             
             # Submit all finalization tasks to Ray workers in parallel
             tasks = []
-            for sample_id in samples_to_finalize:
+            max_queue_print = 10
+            for i, sample_id in enumerate(samples_to_finalize):
+                if i < max_queue_print:
+                    print(f"[SHUTDOWN] Queued finalization for sample: {sample_id}", flush=True)
+                elif i == max_queue_print:
+                    remaining_to_queue = total - max_queue_print
+                    if remaining_to_queue > 0:
+                        print(f"[SHUTDOWN] Queued additional {remaining_to_queue} sample(s)...", flush=True)
                 task_ref = finalize_sample_task.remote(
                     sample_id=sample_id,
                     work_dir=work_dir,
                     target_panel=self.target_panel
                 )
                 tasks.append((sample_id, task_ref))
-            
-            # Wait for all tasks to complete using asyncio.gather to yield to event loop
+
+            # Wait for tasks to complete with periodic progress output.
+            # (Avoids an apparently "stuck" period while asyncio.gather() waits silently.)
             completed = 0
-            # Collect all task refs for concurrent awaiting
-            task_refs = [task_ref for _, task_ref in tasks]
-            sample_ids = [sample_id for sample_id, _ in tasks]
-            
-            # Await all tasks concurrently
-            results = await asyncio.gather(*task_refs, return_exceptions=True)
-            
-            # Process results
-            for sample_id, result in zip(sample_ids, results):
+            task_ref_to_sample_id = {task_ref: sample_id for sample_id, task_ref in tasks}
+            remaining_refs = [task_ref for _, task_ref in tasks]
+
+            while remaining_refs:
+                # Wait briefly for at least one task to become ready.
                 try:
-                    print(f"[SHUTDOWN] Finalizing target.bam for sample: {sample_id}...")
-                    if isinstance(result, Exception):
-                        print(f"[SHUTDOWN] Warning: Failed to finalize target.bam for {sample_id}: {result}")
-                        logging.warning(f"Failed to finalize target.bam for {sample_id}: {result}")
-                        continue
-                    
-                    completed += 1
-                    if result.get("status") == "error":
-                        print(f"[SHUTDOWN] Warning: Finalization error for {sample_id}: {result.get('error', 'Unknown')}")
-                        logging.warning(f"Finalization error for {sample_id}: {result.get('error', 'Unknown')}")
-                    else:
-                        batch_count = result.get("batch_files_merged", 0)
-                        if batch_count > 0:
-                            print(f"[SHUTDOWN] Completed: {sample_id} (merged {batch_count} batch files)")
-                        else:
-                            print(f"[SHUTDOWN] Completed: {sample_id}")
+                    ready_refs, remaining_refs = await asyncio.to_thread(
+                        ray.wait,
+                        remaining_refs,
+                        1,
+                        5.0,  # timeout seconds; keeps the shutdown console responsive
+                    )
                 except Exception as e:
-                    print(f"[SHUTDOWN] Warning: Failed to finalize target.bam for {sample_id}: {e}")
-                    logging.warning(f"Failed to finalize target.bam for {sample_id}: {e}")
-            
-            print(f"[SHUTDOWN] Target BAM finalization: {completed}/{len(tasks)} samples completed")
+                    print(f"[SHUTDOWN] Warning: Error while waiting for target.bam finalization tasks: {e}", flush=True)
+                    logging.warning(f"Error while waiting for target.bam finalization tasks: {e}")
+                    break
+
+                if ready_refs:
+                    for ref in ready_refs:
+                        sample_id = task_ref_to_sample_id.get(ref, "unknown")
+                        try:
+                            result = await asyncio.to_thread(ray.get, ref)
+                            completed += 1
+
+                            if isinstance(result, Exception):
+                                print(
+                                    f"[SHUTDOWN] Warning: Failed to finalize target.bam for {sample_id}: {result}",
+                                    flush=True,
+                                )
+                                logging.warning(f"Failed to finalize target.bam for {sample_id}: {result}")
+                                continue
+
+                            if isinstance(result, dict) and result.get("status") == "error":
+                                print(
+                                    f"[SHUTDOWN] Warning: Finalization error for {sample_id}: {result.get('error', 'Unknown')}",
+                                    flush=True,
+                                )
+                                logging.warning(
+                                    f"Finalization error for {sample_id}: {result.get('error', 'Unknown')}"
+                                )
+                            else:
+                                batch_count = 0
+                                if isinstance(result, dict):
+                                    batch_count = result.get("batch_files_merged", 0) or 0
+                                if batch_count > 0:
+                                    print(
+                                        f"[SHUTDOWN] Completed: {sample_id} (merged {batch_count} batch files)",
+                                        flush=True,
+                                    )
+                                else:
+                                    print(f"[SHUTDOWN] Completed: {sample_id}", flush=True)
+                        except Exception as e:
+                            print(
+                                f"[SHUTDOWN] Warning: Failed to finalize target.bam for {sample_id}: {e}",
+                                flush=True,
+                            )
+                            logging.warning(f"Failed to finalize target.bam for {sample_id}: {e}")
+
+                # Heartbeat: user-friendly output during long waits.
+                now = time.time()
+                if now - last_heartbeat >= heartbeat_seconds:
+                    elapsed_seconds = int(now - start_time)
+                    remaining = len(remaining_refs)
+                    print(
+                        f"[SHUTDOWN] Still finalizing target.bam... {completed}/{total} completed, {remaining} remaining (elapsed {elapsed_seconds}s)",
+                        flush=True,
+                    )
+                    last_heartbeat = now
+
+            print(f"[SHUTDOWN] Target BAM finalization: {completed}/{total} samples completed", flush=True)
         except Exception as e:
             print(f"[SHUTDOWN] Error during target BAM finalization: {e}")
             logging.warning(f"Error during target BAM finalization: {e}")

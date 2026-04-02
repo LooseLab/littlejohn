@@ -7,6 +7,10 @@ and this project (almost) adheres to [Semantic Versioning](https://semver.org/sp
 
 ## [Unreleased]
 
+### Changed
+- **Conda environment:** a single **`robin.yml`** (env name **`robin`**) replaces separate `robin_0_8.yml`, `robin_py12.yml`, `robin_osx.yml`, and the old Python 3.9 `robin.yml` layout. Create with `conda env create -f robin.yml` and `conda activate robin`.
+- **Linux `libstdc++`:** optional `conda_env_hooks/` activate scripts and `scripts/setup_conda_ld_path.sh` were removed; use **`export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH}"`** (see README *Common issues*) and, on Linux, **`robin_linux_extras.yml`** or `conda install` for `libstdcxx-ng>=13` / `libgcc-ng>=13` (plain `conda env create` does not honour `# [linux]` selectors in `robin.yml`).
+
 ### Important
 - **Main branch merge preparation:** This release line captures the major merge of the `little_john` integration work back into the main repository branch.
 - **Version update:** Project version is now **`0.5`**.

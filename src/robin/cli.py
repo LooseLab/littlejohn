@@ -84,7 +84,7 @@ from robin.logging_config import (
 
 
 def _download_missing_models(missing_files, models_dir):
-    """Download missing model files using the same logic as setup_models.py"""
+    """Download missing model files (same asset manifest logic as ``robin utils update-models``)."""
     import json
     import hashlib
     import urllib.request

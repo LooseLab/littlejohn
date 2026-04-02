@@ -194,7 +194,7 @@ def check_model_files(project_root: Optional[Path] = None) -> Tuple[bool, List[s
 
 
 def _download_missing_models(missing_files, models_dir, project_root):
-    """Download missing model files using the same logic as setup_models.py"""
+    """Download missing model files (same asset manifest logic as ``robin utils update-models``)."""
     import json
     import hashlib
     import urllib.request
@@ -330,7 +330,7 @@ def print_model_status(project_root: Optional[Path] = None) -> bool:
         print("AUTOMATIC DOWNLOAD OPTION")
         print("="*60)
         print("Would you like to automatically download the missing model files?")
-        print("This will use the same method as 'python setup_models.py'")
+        print("This uses the same logic as: robin utils update-models")
         
         try:
             response = input("\nDownload missing models? [Y/n]: ").strip().lower()
@@ -352,8 +352,9 @@ def print_model_status(project_root: Optional[Path] = None) -> bool:
                     print("2. Run the API download script:")
                     print("   python setup_models_api.py")
                     print()
-                    print("3. Or run the original setup script:")
-                    print("   python setup_models.py")
+                    print("3. Or from a shell (after pip install -e .):")
+                    print("   robin utils update-models")
+                    print("   robin utils update-clinvar")
                     print()
                     print("After downloading, run ROBIN again.")
                     print("="*60)
@@ -362,18 +363,19 @@ def print_model_status(project_root: Optional[Path] = None) -> bool:
                 print("\n" + "="*60)
                 print("MANUAL DOWNLOAD INSTRUCTIONS")
                 print("="*60)
-                print("To download the missing model files manually, run one of these commands:")
+                print("To download the missing model files manually:")
                 print()
-                print("Option 1 - Using setup_models.py (works with public repositories):")
-                print("   python setup_models.py")
+                print("  robin utils update-models")
+                print("  robin utils update-clinvar")
                 print()
-                print("Option 2 - Using setup_models_api.py (requires GitHub token for private repos):")
+                print("For private GitHub assets, set GITHUB_TOKEN before update-models:")
                 print("   export GITHUB_TOKEN=your_github_token")
+                print("   robin utils update-models")
+                print()
+                print("Legacy API script (optional):")
                 print("   python setup_models_api.py")
                 print()
-                print("Note: Option 1 works if the repository is public.")
-                print("Option 2 is needed for private repositories or if you have a GitHub token.")
-                print("You can create a token at: https://github.com/settings/tokens")
+                print("Create a token at: https://github.com/settings/tokens")
                 print()
                 print("After downloading, you can run ROBIN normally.")
                 print("="*60)

@@ -1,0 +1,16 @@
+# Linux-only packages for the `robin` conda environment.
+#
+# `conda env create -f robin.yml` does not support platform selectors on dependency
+# lines, so macOS-friendly `robin.yml` omits these. On Linux, after creating the env:
+#
+#   conda env update -n robin -f robin_linux_extras.yml
+#
+# Same effect as: conda install -c conda-forge "libstdcxx-ng>=13" "libgcc-ng>=13"
+# See README.md → Common issues → libstdc++ / CXXABI_1.3.15.
+
+name: robin
+channels:
+  - conda-forge
+dependencies:
+  - libstdcxx-ng>=13
+  - libgcc-ng>=13

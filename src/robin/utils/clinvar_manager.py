@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import subprocess
 import tempfile
 import urllib.error
 import urllib.request
@@ -130,15 +132,51 @@ def _ensure_tabix_index(gz_path: Path, tbi_path: Path) -> None:
 
     print(f"Creating tabix index for {gz_path.name}")
     logger.info("Creating tabix index for %s", gz_path)
-    pysam.tabix_index(
-        str(gz_path),
-        preset="vcf",
-        force=True,
-        keep_original=True,
-    )
+    last_err: Optional[BaseException] = None
+    try:
+        pysam.tabix_index(
+            str(gz_path),
+            preset="vcf",
+            force=True,
+            keep_original=True,
+        )
+    except Exception as exc:
+        last_err = exc
+        logger.warning("pysam.tabix_index failed for %s: %s", gz_path, exc)
+        tabix_bin = shutil.which("tabix")
+        if tabix_bin:
+            try:
+                subprocess.run(
+                    [tabix_bin, "-p", "vcf", str(gz_path)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.CalledProcessError as sub_exc:
+                stderr = (sub_exc.stderr or "").strip()
+                stdout = (sub_exc.stdout or "").strip()
+                detail = stderr or stdout or str(sub_exc)
+                raise RuntimeError(
+                    f"Tabix indexing failed for {gz_path} (pysam: {exc!r}; "
+                    f"tabix CLI: {detail})"
+                ) from sub_exc
+        else:
+            raise RuntimeError(
+                f"Tabix indexing failed for {gz_path}: {exc!r}. "
+                "Install htslib (tabix/bgzip) or fix the VCF: it must be "
+                "block-gzipped (bgzip), not plain gzip, and a valid sorted VCF."
+            ) from exc
 
     if not _file_ok(tbi_path):
-        raise RuntimeError(f"Tabix index was not created: {tbi_path}")
+        hint = (
+            f"Tabix index was not created at {tbi_path}. "
+            "If the VCF was recompressed with gzip instead of bgzip, run: "
+            f"bgzip -d {gz_path.name} && bgzip {gz_path.with_suffix('').name} "
+            f"&& tabix -p vcf {gz_path.name}"
+        )
+        if last_err:
+            raise RuntimeError(hint) from last_err
+        raise RuntimeError(hint)
 
 
 def ensure_clinvar_files(
