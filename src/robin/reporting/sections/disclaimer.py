@@ -21,4 +21,4 @@ class DisclaimerSection(ReportSection):
         paragraphs = EXTENDED_DISCLAIMER_TEXT.split("\n\n")
         for p in paragraphs:
             self.elements.append(Paragraph(p, self.styles.styles["Normal"]))
-            self.elements.append(Spacer(1, 12))  # Add some space between paragraphs
+            self.elements.append(Spacer(1, 6))

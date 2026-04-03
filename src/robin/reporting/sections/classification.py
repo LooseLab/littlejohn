@@ -7,7 +7,7 @@ including results from Sturgeon, Random Forest, NanoDX, and PannanoDX classifier
 
 import os
 import pandas as pd
-from reportlab.platypus import PageBreak, Paragraph, Spacer
+from reportlab.platypus import PageBreak, Paragraph, Spacer, Table, Image
 from reportlab.lib.colors import HexColor
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import inch
@@ -17,6 +17,9 @@ import matplotlib
 
 matplotlib.use("Agg")  # ensure non-interactive backend before importing pyplot
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import matplotlib.ticker as mticker
+import seaborn as sns
 import io
 
 from robin.classification_config import get_confidence_status
@@ -27,149 +30,310 @@ logger = logging.getLogger(__name__)
 class ClassificationSection(ReportSection):
     """Section containing the methylation classification results."""
 
-    def _create_time_plot(self, df, classifier_name):
+    def _create_empty_plot_buffer(self):
+        """Create a minimal valid PNG buffer for empty plots."""
+        try:
+            plt.figure(figsize=(8, 5), facecolor="white")
+            plt.text(0.5, 0.5, "No data available", 
+                    ha='center', va='center', transform=plt.gca().transAxes,
+                    fontsize=14, color='gray')
+            plt.title("Classification Plot")
+            plt.axis('off')
+            
+            buf = io.BytesIO()
+            plt.savefig(buf, format="png", dpi=300, bbox_inches="tight", facecolor="white")
+            plt.close()
+            buf.seek(0)
+            
+            # Validate buffer contains data
+            if buf.getvalue():
+                return buf
+            else:
+                raise ValueError("Empty buffer")
+        except Exception:
+            # If even this fails, return a minimal PNG
+            import base64
+            # Minimal 1x1 transparent PNG
+            png_data = base64.b64decode(
+                'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
+            )
+            buf = io.BytesIO(png_data)
+            buf.seek(0)
+            return buf
+
+    def _create_time_plot(self, df, classifier_name, figsize=(4.5, 2.75)):
         """Create a time series plot for classifier predictions.
 
         Args:
             df: DataFrame containing classification data
             classifier_name: Name of the classifier
+            figsize: Figure size (width, height) in inches for compact layout
 
         Returns:
             BytesIO object containing the plot image
         """
-        # Drop non-classification columns
-        df = df.drop(columns=["number_probes"]) if "number_probes" in df.columns else df
+        try:
+            # Drop non-classification columns
+            df = df.drop(columns=["number_probes"]) if "number_probes" in df.columns else df
 
-        # Convert confidence values to percentages if not already
-        if (
-            classifier_name != "Random Forest"
-        ):  # Random Forest is already in percentages
-            df = df * 100
+            # Check if dataframe is empty or has no data
+            if df.empty or len(df) == 0:
+                logger.warning(f"Empty dataframe for {classifier_name} time series plot")
+                return self._create_empty_plot_buffer()
 
-        # Get top classifications (those that exceed 5% at any point)
-        threshold = 5
-        top_classes = df.columns[df.max() > threshold]
+            # Convert confidence values to percentages if not already
+            if (
+                classifier_name != "Random Forest"
+            ):  # Random Forest is already in percentages
+                df = df * 100
 
-        # Get current highest confidence for subtitle
-        last_row = df.iloc[-1]
-        top_prediction = last_row.sort_values(ascending=False).head(1)
-        predicted_class = top_prediction.index[0]
-        confidence_value = float(top_prediction.values[0])
-
-        # Create the plot with white background and adjusted figure size for better spacing
-        plt.figure(
-            figsize=(8, 5), facecolor="white"
-        )  # Increased height for better spacing
-        ax = plt.gca()
-        ax.set_facecolor("white")
-
-        # Website-like colors - extended for more classes
-        colors = {
-            # Sturgeon colors
-            "Embryonal - HGNET - BCOR": "#34C759",  # Green
-            "Ependymal - EPN - PF B": "#FF9500",  # Orange
-            "Ependymal - EPN - RELA": "#FF2D55",  # Red
-            # Additional colors for other classifications
-            "color4": "#007AFF",  # Blue
-            "color5": "#5856D6",  # Purple
-            "color6": "#FF3B30",  # Red-Orange
-            "color7": "#5AC8FA",  # Light Blue
-            "color8": "#4CD964",  # Light Green
-        }
-
-        # Convert index to datetime
-        df.index = pd.to_datetime(df.index, unit="ms")
-
-        # Plot each classification
-        for idx, column in enumerate(top_classes):
-            # Get color from map or use from additional colors
-            if column in colors:
-                color = colors[column]
+            # Get top 3 classifications (those that exceed 5% at any point) to reduce clutter
+            threshold = 5
+            above_threshold = df.columns[df.max() > threshold]
+            if len(above_threshold) <= 3:
+                top_classes = above_threshold
             else:
-                color = colors[
-                    f"color{(idx % 5) + 4}"
-                ]  # Cycle through additional colors
+                final_vals = df.loc[df.index[-1], above_threshold].sort_values(ascending=False)
+                top_classes = final_vals.head(3).index
 
-            plt.plot(
-                df.index,
-                df[column],
-                "o-",  # Line with circles
-                label=column,
-                color=color,
-                linewidth=1,
-                markersize=3,
-                markeredgewidth=0,
+            # Check if we have any classes to plot
+            if len(top_classes) == 0:
+                logger.warning(f"No classes above threshold for {classifier_name} time series plot")
+                return self._create_empty_plot_buffer()
+
+            # Get current highest confidence for subtitle
+            last_row = df.iloc[-1]
+            top_prediction = last_row.sort_values(ascending=False).head(1)
+            predicted_class = top_prediction.index[0]
+            confidence_value = float(top_prediction.values[0])
+
+            # Convert index to datetime
+            df.index = pd.to_datetime(df.index, unit="ms")
+
+            # Reshape to long format for seaborn
+            plot_df = df[top_classes].copy().reset_index()
+            # Index column may be named "timestamp" or "index" depending on source
+            time_col = plot_df.columns[0]
+            plot_df = plot_df.rename(columns={time_col: "Time"})
+            plot_df = plot_df.melt(
+                id_vars=["Time"],
+                value_vars=top_classes,
+                var_name="Class",
+                value_name="Confidence",
             )
+            # Truncate long labels for legend readability, ensuring no collisions
+            # (e.g. "Embryonal - MB G3" and "Embryonal - MB G3G4 - G3" both become
+            # "Embryonal - MB G3..." if truncated naively, merging distinct classes)
+            unique_classes = plot_df["Class"].unique()
+            truncated_map = {}
+            for c in unique_classes:
+                base = c if len(c) <= 20 else c[:17] + "..."
+                # Ensure uniqueness: if collision, extend until distinct
+                out = base
+                while out in truncated_map.values() and out != c:
+                    if len(c) <= len(out) + 3:
+                        out = c  # Use full name to avoid collision
+                        break
+                    out = c[: min(len(out) + 4, len(c))] + ("..." if len(c) > 20 else "")
+                truncated_map[c] = out
+            plot_df["Class"] = plot_df["Class"].map(truncated_map)
 
-        # Add title and subtitle with better spacing
-        plt.suptitle(
-            f"{classifier_name} Classification Confidence Over Time",
-            y=0.95,
-            fontsize=10,
-        )
-        plt.title(
-            f"Current highest confidence: {predicted_class} ({confidence_value:.1f}%)",
-            pad=10,
-            fontsize=9,
-        )
+            # Palette must match actual number of hue levels (avoids seaborn warning)
+            n_hue = plot_df["Class"].nunique()
+            palette = sns.color_palette("husl", n_colors=n_hue)
 
-        # Format x-axis to show HH:MM
-        ax.xaxis.set_major_formatter(matplotlib.dates.DateFormatter("%H:%M"))
-        plt.xlabel("Time", fontsize=9, labelpad=5)
+            # Create plot with seaborn (use context to avoid affecting other report plots)
+            with sns.axes_style("whitegrid"):
+                fig, ax = plt.subplots(figsize=figsize, facecolor="white")
+                ax.set_facecolor("white")
 
-        # Format y-axis with better spacing
-        plt.ylabel("Confidence (%)", fontsize=9, labelpad=10)
-        ax.yaxis.set_major_formatter(matplotlib.ticker.PercentFormatter(decimals=0))
+                sns.lineplot(
+                    data=plot_df,
+                    x="Time",
+                    y="Confidence",
+                    hue="Class",
+                    palette=palette,
+                    linewidth=2,
+                    markers=True,
+                    markersize=6,
+                    markevery=max(1, len(df) // 15),
+                    ax=ax,
+                )
 
-        # Customize grid
-        plt.grid(True, linestyle="--", alpha=0.2)
+                # Add title and subtitle (compact for 2x2 grid)
+                fig.suptitle(f"{classifier_name}", y=0.98, fontsize=10, fontweight="bold")
+                ax.set_title(
+                    f"{predicted_class} ({confidence_value:.1f}%)",
+                    pad=4,
+                    fontsize=8,
+                )
 
-        # Set axis ranges
-        plt.ylim(0, 100)
+                # Format x-axis to show HH:MM
+                ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+                ax.set_xlabel("Time", fontsize=8)
+                ax.set_ylabel("Confidence (%)", fontsize=8)
+                ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=100, decimals=0))
 
-        # Customize legend with better positioning
-        plt.legend(
-            bbox_to_anchor=(0, 1.15, 1, 0),
-            loc="lower left",
-            mode="expand",
-            ncol=3,
-            fontsize=8,
-            frameon=False,
-            markerscale=2,
-        )
+                # Set axis ranges
+                ax.set_ylim(0, 100)
 
-        # Remove spines
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        ax.spines["left"].set_alpha(0.2)
-        ax.spines["bottom"].set_alpha(0.2)
+                # Legend - seaborn places it automatically; adjust for compact layout
+                ax.legend(
+                    bbox_to_anchor=(0, 1.08, 1, 0),
+                    loc="lower left",
+                    mode="expand",
+                    ncol=2,
+                    fontsize=8,
+                    frameon=True,
+                    framealpha=0.9,
+                )
 
-        # Adjust tick parameters
-        ax.tick_params(axis="both", labelsize=8)
-        plt.xticks(rotation=0)
+                # Refined spines (seaborn whitegrid already has grid)
+                sns.despine(ax=ax, top=True, right=True)
 
-        # Adjust layout to prevent label cutoff - use constrained layout instead of subplots_adjust
-        plt.tight_layout()
+                # Tick parameters
+                ax.tick_params(axis="both", labelsize=7)
+                plt.xticks(rotation=0)
 
-        # Save plot to bytes buffer with high DPI for crisp rendering
-        buf = io.BytesIO()
-        plt.savefig(buf, format="png", dpi=300, bbox_inches="tight", facecolor="white")
-        plt.close()
-        buf.seek(0)
-        return buf
+                plt.tight_layout()
+
+            # Save plot to bytes buffer with high DPI for crisp rendering
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=300, bbox_inches="tight", facecolor="white")
+            plt.close(fig)
+            buf.seek(0)
+            
+            # Validate buffer contains valid image data
+            if not buf.getvalue():
+                logger.warning(f"Empty buffer for {classifier_name} time series plot")
+                return self._create_empty_plot_buffer()
+            
+            # Try to validate it's a valid PNG by checking magic bytes
+            buf_data = buf.getvalue()
+            if len(buf_data) < 8 or buf_data[:8] != b'\x89PNG\r\n\x1a\n':
+                logger.warning(f"Invalid PNG data for {classifier_name} time series plot")
+                return self._create_empty_plot_buffer()
+            
+            # Reset buffer position after validation
+            buf.seek(0)
+            return buf
+            
+        except Exception as e:
+            logger.error(f"Error creating {classifier_name} time series plot: {str(e)}")
+            plt.close('all')  # Close any open figures
+            return self._create_empty_plot_buffer()
 
     def add_content(self):
         """Add the classification content to the report."""
-        # Add summary to summary section
+        # Add MNP-Flex hierarchical summary to summary section (if MNP-Flex enabled)
+        try:
+            from robin.reporting.sections.mnpflex import MNPFlexSection
+
+            mnpflex = MNPFlexSection(self.report)
+            results_dir = mnpflex._find_results_dir()
+            if results_dir:
+                summary = mnpflex._load_bundle_summary(results_dir)
+            else:
+                summary = None
+
+            if summary:
+                qc = summary.get("qc", {}) or {}
+                mgmt = summary.get("mgmt", {}) or {}
+                classifier_summary = summary.get("classifier_summary", {}) or {}
+                hierarchy = classifier_summary.get("summary_hierarchical", []) or []
+                has_hierarchical_summary = len(hierarchy) > 0
+
+                # Build legend text (QC, MGMT) for table caption
+                legend_text = (
+                    f"QC status: {qc.get('status', 'Unknown')} | "
+                    f"Average coverage: {mnpflex._format_coverage_value(qc.get('avg_coverage'))} | "
+                    f"Missing sites: {qc.get('missing_site_count', 'N/A')} | "
+                    f"MGMT status: {mgmt.get('status', 'Unknown')} | "
+                    f"MGMT average: {mnpflex._format_mgmt_value(mgmt.get('average'))}"
+                )
+
+                if not has_hierarchical_summary:
+                    # No confident classification - show message + legend in same place
+                    self.summary_elements.append(
+                        Paragraph("MNP-Flex Hierarchical Summary", self.styles.styles["Heading3"])
+                    )
+                    self.summary_elements.append(Spacer(1, 6))
+                    self.summary_elements.append(
+                        Paragraph(
+                            "MNP-Flex has not returned a confident classification.",
+                            self.styles.styles["Warning"],
+                        )
+                    )
+                    self.summary_elements.append(Spacer(1, 6))
+                    self.summary_elements.append(
+                        Paragraph(
+                            legend_text,
+                            ParagraphStyle(
+                                "TableLegend",
+                                parent=self.styles.styles["Normal"],
+                                fontSize=8,
+                                leading=10,
+                                textColor=HexColor("#4B5563"),
+                            ),
+                        )
+                    )
+                    self.summary_elements.append(Spacer(1, 8))
+                else:
+                    # Has hierarchical summary - table with legend
+                    self.summary_elements.append(
+                        Paragraph("MNP-Flex Hierarchical Summary", self.styles.styles["Heading3"])
+                    )
+                    self.summary_elements.append(Spacer(1, 6))
+                    flat = mnpflex._flatten_hierarchy(hierarchy)
+                    if flat:
+                        best_score, best_path = max(flat, key=lambda x: x[0] or 0)
+                        self.summary_elements.append(
+                            Paragraph(
+                                f"<b>Top path</b>: {' > '.join(best_path)} "
+                                f"({mnpflex._format_score(best_score)})",
+                                self.styles.styles["Normal"],
+                            )
+                        )
+                        self.summary_elements.append(Spacer(1, 6))
+                    table_rows = [["Group", "Score", "Description"]]
+                    for node in hierarchy:
+                        table_rows.append(
+                            [
+                                node.get("group", "Unknown"),
+                                mnpflex._format_score(node.get("score")),
+                                mnpflex._collect_descriptions(node),
+                            ]
+                        )
+                    self.summary_elements.append(self.create_table(table_rows))
+                    self.summary_elements.append(Spacer(1, 4))
+                    # Table legend
+                    self.summary_elements.append(
+                        Paragraph(
+                            legend_text,
+                            ParagraphStyle(
+                                "TableLegend",
+                                parent=self.styles.styles["Normal"],
+                                fontSize=8,
+                                leading=10,
+                                textColor=HexColor("#4B5563"),
+                            ),
+                        )
+                    )
+                    self.summary_elements.append(Spacer(1, 8))
+        except Exception as e:
+            logger.error(f"Error adding MNP-Flex hierarchy to classification summary: {e}")
+
+        # Methylation Classification header - divides MNP-Flex from other classifiers
         self.summary_elements.append(
             Paragraph("Methylation Classification", self.styles.styles["Heading3"])
         )
+        self.summary_elements.append(Spacer(1, 6))
 
-        # Add section header
+        # Add section header for detailed view
         self.elements.append(
             Paragraph("Methylation Classification", self.styles.styles["Heading2"])
         )
-        self.elements.append(Spacer(1, 6))
+        self.elements.append(Spacer(1, 4))
 
         # Dictionary of classifiers and their corresponding files
         classifiers = {
@@ -181,6 +345,7 @@ class ClassificationSection(ReportSection):
 
         # Add summary table of all classifications
         summary_data = [["Classifier", "Predicted Class", "Confidence", "Status"]]
+        plot_buffers = []  # Collect (name, buf) for 2x2 grid
 
         # Process each classifier
         for name, filename in classifiers.items():
@@ -194,18 +359,12 @@ class ClassificationSection(ReportSection):
                 if file_path and os.path.exists(file_path):
                     df = pd.read_csv(file_path)
 
-                    # Create and add time series plot for each classifier
+                    # Create time series plot (compact for 2x2 grid)
                     try:
-                        # Set timestamp as index for the plot
-                        df.set_index("timestamp", inplace=True)
-                        plot_buf = self._create_time_plot(df, name)
-                        self.add_figure(
-                            plot_buf,
-                            caption=f"{name} Classification Confidence Over Time",
-                            width=6 * inch,
-                            height=3 * inch,
-                        )
-                        self.elements.append(Spacer(1, 12))
+                        df_plot = df.copy()
+                        df_plot.set_index("timestamp", inplace=True)
+                        plot_buf = self._create_time_plot(df_plot, name)
+                        plot_buffers.append((name, plot_buf))
                     except Exception as e:
                         logger.error(
                             f"Error creating {name} time series plot: {str(e)}"
@@ -253,14 +412,43 @@ class ClassificationSection(ReportSection):
                 logger.error(f"Error processing {name} classification: {str(e)}")
                 continue
 
+        # Add classification time series plots in 2x2 grid (4 per page)
+        if plot_buffers:
+            plot_width = 3.25 * inch
+            plot_height = 2.25 * inch
+            plots_per_row = 2
+            # Pad to complete last row
+            while len(plot_buffers) % plots_per_row != 0:
+                plot_buffers.append((None, None))
+            for row_start in range(0, len(plot_buffers), plots_per_row):
+                row_cells = []
+                for name, buf in plot_buffers[row_start : row_start + plots_per_row]:
+                    if buf is not None:
+                        buf.seek(0)
+                        row_cells.append(Image(buf, width=plot_width, height=plot_height))
+                    else:
+                        row_cells.append(Spacer(plot_width, plot_height))
+                plot_table = Table(
+                    [row_cells],
+                    colWidths=[plot_width] * plots_per_row,
+                )
+                plot_table.setStyle(
+                    [
+                        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ]
+                )
+                self.elements.append(plot_table)
+                self.elements.append(Spacer(1, 4))
+
         # Add explanation text using centralized thresholds
         from robin.classification_config import CLASSIFIER_CONFIDENCE_THRESHOLDS
         
         explanation_lines = ["Note: Classification confidence levels are defined as follows:"]
         for classifier, thresholds in CLASSIFIER_CONFIDENCE_THRESHOLDS.items():
             explanation_lines.append(
-                f"- {classifier.title()}: High (≥{thresholds['high']:.0f}%), "
-                f"Medium (≥{thresholds['medium']:.0f}%), Low (<{thresholds['medium']:.0f}%)"
+                f"- {classifier.title()}: High (>={thresholds['high']:.0f}%), "
+                f"Medium (>={thresholds['medium']:.0f}%), Low (<{thresholds['medium']:.0f}%)"
             )
         explanation_lines.append(
             "Multiple classifiers may provide different results based on their training data and methodology."
@@ -281,128 +469,177 @@ class ClassificationSection(ReportSection):
             # Create table with automatic column width calculation
             summary_table = self.create_table(summary_data, repeat_rows=1)
             self.summary_elements.append(summary_table)
-            self.elements.append(Spacer(1, 12))
-            # Export summary as DataFrame
-            try:
-                # Strip HTML tags from Status for CSV, keep plain text
-                def _strip_html(s):
-                    try:
-                        return (
-                            str(s)
-                            .replace('<font color="#059669">', "")
-                            .replace('<font color="#D97706">', "")
-                            .replace('<font color="#DC2626">', "")
-                            .replace("</font>", "")
-                        )
-                    except Exception:
-                        return s
+            self.elements.append(Spacer(1, 6))
 
-                rows = []
-                for r in summary_data[1:]:
-                    rows.append(
-                        {
-                            "Classifier": r[0],
-                            "PredictedClass": r[1],
-                            "ConfidencePercent": r[2],
-                            "Status": _strip_html(r[3]),
-                        }
-                    )
-                from pandas import DataFrame as _DF
-
-                self.export_frames["classification_summary"] = _DF(rows)
-            except Exception:
-                pass
-
-            # Add detailed results for each classifier
-            self.elements.append(PageBreak())
-            self.elements.append(
-                Paragraph(
-                    "Detailed Classification Results", self.styles.styles["Heading2"]
-                )
-            )
-            self.elements.append(Spacer(1, 12))
-
-            # Process each classifier for detailed view
-            for name, filename in classifiers.items():
+        # Export summary as DataFrame
+        try:
+            # Strip HTML tags from Status for CSV, keep plain text
+            def _strip_html(s):
                 try:
-                    file_path = None
-                    for f in os.listdir(self.report.output):
-                        if f.lower() == filename.lower():
-                            file_path = os.path.join(self.report.output, f)
-                            break
+                    return (
+                        str(s)
+                        .replace('<font color="#059669">', "")
+                        .replace('<font color="#D97706">', "")
+                        .replace('<font color="#DC2626">', "")
+                        .replace("</font>", "")
+                    )
+                except Exception:
+                    return s
 
-                    if file_path and os.path.exists(file_path):
-                        df = pd.read_csv(file_path)
-                        df = (
-                            df.drop(columns=["timestamp"])
-                            if "timestamp" in df.columns
-                            else df
+            rows = []
+            for r in summary_data[1:]:
+                rows.append(
+                    {
+                        "Classifier": r[0],
+                        "PredictedClass": r[1],
+                        "ConfidencePercent": r[2],
+                        "Status": _strip_html(r[3]),
+                    }
+                )
+            from pandas import DataFrame as _DF
+
+            self.export_frames["classification_summary"] = _DF(rows)
+        except Exception:
+            pass
+
+        # Add detailed results for each classifier
+        self.elements.append(PageBreak())
+        self.elements.append(
+            Paragraph(
+                "Detailed Classification Results", self.styles.styles["Heading2"]
+            )
+        )
+        self.elements.append(Spacer(1, 4))
+
+        # Collect classifier blocks for 2-column layout
+        block_width = self.report.doc.width / 2
+        table_col_widths = [block_width * 0.65, block_width * 0.35]  # Class, Score
+        classifier_blocks = []
+
+        for name, filename in classifiers.items():
+            try:
+                file_path = None
+                for f in os.listdir(self.report.output):
+                    if f.lower() == filename.lower():
+                        file_path = os.path.join(self.report.output, f)
+                        break
+
+                if file_path and os.path.exists(file_path):
+                    df = pd.read_csv(file_path)
+                    df = (
+                        df.drop(columns=["timestamp"])
+                        if "timestamp" in df.columns
+                        else df
+                    )
+                    df = (
+                        df.drop(columns=["number_probes"])
+                        if "number_probes" in df.columns
+                        else df
+                    )
+
+                    last_row = df.iloc[-1]
+                    top_predictions = last_row.sort_values(ascending=False).head(10)
+
+                    # Build detailed table for top 10 predictions
+                    detailed_data = [["Predicted Class", "Confidence Score"]]
+                    for class_name, score in top_predictions.items():
+                        confidence = (
+                            score / 100.0 if name == "Random Forest" else score
                         )
-                        df = (
-                            df.drop(columns=["number_probes"])
-                            if "number_probes" in df.columns
-                            else df
-                        )
+                        detailed_data.append([class_name, f"{confidence:.1%}"])
 
-                        last_row = df.iloc[-1]
-                        top_predictions = last_row.sort_values(ascending=False).head(10)
+                    detailed_table = self.create_table(
+                        detailed_data,
+                        col_widths=table_col_widths,
+                        repeat_rows=1,
+                        auto_col_width=False,
+                        compact=True,
+                    )
+                    detailed_table.setStyle(
+                        [
+                            ("TOPPADDING", (0, 0), (-1, -1), 2),
+                            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                        ]
+                    )
 
-                        # Add classifier header
-                        self.elements.append(
-                            Paragraph(
-                                f"{name} Classification", self.styles.styles["Heading3"]
-                            )
-                        )
-                        self.elements.append(Spacer(1, 6))
+                    # Block: header + table
+                    header = Paragraph(
+                        f"{name} Classification", self.styles.styles["Heading3"]
+                    )
+                    block = Table(
+                        [[header], [detailed_table]],
+                        colWidths=[block_width],
+                    )
+                    block.setStyle(
+                        [
+                            ("TOPPADDING", (0, 0), (-1, -1), 0),
+                            ("BOTTOMPADDING", (0, 0), (-1, 0), 2),
+                            ("BOTTOMPADDING", (0, 1), (-1, -1), 0),
+                        ]
+                    )
+                    classifier_blocks.append((name, block, top_predictions))
 
-                        # Create detailed table for top 10 predictions
-                        detailed_data = [["Predicted Class", "Confidence Score"]]
-
+                    # Export top predictions
+                    try:
+                        rows = []
                         for class_name, score in top_predictions.items():
                             confidence = (
                                 score / 100.0 if name == "Random Forest" else score
                             )
-                            detailed_data.append([class_name, f"{confidence:.1%}"])
-
-                        # Create table with right-aligned confidence scores
-                        detailed_table = self.create_table(
-                            detailed_data, repeat_rows=1, auto_col_width=True
-                        )
-                        self.elements.append(detailed_table)
-                        self.elements.append(Spacer(1, 12))
-
-                        # Export top predictions for this classifier
-                        try:
-                            rows = []
-                            for class_name, score in top_predictions.items():
-                                confidence = (
-                                    score / 100.0 if name == "Random Forest" else score
-                                )
-                                rows.append(
-                                    {
-                                        "Classifier": name,
-                                        "PredictedClass": class_name,
-                                        "ConfidencePercent": f"{confidence:.1%}",
-                                    }
-                                )
-                            key = (
-                                f"classification_{name.lower().replace(' ', '_')}_top10"
+                            rows.append(
+                                {
+                                    "Classifier": name,
+                                    "PredictedClass": class_name,
+                                    "ConfidencePercent": f"{confidence:.1%}",
+                                }
                             )
-                            from pandas import DataFrame as _DF
+                        key = (
+                            f"classification_{name.lower().replace(' ', '_')}_top10"
+                        )
+                        from pandas import DataFrame as _DF
 
-                            self.export_frames[key] = _DF(rows)
-                        except Exception:
-                            pass
+                        self.export_frames[key] = _DF(rows)
+                    except Exception:
+                        pass
 
-                except Exception as e:
-                    logger.error(
-                        f"Error processing detailed {name} classification: {str(e)}"
-                    )
-                    continue
+            except Exception as e:
+                logger.error(
+                    f"Error processing detailed {name} classification: {str(e)}"
+                )
+                continue
 
-            # Add explanation text
+        # Arrange blocks in 2-column grid
+        if classifier_blocks:
+            plots_per_row = 2
+            for row_start in range(0, len(classifier_blocks), plots_per_row):
+                row_cells = []
+                for i in range(plots_per_row):
+                    idx = row_start + i
+                    if idx < len(classifier_blocks):
+                        _, block, _ = classifier_blocks[idx]
+                        row_cells.append(block)
+                    else:
+                        row_cells.append(Spacer(block_width, 1))
+
+                grid_table = Table(
+                    [row_cells],
+                    colWidths=[block_width] * plots_per_row,
+                )
+                grid_table.setStyle(
+                    [
+                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                        ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                        ("LEFTPADDING", (1, 0), (1, -1), 8),  # Gap between columns
+                    ]
+                )
+                self.elements.append(grid_table)
+                self.elements.append(Spacer(1, 4))
+
+        # Add explanation text to detailed section
+        if len(summary_data) > 1:
             self.elements.append(Explanation_text)
-
         else:
             self.elements.append(
                 Paragraph(

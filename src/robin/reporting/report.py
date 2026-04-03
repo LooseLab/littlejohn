@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 class RobinReport:
     """Main class for generating ROBIN PDF reports."""
 
-    def __init__(self, filename, output, center: str, progress_callback=None, workflow_steps=None):
+    def __init__(self, filename, output, center: str, progress_callback=None, workflow_steps=None, sample_identifiers=None):
         """Initialize the report generator.
 
         Args:
@@ -30,6 +30,7 @@ class RobinReport:
             center: Center ID running the analysis
             progress_callback: Optional callback function for progress updates
             workflow_steps: Optional list of workflow steps to determine which sections to include
+            sample_identifiers: Optional dict with first_name, last_name, dob, nhs_number for inclusion in report
         """
         self.filename = filename
         self.output = output
@@ -37,6 +38,7 @@ class RobinReport:
         self.sample_id = os.path.basename(os.path.normpath(output))
         self.progress_callback = progress_callback
         self.workflow_steps = workflow_steps
+        self.sample_identifiers = sample_identifiers
 
         # Handle filename with None prefix
         if filename.startswith("None"):
@@ -106,6 +108,7 @@ class RobinReport:
         from .sections.fusion import FusionSection
         from .sections.coverage import CoverageSection
         from .sections.mgmt import MGMTSection
+        from .sections.mnpflex import MNPFlexSection
         from .sections.run_data import RunDataSection
         from .sections.disclaimer import DisclaimerSection
         from .sections.variants import VariantsSection
@@ -143,6 +146,9 @@ class RobinReport:
         # MGMT section
         if not self.workflow_steps or is_section_enabled("mgmt", self.workflow_steps):
             sections.append(MGMTSection(self))
+
+        # MNP-Flex section (include if results are present)
+        sections.append(MNPFlexSection(self))
         
         # Run data section (always included)
         sections.append(RunDataSection(self))
@@ -171,26 +177,41 @@ class RobinReport:
             logger.info("Starting report generation")
             self._emit_progress("initializing", "Initializing report generation...", 0.0)
 
-            # Add summary section header with enhanced M3 typography
+            # Add summary section header (Heading 1 level)
             self.elements_summary.insert(
                 0,
                 Paragraph(
-                    f"Summary - {self.sample_id}", self.styles.styles["DisplayMedium"]
+                    f"Summary - {self.sample_id}", self.styles.styles["Heading1"]
                 ),
             )
 
-            # Add enhanced summary card with M3 styling
-            summary_card_content = f"""
-            <b>ROBIN Analysis Report</b><br/>
-            Sample ID: {self.sample_id}<br/>
-            Centre ID: {self.centreID if self.centreID else 'Not specified'}<br/>
-            Report Type: {report_type.title()}<br/>
-            Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-            """
+            # Build summary card; add sample identifiers when available
+            summary_lines = [
+                "ROBIN Analysis Report<br/>",
+                f"Sample ID: {self.sample_id}<br/>",
+            ]
+            si = getattr(self, "sample_identifiers", None)
+            if si:
+                if si.get("test_id"):
+                    summary_lines.append(f"Test ID: {si['test_id']}<br/>")
+                if si.get("first_name"):
+                    summary_lines.append(f"First name: {si['first_name']}<br/>")
+                if si.get("last_name"):
+                    summary_lines.append(f"Last name: {si['last_name']}<br/>")
+                if si.get("dob"):
+                    summary_lines.append(f"Date of birth: {si['dob']}<br/>")
+                if si.get("nhs_number"):
+                    summary_lines.append(f"Hospital Number: {si['nhs_number']}<br/>")
+            summary_lines.extend([
+                f"Centre ID: {self.centreID if self.centreID else 'Not specified'}<br/>",
+                f"Report Type: {report_type.title()}<br/>",
+                f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            ])
+            summary_card_content = "\n            ".join(summary_lines)
             self.elements_summary.insert(
                 1, Paragraph(summary_card_content, self.styles.styles["InfoCard"])
             )
-            self.elements_summary.insert(2, Spacer(1, 16))
+            self.elements_summary.insert(2, Spacer(1, 8))
 
             # Process each section
             total_sections = len(self.sections)
@@ -242,7 +263,7 @@ class RobinReport:
                     1,
                     Paragraph("Detailed Analysis", self.styles.styles["HeadlineLarge"]),
                 )
-                self.elements.insert(2, Spacer(1, 16))  # Enhanced spacing
+                self.elements.insert(2, Spacer(1, 8))
 
             # Add page break before end of report elements
             if self.end_of_report_elements:
@@ -285,7 +306,7 @@ class RobinReport:
             self.end_of_report_elements.append(
                 Paragraph(success_content, self.styles.styles["Success"])
             )
-            self.end_of_report_elements.append(Spacer(1, 12))
+            self.end_of_report_elements.append(Spacer(1, 6))
 
             # Optionally export CSV/XLSX/ZIP
             if export_csv_dir:
@@ -424,6 +445,7 @@ def create_pdf(
     export_zip=False,
     progress_callback=None,
     workflow_steps=None,
+    sample_identifiers=None,
 ):
     """Create a PDF report from ROBIN analysis results.
 
@@ -437,11 +459,16 @@ def create_pdf(
         export_zip: Whether to create ZIP archive
         progress_callback: Optional callback function for progress updates
         workflow_steps: Optional list of workflow steps to determine which sections to include
+        sample_identifiers: Optional dict with first_name, last_name, dob, nhs_number for report
 
     Returns:
         Path to the generated PDF file
     """
-    report = RobinReport(filename, output, center, progress_callback, workflow_steps=workflow_steps)
+    report = RobinReport(
+        filename, output, center, progress_callback,
+        workflow_steps=workflow_steps,
+        sample_identifiers=sample_identifiers,
+    )
     return report.generate_report(
         report_type=report_type,
         export_csv_dir=export_csv_dir,

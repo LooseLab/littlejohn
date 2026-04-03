@@ -134,9 +134,9 @@ class FusionSection(ReportSection):
             "master_candidates": None,
             "all_candidates": None,
             "master_path": os.path.join(
-                self.report.output, "fusion_candidates_master_processed.csv"
+                self.report.output, "fusion_candidates_master_processed.pkl"
             ),
-            "all_path": os.path.join(self.report.output, "fusion_candidates_all_processed.csv"),
+            "all_path": os.path.join(self.report.output, "fusion_candidates_all_processed.pkl"),
         }
 
         try:
@@ -429,7 +429,7 @@ class FusionSection(ReportSection):
         self.elements.append(
             Paragraph("Gene Fusion Analysis", self.styles.styles["Heading1"])
         )
-        self.elements.append(Spacer(1, 12))
+        self.elements.append(Spacer(1, 6))
 
         # Load fusion data
         fusion_data = self._load_fusion_data()
@@ -475,7 +475,7 @@ class FusionSection(ReportSection):
             self.elements.append(
                 Paragraph("Detailed Analysis", self.styles.styles["Heading2"])
             )
-            self.elements.append(Spacer(1, 12))
+            self.elements.append(Spacer(1, 6))
 
             # Add target panel fusions
             if master_pairs:
@@ -487,7 +487,7 @@ class FusionSection(ReportSection):
                 )
                 if table:
                     self.elements.append(table)
-                    self.elements.append(Spacer(1, 12))
+                    self.elements.append(Spacer(1, 6))
 
             # Add genome-wide fusions
             if all_pairs and len(all_pairs) > len(master_pairs):
@@ -499,7 +499,7 @@ class FusionSection(ReportSection):
                 )
                 if table:
                     self.elements.append(table)
-                    self.elements.append(Spacer(1, 12))
+                    self.elements.append(Spacer(1, 6))
 
             # Add source information
             source_text = "Data sources:\n"

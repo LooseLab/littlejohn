@@ -53,6 +53,18 @@ except ImportError as e:
     reconstruct_full_bedmethyl_data = None
 
 
+def _is_fail_only_expected(job) -> bool:
+    """True when errors are expected for fail-only BAM submissions."""
+    try:
+        if not bool(job.context.metadata.get("fail_only_bam_submission", False)):
+            return False
+        fp = getattr(job.context, "filepath", "") or ""
+        base = os.path.basename(fp).lower()
+        return ("fail" in base) and ("pass" not in base)
+    except Exception:
+        return False
+
+
 def _compute_hvpath() -> Optional[str]:
     """Resolve the hv_rapidCNS2 path from this package's submodules.
 
@@ -118,7 +130,7 @@ def run_rcns2(rcns2folder, batch, bed, threads, showerrors):
         logger.info(f"Batch number: {batch}")
 
         # Check if R script exists
-        r_script_path = f"{HVPATH}/bin/methylation_classification_nanodx_v0.2.R"
+        r_script_path = f"{HVPATH}/bin/methylation_classification_nanodx_v0.3.R"
         if not os.path.exists(r_script_path):
             logger.error(f"R script not found at: {r_script_path}")
             raise FileNotFoundError(f"R script not found: {r_script_path}")
@@ -659,6 +671,7 @@ def random_forest_handler(job, work_dir=None):
     """
     # Get job-specific logger
     logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
+    suppress_expected = _is_fail_only_expected(job)
 
     try:
         # Check if this is a batched job
@@ -707,8 +720,15 @@ def random_forest_handler(job, work_dir=None):
             
             if not parquet_paths:
                 error_msg = "No parquet paths found from bed conversion results in batch"
-                logger.error(error_msg)
-                job.context.add_error("random_forest_analysis", error_msg)
+                if suppress_expected:
+                    logger.warning(f"{error_msg} (expected for fail-only BAM submission)")
+                    job.context.add_result(
+                        "random_forest_analysis",
+                        {"status": "expected_failure", "reason": error_msg},
+                    )
+                else:
+                    logger.error(error_msg)
+                    job.context.add_error("random_forest_analysis", error_msg)
                 return
             
             # Determine work directory for the batch
@@ -747,8 +767,25 @@ def random_forest_handler(job, work_dir=None):
             logger.info(f"Total batches processed: {batch_result.get('total_batches', 0)}")
             
             if batch_result.get("error_message"):
-                logger.error(f"Batch processing completed with errors: {batch_result['error_message']}")
-                job.context.add_error("random_forest_analysis", batch_result["error_message"])
+                if suppress_expected:
+                    logger.warning(
+                        f"Batch processing completed with expected errors (fail-only BAM submission): {batch_result['error_message']}"
+                    )
+                    job.context.add_result(
+                        "random_forest_analysis",
+                        {
+                            "status": "expected_failure",
+                            "error_message": batch_result["error_message"],
+                            "sample_id": sample_id,
+                        },
+                    )
+                else:
+                    logger.error(
+                        f"Batch processing completed with errors: {batch_result['error_message']}"
+                    )
+                    job.context.add_error(
+                        "random_forest_analysis", batch_result["error_message"]
+                    )
             else:
                 logger.info("Batch processing completed successfully with aggregated Random Forest analysis")
                 job.context.add_result(
@@ -834,5 +871,14 @@ def random_forest_handler(job, work_dir=None):
                 )
 
     except Exception as e:
+        if suppress_expected:
+            logger.warning(
+                f"Expected Random Forest failure for fail-only BAM submission: {e}"
+            )
+            job.context.add_result(
+                "random_forest_analysis",
+                {"status": "expected_failure", "error_message": str(e)},
+            )
+            return
         job.context.add_error("random_forest_analysis", str(e))
         logger.error(f"Error in Random Forest analysis for {job.context.filepath}: {e}")

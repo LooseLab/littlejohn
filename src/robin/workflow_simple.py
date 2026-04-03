@@ -12,8 +12,27 @@ from typing import Callable, Dict, List, Optional, Any, Set
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 from tqdm import tqdm
+
+try:
+    from rich.progress import (
+        BarColumn,
+        Progress,
+        SpinnerColumn,
+        TaskProgressColumn,
+        TextColumn,
+        TimeElapsedColumn,
+        TimeRemainingColumn,
+    )
+
+    _RICH_AVAILABLE = True
+except Exception:
+    _RICH_AVAILABLE = False
 from robin.logging_config import get_job_logger
-from robin.analysis.target_analysis import igv_bam_handler, snp_analysis_handler
+from robin.analysis.target_analysis import (
+    igv_bam_handler,
+    snp_analysis_handler,
+    target_bam_finalize_handler,
+)
 
 # ---------- Batch Configuration ----------
 BATCH_CONFIG: Dict[str, Dict[str, Any]] = {
@@ -284,24 +303,30 @@ class SampleJobBatcher:
             return self._check_and_create_batches(sample_id, job_type)
     
     def _check_and_create_batches(self, sample_id: str, job_type: str) -> List[BatchedJob]:
-        """Check if we should create batches for a sample/job_type combination"""
+        """Check if we should create batches for a sample/job_type combination.
+        Jobs with force_individual_batch (e.g. large BAMs) are emitted as single-file batches.
+        """
         config = BATCH_CONFIG.get(job_type, {"max_batch_size": 20, "timeout_seconds": 10})
         max_batch_size = config["max_batch_size"]
         
         pending = self.pending_jobs[sample_id][job_type]
         batches = []
         
-        # Create batches of max_batch_size
-        while len(pending) >= max_batch_size:
-            batch_jobs = pending[:max_batch_size]
-            pending = pending[max_batch_size:]
-            
-            # Create batched job
+        # Emit single-file batches for jobs marked force_individual_batch (e.g. large BAMs)
+        individual = [j for j in pending if (j.context.metadata or {}).get("force_individual_batch")]
+        rest = [j for j in pending if not (j.context.metadata or {}).get("force_individual_batch")]
+        for job in individual:
+            batches.append(self._create_batched_job([job], sample_id, job_type))
+        
+        # Create batches of max_batch_size from the rest
+        while len(rest) >= max_batch_size:
+            batch_jobs = rest[:max_batch_size]
+            rest = rest[max_batch_size:]
             batched_job = self._create_batched_job(batch_jobs, sample_id, job_type)
             batches.append(batched_job)
         
-        # Update pending list
-        self.pending_jobs[sample_id][job_type] = pending
+        # Update pending list (only unbatched jobs remain)
+        self.pending_jobs[sample_id][job_type] = rest
         
         return batches
     
@@ -545,6 +570,7 @@ class WorkflowManager:
                 "quick": "target",  # For testing purposes - map to target queue
                 # IGV BAM build goes to slow queue to avoid contention with analyses
                 "igv_bam": "slow",
+                "target_bam_finalize": "slow",
                 # Classification queue
                 "sturgeon": "classification",
                 "nanodx": "classification",
@@ -569,6 +595,7 @@ class WorkflowManager:
                 "long": "analysis",  # For testing purposes
                 "quick": "analysis",  # For testing purposes
                 "igv_bam": "slow",
+                "target_bam_finalize": "slow",
                 # Classification queue
                 "sturgeon": "classification",
                 "nanodx": "classification",
@@ -1837,6 +1864,10 @@ class WorkflowRunner:
         self.manager.register_handler("slow", "igv_bam", igv_bam_handler)
         # Register SNP analysis handler on slow queue
         self.manager.register_handler("slow", "snp_analysis", snp_analysis_handler)
+        # Register target BAM finalization handler on slow queue
+        self.manager.register_handler(
+            "slow", "target_bam_finalize", target_bam_finalize_handler
+        )
 
     def register_handler(
         self, queue_type: str, job_type: str, handler: Callable[[Job], None]
@@ -1945,6 +1976,23 @@ class WorkflowRunner:
             if sample_id is None:
                 sample_id = Path(sample_dir).name
 
+            # Determine target panel from master.csv if present
+            target_panel = None
+            try:
+                master_csv = Path(sample_dir) / "master.csv"
+                if master_csv.exists():
+                    import csv
+
+                    with master_csv.open("r", newline="") as fh:
+                        reader = csv.DictReader(fh)
+                        first_row = next(reader, None)
+                        if first_row:
+                            panel = first_row.get("analysis_panel", "").strip()
+                            if panel:
+                                target_panel = panel
+            except Exception:
+                pass
+
             # Create a context for this sample with SNP-specific metadata
             metadata = {
                 "sample_id": sample_id,
@@ -1953,6 +2001,9 @@ class WorkflowRunner:
                 "threads": threads,
                 "force_regenerate": force_regenerate,
             }
+
+            if target_panel:
+                metadata["target_panel"] = target_panel
 
             # Add reference genome if provided
             if reference:
@@ -1985,6 +2036,69 @@ class WorkflowRunner:
             if self.verbose:
                 print(
                     f"[WorkflowRunner] Failed to submit SNP analysis job for sample {sample_id}: {e}"
+                )
+            return False
+
+    def submit_target_bam_finalize_job(
+        self,
+        sample_dir: str,
+        sample_id: str = None,
+        target_panel: str = None,
+    ) -> bool:
+        """
+        Submit a target BAM finalization job for an existing sample directory.
+        """
+        try:
+            if sample_id is None:
+                sample_id = Path(sample_dir).name
+
+            if target_panel is None:
+                try:
+                    import csv
+                    master_csv = Path(sample_dir) / "master.csv"
+                    if master_csv.exists():
+                        with master_csv.open("r", newline="") as fh:
+                            reader = csv.DictReader(fh)
+                            first_row = next(reader, None)
+                            if first_row:
+                                panel = first_row.get("analysis_panel", "").strip()
+                                if panel:
+                                    target_panel = panel
+                except Exception:
+                    pass
+
+            metadata = {
+                "sample_id": sample_id,
+                "sample_dir": sample_dir,
+                "work_dir": os.path.dirname(sample_dir),
+                "bam_metadata": {"sample_id": sample_id},
+            }
+
+            if target_panel:
+                metadata["target_panel"] = target_panel
+
+            context = WorkflowContext(filepath=sample_dir, metadata=metadata)
+
+            job = Job(
+                job_id=next(_job_id_counter),
+                job_type="target_bam_finalize",
+                context=context,
+                origin="slow",
+                workflow=["slow:target_bam_finalize"],
+            )
+
+            self.manager.enqueue_jobs([job])
+
+            if self.verbose:
+                print(
+                    f"[WorkflowRunner] Submitted target BAM finalization job for sample {sample_id}"
+                )
+
+            return True
+        except Exception as e:
+            if self.verbose:
+                print(
+                    f"[WorkflowRunner] Failed to submit target BAM finalization job for sample {sample_id}: {e}"
                 )
             return False
 
@@ -2093,8 +2207,11 @@ class WorkflowRunner:
     def _monitor_progress(self, watcher) -> None:
         """Monitor and display worker progress in real-time."""
         import time
+        if _should_use_rich_progress():
+            self._monitor_progress_rich()
+            return
 
-        # Create progress bars for each worker type
+        # Create progress bars for each worker type (tqdm fallback)
         preprocessing_pbar = tqdm(
             desc="Preprocessing", unit="jobs", position=0, leave=True
         )
@@ -2283,3 +2400,161 @@ class WorkflowRunner:
             for pbar in progress_bars.values():
                 pbar.close()
             overall_pbar.close()
+
+    def _monitor_progress_rich(self) -> None:
+        """Monitor and display worker progress using rich progress bars."""
+        import time
+
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("{task.description}"),
+            BarColumn(bar_width=20),
+            TaskProgressColumn(),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+            TextColumn("{task.fields[detail]}"),
+            refresh_per_second=4,
+        )
+
+        queue_order = [
+            "preprocessing",
+            "bed_conversion",
+            "mgmt",
+            "cnv",
+            "target",
+            "fusion",
+            "classification",
+            "slow",
+        ]
+        task_ids = {
+            queue: progress.add_task(queue.title(), total=None, detail="")
+            for queue in queue_order
+        }
+        overall_task_id = progress.add_task("Overall Progress", total=None, detail="")
+
+        progress.start()
+        try:
+            while self.manager.is_running():
+                stats = self.manager.get_stats()
+
+                total_processed = stats["total_processed"]
+                total_actual_jobs = stats["total_actual_jobs"]
+                overall_total = total_actual_jobs if total_actual_jobs > 0 else None
+
+                progress.update(
+                    overall_task_id,
+                    total=overall_total,
+                    completed=total_processed,
+                    detail=(
+                        f"Done:{total_processed}/{total_actual_jobs} | "
+                        f"Act:{stats['active_jobs']} | "
+                        f"Fail:{stats['failed']} | "
+                        f"Skip:{stats['total_skipped']}"
+                    ),
+                )
+
+                for queue_name in queue_order:
+                    queue_size = stats["queue_sizes"][queue_name]
+                    active_in_queue = 0
+                    active_jobs_info = []
+
+                    for worker_name, jobs in stats["active_by_worker"].items():
+                        for job in jobs:
+                            filename = job["filepath"].split("/")[-1]
+                            duration = int(job["duration"])
+                            matches_queue = False
+                            if (
+                                queue_name == "preprocessing"
+                                and worker_name.startswith("PreprocessingWorker")
+                            ):
+                                active_in_queue += 1
+                                matches_queue = True
+                            elif (
+                                queue_name == "bed_conversion"
+                                and worker_name.startswith("BedConversionWorker")
+                            ):
+                                active_in_queue += 1
+                                matches_queue = True
+                            elif queue_name == "mgmt" and worker_name.startswith(
+                                "MGMTWorker"
+                            ):
+                                active_in_queue += 1
+                                matches_queue = True
+                            elif queue_name == "cnv" and worker_name.startswith(
+                                "CNVWorker"
+                            ):
+                                active_in_queue += 1
+                                matches_queue = True
+                            elif queue_name == "target" and worker_name.startswith(
+                                "TargetWorker"
+                            ):
+                                active_in_queue += 1
+                                matches_queue = True
+                            elif queue_name == "fusion" and worker_name.startswith(
+                                "FusionWorker"
+                            ):
+                                active_in_queue += 1
+                                matches_queue = True
+                            elif (
+                                queue_name == "classification"
+                                and worker_name.startswith("ClassificationWorker")
+                            ):
+                                active_in_queue += 1
+                                matches_queue = True
+                            elif queue_name == "slow" and worker_name.startswith(
+                                "SlowWorker"
+                            ):
+                                active_in_queue += 1
+                                matches_queue = True
+
+                            if matches_queue and len(active_jobs_info) < 2:
+                                active_jobs_info.append(
+                                    f"{job['job_type']}:{filename}({duration}s)"
+                                )
+
+                    completed_in_queue = 0
+                    for job_type, count in stats["completed_by_type"].items():
+                        queue_type = self.manager.job_queue_mapping.get(
+                            job_type, "slow"
+                        )
+                        if queue_type == queue_name:
+                            completed_in_queue += count
+                    for job_type, count in stats.get("failed_by_type", {}).items():
+                        queue_type = self.manager.job_queue_mapping.get(
+                            job_type, "slow"
+                        )
+                        if queue_type == queue_name:
+                            completed_in_queue += count
+
+                    total_for_queue = completed_in_queue + active_in_queue + queue_size
+                    total_for_queue_display = (
+                        str(total_for_queue) if total_for_queue > 0 else "-"
+                    )
+                    completed_display = str(completed_in_queue)
+                    detail_parts = [f"{completed_display}/{total_for_queue_display}"]
+                    if active_jobs_info:
+                        detail_parts.append(" | ".join(active_jobs_info))
+                    progress.update(
+                        task_ids[queue_name],
+                        total=total_for_queue if total_for_queue > 0 else None,
+                        completed=completed_in_queue,
+                        detail=" | ".join(detail_parts),
+                    )
+
+                if not self.manager.is_running():
+                    break
+
+                time.sleep(1.0)
+        finally:
+            progress.stop()
+
+
+def _should_use_rich_progress() -> bool:
+    if not _RICH_AVAILABLE:
+        return False
+    preference = os.environ.get("ROBIN_PROGRESS", "").strip().lower()
+    if preference in {"tqdm", "plain", "off", "0", "false", "no"}:
+        return False
+    if preference in {"rich", "on", "1", "true", "yes"}:
+        return True
+    return True

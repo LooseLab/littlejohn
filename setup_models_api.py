@@ -17,7 +17,7 @@ def get_release_assets(github_token):
     
     try:
         request = urllib.request.Request(
-            "https://api.github.com/repos/LooseLab/littlejohn/releases/tags/v0.0.1",
+            "https://api.github.com/repos/LooseLab/littlejohn/releases/tags/v0.5",
             headers=headers
         )
         with urllib.request.urlopen(request) as response:
@@ -27,7 +27,7 @@ def get_release_assets(github_token):
         if e.code == 401:
             raise RuntimeError("Authentication failed. Check your GitHub token.")
         elif e.code == 404:
-            raise RuntimeError("Release v0.0.1 not found.")
+            raise RuntimeError("Release v0.5 not found.")
         else:
             raise RuntimeError(f"HTTP error {e.code}: {e.reason}")
 
@@ -108,8 +108,8 @@ def main():
     # Expected checksums from assets.json
     expected_checksums = {
         "general.zip": "706e043f3b9f248e51e9e57b0a01085efb93ae01d8a52fcff53418c7b39bbe26",
-        "Capper_et_al_NN.pkl": "8ae3d464832ad4755e429e67833de17916c2f54ae2fdbfb6eff33fdcd78e626d",
-        "pancan_devel_v5i_NN.pkl": "66e58f4d9745e29db18846339f1fd24729364543702ff3ece3217d299334ff2b"
+        "Capper_et_al_NN_v2.pkl": "00b05dc5ad2c6f617d95517422ef47181f891d60a0c87fbe91af542d574cbbd5",
+        "pancan_devel_v5i_NN_v2.pkl": "4d4193ff98c5bc066a5eaf480924aeecf91d61dd85dbe6ad649419b596236806"
     }
     
     # Download each asset

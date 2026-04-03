@@ -36,8 +36,11 @@ warnings.filterwarnings(
 
 import os
 import sys
+import csv
+import shutil
+import tempfile
 from pathlib import Path
-from typing import Optional, List, Dict, Tuple, Any
+from typing import Optional, List, Dict, Tuple, Any, Iterable
 
 import click
 import logging
@@ -46,22 +49,53 @@ import logging
 is_development_mode = os.environ.get("ROBIN_DEV_MODE", "").lower() in ("1", "true", "yes", "on")
 
 from robin.workflow_simple import default_file_classifier, Job
-from robin.analysis.bam_preprocessor import bam_preprocessing_handler
-from robin.analysis.mgmt_analysis import mgmt_handler
-from robin.analysis.cnv_analysis import cnv_handler
-from robin.analysis.bed_conversion import bed_conversion_handler
-from robin.analysis.sturgeon_analysis import sturgeon_handler
-from robin.analysis.nanodx_analysis import nanodx_handler, pannanodx_handler
-from robin.analysis.random_forest_analysis import random_forest_handler
-from robin.analysis.target_analysis import target_handler
-from robin.analysis.fusion_analysis import fusion_handler
+
+# Many analysis handlers have optional third-party dependencies. Import them lazily
+# so lightweight commands (e.g. `robin utils update-models`) still work.
+_analysis_import_error: Optional[BaseException] = None
+try:
+    from robin.analysis.bam_preprocessor import bam_preprocessing_handler
+    from robin.analysis.mgmt_analysis import mgmt_handler
+    from robin.analysis.cnv_analysis import cnv_handler
+    from robin.analysis.bed_conversion import bed_conversion_handler
+    from robin.analysis.sturgeon_analysis import sturgeon_handler
+    from robin.analysis.nanodx_analysis import nanodx_handler, pannanodx_handler
+    from robin.analysis.random_forest_analysis import random_forest_handler
+    from robin.analysis.target_analysis import target_handler
+    from robin.analysis.fusion_analysis import fusion_handler
+    from robin.analysis.utilities.matkit import run_matkit
+    from robin.analysis.mgmt_analysis import extract_mgmt_site_rows_from_bed
+except Exception as e:
+    _analysis_import_error = e
+    bam_preprocessing_handler = None  # type: ignore[assignment]
+    mgmt_handler = None  # type: ignore[assignment]
+    cnv_handler = None  # type: ignore[assignment]
+    bed_conversion_handler = None  # type: ignore[assignment]
+    sturgeon_handler = None  # type: ignore[assignment]
+    nanodx_handler = None  # type: ignore[assignment]
+    pannanodx_handler = None  # type: ignore[assignment]
+    random_forest_handler = None  # type: ignore[assignment]
+    target_handler = None  # type: ignore[assignment]
+    fusion_handler = None  # type: ignore[assignment]
+    run_matkit = None  # type: ignore[assignment]
+    extract_mgmt_site_rows_from_bed = None  # type: ignore[assignment]
 from robin.logging_config import (
     configure_logging,
+)
+from robin.utils.sequencing_files import (
+    DEFAULT_GRCH38_REFERENCE_URL,
+    copy_panel_bed_to,
+    copy_panel_source_bed_if_present,
+    describe_reference_action,
+    materialize_reference,
+    panel_bed_filename,
+    panel_source_available,
+    panel_source_filename,
 )
 
 
 def _download_missing_models(missing_files, models_dir):
-    """Download missing model files using the same logic as setup_models.py"""
+    """Download missing model files (same asset manifest logic as ``robin utils update-models``)."""
     import json
     import hashlib
     import urllib.request
@@ -70,11 +104,15 @@ def _download_missing_models(missing_files, models_dir):
     
     print("\n🔄 Attempting to download missing models...")
     
+    # Find project root from models_dir location
+    # models_dir is src/robin/models, so project root is 3 levels up
+    project_root = models_dir.parent.parent.parent
+    
     # Load assets manifest
     try:
-        assets_file = Path.cwd() / "assets.json"
+        assets_file = project_root / "assets.json"
         if not assets_file.exists():
-            print("❌ assets.json not found. Cannot download models automatically.")
+            print(f"❌ assets.json not found at {assets_file}. Cannot download models automatically.")
             return False
         
         with open(assets_file, 'r') as f:
@@ -86,8 +124,8 @@ def _download_missing_models(missing_files, models_dir):
     # Asset name mapping
     asset_mapping = {
         "general.zip": "general_model",
-        "Capper_et_al_NN.pkl": "capper_model", 
-        "pancan_devel_v5i_NN.pkl": "pancan_model"
+        "Capper_et_al_NN_v2.pkl": "capper_model", 
+        "pancan_devel_v5i_NN_v2.pkl": "pancan_model"
     }
     
     github_token = os.getenv('GITHUB_TOKEN')
@@ -157,128 +195,54 @@ def _download_missing_models(missing_files, models_dir):
 
 
 def _check_models_or_exit():
-    """Check for required model files and offer to download them if missing."""
-    from pathlib import Path
-    
-    # Define required models
-    required_models = [
-        "general.zip",
-        "Capper_et_al_NN.pkl", 
-        "pancan_devel_v5i_NN.pkl"
-    ]
-    
-    # Try to find models directory - prioritize current working directory
-    strategies = [
-        # Strategy 1: Current working directory (most reliable for development)
-        Path.cwd() / "src" / "robin" / "models",
-        # Strategy 2: Look for project root from current directory
-        Path.cwd() / "robin" / "models",
-        # Strategy 3: Look relative to this file (for installed packages)
-        Path(__file__).parent.parent / "models",
-        # Strategy 4: Look in common installation locations
-        Path.home() / ".local" / "share" / "robin" / "models",
-        Path("/usr/local/share/robin/models"),
-        Path("/opt/robin/models"),
-    ]
-    
-    models_dir = None
-    for strategy in strategies:
-        if strategy.exists():
-            models_dir = strategy
-            break
-    
-    if models_dir is None:
-        print("❌ Could not locate ROBIN models directory")
-        print("Please ensure you're running ROBIN from the project root directory")
-        print("or that the models are installed in a standard location.")
+    """Ensure required runtime assets exist; auto-download missing ones."""
+    try:
+        from robin.utils.model_checker import get_models_directory, check_model_files
+        from robin.utils.model_updater import update_models as _update_models
+        from robin.utils.clinvar_manager import ensure_clinvar_files
+    except Exception as e:
+        click.echo(f"❌ Could not load asset bootstrap helpers: {e}", err=True)
         sys.exit(1)
-    
-    # Check for missing files
-    missing_files = []
-    present_files = []
-    
-    for filename in required_models:
-        model_path = models_dir / filename
-        if model_path.exists() and model_path.stat().st_size > 0:
-            present_files.append(filename)
-        else:
-            missing_files.append(filename)
-    
-    if missing_files:
-        print("\n" + "="*60)
-        print("ROBIN MODEL STATUS CHECK")
-        print("="*60)
-        print("❌ Missing required model files:")
-        for filename in missing_files:
-            print(f"   ✗ {filename}")
-        
-        if present_files:
-            print("\n✅ Present model files:")
-            for filename in present_files:
-                print(f"   ✓ {filename}")
-        
-        print(f"\n📁 Models directory: {models_dir}")
-        print(f"📁 Current working directory: {Path.cwd()}")
-        
-        # Ask user if they want to download
-        print("\n" + "="*60)
-        print("AUTOMATIC DOWNLOAD OPTION")
-        print("="*60)
-        print("Would you like to automatically download the missing model files?")
-        print("This will use the same method as 'python setup_models.py'")
-        
-        try:
-            response = input("\nDownload missing models? [Y/n]: ").strip().lower()
-            if response in ['', 'y', 'yes']:
-                if _download_missing_models(missing_files, models_dir):
-                    print("\n🎉 All models downloaded successfully!")
-                    print("ROBIN is now ready to run.")
-                    return  # Success, continue execution
-                else:
-                    print("\n⚠️  Some downloads failed. Trying alternative method...")
-                    print("\n" + "="*60)
-                    print("FALLBACK TO API METHOD")
-                    print("="*60)
-                    print("The automatic download failed. You can try the API method:")
-                    print()
-                    print("1. Set a GitHub token:")
-                    print("   export GITHUB_TOKEN=your_github_token")
-                    print()
-                    print("2. Run the API download script:")
-                    print("   python setup_models_api.py")
-                    print()
-                    print("3. Or run the original setup script:")
-                    print("   python setup_models.py")
-                    print()
-                    print("After downloading, run ROBIN again.")
-                    print("="*60)
-                    sys.exit(1)
-            else:
-                print("\n" + "="*60)
-                print("MANUAL DOWNLOAD INSTRUCTIONS")
-                print("="*60)
-                print("To download the missing model files manually, run one of these commands:")
-                print()
-                print("Option 1 - Using setup_models.py (works with public repositories):")
-                print("   python setup_models.py")
-                print()
-                print("Option 2 - Using setup_models_api.py (requires GitHub token for private repos):")
-                print("   export GITHUB_TOKEN=your_github_token")
-                print("   python setup_models_api.py")
-                print()
-                print("Note: Option 1 works if the repository is public.")
-                print("Option 2 is needed for private repositories or if you have a GitHub token.")
-                print("You can create a token at: https://github.com/settings/tokens")
-                print()
-                print("After downloading, you can run ROBIN normally.")
-                print("="*60)
-                print("\n⚠️  ROBIN cannot run without the required model files.")
-                print("Please download them using one of the methods above and try again.")
-                sys.exit(1)
-        except KeyboardInterrupt:
-            print("\n\n⚠️  Download cancelled by user.")
-            print("ROBIN cannot run without the required model files.")
+
+    # 1) Ensure required models are available (auto-download missing on first run).
+    try:
+        models_dir = get_models_directory()
+    except Exception as e:
+        click.echo(f"❌ Could not locate ROBIN models directory: {e}", err=True)
+        sys.exit(1)
+
+    all_present, missing_files, _present_files = check_model_files()
+    if not all_present:
+        click.echo("Missing required model files detected. Downloading now...")
+        ok, msgs = _update_models(models_dir=models_dir, overwrite=False)
+        for m in msgs:
+            click.echo(m)
+        if not ok:
+            click.echo(
+                "❌ Failed to download required model files. "
+                "You can retry with: robin utils update-models",
+                err=True,
+            )
             sys.exit(1)
+
+        all_present_after, missing_after, _present_after = check_model_files()
+        if not all_present_after:
+            click.echo(
+                f"❌ Required model files are still missing after download: {', '.join(missing_after)}",
+                err=True,
+            )
+            sys.exit(1)
+
+    # 2) Ensure ClinVar VCF resources are available (download or generate as needed).
+    try:
+        ensure_clinvar_files(download_if_missing=True)
+    except Exception as e:
+        click.echo(
+            "❌ Failed to set up ClinVar VCF files automatically. "
+            f"You can retry with: robin utils update-clinvar\nReason: {e}",
+            err=True,
+        )
+        sys.exit(1)
 
 
 # Constants
@@ -318,6 +282,34 @@ JOBS_REQUIRING_BED_CONVERSION = {"sturgeon", "nanodx", "pannanodx", "random_fore
 
 from robin.reporting.sections.disclaimer_text import EXTENDED_DISCLAIMER_TEXT
 
+try:
+    from rich.console import Console
+    from rich.panel import Panel
+
+    _RICH_AVAILABLE = True
+except Exception:
+    _RICH_AVAILABLE = False
+
+_RICH_CONSOLE = Console() if _RICH_AVAILABLE else None
+
+
+def _echo_styled(message: str, level: str = "info") -> None:
+    """Print with optional rich styling (no emojis)."""
+    if not _RICH_AVAILABLE or _RICH_CONSOLE is None:
+        click.echo(message)
+        return
+
+    styles = {
+        "info": "cyan",
+        "success": "green",
+        "warn": "yellow",
+        "error": "red",
+        "header": "bold magenta",
+        "muted": "dim",
+    }
+    style = styles.get(level, "white")
+    _RICH_CONSOLE.print(message, style=style)
+
 # Disclaimer text for user acknowledgment
 DISCLAIMER_TEXT = EXTENDED_DISCLAIMER_TEXT
 
@@ -347,9 +339,24 @@ def _get_user_acknowledgment() -> bool:
     if is_development_mode:
         return True
         
-    click.echo("\nDISCLAIMER:")
-    click.echo(DISCLAIMER_TEXT)
-    click.echo("\nTo proceed, please type 'I agree' (exactly as shown):")
+    if _RICH_AVAILABLE and _RICH_CONSOLE is not None:
+        _RICH_CONSOLE.print(
+            Panel(
+                DISCLAIMER_TEXT,
+                title="DISCLAIMER",
+                title_align="left",
+                border_style="yellow",
+                style="yellow",
+                expand=False,
+            )
+        )
+    else:
+        click.echo("\n" + "=" * 70)
+        click.echo("DISCLAIMER:")
+        click.echo("=" * 70)
+        click.echo(DISCLAIMER_TEXT)
+        click.echo("=" * 70)
+    _echo_styled("\nTo proceed, please type 'I agree' (exactly as shown):", level="warn")
     try:
         response = input().strip()
     except (KeyboardInterrupt, EOFError):
@@ -366,11 +373,231 @@ def _get_user_acknowledgment() -> bool:
     return False
 
 
+def _warn_if_process_large_bams() -> None:
+    """If ROBIN_PROCESS_LARGE_BAMS is set, print a warning not to use with live runs."""
+    if os.environ.get("ROBIN_PROCESS_LARGE_BAMS", "0").strip().lower() in ("1", "true", "yes", "on"):
+        _echo_styled(
+            "Warning: ROBIN_PROCESS_LARGE_BAMS is enabled. Do not use this option alongside live runs.",
+            level="warn",
+        )
+
+
 @click.group()
 @click.version_option()
 def main() -> None:
     """Robin now uses Little John - his second in command who kept the merry men in line."""
     pass
+
+
+def _iter_mgmt_bams(root: Path, recursive: bool) -> Iterable[Path]:
+    """Yield mgmt_sorted.bam paths under a root directory."""
+    if recursive:
+        yield from root.rglob("mgmt_sorted.bam")
+        return
+
+    direct = root / "mgmt_sorted.bam"
+    if direct.exists():
+        yield direct
+
+    for entry in root.iterdir():
+        if not entry.is_dir():
+            continue
+        candidate = entry / "mgmt_sorted.bam"
+        if candidate.exists():
+            yield candidate
+
+
+@main.group()
+def password() -> None:
+    """Manage the GUI login password (stored as a hash)."""
+    pass
+
+
+@password.command("set")
+def password_set() -> None:
+    """Set or replace the GUI password. Prompts twice for confirmation; input is never echoed."""
+    try:
+        from robin.gui_launcher import set_gui_password_interactive
+    except ImportError as e:
+        click.echo(f"GUI password module not available: {e}", err=True)
+        sys.exit(1)
+    if not set_gui_password_interactive():
+        sys.exit(1)
+    click.echo("GUI password set successfully.")
+
+
+@main.group()
+def utils() -> None:
+    """Utility helpers for inspecting robin outputs."""
+    pass
+
+
+@utils.command()
+@click.argument("output_dir", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--recursive",
+    "-r",
+    is_flag=True,
+    help="Search for mgmt_sorted.bam recursively under output_dir.",
+)
+@click.option(
+    "--out",
+    "-o",
+    "out_path",
+    type=click.Path(path_type=Path),
+    default="-",
+    help="Output TSV path (default: stdout).",
+)
+def mgmt(output_dir: Path, recursive: bool, out_path: Path) -> None:
+    """Summarize MGMT CpG site methylation counts from mgmt_sorted.bam files."""
+    if not output_dir.exists():
+        click.echo(f"Error: output_dir not found: {output_dir}", err=True)
+        sys.exit(1)
+
+    bam_paths = list(_iter_mgmt_bams(output_dir, recursive))
+    if not bam_paths:
+        click.echo(
+            f"No mgmt_sorted.bam files found under {output_dir} (recursive={recursive}).",
+            err=True,
+        )
+        sys.exit(1)
+
+    output_stream = sys.stdout if str(out_path) == "-" else open(out_path, "w", newline="")
+    try:
+        writer = csv.writer(output_stream, delimiter="\t")
+        writer.writerow(
+            [
+                "sample_id",
+                "run_path",
+                "site",
+                "chr",
+                "pos",
+                "cov_fwd",
+                "cov_rev",
+                "cov_total",
+                "meth_fwd",
+                "meth_rev",
+                "meth_total",
+                "meth_pct",
+            ]
+        )
+
+        for bam_path in sorted(bam_paths):
+            run_dir = bam_path.parent
+            sample_id = run_dir.name
+            rel_run_path = os.path.relpath(run_dir, output_dir)
+
+            with tempfile.NamedTemporaryFile(
+                suffix=".bed", delete=False
+            ) as temp_bed:
+                temp_bed_path = temp_bed.name
+
+            try:
+                run_matkit(str(bam_path), temp_bed_path)
+                site_rows = extract_mgmt_site_rows_from_bed(temp_bed_path)
+            except Exception as exc:
+                click.echo(
+                    f"Failed to process {bam_path}: {exc}",
+                    err=True,
+                )
+                continue
+            finally:
+                try:
+                    os.remove(temp_bed_path)
+                except OSError:
+                    pass
+
+            if not site_rows:
+                click.echo(
+                    f"No MGMT site data found in {bam_path}",
+                    err=True,
+                )
+                continue
+
+            for row in site_rows:
+                meth_fwd = int(row.get("meth_fwd", 0))
+                meth_rev = int(row.get("meth_rev", 0))
+                meth_total = meth_fwd + meth_rev
+                cov_total = int(row.get("cov_total", 0))
+                meth_pct = round((meth_total / cov_total) * 100.0, 2) if cov_total else 0.0
+                site_label = str(row.get("site", "")).split(" ")[0] if row.get("site") else ""
+                writer.writerow(
+                    [
+                        sample_id,
+                        rel_run_path,
+                        site_label,
+                        row.get("chr", ""),
+                        row.get("pos", ""),
+                        row.get("cov_fwd", 0),
+                        row.get("cov_rev", 0),
+                        cov_total,
+                        meth_fwd,
+                        meth_rev,
+                        meth_total,
+                        meth_pct,
+                    ]
+                )
+    finally:
+        if output_stream is not sys.stdout:
+            output_stream.close()
+
+
+@utils.command("update-clinvar")
+def update_clinvar() -> None:
+    """Update ClinVar to the newest available NCBI version (best-effort)."""
+
+    try:
+        from robin.utils.clinvar_manager import update_clinvar_if_newer
+
+        updated = update_clinvar_if_newer(download_if_missing=True)
+        if updated:
+            click.echo("ClinVar updated successfully.")
+        else:
+            click.echo("ClinVar is already up to date.")
+    except Exception as e:
+        click.echo(f"Failed to update ClinVar: {e}", err=True)
+        sys.exit(1)
+
+
+@utils.command("update-models")
+@click.option(
+    "--models-dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Directory to place model files (defaults to ROBIN's models directory).",
+)
+@click.option(
+    "--manifest",
+    "manifest_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Path to assets.json manifest (defaults to repo-root assets.json or ROBIN_ASSETS_MANIFEST).",
+)
+@click.option(
+    "--overwrite",
+    is_flag=True,
+    help="Overwrite existing model files (default: skip existing).",
+)
+def update_models(models_dir: Optional[Path], manifest_path: Optional[Path], overwrite: bool) -> None:
+    """Download/update ROBIN model files using the assets manifest."""
+    try:
+        from robin.utils.model_checker import get_models_directory
+        from robin.utils.model_updater import update_models as _update_models
+
+        target_dir = models_dir or get_models_directory()
+        ok, msgs = _update_models(
+            models_dir=target_dir,
+            manifest_path=str(manifest_path) if manifest_path else None,
+            overwrite=overwrite,
+        )
+        for m in msgs:
+            click.echo(m)
+        if not ok:
+            sys.exit(1)
+        click.echo("Model update complete.")
+    except Exception as e:
+        click.echo(f"Failed to update models: {e}", err=True)
+        sys.exit(1)
 
 
 def _remove_panel_from_system(panel_name: str) -> bool:
@@ -401,9 +628,13 @@ def _remove_panel_from_system(panel_name: str) -> bool:
             return False
         
         # Confirm removal
+        source_preview = resources_dir / panel_source_filename(panel_name)
         click.echo(f"Panel '{panel_name}' will be removed:")
-        click.echo(f"  File: {panel_path}")
+        click.echo(f"  Processed BED: {panel_path}")
         click.echo(f"  Size: {panel_path.stat().st_size} bytes")
+        if source_preview.exists():
+            click.echo(f"  Original upload: {source_preview}")
+            click.echo(f"  Size: {source_preview.stat().st_size} bytes")
         
         # Ask for confirmation
         try:
@@ -415,12 +646,16 @@ def _remove_panel_from_system(panel_name: str) -> bool:
             click.echo("\nPanel removal cancelled.")
             return False
         
-        # Remove the file
+        # Remove processed BED and optional stored original upload
         panel_path.unlink()
-        
+        source_path = resources_dir / panel_source_filename(panel_name)
+        if source_path.exists():
+            source_path.unlink()
+            click.echo(f"Removed file: {source_path}")
+
         click.echo(f"Panel '{panel_name}' removed successfully")
         click.echo(f"Removed file: {panel_path}")
-        
+
         return True
         
     except Exception as e:
@@ -471,17 +706,21 @@ def remove_panel(panel_name: str, force: bool) -> None:
     # Check if panel exists
     panel_filename = f"{panel_name}_panel_name_uniq.bed"
     panel_path = resources_dir / panel_filename
-    
+    source_path = resources_dir / panel_source_filename(panel_name)
+
     if not panel_path.exists():
         click.echo(f"Error: Panel '{panel_name}' not found", err=True)
         click.echo(f"Expected file: {panel_path}", err=True)
         click.echo("\nUse 'robin list-panels' to see available panels.", err=True)
         sys.exit(1)
-    
+
     # Show panel info
     click.echo(f"Panel '{panel_name}' found:")
-    click.echo(f"  File: {panel_path}")
+    click.echo(f"  Processed BED: {panel_path}")
     click.echo(f"  Size: {panel_path.stat().st_size} bytes")
+    if source_path.exists():
+        click.echo(f"  Original upload: {source_path}")
+        click.echo(f"  Size: {source_path.stat().st_size} bytes")
     
     # Confirm removal unless --force is used
     if not force:
@@ -494,12 +733,15 @@ def remove_panel(panel_name: str, force: bool) -> None:
             click.echo("\nPanel removal cancelled.")
             return
     
-    # Remove the file
+    # Remove processed BED and optional stored original
     try:
         panel_path.unlink()
+        click.echo(f"\nRemoved file: {panel_path}")
+        if source_path.exists():
+            source_path.unlink()
+            click.echo(f"Removed file: {source_path}")
         click.echo(f"\nPanel '{panel_name}' removed successfully!")
-        click.echo(f"Removed file: {panel_path}")
-        click.echo(f"Use 'robin list-panels' to see remaining panels")
+        click.echo("Use 'robin list-panels' to see remaining panels")
     except Exception as e:
         click.echo(f"Error removing panel file: {e}", err=True)
         sys.exit(1)
@@ -758,6 +1000,115 @@ def _get_available_panels() -> List[str]:
     return panels
 
 
+@utils.command("sequencing-files")
+@click.option(
+    "--panel",
+    "-p",
+    "panel",
+    type=click.Choice(_get_available_panels()),
+    required=True,
+    help="Target gene panel (same as ROBIN workflow --target-panel).",
+)
+@click.option(
+    "--reference",
+    "-r",
+    "reference",
+    type=str,
+    default=DEFAULT_GRCH38_REFERENCE_URL,
+    show_default=True,
+    help=(
+        "Reference genome: HTTPS URL to download, or path to a local FASTA "
+        "(e.g. .fa or .fa.gz)."
+    ),
+)
+@click.option(
+    "--output-dir",
+    "-o",
+    "output_dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Directory for outputs (default: ./reference_files in the current working directory).",
+)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    help="Proceed without interactive confirmation (for scripts).",
+)
+def sequencing_files(
+    panel: str,
+    reference: str,
+    output_dir: Optional[Path],
+    yes: bool,
+) -> None:
+    """Copy panel BED(s) and reference genome for sequencing.
+
+    Copies the processed ``*_panel_name_uniq.bed`` and, when packaged, ``*_panel_source.bed``
+    (original / unprocessed design) into one folder for adaptive sampling and aligners.
+    The default reference is NCBI GRCh38 (no-alt analysis set, UCSC-style names), a large download.
+    """
+    out = (output_dir or (Path.cwd() / "reference_files")).resolve()
+    bed_name = panel_bed_filename(panel)
+    source_name = panel_source_filename(panel)
+    has_source = panel_source_available(panel)
+
+    click.echo("")
+    click.echo("Planned actions:")
+    click.echo(f"  Output directory: {out}")
+    step = 1
+    click.echo(
+        f"  {step}. Processed panel BED: copy '{bed_name}' from ROBIN "
+        "(unique genes; used for ROBIN analyses)."
+    )
+    step += 1
+    if has_source:
+        click.echo(
+            f"  {step}. Source panel BED: copy '{source_name}' "
+            "(unprocessed design; shipped with ROBIN or from `robin add-panel`)."
+        )
+        step += 1
+    else:
+        click.echo(
+            f"  — No '{source_name}' in ROBIN for this panel "
+            "(optional file; add it under `robin/resources` to include it here)."
+        )
+    click.echo(f"  {step}. Reference genome:")
+    for line in describe_reference_action(reference, out).split("\n"):
+        click.echo(f"     {line}")
+
+    if not yes:
+        click.echo("")
+        if not click.confirm(
+            "Proceed with copying the panel BED(s) and fetching the reference as described above?",
+            default=False,
+        ):
+            raise click.Abort()
+
+    try:
+        bed_dest = copy_panel_bed_to(panel, out)
+        click.echo(f"Copied processed panel BED to: {bed_dest}")
+    except FileNotFoundError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    src_dest = copy_panel_source_bed_if_present(panel, out)
+    if src_dest:
+        click.echo(f"Copied source panel BED to: {src_dest}")
+
+    try:
+        ref_dest = materialize_reference(reference, out)
+        click.echo(f"Reference genome at: {ref_dest}")
+    except (FileNotFoundError, RuntimeError) as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    click.echo("")
+    click.echo(
+        "Done. Use the source or processed BED as needed for adaptive sampling; "
+        "use the reference FASTA for alignment."
+    )
+
+
 def _register_panel_in_system(panel_name: str, bed_path: Path) -> bool:
     """Register the new panel in ROBIN system by updating relevant files."""
     try:
@@ -802,6 +1153,9 @@ def add_panel(bed_file: Path, panel_name: str, validate_only: bool) -> None:
     
     Gene names can be comma-separated for regions covering multiple genes.
     The output will be a unique gene list with one entry per gene.
+
+    ROBIN also stores an unmodified copy of your upload as
+    '{panel_name}_panel_source.bed' alongside the processed file.
     """
     if not _get_user_acknowledgment():
         sys.exit(1)
@@ -846,29 +1200,51 @@ def add_panel(bed_file: Path, panel_name: str, validate_only: bool) -> None:
     
     output_filename = f"{panel_name}_panel_name_uniq.bed"
     output_path = resources_dir / output_filename
-    
+    source_path = resources_dir / panel_source_filename(panel_name)
+
     # Check if panel already exists
     if output_path.exists():
         click.echo(f"Error: Panel '{panel_name}' already exists at {output_path}", err=True)
         click.echo("Please choose a different panel name or remove the existing panel first.", err=True)
         sys.exit(1)
-    
+    if source_path.exists():
+        click.echo(f"Error: File already exists: {source_path}", err=True)
+        click.echo("Remove it or choose a different panel name.", err=True)
+        sys.exit(1)
+
+    click.echo(f"Storing original BED (unprocessed): {source_path}")
+    try:
+        shutil.copy2(bed_file, source_path)
+    except OSError as e:
+        click.echo(f"Error copying original BED file: {e}", err=True)
+        sys.exit(1)
+
     click.echo(f"Generating unique gene BED file: {output_path}")
-    
+
     # Generate unique gene BED file
     if not _generate_unique_gene_bed(bed_file, output_path):
         click.echo("Failed to generate unique gene BED file", err=True)
+        try:
+            source_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         sys.exit(1)
-    
+
     click.echo("Unique gene BED file generated successfully")
-    
+
     # Register panel in system
     if not _register_panel_in_system(panel_name, output_path):
         click.echo("Failed to register panel in system", err=True)
+        try:
+            output_path.unlink(missing_ok=True)
+            source_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         sys.exit(1)
-    
+
     click.echo(f"\nPanel '{panel_name}' added successfully!")
-    click.echo(f"BED file: {output_path}")
+    click.echo(f"  Processed BED (unique genes): {output_path}")
+    click.echo(f"  Original upload: {source_path}")
     click.echo(f"Usage: Use --target-panel {panel_name} in workflow commands")
     click.echo(f"Example: robin workflow /path/to/bams --workflow mgmt,target --target-panel {panel_name}")
     click.echo(f"Remove: robin remove-panel {panel_name}")
@@ -1084,6 +1460,10 @@ def _create_ray_workflow_runner(
             ) -> bool:
                 """Submit a SNP analysis job for an existing sample directory using Ray workflow."""
                 try:
+                    sid_for_log = sample_id or Path(sample_dir).name
+                    click.echo(
+                        f"[SNP] Submitting SNP analysis for sample '{sid_for_log}'..."
+                    )
                     # Try to get coordinator with retries
                     import time
                     from robin import workflow_ray as wrn
@@ -1099,7 +1479,7 @@ def _create_ray_workflow_runner(
                             except Exception:
                                 pass
 
-                        if self.coordinator is None:
+                        if self.coordinator is not None:
                             break
 
                         if attempt < max_retries - 1:
@@ -1107,6 +1487,10 @@ def _create_ray_workflow_runner(
                             retry_delay *= 1.5  # Exponential backoff
 
                     if self.coordinator is None:
+                        click.echo(
+                            f"[SNP] Failed to get coordinator for sample '{sid_for_log}'.",
+                            err=True,
+                        )
                         return False
 
                     # Submit the SNP analysis job using the coordinator
@@ -1120,11 +1504,100 @@ def _create_ray_workflow_runner(
 
                     try:
                         final_result = ray.get(result, timeout=30.0)
+                        if final_result:
+                            click.echo(
+                                f"[SNP] Queued SNP analysis for sample '{sid_for_log}'."
+                            )
+                        else:
+                            click.echo(
+                                f"[SNP] Submission returned False for sample '{sid_for_log}'.",
+                                err=True,
+                            )
                         return final_result
-                    except Exception:
+                    except Exception as e:
+                        click.echo(
+                            f"[SNP] Failed waiting for submit confirmation for sample '{sid_for_log}': {e}",
+                            err=True,
+                        )
                         return False
 
-                except Exception:
+                except Exception as e:
+                    click.echo(
+                        f"[SNP] Unexpected submission error for sample '{sample_id or Path(sample_dir).name}': {e}",
+                        err=True,
+                    )
+                    return False
+
+            def submit_target_bam_finalize_job(
+                self,
+                sample_dir: str,
+                sample_id: str = None,
+                target_panel: str = None,
+                reference: str = None,
+            ) -> bool:
+                """Submit a target BAM finalization job for an existing sample directory using Ray workflow."""
+                try:
+                    sid_for_log = sample_id or Path(sample_dir).name
+                    click.echo(
+                        f"[Finalize] Submitting target BAM finalization for sample '{sid_for_log}'..."
+                    )
+                    import time
+                    from robin import workflow_ray as wrn
+
+                    max_retries = 5
+                    retry_delay = 1.0
+
+                    for attempt in range(max_retries):
+                        if self.coordinator is None:
+                            try:
+                                self.coordinator = wrn.get_coordinator_sync()
+                            except Exception:
+                                pass
+
+                        if self.coordinator is not None:
+                            break
+
+                        if attempt < max_retries - 1:
+                            time.sleep(retry_delay)
+                            retry_delay *= 1.5
+
+                    if self.coordinator is None:
+                        click.echo(
+                            f"[Finalize] Failed to get coordinator for sample '{sid_for_log}'.",
+                            err=True,
+                        )
+                        return False
+
+                    result = self.coordinator.submit_target_bam_finalize_job.remote(
+                        sample_dir, sample_id, target_panel, reference
+                    )
+
+                    import ray
+
+                    try:
+                        final_result = ray.get(result, timeout=30.0)
+                        if final_result:
+                            click.echo(
+                                f"[Finalize] Queued target BAM finalization for sample '{sid_for_log}'."
+                            )
+                        else:
+                            click.echo(
+                                f"[Finalize] Submission returned False for sample '{sid_for_log}'.",
+                                err=True,
+                            )
+                        return final_result
+                    except Exception as e:
+                        click.echo(
+                            f"[Finalize] Failed waiting for submit confirmation for sample '{sid_for_log}': {e}",
+                            err=True,
+                        )
+                        return False
+
+                except Exception as e:
+                    click.echo(
+                        f"[Finalize] Unexpected submission error for sample '{sample_id or Path(sample_dir).name}': {e}",
+                        err=True,
+                    )
                     return False
 
             def is_sample_ready_for_snp_analysis(
@@ -1226,6 +1699,9 @@ def _initialize_ray(num_cpus: Optional[int], include_dashboard: bool = True) -> 
                 os.environ["RAY_DISABLE_IMPORT_WARNING"] = "1"
                 os.environ["RAY_DISABLE_DEPRECATION_WARNING"] = "1"
                 os.environ["RAY_OBJECT_STORE_ALLOW_SLOW_STORAGE"] = "1"
+                # Raise dashboard/State API job list limit (default 10k); set only if not already set
+                if "RAY_MAX_LIMIT_FROM_DATA_SOURCE" not in os.environ:
+                    os.environ["RAY_MAX_LIMIT_FROM_DATA_SOURCE"] = "100000"
 
                 # Bind dashboard to 0.0.0.0 when supported so it's reachable off-host
                 init_kwargs = {
@@ -1602,27 +2078,29 @@ def _display_workflow_config(
     queue_priority: tuple = (),
 ) -> None:
     """Display workflow configuration information."""
-    click.echo(f"Center: {center}")
+    _echo_styled(f"Center: {center}", level="info")
     
     if no_process_existing:
-        click.echo(
+            _echo_styled(
             f"Starting workflow on {path} for BAM files (skipping existing files)..."
-        )
+            )
     else:
-        click.echo(
+            _echo_styled(
             f"Starting workflow on {path} for BAM files (will process existing files first)..."
-        )
+            )
 
     if work_dir:
-        click.echo(f"Output directory: {work_dir}")
+        _echo_styled(f"Output directory: {work_dir}", level="info")
     else:
-        click.echo("Output directory: Not specified (using input directory)")
+        _echo_styled(
+            "Output directory: Not specified (using input directory)", level="warn"
+        )
 
     if uses_simplified_format:
         # Extract job types from the final workflow steps
         final_job_types = [step.split(":")[1] for step in workflow_steps if ":" in step]
-        click.echo(f"Workflow plan (simplified): {final_job_types}")
-        click.echo(f"Auto-assigned queues: {workflow_steps}")
+        _echo_styled(f"Workflow plan (simplified): {final_job_types}", level="info")
+        _echo_styled(f"Auto-assigned queues: {workflow_steps}", level="info")
 
         # Check if bed_conversion was auto-added
         if original_workflow and isinstance(original_workflow, str):
@@ -1631,14 +2109,15 @@ def _display_workflow_config(
                 "bed_conversion" in final_job_types
                 and "bed_conversion" not in original_jobs
             ):
-                click.echo(
-                    "Note: bed_conversion was automatically added as it's required for other jobs"
+                _echo_styled(
+                    "Note: bed_conversion was automatically added as it's required for other jobs",
+                    level="warn",
                 )
     else:
-        click.echo(f"Workflow plan: {workflow_steps}")
+        _echo_styled(f"Workflow plan: {workflow_steps}", level="info")
 
-    click.echo(f"Commands: {command_map}")
-    click.echo(f"Log_level: {log_level}")
+    _echo_styled(f"Commands: {command_map}", level="info")
+    _echo_styled(f"Log_level: {log_level}", level="info")
 
     if job_levels:
         click.echo(f"Job log levels: {job_levels}")
@@ -1647,7 +2126,7 @@ def _display_workflow_config(
 
     # Display Ray configuration if enabled
     if use_ray:
-        click.echo("Distributed computing: Ray (experimental)")
+        _echo_styled("Distributed computing: Ray (experimental)", level="info")
         if ray_num_cpus:
             click.echo(f"  - Ray CPUs: {ray_num_cpus}")
         else:
@@ -1661,7 +2140,9 @@ def _display_workflow_config(
         if queue_priority:
             click.echo(f"  - Queue priorities: {list(queue_priority)}")
     else:
-        click.echo("Distributed computing: Disabled (using threading)")
+        _echo_styled(
+            "Distributed computing: Disabled (using threading)", level="warn"
+        )
         click.echo("Worker configuration:")
         if legacy_analysis_queue:
             click.echo(
@@ -1676,8 +2157,8 @@ def _display_workflow_config(
 
         click.echo("  - Other queues: 1 worker each (fixed)")
 
-    click.echo("Press Ctrl+C to stop")
-    click.echo("Running The Workflow!")
+    _echo_styled("Press Ctrl+C to stop", level="warn")
+    _echo_styled("Running the workflow...", level="success")
 
 
 @main.command()
@@ -1875,12 +2356,15 @@ def workflow(
                 ref_path = str(reference) if isinstance(reference, Path) else reference
                 
                 # Use click.echo for visibility even when log level is ERROR
-                click.echo(f"Validating reference genome: {reference}")
+                _echo_styled(f"Validating reference genome: {reference}", level="info")
                 
                 # Validate and ensure index exists
                 _ensure_fasta_index(ref_path)
                 
-                click.echo(f"✓ Reference genome validated and indexed: {reference}")
+                _echo_styled(
+                    f"Reference genome validated and indexed: {reference}",
+                    level="success",
+                )
             except Exception as e:
                 error_msg = (
                     f"Failed to validate reference genome: {e}\n"
@@ -1893,6 +2377,8 @@ def workflow(
         # Require user acknowledgment before proceeding
         if not _get_user_acknowledgment():
             sys.exit(1)
+
+        _warn_if_process_large_bams()
 
         # Validate input parameters
         _validate_inputs(path, workflow, analysis_workers, ray_num_cpus)
@@ -1936,6 +2422,10 @@ def workflow(
             # Ensure Ray is initialized if CPUs not specified
             try:
                 import ray
+
+                # Raise dashboard/State API job list limit (default 10k) if not set
+                if "RAY_MAX_LIMIT_FROM_DATA_SOURCE" not in os.environ:
+                    os.environ["RAY_MAX_LIMIT_FROM_DATA_SOURCE"] = "100000"
 
                 if not ray.is_initialized():
                     # Apply preset CPU caps for Ray Core if provided

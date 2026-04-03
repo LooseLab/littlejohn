@@ -1,5 +1,5 @@
 {
-  "version": "0.0.1",
+  "version": "0.5",
   "assets": {
     "general_model": {
       "name": "general.zip",
@@ -10,20 +10,20 @@
       "description": "General machine learning model archive"
     },
     "capper_model": {
-      "name": "Capper_et_al_NN.pkl",
-      "version": "0.0.1",
-      "url": "https://github.com/LooseLab/littlejohn/releases/download/v0.0.1/Capper_et_al_NN.pkl",
-      "sha256": "8ae3d464832ad4755e429e67833de17916c2f54ae2fdbfb6eff33fdcd78e626d",
-      "size_bytes": 138089639,
-      "description": "Capper et al neural network model"
+      "name": "Capper_et_al_NN_v2.pkl",
+      "version": "0.5",
+      "url": "https://github.com/LooseLab/littlejohn/releases/download/v0.5/Capper_et_al_NN_v2.pkl",
+      "sha256": "00b05dc5ad2c6f617d95517422ef47181f891d60a0c87fbe91af542d574cbbd5",
+      "size_bytes": 138089704,
+      "description": "Capper et al neural network model (v2)"
     },
     "pancan_model": {
-      "name": "pancan_devel_v5i_NN.pkl",
-      "version": "0.0.1",
-      "url": "https://github.com/LooseLab/littlejohn/releases/download/v0.0.1/pancan_devel_v5i_NN.pkl",
-      "sha256": "66e58f4d9745e29db18846339f1fd24729364543702ff3ece3217d299334ff2b",
-      "size_bytes": 203907645,
-      "description": "Pan-cancer development v5i neural network model"
+      "name": "pancan_devel_v5i_NN_v2.pkl",
+      "version": "0.5",
+      "url": "https://github.com/LooseLab/littlejohn/releases/download/v0.5/pancan_devel_v5i_NN_v2.pkl",
+      "sha256": "4d4193ff98c5bc066a5eaf480924aeecf91d61dd85dbe6ad649419b596236806",
+      "size_bytes": 203907710,
+      "description": "Pan-cancer development v5i neural network model (v2)"
     }
   }
 }

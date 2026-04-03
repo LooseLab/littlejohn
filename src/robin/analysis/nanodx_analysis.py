@@ -40,6 +40,18 @@ except ImportError as e:
 from robin.logging_config import get_job_logger
 
 
+def _is_fail_only_expected(job) -> bool:
+    """True when errors are expected for fail-only BAM submissions."""
+    try:
+        if not bool(job.context.metadata.get("fail_only_bam_submission", False)):
+            return False
+        fp = getattr(job.context, "filepath", "") or ""
+        base = os.path.basename(fp).lower()
+        return ("fail" in base) and ("pass" not in base)
+    except Exception:
+        return False
+
+
 @dataclass
 class NanodxMetadata:
     """Container for NanoDX analysis metadata and results"""
@@ -187,7 +199,7 @@ def _direct_classification(
 class NanodxAnalysis:
     """NanoDX analysis worker"""
 
-    def __init__(self, work_dir=None, model: str = "Capper_et_al_NN.pkl"):
+    def __init__(self, work_dir=None, model: str = "Capper_et_al_NN_v2.pkl"):
         self.work_dir = work_dir or os.getcwd()
         self.model = model
 
@@ -199,7 +211,7 @@ class NanodxAnalysis:
         self.cpgs = self._load_cpgs_data()
 
         # Determine store file name
-        if self.model != "Capper_et_al_NN.pkl":
+        if self.model != "Capper_et_al_NN_v2.pkl":
             self.storefile = "PanNanoDX_scores.csv"
         else:
             self.storefile = "NanoDX_scores.csv"
@@ -248,9 +260,7 @@ class NanodxAnalysis:
 
         if models is not None:
             try:
-                model_path = os.path.join(
-                    os.path.dirname(os.path.abspath(models.__file__)), self.model
-                )
+                model_path = str(models.DIR / self.model)
                 if os.path.exists(model_path):
                     return model_path
             except Exception:
@@ -416,7 +426,7 @@ class NanodxAnalysis:
 class PanNanodxAnalysis(NanodxAnalysis):
     """PanNanoDX analysis worker"""
 
-    def __init__(self, work_dir=None, model: str = "pancan_devel_v5i_NN.pkl"):
+    def __init__(self, work_dir=None, model: str = "pancan_devel_v5i_NN_v2.pkl"):
         super().__init__(work_dir=work_dir, model=model)
 
         # Override store file name for PanNanoDX
@@ -431,7 +441,7 @@ class PanNanodxAnalysis(NanodxAnalysis):
         logger.debug(f"Store file: {self.storefile}")
 
 
-def process_multiple_files(parquet_paths, metadata_list, work_dir, logger, model="Capper_et_al_NN.pkl"):
+def process_multiple_files(parquet_paths, metadata_list, work_dir, logger, model="Capper_et_al_NN_v2.pkl"):
     """
     Process multiple parquet files for NanoDX analysis.
     
@@ -444,7 +454,7 @@ def process_multiple_files(parquet_paths, metadata_list, work_dir, logger, model
         metadata_list: List of metadata dictionaries (one per parquet file)
         work_dir: Working directory
         logger: Logger instance
-        model: Model to use ("Capper_et_al_NN.pkl" for NanoDX or "pancan_devel_v5i_NN.pkl" for PanNanoDX)
+        model: Model to use ("Capper_et_al_NN_v2.pkl" for NanoDX or "pancan_devel_v5i_NN_v2.pkl" for PanNanoDX)
 
     Returns:
         Dictionary with aggregated NanoDX analysis results
@@ -459,7 +469,7 @@ def process_multiple_files(parquet_paths, metadata_list, work_dir, logger, model
     sample_id = metadata_list[0].get("sample_id", "unknown")
     
     # Determine analysis type based on model
-    is_pannanodx = model != "Capper_et_al_NN.pkl"
+    is_pannanodx = model != "Capper_et_al_NN_v2.pkl"
     analysis_type = "PanNanoDX" if is_pannanodx else "NanoDX"
     
     logger.info(f"🧠 Starting multi-file {analysis_type} analysis for sample: {sample_id}")
@@ -591,6 +601,7 @@ def nanodx_handler(job, work_dir=None):
     """
     # Get job-specific logger first, before any potential exceptions
     logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
+    suppress_expected = _is_fail_only_expected(job)
 
     try:
         # Check if this is a batched job
@@ -639,8 +650,15 @@ def nanodx_handler(job, work_dir=None):
             
             if not parquet_paths:
                 error_msg = "No parquet paths found from bed conversion results in batch"
-                logger.error(error_msg)
-                job.context.add_error("nanodx_analysis", error_msg)
+                if suppress_expected:
+                    logger.warning(f"{error_msg} (expected for fail-only BAM submission)")
+                    job.context.add_result(
+                        "nanodx_analysis",
+                        {"status": "expected_failure", "reason": error_msg},
+                    )
+                else:
+                    logger.error(error_msg)
+                    job.context.add_error("nanodx_analysis", error_msg)
                 return
             
             # Determine work directory for the batch
@@ -660,7 +678,7 @@ def nanodx_handler(job, work_dir=None):
                 metadata_list=metadata_list,
                 work_dir=batch_work_dir,
                 logger=logger,
-                model="Capper_et_al_NN.pkl"  # NanoDX model
+                model="Capper_et_al_NN_v2.pkl"  # NanoDX model
             )
             
             # Store batch results in job context (maintain compatibility with existing structure)
@@ -678,8 +696,23 @@ def nanodx_handler(job, work_dir=None):
             logger.info(f"Total features processed: {batch_result.get('total_features', 0)}")
             
             if batch_result.get("error_message"):
-                logger.error(f"Batch processing completed with errors: {batch_result['error_message']}")
-                job.context.add_error("nanodx_analysis", batch_result["error_message"])
+                if suppress_expected:
+                    logger.warning(
+                        f"Batch processing completed with expected errors (fail-only BAM submission): {batch_result['error_message']}"
+                    )
+                    job.context.add_result(
+                        "nanodx_analysis",
+                        {
+                            "status": "expected_failure",
+                            "error_message": batch_result["error_message"],
+                            "sample_id": sample_id,
+                        },
+                    )
+                else:
+                    logger.error(
+                        f"Batch processing completed with errors: {batch_result['error_message']}"
+                    )
+                    job.context.add_error("nanodx_analysis", batch_result["error_message"])
             else:
                 logger.info("Batch processing completed successfully with aggregated NanoDX analysis")
                 job.context.add_result(
@@ -688,7 +721,7 @@ def nanodx_handler(job, work_dir=None):
                         "status": "success",
                         "sample_id": sample_id,
                         "analysis_time": batch_result.get("analysis_timestamp", 0),
-                        "model_used": batch_result.get("model_used", "Capper_et_al_NN.pkl"),
+                        "model_used": batch_result.get("model_used", "Capper_et_al_NN_v2.pkl"),
                         "n_features": batch_result.get("total_features", 0),
                         "store_path": batch_result.get("store_path", ""),
                         "processing_steps": batch_result.get("processing_steps", []),
@@ -761,6 +794,15 @@ def nanodx_handler(job, work_dir=None):
                 )
 
     except Exception as e:
+        if suppress_expected:
+            logger.warning(
+                f"Expected NanoDX failure for fail-only BAM submission: {e}"
+            )
+            job.context.add_result(
+                "nanodx_analysis",
+                {"status": "expected_failure", "error_message": str(e)},
+            )
+            return
         job.context.add_error("nanodx_analysis", str(e))
         logger.error(f"Error in NanoDX analysis for {job.context.filepath}: {e}")
 
@@ -776,6 +818,7 @@ def pannanodx_handler(job, work_dir=None):
     """
     # Get job-specific logger first, before any potential exceptions
     logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
+    suppress_expected = _is_fail_only_expected(job)
 
     try:
         # Check if this is a batched job
@@ -824,8 +867,15 @@ def pannanodx_handler(job, work_dir=None):
             
             if not parquet_paths:
                 error_msg = "No parquet paths found from bed conversion results in batch"
-                logger.error(error_msg)
-                job.context.add_error("pannanodx_analysis", error_msg)
+                if suppress_expected:
+                    logger.warning(f"{error_msg} (expected for fail-only BAM submission)")
+                    job.context.add_result(
+                        "pannanodx_analysis",
+                        {"status": "expected_failure", "reason": error_msg},
+                    )
+                else:
+                    logger.error(error_msg)
+                    job.context.add_error("pannanodx_analysis", error_msg)
                 return
             
             # Determine work directory for the batch
@@ -845,7 +895,7 @@ def pannanodx_handler(job, work_dir=None):
                 metadata_list=metadata_list,
                 work_dir=batch_work_dir,
                 logger=logger,
-                model="pancan_devel_v5i_NN.pkl"  # PanNanoDX model
+                model="pancan_devel_v5i_NN_v2.pkl"  # PanNanoDX model
             )
             
             # Store batch results in job context (maintain compatibility with existing structure)
@@ -863,8 +913,25 @@ def pannanodx_handler(job, work_dir=None):
             logger.info(f"Total features processed: {batch_result.get('total_features', 0)}")
             
             if batch_result.get("error_message"):
-                logger.error(f"Batch processing completed with errors: {batch_result['error_message']}")
-                job.context.add_error("pannanodx_analysis", batch_result["error_message"])
+                if suppress_expected:
+                    logger.warning(
+                        f"Batch processing completed with expected errors (fail-only BAM submission): {batch_result['error_message']}"
+                    )
+                    job.context.add_result(
+                        "pannanodx_analysis",
+                        {
+                            "status": "expected_failure",
+                            "error_message": batch_result["error_message"],
+                            "sample_id": sample_id,
+                        },
+                    )
+                else:
+                    logger.error(
+                        f"Batch processing completed with errors: {batch_result['error_message']}"
+                    )
+                    job.context.add_error(
+                        "pannanodx_analysis", batch_result["error_message"]
+                    )
             else:
                 logger.info("Batch processing completed successfully with aggregated PanNanoDX analysis")
                 job.context.add_result(
@@ -873,7 +940,7 @@ def pannanodx_handler(job, work_dir=None):
                         "status": "success",
                         "sample_id": sample_id,
                         "analysis_time": batch_result.get("analysis_timestamp", 0),
-                        "model_used": batch_result.get("model_used", "pancan_devel_v5i_NN.pkl"),
+                        "model_used": batch_result.get("model_used", "pancan_devel_v5i_NN_v2.pkl"),
                         "n_features": batch_result.get("total_features", 0),
                         "store_path": batch_result.get("store_path", ""),
                         "processing_steps": batch_result.get("processing_steps", []),
@@ -948,6 +1015,15 @@ def pannanodx_handler(job, work_dir=None):
                 )
 
     except Exception as e:
+        if suppress_expected:
+            logger.warning(
+                f"Expected PanNanoDX failure for fail-only BAM submission: {e}"
+            )
+            job.context.add_result(
+                "pannanodx_analysis",
+                {"status": "expected_failure", "error_message": str(e)},
+            )
+            return
         job.context.add_error("pannanodx_analysis", str(e))
         logger.error(f"Error in PanNanoDX analysis for {job.context.filepath}: {e}")
 

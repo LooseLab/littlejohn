@@ -1,72 +1,18 @@
 #!/usr/bin/env python3
 """
-Target Analysis Module for robin
+Target Analysis Module for robin.
 
-This module provides automated target analysis following the exact architecture
-specified in the Target Analysis Documentation. It integrates with robin's
+Requires Python 3.12+. Automated target analysis; integrates with robin's
 workflow system and processes files for target-specific analysis.
 
-Features:
-- Automated target analysis using various input file types
-- Integration with robin's workflow system
-- Sample-specific output directories
-- Comprehensive metadata extraction and logging
-- Error handling and result tracking
-- State persistence and incremental processing
-
-Classes
--------
-TargetMetadata
-    Container for target analysis metadata and results.
-
-TargetAnalysis
-    Main analysis class that processes files for target analysis.
-
-Dependencies
------------
-- pandas: Data manipulation and analysis
-- numpy: Numerical computations
-- logging: Logging for debugging and monitoring
-- typing: Type hints
-- tempfile: Temporary file creation
-- pathlib: File system paths
-- os: Operating system interface
-- time: Time utilities
-- json: JSON serialization
-- pickle: Python object serialization
-- gc: Garbage collection
-- pysam: BAM file processing
-- asyncio: Asynchronous processing support
-- subprocess: External command execution
-
-Example Usage
------------
-.. code-block:: python
-
-    from robin.analysis.target_analysis import TargetAnalysis
-
-    # Initialize analysis
-    target_analysis = TargetAnalysis(
-        work_dir="output/",
-        config_path="target_config.json"
-    )
-
-    # Process files
-    target_analysis.process_file("sample.bam")
-
-Notes
------
-The module follows the robin framework patterns for:
-- Integration with workflow system
-- Worker process management
-- State tracking and persistence
-- Error handling and logging
-- Output generation and file management
-
-Authors
--------
-Matt Loose
+Classes: TargetMetadata, TargetAnalysis.
 """
+
+from __future__ import annotations
+
+import sys
+if sys.version_info < (3, 12):
+    raise RuntimeError("robin target_analysis requires Python 3.12 or newer")
 
 import os
 import tempfile
@@ -78,6 +24,8 @@ import subprocess
 import shutil
 import glob
 import fcntl
+import uuid
+from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
 from io import StringIO
@@ -85,6 +33,7 @@ import numpy as np
 import pandas as pd
 import pysam
 from robin.logging_config import get_job_logger
+from robin.analysis.snp_processing import build_snp_display_data
 
 # Optional import for Docker functionality
 try:
@@ -93,19 +42,100 @@ except ImportError:
     docker = None
 
 
+def is_docker_available_for_snp_analysis() -> tuple[bool, str]:
+    """
+    Check if Docker is available for SNP analysis (Clair3 pipeline).
+    Returns (True, "") if Docker is ready, (False, "error message") otherwise.
+    """
+    if docker is None:
+        return False, "Docker Python package is not installed. Install it with: pip install docker"
+    try:
+        client = docker.from_env()
+        client.ping()
+        return True, ""
+    except Exception as e:
+        return False, f"Docker daemon is not available: {e}"
+
+
 def json_serializable(obj):
-    """Convert numpy types to JSON serializable types."""
-    if isinstance(obj, np.integer):
-        return int(obj)
-    elif isinstance(obj, np.floating):
-        return float(obj)
-    elif isinstance(obj, np.ndarray):
-        return obj.tolist()
-    elif isinstance(obj, pd.Series):
-        return obj.tolist()
-    elif isinstance(obj, pd.DataFrame):
-        return obj.to_dict("records")
-    return obj
+    """Convert numpy/pandas types to JSON-serializable (3.12: type patterns)."""
+    match obj:
+        case int():
+            return int(obj)
+        case float():
+            return float(obj)
+        case _ if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        case _ if isinstance(obj, pd.Series):
+            return obj.tolist()
+        case _ if isinstance(obj, pd.DataFrame):
+            return obj.to_dict("records")
+        case _:
+            return obj
+
+
+def _is_non_empty_file(path: Path) -> bool:
+    """Return True when a path exists, is a file, and is non-empty."""
+    return path.exists() and path.is_file() and path.stat().st_size > 0
+
+
+def _resolve_clinvar_db_for_snpsift(logger: logging.Logger) -> Optional[str]:
+    """
+    Resolve ClinVar DB for SnpSift using bgzip + tabix index.
+
+    Preferred and required format is `clinvar.vcf.gz` with a sibling `.tbi` index.
+    If the index is missing, try to generate it in place.
+    """
+    try:
+        # Use an alias to avoid shadowing module-level `resources`.
+        from robin import resources as robin_resources
+
+        resources_dir = Path(os.path.dirname(os.path.abspath(robin_resources.__file__)))
+        clinvar_gz = resources_dir / "clinvar.vcf.gz"
+        clinvar_tbi = resources_dir / "clinvar.vcf.gz.tbi"
+
+        if not _is_non_empty_file(clinvar_gz):
+            logger.warning(
+                "ClinVar bgzipped VCF not found or empty at %s", clinvar_gz
+            )
+            return None
+
+        if not _is_non_empty_file(clinvar_tbi):
+            logger.info(
+                "ClinVar tabix index missing at %s; attempting to generate it.",
+                clinvar_tbi,
+            )
+            try:
+                pysam.tabix_index(
+                    str(clinvar_gz),
+                    preset="vcf",
+                    force=True,
+                    keep_original=True,
+                )
+            except Exception as index_exc:
+                logger.warning(
+                    "Failed to create ClinVar tabix index for %s: %s",
+                    clinvar_gz,
+                    index_exc,
+                )
+                return None
+
+        if not _is_non_empty_file(clinvar_tbi):
+            logger.warning(
+                "ClinVar tabix index still missing/empty after generation attempt: %s",
+                clinvar_tbi,
+            )
+            return None
+
+        logger.info(
+            "Using ClinVar DB for SnpSift: %s (index: %s)",
+            clinvar_gz,
+            clinvar_tbi,
+        )
+        return str(clinvar_gz)
+    except Exception as exc:
+        logger.warning("Could not resolve ClinVar DB for SnpSift: %s", exc)
+        return None
 
 
 class FileLock:
@@ -156,7 +186,24 @@ except ImportError:
     resources = None
 
 
-def run_bedtools(bamfile, bedfile, tempbamfile):
+def _load_bed_regions(bedfile: str) -> List[Tuple[str, int, int]]:
+    """Load BED regions into a list of (chrom, start, end) tuples."""
+    regions: List[Tuple[str, int, int]] = []
+    with open(bedfile, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split('\t')
+            if len(parts) >= 3:
+                chrom = parts[0]
+                start = int(parts[1])
+                end = int(parts[2])
+                regions.append((chrom, start, end))
+    return regions
+
+
+def run_bedtools(bamfile, bedfile, tempbamfile, regions: Optional[List[Tuple[str, int, int]]] = None):
     """
     Extract target regions from BAM file, keeping all mappings (primary, secondary, supplementary)
     for reads that overlap the target regions.
@@ -173,6 +220,8 @@ def run_bedtools(bamfile, bedfile, tempbamfile):
         Path to the BED file defining regions
     tempbamfile : str
         Path where the output BAM file should be written
+    regions : list of tuples, optional
+        Pre-loaded BED regions to avoid repeated parsing
     """
     logger = logging.getLogger("robin.target")
 
@@ -183,19 +232,9 @@ def run_bedtools(bamfile, bedfile, tempbamfile):
         # We use -F 2304 to exclude supplementary and secondary, keeping only primary alignments
         logger.debug(f"Step 1: Extracting read names from primary alignments overlapping {bedfile}")
         
-        # Read BED file to get regions
-        regions = []
-        with open(bedfile, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-                parts = line.split('\t')
-                if len(parts) >= 3:
-                    chrom = parts[0]
-                    start = int(parts[1])
-                    end = int(parts[2])
-                    regions.append((chrom, start, end))
+        # Read BED file to get regions (unless preloaded)
+        if regions is None:
+            regions = _load_bed_regions(bedfile)
         
         if not regions:
             logger.warning(f"No valid regions found in BED file: {bedfile}")
@@ -210,48 +249,24 @@ def run_bedtools(bamfile, bedfile, tempbamfile):
         # Open input BAM and collect read names from primary alignments overlapping regions
         read_names = set()
         with pysam.AlignmentFile(bamfile, "rb") as in_bam:
-            # Check if BAM is indexed by checking for index file
+            # Require BAM index for performance and correctness
             index_file = f"{bamfile}.bai"
-            use_indexed = os.path.exists(index_file)
+            if not os.path.exists(index_file):
+                raise FileNotFoundError(f"BAM index (.bai) not found for {bamfile}")
             
-            if not use_indexed:
-                logger.debug("BAM file is not indexed, using full-scan method")
-            
-            if use_indexed:
-                # Use indexed access (faster)
-                for chrom, start, end in regions:
-                    try:
-                        # Fetch reads overlapping this region
-                        for read in in_bam.fetch(chrom, start, end):
-                            # Only consider primary alignments (not supplementary or secondary)
-                            # Flag checks: not supplementary (0x800) and not secondary (0x100)
-                            if not (read.flag & 0x800) and not (read.flag & 0x100):
-                                read_names.add(read.query_name)
-                    except ValueError:
-                        # Chromosome not found in BAM, skip
-                        logger.debug(f"Chromosome {chrom} not found in BAM file, skipping")
-                        continue
-            else:
-                # BAM is not indexed, iterate through all reads
-                # Create a dictionary of regions for fast lookup
-                region_dict = {}
-                for chrom, start, end in regions:
-                    if chrom not in region_dict:
-                        region_dict[chrom] = []
-                    region_dict[chrom].append((start, end))
-                
-                # Iterate through all reads
-                for read in in_bam.fetch(until_eof=True):
-                    # Only consider primary alignments
-                    if not (read.flag & 0x800) and not (read.flag & 0x100):
-                        if read.reference_name in region_dict:
-                            read_start = read.reference_start
-                            read_end = read.reference_end
-                            # Check if read overlaps any region on this chromosome
-                            for reg_start, reg_end in region_dict[read.reference_name]:
-                                if not (read_end <= reg_start or read_start >= reg_end):
-                                    read_names.add(read.query_name)
-                                    break
+            # Use indexed access (faster)
+            for chrom, start, end in regions:
+                try:
+                    # Fetch reads overlapping this region
+                    for read in in_bam.fetch(chrom, start, end):
+                        # Only consider primary alignments (not supplementary or secondary)
+                        # Flag checks: not supplementary (0x800) and not secondary (0x100)
+                        if not (read.flag & 0x800) and not (read.flag & 0x100):
+                            read_names.add(read.query_name)
+                except ValueError:
+                    # Chromosome not found in BAM, skip
+                    logger.debug(f"Chromosome {chrom} not found in BAM file, skipping")
+                    continue
         
         logger.debug(f"Found {len(read_names)} unique read names overlapping target regions")
         
@@ -415,6 +430,97 @@ def get_covdfs(bamfile, bedfile=None):
         return None, None
 
 
+def get_read_counts_per_target(bamfile, bedfile):
+    """
+    Count reads overlapping each target region in a BED file.
+    
+    Parameters
+    ----------
+    bamfile : str
+        Path to the input BAM file
+    bedfile : str
+        Path to the BED file defining target regions
+    
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with columns: chrom, startpos, endpos, name, reads
+        Returns empty DataFrame if extraction fails
+    """
+    logger = logging.getLogger("robin.target")
+    
+    try:
+        # Read BED file to get regions
+        bed_regions = []
+        with open(bedfile, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split('\t')
+                if len(parts) >= 4:
+                    chrom = parts[0]
+                    start = int(parts[1])
+                    end = int(parts[2])
+                    name = parts[3] if parts[3].strip() else f"{chrom}:{start}-{end}"
+                    bed_regions.append((chrom, start, end, name))
+        
+        if not bed_regions:
+            logger.warning(f"No valid regions found in BED file: {bedfile}")
+            return pd.DataFrame(columns=["chrom", "startpos", "endpos", "name", "reads"])
+        
+        # Count reads per region
+        read_counts = []
+        with pysam.AlignmentFile(bamfile, "rb") as bam:
+            index_file = f"{bamfile}.bai"
+            use_indexed = os.path.exists(index_file)
+            
+            for chrom, start, end, name in bed_regions:
+                try:
+                    # Count primary alignments only (not supplementary or secondary)
+                    read_count = 0
+                    if use_indexed:
+                        # Use indexed access (faster)
+                        for read in bam.fetch(chrom, start, end):
+                            # Only count primary alignments
+                            if not (read.flag & 0x800) and not (read.flag & 0x100):
+                                read_count += 1
+                    else:
+                        # BAM is not indexed, count manually
+                        for read in bam.fetch(chrom, start, end):
+                            # Only count primary alignments
+                            if not (read.flag & 0x800) and not (read.flag & 0x100):
+                                read_count += 1
+                    
+                    read_counts.append({
+                        'chrom': chrom,
+                        'startpos': start,
+                        'endpos': end,
+                        'name': name,
+                        'reads': read_count
+                    })
+                except ValueError:
+                    logger.debug(f"Chromosome {chrom} not found in BAM file, skipping")
+                    read_counts.append({
+                        'chrom': chrom,
+                        'startpos': start,
+                        'endpos': end,
+                        'name': name,
+                        'reads': 0
+                    })
+                    continue
+        
+        df = pd.DataFrame(read_counts)
+        logger.debug(f"Extracted read counts for {len(df)} target regions from {bamfile}")
+        return df
+        
+    except Exception as e:
+        logger.error(f"Error extracting read counts per target: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return pd.DataFrame(columns=["chrom", "startpos", "endpos", "name", "reads"])
+
+
 def run_bedmerge(newcovdf, cov_df_main, bedcovdf, bedcov_df_main):
     """
     Merge coverage dataframes for incremental processing.
@@ -513,9 +619,9 @@ def run_bedmerge(newcovdf, cov_df_main, bedcovdf, bedcov_df_main):
     return merged_df, merged_bed_df
 
 
-@dataclass
+@dataclass(slots=True)
 class TargetMetadata:
-    """Container for target analysis metadata and results"""
+    """Container for target analysis metadata and results."""
 
     sample_id: str
     file_path: str
@@ -582,6 +688,47 @@ class TargetAnalysis:
             )
 
         logger.info(f"Target Analysis initialized (staging={'enabled' if use_staging else 'disabled'}, batch_size={batch_size})")
+
+    def _get_master_bed_path(self, sample_id: str) -> Optional[str]:
+        """
+        Get the path to the master BED file for a sample if it exists.
+        Master BED includes target panel + CNV breakpoints + fusion breakpoints + master BED breakpoints.
+        
+        Args:
+            sample_id: Sample ID
+            
+        Returns:
+            Path to master BED file, or None if not found
+        """
+        logger = logging.getLogger("robin.target")
+        try:
+            import glob
+            from robin.analysis.fusion_work import _load_analysis_counter
+            
+            sample_dir = os.path.join(self.work_dir, sample_id)
+            bed_dir = os.path.join(sample_dir, "bed_files")
+            
+            if not os.path.exists(bed_dir):
+                return None
+            
+            # Try to get analysis counter
+            analysis_counter = _load_analysis_counter(sample_id, self.work_dir)
+            master_bed_path = os.path.join(bed_dir, f"master_{analysis_counter:03d}.bed")
+            
+            if os.path.exists(master_bed_path):
+                return master_bed_path
+            
+            # Try to find the latest master BED file if counter-based doesn't exist
+            master_bed_files = glob.glob(os.path.join(bed_dir, "master_*.bed"))
+            if master_bed_files:
+                # Sort by modification time and return the latest
+                latest = max(master_bed_files, key=os.path.getmtime)
+                logger.debug(f"Using latest master BED file: {latest}")
+                return latest
+        except Exception as e:
+            logger.debug(f"Error finding master BED file: {e}")
+        
+        return None
 
     def _find_target_bed(self, target_panel: str) -> str:
         """Find the target BED file from robin resources based on panel type"""
@@ -916,12 +1063,6 @@ class TargetAnalysis:
 
                 # Store coverage data in metadata
                 target_result.coverage_data = {
-                    "genome_coverage": (
-                        newcovdf.to_dict("records") if not newcovdf.empty else []
-                    ),
-                    "target_coverage": (
-                        bedcovdf.to_dict("records") if not bedcovdf.empty else []
-                    ),
                     "genome_coverage_shape": newcovdf.shape,
                     "target_coverage_shape": bedcovdf.shape,
                 }
@@ -937,8 +1078,13 @@ class TargetAnalysis:
                     dir=sample_output_dir, suffix=".bam"
                 )
 
+                # Prefer master BED file if available, otherwise use original target panel BED
+                # Master BED includes target panel + CNV + fusion + master BED breakpoints
+                sample_id = metadata.get("sample_id", "unknown")
+                targets_bed = self._get_master_bed_path(sample_id) or self.bedfile
+                
                 # Run bedtools intersection
-                run_bedtools(file_path, self.bedfile, tempbamfile.name)
+                run_bedtools(file_path, targets_bed, tempbamfile.name)
 
                 # Check if target BAM has reads
                 if (
@@ -1103,6 +1249,115 @@ class TargetAnalysis:
                 )
 
                 target_result.processing_steps.append("target_coverage_calculated")
+
+                # Step 13b: Create target coverage with timestamp and read counts (optimized)
+                logger.info("Calculating read counts per target...")
+                new_read_counts_df = get_read_counts_per_target(file_path, self.bedfile)
+                
+                if not new_read_counts_df.empty:
+                    # Use optimized approach: store latest cumulative reads in separate Parquet file for fast access
+                    time_coverage_file = os.path.join(sample_output_dir, "target_coverage_time.csv")
+                    latest_reads_cache = os.path.join(sample_output_dir, "_target_coverage_latest_reads.parquet")
+                    
+                    # Load previous cumulative reads from cache (much faster than reading entire CSV)
+                    previous_cumulative_reads = None
+                    if os.path.exists(latest_reads_cache):
+                        try:
+                            previous_cumulative_reads = pd.read_parquet(latest_reads_cache)
+                            previous_cumulative_reads.rename(columns={'reads': 'previous_reads'}, inplace=True)
+                        except Exception as e:
+                            logger.debug(f"Could not load cached latest reads, will try CSV: {e}")
+                            # Fallback to CSV if cache doesn't exist
+                            if os.path.exists(time_coverage_file):
+                                try:
+                                    # Only read last chunk for efficiency
+                                    existing_time_df = pd.read_csv(time_coverage_file)
+                                    if not existing_time_df.empty:
+                                        latest_timestamp = existing_time_df['timestamp'].max()
+                                        previous_cumulative_reads = existing_time_df[
+                                            existing_time_df['timestamp'] == latest_timestamp
+                                        ][['chrom', 'startpos', 'endpos', 'name', 'reads']].copy()
+                                        previous_cumulative_reads.rename(columns={'reads': 'previous_reads'}, inplace=True)
+                                except Exception as e2:
+                                    logger.warning(f"Error loading existing target_coverage_time.csv: {e2}")
+                    
+                    # Merge new read counts with target coverage data
+                    target_coverage_with_reads = target_coverage_df.merge(
+                        new_read_counts_df[['chrom', 'startpos', 'endpos', 'name', 'reads']],
+                        on=['chrom', 'startpos', 'endpos', 'name'],
+                        how='left'
+                    )
+                    # Fill missing reads with 0
+                    target_coverage_with_reads['reads'] = target_coverage_with_reads['reads'].fillna(0).astype(int)
+                    
+                    # Accumulate with previous cumulative reads if available
+                    if previous_cumulative_reads is not None:
+                        target_coverage_with_reads = target_coverage_with_reads.merge(
+                            previous_cumulative_reads,
+                            on=['chrom', 'startpos', 'endpos', 'name'],
+                            how='left'
+                        )
+                        target_coverage_with_reads['previous_reads'] = target_coverage_with_reads['previous_reads'].fillna(0).astype(int)
+                        # Add new reads to previous cumulative reads
+                        target_coverage_with_reads['reads'] = (
+                            target_coverage_with_reads['reads'] + target_coverage_with_reads['previous_reads']
+                        )
+                        target_coverage_with_reads.drop(columns=['previous_reads'], inplace=True)
+                    
+                    # Calculate normalized reads (reads per length)
+                    target_coverage_with_reads['reads_per_length'] = (
+                        target_coverage_with_reads['reads'] / target_coverage_with_reads['length']
+                    )
+                    
+                    # Add timestamp
+                    if self.simtime and timestamp:
+                        current_timestamp = timestamp * 1000
+                    else:
+                        current_timestamp = time.time() * 1000
+                    target_coverage_with_reads['timestamp'] = current_timestamp
+                    
+                    # Reorder columns: chrom, startpos, endpos, name, length, coverage, bases, timestamp, reads, reads_per_length
+                    target_coverage_with_reads = target_coverage_with_reads[
+                        ['chrom', 'startpos', 'endpos', 'name', 'length', 'coverage', 'bases',
+                         'timestamp', 'reads', 'reads_per_length']
+                    ]
+                    
+                    # Save latest cumulative reads to cache for next time (fast access)
+                    try:
+                        target_coverage_with_reads[['chrom', 'startpos', 'endpos', 'name', 'reads']].to_parquet(
+                            latest_reads_cache, index=False
+                        )
+                    except Exception as e:
+                        logger.debug(f"Could not save latest reads cache: {e}")
+                    
+                    # Append to CSV using append mode (much faster than reading entire file)
+                    try:
+                        # Check if file exists to determine if we need header
+                        file_exists = os.path.exists(time_coverage_file)
+                        target_coverage_with_reads.to_csv(
+                            time_coverage_file, 
+                            mode='a', 
+                            header=not file_exists,
+                            index=False
+                        )
+                    except Exception as e:
+                        logger.warning(f"Error appending to target_coverage_time.csv: {e}")
+                        # Fallback: read and concat (slower but works)
+                        if os.path.exists(time_coverage_file):
+                            try:
+                                existing_time_df = pd.read_csv(time_coverage_file)
+                                target_coverage_with_reads = pd.concat(
+                                    [existing_time_df, target_coverage_with_reads],
+                                    ignore_index=True
+                                )
+                                target_coverage_with_reads.to_csv(time_coverage_file, index=False)
+                            except Exception as e2:
+                                logger.error(f"Error in fallback CSV write: {e2}")
+                    
+                    logger.info(f"Saved target coverage with timestamp and cumulative read counts: {time_coverage_file}")
+                    target_result.processing_steps.append("target_coverage_time_saved")
+                else:
+                    logger.warning("No read counts extracted, skipping target_coverage_time.csv")
 
                 # Step 13: Identify targets exceeding threshold
                 run_list = target_coverage_df[
@@ -1293,20 +1548,19 @@ class TargetAnalysis:
             ]
             results["summary_stats"]["significant_targets"] = len(significant_targets)
 
-            # Add target analysis results
-            for idx, row in bedcovdf.iterrows():
-                target_info = {
+            # Add target analysis results (list comp inlined in 3.12)
+            max_bases = bedcovdf["bases"].max()
+            results["targets_analyzed"] = [
+                {
                     "target_id": row.get("name", f"target_{idx+1:03d}"),
                     "position": f"{row['chrom']}:{row['startpos']}-{row['endpos']}",
                     "coverage": row["bases"],
                     "significance": (
-                        "high"
-                        if row["bases"]
-                        > significant_threshold * bedcovdf["bases"].max()
-                        else "medium"
+                        "high" if row["bases"] > significant_threshold * max_bases else "medium"
                     ),
                 }
-                results["targets_analyzed"].append(target_info)
+                for idx, row in bedcovdf.iterrows()
+            ]
 
             # Calculate average score
             if results["targets_analyzed"]:
@@ -1434,102 +1688,116 @@ class TargetAnalysis:
     
     def accumulate_staged_files(self, sample_id: str, force: bool = False) -> Dict[str, Any]:
         """
-        Batch accumulation of staged files with proper locking to prevent race conditions.
-        
-        This method:
-        1. Locks the accumulation process to prevent concurrent accumulations
-        2. Loads all staged files
-        3. Efficiently merges them using groupby (faster than iterative merge)
-        4. Merges batch with existing accumulated data
-        5. Saves updated accumulated data
-        6. Cleans up staging files
-        
-        Args:
-            sample_id: Sample identifier
-            force: If True, accumulate even if below threshold (for end-of-run)
-        
-        Returns:
-            Dictionary with accumulation results
+        Batch accumulation of staged files with minimal lock hold time.
+        Lock is held only to: (1) claim staging files, (2) load existing + merge, (3) write outputs + cleanup.
+        Heavy work (load parquets, BAM filtering, read counts) runs outside the lock.
         """
         logger = logging.getLogger("robin.target")
-        
-        # Use lock to prevent concurrent accumulation of the same sample
         lock_file = self._get_lock_file(sample_id, "accumulation")
-        
+        staging_dir = self._get_staging_dir(sample_id)
+        sample_output_dir = os.path.join(self.work_dir, sample_id)
+        start_time = time.time()
+
         try:
+            # --- Critical section 1: claim staging files (short) ---
+            batch_dir = None
+            num_claimed = 0
             with FileLock(lock_file, timeout=60.0):
-                logger.info(f"Starting batch accumulation for {sample_id} (force={force})")
-                start_time = time.time()
-                
-                staging_dir = self._get_staging_dir(sample_id)
-                sample_output_dir = os.path.join(self.work_dir, sample_id)
-                
-                # Find all staging files
                 coverage_files = sorted(glob.glob(os.path.join(staging_dir, "coverage_*.parquet")))
                 bedcov_files = sorted(glob.glob(os.path.join(staging_dir, "bedcov_*.parquet")))
                 timestamp_files = sorted(glob.glob(os.path.join(staging_dir, "timestamp_*.txt")))
                 source_bam_files = sorted(glob.glob(os.path.join(staging_dir, "source_bam_*.txt")))
-                
                 if not coverage_files:
                     logger.info(f"No staged files to accumulate for {sample_id}")
                     return {"status": "no_files", "files_processed": 0}
-                
-                # Check if we should accumulate based on count
                 if not force and len(coverage_files) < self.batch_size:
                     logger.info(
                         f"Skipping accumulation - only {len(coverage_files)} files staged "
                         f"(threshold: {self.batch_size}, force={force})"
                     )
                     return {"status": "below_threshold", "files_pending": len(coverage_files)}
-                
-                logger.info(
-                    f"Accumulating {len(coverage_files)} staged files for {sample_id}"
-                )
-                
-                # Load all staged files (they're small and fast to load)
-                staged_covdfs = []
-                staged_bedcovdfs = []
-                timestamps = []
-                source_bam_paths = []
-                
-                for cov_file, bed_file, ts_file, source_bam_file in zip(coverage_files, bedcov_files, timestamp_files, source_bam_files):
+                n_claim = len(coverage_files) if force else min(self.batch_size, len(coverage_files))
+                batch_id = str(uuid.uuid4())
+                batch_dir = os.path.join(staging_dir, f"_batch_{batch_id}")
+                os.makedirs(batch_dir, exist_ok=True)
+                for i in range(n_claim):
+                    for src in (coverage_files[i], bedcov_files[i], timestamp_files[i], source_bam_files[i]):
+                        if os.path.exists(src):
+                            shutil.move(src, os.path.join(batch_dir, os.path.basename(src)))
+                num_claimed = n_claim
+            # Lock released
+
+            # --- No lock: load from batch dir ---
+            coverage_batch = sorted(glob.glob(os.path.join(batch_dir, "coverage_*.parquet")))
+            bedcov_batch = sorted(glob.glob(os.path.join(batch_dir, "bedcov_*.parquet")))
+            timestamp_batch = sorted(glob.glob(os.path.join(batch_dir, "timestamp_*.txt")))
+            source_bam_batch = sorted(glob.glob(os.path.join(batch_dir, "source_bam_*.txt")))
+            batch_covdf = None
+            batch_bedcovdf = None
+            timestamps = []
+            source_bam_paths = []
+            loaded_files = 0
+            for cov_file, bed_file, ts_file, source_bam_file in zip(
+                coverage_batch, bedcov_batch, timestamp_batch, source_bam_batch
+            ):
+                try:
+                    cov_df = pd.read_parquet(cov_file)
+                    bed_df = pd.read_parquet(bed_file)
+                    cov_df = cov_df.groupby(['#rname', 'startpos', 'endpos'], as_index=False).agg({
+                        'numreads': 'sum', 'covbases': 'sum', 'meandepth': 'sum'
+                    })
+                    bed_df = bed_df.groupby(
+                        ['chrom', 'startpos', 'endpos', 'name'], as_index=False
+                    ).agg({'bases': 'sum'})
+                    if batch_covdf is None:
+                        batch_covdf = cov_df
+                    else:
+                        batch_covdf = batch_covdf.merge(
+                            cov_df, on=['#rname', 'startpos', 'endpos'], how='outer',
+                            suffixes=('_df1', '_df2'),
+                        )
+                        batch_covdf['numreads'] = batch_covdf['numreads_df1'].fillna(0) + batch_covdf['numreads_df2'].fillna(0)
+                        batch_covdf['covbases'] = batch_covdf['covbases_df1'].fillna(0) + batch_covdf['covbases_df2'].fillna(0)
+                        batch_covdf['meandepth'] = batch_covdf['meandepth_df1'].fillna(0) + batch_covdf['meandepth_df2'].fillna(0)
+                        batch_covdf.drop(columns=['numreads_df1', 'numreads_df2', 'covbases_df1', 'covbases_df2', 'meandepth_df1', 'meandepth_df2'], inplace=True)
+                    if batch_bedcovdf is None:
+                        batch_bedcovdf = bed_df
+                    else:
+                        batch_bedcovdf = batch_bedcovdf.merge(
+                            bed_df, on=['chrom', 'startpos', 'endpos', 'name'], how='outer',
+                            suffixes=('_df1', '_df2'),
+                        )
+                        batch_bedcovdf['bases'] = batch_bedcovdf['bases_df1'].fillna(0) + batch_bedcovdf['bases_df2'].fillna(0)
+                        batch_bedcovdf.drop(columns=['bases_df1', 'bases_df2'], inplace=True)
+                    with open(ts_file, "r") as f:
+                        timestamps.append(float(f.read().strip()))
+                    with open(source_bam_file, "r") as f:
+                        source_bam_paths.append(f.read().strip())
+                    loaded_files += 1
+                except Exception as e:
+                    logger.warning(f"Error loading staging file {cov_file}: {e}")
+            if batch_covdf is None or batch_bedcovdf is None:
+                logger.error("No staging files could be loaded successfully")
+                if batch_dir and os.path.exists(batch_dir):
+                    for f in glob.glob(os.path.join(batch_dir, "*")):
+                        try:
+                            os.remove(f)
+                        except OSError:
+                            pass
                     try:
-                        staged_covdfs.append(pd.read_parquet(cov_file))
-                        staged_bedcovdfs.append(pd.read_parquet(bed_file))
-                        with open(ts_file, "r") as f:
-                            timestamps.append(float(f.read().strip()))
-                        with open(source_bam_file, "r") as f:
-                            source_bam_paths.append(f.read().strip())
-                    except Exception as e:
-                        logger.warning(f"Error loading staging file {cov_file}: {e}")
-                        continue
-                
-                if not staged_covdfs:
-                    logger.error("No staging files could be loaded successfully")
-                    return {"status": "load_failed", "files_attempted": len(coverage_files)}
-                
-                logger.info(f"Loaded {len(staged_covdfs)} staging files successfully")
-                
-                # Efficient batch merge using concat + groupby (much faster than iterative merge)
-                logger.info("Merging staged coverage data...")
-                batch_covdf = pd.concat(staged_covdfs, ignore_index=True)
-                batch_covdf = batch_covdf.groupby(['#rname', 'startpos', 'endpos'], as_index=False).agg({
-                    'numreads': 'sum',
-                    'covbases': 'sum',
-                    'meandepth': 'sum'
-                })
-                
-                logger.info("Merging staged target coverage data...")
-                batch_bedcovdf = pd.concat(staged_bedcovdfs, ignore_index=True)
-                batch_bedcovdf = batch_bedcovdf.groupby(
-                    ['chrom', 'startpos', 'endpos', 'name'], as_index=False
-                ).agg({'bases': 'sum'})
-                
-                logger.info(
-                    f"Batch merged: genome={batch_covdf.shape}, targets={batch_bedcovdf.shape}"
-                )
-                
-                # Load existing accumulated data (only once per batch)
+                        os.rmdir(batch_dir)
+                    except OSError:
+                        pass
+                return {"status": "load_failed", "files_attempted": num_claimed}
+            logger.info(f"Loaded {loaded_files} staging files; merging with accumulated data...")
+
+            # --- Critical section 2: load existing + merge (short) ---
+            existing_covdf = None
+            existing_bedcovdf = None
+            existing_coverage_over_time = None
+            updated_covdf = None
+            updated_bedcovdf = None
+            with FileLock(lock_file, timeout=60.0):
                 existing_covdf = self._load_existing_coverage_data(
                     sample_output_dir, "coverage_main.csv", logger
                 )
@@ -1539,53 +1807,115 @@ class TargetAnalysis:
                 existing_coverage_over_time = self._load_existing_coverage_over_time(
                     sample_output_dir, logger
                 )
-                
-                # Single merge with accumulated data
-                logger.info("Merging with accumulated data...")
                 if existing_covdf is not None:
                     updated_covdf, updated_bedcovdf = run_bedmerge(
                         batch_covdf, existing_covdf, batch_bedcovdf, existing_bedcovdf
                     )
                 else:
                     updated_covdf, updated_bedcovdf = batch_covdf, batch_bedcovdf
-                
-                logger.info(
-                    f"Final accumulated: genome={updated_covdf.shape}, targets={updated_bedcovdf.shape}"
+            # Lock released
+
+            logger.info(f"Final accumulated: genome={updated_covdf.shape}, targets={updated_bedcovdf.shape}")
+            bases = updated_covdf["covbases"].sum()
+            genome = updated_covdf["endpos"].sum()
+            coverage = bases / genome if genome > 0 else 0.0
+            logger.info(f"Coverage: {coverage:.4f} ({bases} bases / {genome} genome)")
+            current_timestamp = max(timestamps) if timestamps else time.time() * 1000
+            if existing_coverage_over_time is not None:
+                updated_coverage_over_time = np.vstack(
+                    [existing_coverage_over_time, [[current_timestamp, coverage]]]
                 )
-                
-                # Calculate coverage statistics
-                bases = updated_covdf["covbases"].sum()
-                genome = updated_covdf["endpos"].sum()
-                coverage = bases / genome if genome > 0 else 0.0
-                
-                logger.info(
-                    f"Coverage: {coverage:.4f} ({bases} bases / {genome} genome)"
+            else:
+                updated_coverage_over_time = np.array([[current_timestamp, coverage]])
+
+            target_coverage_df = updated_bedcovdf.copy()
+            target_coverage_df["length"] = (
+                target_coverage_df["endpos"] - target_coverage_df["startpos"] + 1
+            )
+            target_coverage_df["coverage"] = (
+                target_coverage_df["bases"] / target_coverage_df["length"]
+            )
+            target_coverage_df = target_coverage_df[
+                ["chrom", "startpos", "endpos", "name", "length", "coverage", "bases"]
+            ]
+            run_list = target_coverage_df[target_coverage_df["coverage"].ge(self.callthreshold)]
+
+            # --- No lock: BAM read counts and filtered BAMs ---
+            batch_read_counts = None
+            if source_bam_paths:
+                batch_read_counts_list = []
+                for bam_path in source_bam_paths:
+                    read_counts_df = get_read_counts_per_target(bam_path, self.bedfile)
+                    if not read_counts_df.empty:
+                        batch_read_counts_list.append(read_counts_df)
+                if batch_read_counts_list:
+                    batch_read_counts = pd.concat(batch_read_counts_list, ignore_index=True)
+                    batch_read_counts = batch_read_counts.groupby(
+                        ['chrom', 'startpos', 'endpos', 'name'], as_index=False
+                    ).agg({'reads': 'sum'})
+
+            if len(run_list) > 0:
+                logger.info("Processing filtered BAM files...")
+                try:
+                    original_bam_files = list(set(source_bam_paths))
+                    if original_bam_files:
+                        targets_bed = self._get_master_bed_path(sample_id) or self.bedfile
+                        if targets_bed != self.bedfile:
+                            logger.info(f"Using master BED file for target.bam: {targets_bed}")
+                        else:
+                            logger.info(f"Using original target panel BED file for target.bam: {targets_bed}")
+                        filtered_bams_dir = os.path.join(sample_output_dir, "_filtered_bams")
+                        os.makedirs(filtered_bams_dir, exist_ok=True)
+                        new_filtered_bams = []
+                        bed_regions_cache = None
+                        try:
+                            bed_regions_cache = _load_bed_regions(targets_bed)
+                        except Exception as e:
+                            logger.warning(f"Could not preload BED regions from {targets_bed}: {e}")
+                        for i, source_bam in enumerate(original_bam_files):
+                            filtered_bam_name = f"filtered_{i:06d}_{os.path.basename(source_bam)}"
+                            filtered_bam_path = os.path.join(filtered_bams_dir, filtered_bam_name)
+                            logger.info(f"Filtering BAM {i+1}/{len(original_bam_files)}: {os.path.basename(source_bam)}")
+                            run_bedtools(source_bam, targets_bed, filtered_bam_path, regions=bed_regions_cache)
+                            if os.path.exists(filtered_bam_path):
+                                new_filtered_bams.append(filtered_bam_path)
+                        if new_filtered_bams:
+                            batch_timestamp = int(time.time() * 1000)
+                            batch_merged_bam = os.path.join(sample_output_dir, f"batch_{batch_timestamp}.bam")
+                            if len(new_filtered_bams) > 1:
+                                pysam.merge("-o", batch_merged_bam, *new_filtered_bams)
+                            else:
+                                shutil.copy2(new_filtered_bams[0], batch_merged_bam)
+                            pysam.index(batch_merged_bam)
+                            for filtered_bam in new_filtered_bams:
+                                try:
+                                    if os.path.exists(filtered_bam):
+                                        os.remove(filtered_bam)
+                                    if os.path.exists(f"{filtered_bam}.bai"):
+                                        os.remove(f"{filtered_bam}.bai")
+                                except OSError as e:
+                                    logger.warning(f"Could not remove filtered BAM {filtered_bam}: {e}")
+                            try:
+                                if not os.listdir(filtered_bams_dir):
+                                    os.rmdir(filtered_bams_dir)
+                            except OSError:
+                                pass
+                except Exception as e:
+                    logger.error(f"Error creating target.bam: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+
+            # --- Critical section 3: write all outputs + cleanup (short) ---
+            time_coverage_file = os.path.join(sample_output_dir, "target_coverage_time.csv")
+            latest_reads_cache = os.path.join(sample_output_dir, "_target_coverage_latest_reads.parquet")
+            with FileLock(lock_file, timeout=60.0):
+                np.save(
+                    os.path.join(sample_output_dir, "coverage_time_chart.npy"),
+                    updated_coverage_over_time,
                 )
-                
-                # Track coverage over time (use most recent timestamp from batch)
-                if timestamps:
-                    current_timestamp = max(timestamps)
-                    if existing_coverage_over_time is not None:
-                        updated_coverage_over_time = np.vstack(
-                            [existing_coverage_over_time, [[current_timestamp, coverage]]]
-                        )
-                    else:
-                        updated_coverage_over_time = np.array([[current_timestamp, coverage]])
-                    
-                    # Save coverage over time
-                    np.save(
-                        os.path.join(sample_output_dir, "coverage_time_chart.npy"),
-                        updated_coverage_over_time,
-                    )
-                
-                # Save updated coverage data
-                logger.info("Saving accumulated data...")
                 updated_covdf.to_csv(
-                    os.path.join(sample_output_dir, "coverage_main.csv"),
-                    index=False,
+                    os.path.join(sample_output_dir, "coverage_main.csv"), index=False
                 )
-                
-                # Calculate and save bed_coverage_main.csv with length and coverage columns
                 bed_coverage_main_df = updated_bedcovdf.copy()
                 bed_coverage_main_df["length"] = (
                     bed_coverage_main_df["endpos"] - bed_coverage_main_df["startpos"] + 1
@@ -1597,169 +1927,103 @@ class TargetAnalysis:
                     ["chrom", "startpos", "endpos", "name", "length", "coverage", "bases"]
                 ]
                 bed_coverage_main_df.to_csv(
-                    os.path.join(sample_output_dir, "bed_coverage_main.csv"),
-                    index=False,
+                    os.path.join(sample_output_dir, "bed_coverage_main.csv"), index=False
                 )
-                
-                # Calculate and save target_coverage.csv
-                target_coverage_df = updated_bedcovdf.copy()
-                target_coverage_df["length"] = (
-                    target_coverage_df["endpos"] - target_coverage_df["startpos"] + 1
-                )
-                target_coverage_df["coverage"] = (
-                    target_coverage_df["bases"] / target_coverage_df["length"]
-                )
-                target_coverage_df = target_coverage_df[
-                    ["chrom", "startpos", "endpos", "name", "length", "coverage", "bases"]
-                ]
                 target_coverage_df.to_csv(
-                    os.path.join(sample_output_dir, "target_coverage.csv"),
-                    index=False,
+                    os.path.join(sample_output_dir, "target_coverage.csv"), index=False
                 )
-                
-                # Identify and save targets exceeding threshold
-                run_list = target_coverage_df[
-                    target_coverage_df["coverage"].ge(self.callthreshold)
-                ]
-                
-                if len(run_list) > 0:
-                    logger.info(f"Found {len(run_list)} regions exceeding threshold")
-                    
-                    # Save count
-                    targets_exceeding_file = os.path.join(
-                        sample_output_dir, "targets_exceeding_threshold_count.txt"
+                if batch_read_counts is not None:
+                    previous_cumulative_reads = None
+                    if os.path.exists(latest_reads_cache):
+                        try:
+                            previous_cumulative_reads = pd.read_parquet(latest_reads_cache)
+                            previous_cumulative_reads.rename(columns={'reads': 'previous_reads'}, inplace=True)
+                        except Exception:
+                            pass
+                    if previous_cumulative_reads is None and os.path.exists(time_coverage_file):
+                        try:
+                            existing_time_df = pd.read_csv(time_coverage_file)
+                            if not existing_time_df.empty:
+                                latest_ts = existing_time_df['timestamp'].max()
+                                previous_cumulative_reads = existing_time_df[
+                                    existing_time_df['timestamp'] == latest_ts
+                                ][['chrom', 'startpos', 'endpos', 'name', 'reads']].copy()
+                                previous_cumulative_reads.rename(columns={'reads': 'previous_reads'}, inplace=True)
+                        except Exception:
+                            pass
+                    target_coverage_with_reads = target_coverage_df.merge(
+                        batch_read_counts[['chrom', 'startpos', 'endpos', 'name', 'reads']],
+                        on=['chrom', 'startpos', 'endpos', 'name'], how='left'
                     )
+                    target_coverage_with_reads['reads'] = target_coverage_with_reads['reads'].fillna(0).astype(int)
+                    if previous_cumulative_reads is not None:
+                        target_coverage_with_reads = target_coverage_with_reads.merge(
+                            previous_cumulative_reads,
+                            on=['chrom', 'startpos', 'endpos', 'name'], how='left'
+                        )
+                        target_coverage_with_reads['previous_reads'] = target_coverage_with_reads['previous_reads'].fillna(0).astype(int)
+                        target_coverage_with_reads['reads'] = (
+                            target_coverage_with_reads['reads'] + target_coverage_with_reads['previous_reads']
+                        )
+                        target_coverage_with_reads.drop(columns=['previous_reads'], inplace=True)
+                    target_coverage_with_reads['reads_per_length'] = (
+                        target_coverage_with_reads['reads'] / target_coverage_with_reads['length']
+                    )
+                    target_coverage_with_reads['timestamp'] = current_timestamp
+                    target_coverage_with_reads = target_coverage_with_reads[
+                        ['chrom', 'startpos', 'endpos', 'name', 'length', 'coverage', 'bases',
+                         'timestamp', 'reads', 'reads_per_length']
+                    ]
+                    try:
+                        target_coverage_with_reads[['chrom', 'startpos', 'endpos', 'name', 'reads']].to_parquet(
+                            latest_reads_cache, index=False
+                        )
+                    except Exception:
+                        pass
+                    file_exists = os.path.exists(time_coverage_file)
+                    target_coverage_with_reads.to_csv(
+                        time_coverage_file, mode='a', header=not file_exists, index=False
+                    )
+                targets_exceeding_file = os.path.join(
+                    sample_output_dir, "targets_exceeding_threshold_count.txt"
+                )
+                if len(run_list) > 0:
                     with open(targets_exceeding_file, "w") as f:
                         f.write(str(len(run_list)))
-                    
-                    # Generate BED file
                     run_list[["chrom", "startpos", "endpos"]].to_csv(
                         os.path.join(sample_output_dir, "targets_exceeding_threshold.bed"),
-                        sep="\t",
-                        header=None,
-                        index=None,
+                        sep="\t", header=None, index=None,
                     )
                 else:
-                    logger.info("No regions exceed coverage threshold")
-                    # Create empty BED file
                     with open(
-                        os.path.join(sample_output_dir, "targets_exceeding_threshold.bed"),
-                        "w"
+                        os.path.join(sample_output_dir, "targets_exceeding_threshold.bed"), "w"
                     ) as f:
                         pass
-                
-                # Create target.bam file using filtered BAM accumulation approach
-                if len(run_list) > 0:
-                    logger.info("Processing filtered BAM files...")
+                if batch_dir and os.path.exists(batch_dir):
+                    for f in glob.glob(os.path.join(batch_dir, "*")):
+                        try:
+                            os.remove(f)
+                        except OSError:
+                            pass
                     try:
-                        # Use source BAM files from staging
-                        original_bam_files = list(set(source_bam_paths))  # Remove duplicates
-                        
-                        if original_bam_files:
-                            # Use the original target panel BED file
-                            targets_bed = self.bedfile
-                            
-                            # Create filtered BAM directory
-                            filtered_bams_dir = os.path.join(sample_output_dir, "_filtered_bams")
-                            os.makedirs(filtered_bams_dir, exist_ok=True)
-                            
-                            # Process each source BAM file and save filtered version
-                            new_filtered_bams = []
-                            for i, source_bam in enumerate(original_bam_files):
-                                filtered_bam_name = f"filtered_{i:06d}_{os.path.basename(source_bam)}"
-                                filtered_bam_path = os.path.join(filtered_bams_dir, filtered_bam_name)
-                                
-                                logger.info(f"Filtering BAM {i+1}/{len(original_bam_files)}: {os.path.basename(source_bam)}")
-                                run_bedtools(source_bam, targets_bed, filtered_bam_path)
-                                
-                                if os.path.exists(filtered_bam_path):
-                                    new_filtered_bams.append(filtered_bam_path)
-                            
-                            # Create batch merged BAM instead of merging into target.bam immediately
-                            # We'll merge all batch BAMs into target.bam at the end of the run
-                            if new_filtered_bams:
-                                logger.info(f"Merging {len(new_filtered_bams)} filtered BAM files into batch file...")
-                                
-                                # Create batch-specific output file with timestamp to avoid conflicts
-                                batch_timestamp = int(time.time() * 1000)  # milliseconds for uniqueness
-                                batch_merged_bam = os.path.join(sample_output_dir, f"batch_{batch_timestamp}.bam")
-                                
-                                # Merge all filtered BAMs for this batch
-                                if len(new_filtered_bams) > 1:
-                                    pysam.merge("-o", batch_merged_bam, *new_filtered_bams)
-                                else:
-                                    # Single BAM - just copy it
-                                    shutil.copy2(new_filtered_bams[0], batch_merged_bam)
-                                
-                                # Index the batch merged BAM
-                                logger.info("Indexing batch merged BAM...")
-                                pysam.index(batch_merged_bam)
-                                
-                                # Verify the batch BAM was created
-                                if os.path.exists(batch_merged_bam) and os.path.exists(f"{batch_merged_bam}.bai"):
-                                    try:
-                                        with pysam.AlignmentFile(batch_merged_bam, "rb") as bam_file:
-                                            read_count = bam_file.count(until_eof=True)
-                                            if read_count > 0:
-                                                logger.info(f"Successfully created batch BAM with {read_count} reads from {len(new_filtered_bams)} filtered BAM files")
-                                            else:
-                                                logger.warning("Batch BAM created but contains no reads")
-                                    except Exception as e:
-                                        logger.warning(f"Could not verify batch BAM: {e}")
-                                else:
-                                    logger.error("Failed to create batch BAM file")
-                                
-                                # Clean up filtered BAM files now that batch is merged
-                                logger.info("Cleaning up filtered BAM files after batch merge...")
-                                for filtered_bam in new_filtered_bams:
-                                    try:
-                                        if os.path.exists(filtered_bam):
-                                            os.remove(filtered_bam)
-                                        if os.path.exists(f"{filtered_bam}.bai"):
-                                            os.remove(f"{filtered_bam}.bai")
-                                    except OSError as e:
-                                        logger.warning(f"Could not remove filtered BAM {filtered_bam}: {e}")
-                                
-                                # Remove the filtered BAMs directory if empty
-                                try:
-                                    if not os.listdir(filtered_bams_dir):
-                                        os.rmdir(filtered_bams_dir)
-                                except OSError:
-                                    pass  # Directory not empty, that's fine
-                        else:
-                            logger.warning("No suitable BAM files found to create target.bam")
-                            
-                    except Exception as e:
-                        logger.error(f"Error creating target.bam: {e}")
-                        import traceback
-                        logger.error(traceback.format_exc())
-                
-                # Clean up staging files
-                logger.info("Cleaning up staging files...")
-                for f in coverage_files + bedcov_files + timestamp_files + source_bam_files:
-                    try:
-                        os.remove(f)
-                    except OSError as e:
-                        logger.warning(f"Could not remove staging file {f}: {e}")
-                
-                # Force garbage collection
-                gc.collect()
-                
-                elapsed = time.time() - start_time
-                logger.info(
-                    f"Batch accumulation complete for {sample_id}: "
-                    f"{len(coverage_files)} files in {elapsed:.2f}s "
-                    f"({elapsed/len(coverage_files):.3f}s per file)"
-                )
-                
-                return {
-                    "status": "success",
-                    "files_processed": len(coverage_files),
-                    "coverage": coverage,
-                    "targets_exceeding_threshold": len(run_list) if len(run_list) > 0 else 0,
-                    "elapsed_time": elapsed,
-                }
-        
+                        os.rmdir(batch_dir)
+                    except OSError:
+                        pass
+
+            gc.collect()
+            elapsed = time.time() - start_time
+            logger.info(
+                f"Batch accumulation complete for {sample_id}: "
+                f"{num_claimed} files in {elapsed:.2f}s"
+            )
+            return {
+                "status": "success",
+                "files_processed": num_claimed,
+                "coverage": coverage,
+                "targets_exceeding_threshold": len(run_list) if len(run_list) > 0 else 0,
+                "elapsed_time": elapsed,
+            }
+
         except TimeoutError as e:
             logger.error(f"Could not acquire accumulation lock for {sample_id}: {e}")
             return {"status": "lock_timeout", "error": str(e)}
@@ -2045,24 +2309,13 @@ def target_handler(job, work_dir=None, reference=None, target_panel=None):
         for i, filepath in enumerate(filepaths):
             logger.info(f"  Batch file {i+1}/{batch_size}: {os.path.basename(filepath)}")
         
-        # Prepare metadata list for all BAM files in the batch
-        metadata_list = []
-        for i, bam_path in enumerate(filepaths):
-            # Get metadata from preprocessing for this specific file
-            file_metadata = batched_job.contexts[i].metadata.get("bam_metadata", {})
-            
-            # Get sample ID from preprocessing results for this specific file
-            file_context = batched_job.contexts[i]
-            file_sample_id = file_context.get_sample_id()
-            
-            # Use the sample ID from the file's context (which should have preprocessing results)
-            if file_sample_id != "unknown":
-                file_metadata["sample_id"] = file_sample_id
-            else:
-                file_metadata["sample_id"] = sample_id
-            
-            metadata_list.append(file_metadata)
-        
+        # Prepare metadata list for all BAM files in the batch (list comp inlined in 3.12)
+        def _batch_metadata(i: int) -> dict:
+            ctx = batched_job.contexts[i]
+            sid = ctx.get_sample_id()
+            return {**ctx.metadata.get("bam_metadata", {}), "sample_id": sid if sid != "unknown" else sample_id}
+        metadata_list = [_batch_metadata(i) for i in range(len(filepaths))]
+
         # Determine work directory for the batch
         if work_dir is None:
             # Default to first BAM file directory
@@ -2295,7 +2548,7 @@ def target_handler(job, work_dir=None, reference=None, target_panel=None):
 
 
 def finalize_accumulation_for_sample(
-    sample_id: str, work_dir: str, target_panel: str
+    sample_id: str, work_dir: str, target_panel: str, reference: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Force final accumulation of any remaining staged files for a sample
@@ -2328,6 +2581,9 @@ def finalize_accumulation_for_sample(
             batch_size=1,  # Force accumulation regardless of count
             use_staging=True
         )
+        if reference:
+            target_analysis.reference = reference
+            logger.info(f"Finalize path using reference genome: {reference}")
         
         # Check if there are pending files
         pending_count = target_analysis._get_pending_count(sample_id)
@@ -2372,43 +2628,99 @@ def finalize_accumulation_for_sample(
             # Create temp merged output
             temp_merged_bam = os.path.join(sample_output_dir, ".final_merged.bam.tmp")
             
-            # Merge all batch BAMs
-            pysam.merge("-o", temp_merged_bam, *batch_bams)
+            # Clean stale temp outputs from a prior interrupted finalize, then force overwrite.
+            if os.path.exists(temp_merged_bam):
+                try:
+                    os.remove(temp_merged_bam)
+                except OSError as e:
+                    logger.warning(f"Could not remove stale temp merged BAM {temp_merged_bam}: {e}")
+            if os.path.exists(f"{temp_merged_bam}.bai"):
+                try:
+                    os.remove(f"{temp_merged_bam}.bai")
+                except OSError as e:
+                    logger.warning(f"Could not remove stale temp merged BAI {temp_merged_bam}.bai: {e}")
+
+            # Merge all batch BAMs (force overwrite in case file appears between checks)
+            pysam.merge("-f", "-o", temp_merged_bam, *batch_bams)
             logger.info("Merged all batch BAMs into temporary file")
             
             # Index the merged BAM
             pysam.index(temp_merged_bam)
             logger.info("Indexed merged target.bam")
-            
-            # Atomically replace target.bam
-            if os.path.exists(target_bam_path):
-                os.remove(target_bam_path)
-                if os.path.exists(f"{target_bam_path}.bai"):
-                    os.remove(f"{target_bam_path}.bai")
-            
-            shutil.move(temp_merged_bam, target_bam_path)
-            if os.path.exists(f"{temp_merged_bam}.bai"):
-                shutil.move(f"{temp_merged_bam}.bai", f"{target_bam_path}.bai")
-            
-            # Verify target.bam was created successfully
-            target_bam_exists = os.path.exists(target_bam_path) and os.path.exists(f"{target_bam_path}.bai")
-            
-            if target_bam_exists:
+
+            existing_target_read_count = 0
+            existing_target_has_reads = False
+            if os.path.exists(target_bam_path) and os.path.exists(f"{target_bam_path}.bai"):
                 try:
                     with pysam.AlignmentFile(target_bam_path, "rb") as bam_file:
-                        read_count = bam_file.count(until_eof=True)
-                        if read_count > 0:
-                            logger.info(f"Successfully created target.bam with {read_count} reads from {len(batch_bams)} batch files")
-                        else:
-                            logger.warning("target.bam created but contains no reads")
+                        existing_target_read_count = bam_file.count(until_eof=True)
+                        existing_target_has_reads = existing_target_read_count > 0
                 except Exception as e:
-                    logger.warning(f"Could not verify target.bam: {e}")
+                    logger.warning(f"Could not read existing target.bam before replacement: {e}")
+
+            merged_read_count = 0
+            try:
+                with pysam.AlignmentFile(temp_merged_bam, "rb") as bam_file:
+                    merged_read_count = bam_file.count(until_eof=True)
+            except Exception as e:
+                logger.warning(f"Could not read merged temp BAM before replacement: {e}")
+
+            replaced_target_bam = False
+
+            # Safety guard: preserve known-good existing BAM if newly merged BAM is empty.
+            if merged_read_count == 0 and existing_target_has_reads:
+                logger.warning(
+                    "Merged BAM for sample %s has 0 reads; preserving existing target.bam with %s reads.",
+                    sample_id,
+                    existing_target_read_count,
+                )
+                try:
+                    if os.path.exists(temp_merged_bam):
+                        os.remove(temp_merged_bam)
+                    if os.path.exists(f"{temp_merged_bam}.bai"):
+                        os.remove(f"{temp_merged_bam}.bai")
+                except OSError as e:
+                    logger.warning(f"Could not clean temp merged BAM after preserve decision: {e}")
+
+                target_bam_exists = os.path.exists(target_bam_path) and os.path.exists(f"{target_bam_path}.bai")
+                result["final_merge"] = "preserved_existing"
+                result["warning"] = (
+                    "Merged BAM was empty; preserved existing target.bam and continued."
+                )
             else:
-                logger.error("Failed to create target.bam file")
+                # Atomically replace target.bam
+                if os.path.exists(target_bam_path):
+                    os.remove(target_bam_path)
+                    if os.path.exists(f"{target_bam_path}.bai"):
+                        os.remove(f"{target_bam_path}.bai")
+
+                shutil.move(temp_merged_bam, target_bam_path)
+                if os.path.exists(f"{temp_merged_bam}.bai"):
+                    shutil.move(f"{temp_merged_bam}.bai", f"{target_bam_path}.bai")
+                replaced_target_bam = True
+
+                # Verify target.bam was created successfully
+                target_bam_exists = os.path.exists(target_bam_path) and os.path.exists(f"{target_bam_path}.bai")
+
+                if target_bam_exists:
+                    try:
+                        with pysam.AlignmentFile(target_bam_path, "rb") as bam_file:
+                            read_count = bam_file.count(until_eof=True)
+                            if read_count > 0:
+                                logger.info(
+                                    f"Successfully created target.bam with {read_count} reads from {len(batch_bams)} batch files"
+                                )
+                            else:
+                                logger.warning("target.bam created but contains no reads")
+                    except Exception as e:
+                        logger.warning(f"Could not verify target.bam: {e}")
+                else:
+                    logger.error("Failed to create target.bam file")
+                result["final_merge"] = "success" if target_bam_exists else "failed"
             
             # Clean up batch BAM files and their associated BAI files
             # Only clean up if target.bam was successfully created
-            if target_bam_exists:
+            if target_bam_exists and replaced_target_bam:
                 logger.info(f"Cleaning up {len(batch_bams)} batch BAM files and their index files after final merge")
                 cleaned_count = 0
                 failed_count = 0
@@ -2434,11 +2746,12 @@ def finalize_accumulation_for_sample(
                 
                 if failed_count > 0:
                     logger.warning(f"Failed to remove {failed_count} batch file(s) - they may need manual cleanup")
+            elif target_bam_exists:
+                logger.info("Preserved existing target.bam; keeping batch files for investigation/retry.")
             else:
                 logger.warning("Skipping batch cleanup - target.bam was not successfully created")
             
             logger.info(f"Final merge complete for {sample_id}")
-            result["final_merge"] = "success" if target_bam_exists else "failed"
             result["batch_files_merged"] = len(batch_bams)
         else:
             logger.info(f"No batch BAM files found for {sample_id}")
@@ -2451,6 +2764,83 @@ def finalize_accumulation_for_sample(
         import traceback
         logger.error(traceback.format_exc())
         return {"status": "error", "error": str(e), "sample_id": sample_id}
+
+
+def target_bam_finalize_handler(job, work_dir: Optional[str] = None) -> None:
+    """
+    Workflow handler to finalize target BAMs for a sample.
+    Runs accumulation and merges batch BAMs into target.bam.
+
+    Required metadata:
+    - sample_id: Sample identifier (optional; defaults to context sample ID)
+    - work_dir: Parent directory containing sample folder (optional)
+    - target_panel: Target panel type (optional; resolved from master.csv if missing)
+    """
+    logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
+
+    try:
+        sid = (
+            job.context.get_sample_id()
+            if hasattr(job.context, "get_sample_id")
+            else "unknown"
+        )
+        metadata = job.context.metadata or {}
+        sample_id = metadata.get("sample_id") or sid
+        sample_dir = metadata.get("sample_dir")
+        base = work_dir or metadata.get("work_dir")
+
+        if not sample_dir:
+            if base and sample_id and sample_id != "unknown":
+                sample_dir = os.path.join(base, sample_id)
+            elif os.path.isdir(job.context.filepath):
+                sample_dir = job.context.filepath
+            else:
+                sample_dir = os.path.dirname(job.context.filepath)
+
+        if not base and sample_dir:
+            base = os.path.dirname(sample_dir)
+
+        if not base or not sample_id:
+            raise RuntimeError(
+                f"Missing work_dir/sample_id for target BAM finalization (work_dir={base}, sample_id={sample_id})"
+            )
+
+        target_panel = metadata.get("target_panel")
+        reference = metadata.get("reference")
+        if not target_panel and sample_dir and os.path.isdir(sample_dir):
+            try:
+                import csv
+                master_csv = os.path.join(sample_dir, "master.csv")
+                if os.path.exists(master_csv):
+                    with open(master_csv, "r", newline="") as fh:
+                        reader = csv.DictReader(fh)
+                        first_row = next(reader, None)
+                        if first_row:
+                            panel = first_row.get("analysis_panel", "").strip()
+                            if panel:
+                                target_panel = panel
+            except Exception:
+                pass
+
+        if not target_panel:
+            target_panel = "rCNS2"
+
+        logger.info(
+            f"Finalizing target BAM: sample_id={sample_id}, work_dir={base}, target_panel={target_panel}, reference={reference}"
+        )
+
+        result = finalize_accumulation_for_sample(
+            sample_id=sample_id, work_dir=base, target_panel=target_panel, reference=reference
+        )
+
+        if result.get("status") == "error":
+            job.context.add_error("target_bam_finalize", result.get("error", "Unknown error"))
+        else:
+            job.context.add_result("target_bam_finalize", result)
+
+    except Exception as e:
+        job.context.add_error("target_bam_finalize", str(e))
+        logger.error(f"Error in target BAM finalization handler: {e}")
 
 
 def ensure_sorted_igv_bam(
@@ -2593,6 +2983,9 @@ def run_snp_analysis(
     threads: int = 4,
     force_regenerate: bool = False,
     reference: Optional[str] = None,
+    annotation_only: bool = False,
+    annotation_verbose: bool = False,
+    target_panel: Optional[str] = None,
 ) -> str:
     """
     Run SNP analysis using Clair3 for a sample.
@@ -2602,11 +2995,15 @@ def run_snp_analysis(
     - Clair3 variant calling
     - snpEff annotation
     - SnpSift annotation with ClinVar data
+    - Optional annotation-only reruns with verbose logging
 
     Args:
         sample_dir: Path to the sample output directory
         threads: Number of threads to use for processing
         force_regenerate: If True, force recreation even if output exists
+        annotation_only: If True, run only the snpEff/SnpSift annotation steps
+        annotation_verbose: If True, run annotation steps with verbose logging enabled
+        target_panel: Target panel name used to resolve full target BED file
 
     Returns:
         The path to the output directory containing SNP results (empty string on failure)
@@ -2616,7 +3013,15 @@ def run_snp_analysis(
     # CRITICAL: Immediate logging to see if we even get here
     logger.info("ENTERING run_snp_analysis function")
     logger.info(
-        f"Parameters: sample_dir={sample_dir}, threads={threads}, force_regenerate={force_regenerate}, reference={reference}"
+        "Parameters: sample_dir=%s, threads=%s, force_regenerate=%s, "
+        "reference=%s, annotation_only=%s, annotation_verbose=%s, target_panel=%s",
+        sample_dir,
+        threads,
+        force_regenerate,
+        reference,
+        annotation_only,
+        annotation_verbose,
+        target_panel,
     )
 
     # Also log to stderr to make sure we see it
@@ -2640,27 +3045,114 @@ def run_snp_analysis(
             os.path.join(clair_dir, "snpsift_indel_output.vcf"),
         ]
 
-        if not force_regenerate and all(os.path.exists(f) for f in snp_output_files):
+        if annotation_only:
+            logger.info("Annotation-only mode enabled; skipping existing output shortcut.")
+        elif not force_regenerate and all(os.path.exists(f) for f in snp_output_files):
             logger.info(f"SNP analysis already present in {clair_dir}")
+            logger.info("Rebuilding SNP display JSON from existing snpsift output.")
+            try:
+                snp_display_vcf = Path(clair_dir) / "snpsift_output.vcf"
+                snp_display_path = Path(clair_dir) / "snpsift_output_display.json"
+                if snp_display_vcf.exists():
+                    snp_display = build_snp_display_data(snp_display_vcf)
+                    if snp_display is not None:
+                        with snp_display_path.open("w", encoding="utf-8") as f_out:
+                            json.dump(snp_display, f_out)
+                        logger.info(
+                            f"SNP display data refreshed at {snp_display_path}"
+                        )
+                    else:
+                        logger.warning(
+                            "Could not regenerate SNP display data from existing VCF."
+                        )
+                else:
+                    logger.warning(
+                        "snpsift_output.vcf not found while refreshing display JSON."
+                    )
+            except Exception as display_exc:
+                logger.warning(f"Failed to refresh SNP display JSON: {display_exc}")
             return clair_dir
 
         logger.info("STEP 3: Checking for required input files")
         target_bam = os.path.join(sample_dir, "target.bam")
-        targets_bed = os.path.join(sample_dir, "targets_exceeding_threshold.bed")
+        threshold_targets_bed = os.path.join(sample_dir, "targets_exceeding_threshold.bed")
+        targets_bed = threshold_targets_bed
+        output_snv_vcf = os.path.join(clair_dir, "output_done.vcf.gz")
+        output_indel_vcf = os.path.join(clair_dir, "output_indel_done.vcf.gz")
+
+        def resolve_full_targets_bed() -> str:
+            # 1) Prefer target panel BED from resources when panel is known.
+            if target_panel:
+                if target_panel == "rCNS2":
+                    bed_filename = "rCNS2_panel_name_uniq.bed"
+                elif target_panel == "AML":
+                    bed_filename = "AML_panel_name_uniq.bed"
+                elif target_panel == "PanCan":
+                    bed_filename = "PanCan_panel_name_uniq.bed"
+                else:
+                    bed_filename = f"{target_panel}_panel_name_uniq.bed"
+
+                panel_paths = []
+                if resources is not None:
+                    try:
+                        panel_paths.append(
+                            os.path.join(
+                                os.path.dirname(os.path.abspath(resources.__file__)),
+                                bed_filename,
+                            )
+                        )
+                    except Exception:
+                        pass
+                panel_paths.extend(
+                    [bed_filename, f"data/{bed_filename}", f"/usr/local/share/{bed_filename}"]
+                )
+                for path in panel_paths:
+                    if os.path.exists(path):
+                        return path
+
+            # 2) Fall back to sample-specific master BED if available.
+            try:
+                import glob
+
+                bed_dir = os.path.join(sample_dir, "bed_files")
+                if os.path.isdir(bed_dir):
+                    master_bed_files = glob.glob(os.path.join(bed_dir, "master_*.bed"))
+                    if master_bed_files:
+                        return max(master_bed_files, key=os.path.getmtime)
+            except Exception as e:
+                logger.debug(f"Error resolving master BED from sample bed_files/: {e}")
+
+            # 3) Final fallback: legacy threshold BED.
+            return threshold_targets_bed
 
         logger.info("CHECKING INPUT FILES FOR CLAIR3")
         logger.info(f"  Sample directory: {sample_dir}")
         logger.info(f"  Target BAM path: {target_bam}")
-        logger.info(f"  Targets BED path: {targets_bed}")
+        targets_bed = resolve_full_targets_bed()
+        logger.info(f"  Threshold BED path: {threshold_targets_bed}")
+        logger.info(f"  Targets BED path selected for ClairS: {targets_bed}")
         logger.info(f"  Reference path: {reference}")
 
-        if not os.path.exists(target_bam):
-            logger.error(f"target.bam not found: {target_bam}")
-            return ""
+        if annotation_only:
+            missing_annotation_inputs = [
+                path for path in [output_snv_vcf, output_indel_vcf] if not os.path.exists(path)
+            ]
+            if missing_annotation_inputs:
+                for missing in missing_annotation_inputs:
+                    logger.error(f"Annotation input not found: {missing}")
+                logger.error(
+                    "Annotation-only mode requires existing Clair3 outputs. "
+                    "Run the full SNP pipeline first."
+                )
+                return ""
+        else:
+            if not os.path.exists(target_bam):
+                logger.error(f"target.bam not found: {target_bam}")
+                return ""
 
-        if not os.path.exists(targets_bed):
-            logger.error(f"targets_exceeding_threshold.bed not found: {targets_bed}")
-            return ""
+            if not os.path.exists(targets_bed):
+                logger.error(f"Target BED file not found: {targets_bed}")
+                return ""
 
         # Check for reference genome
         if not reference:
@@ -2680,83 +3172,91 @@ def run_snp_analysis(
                     break
 
         if not reference:
-            logger.error(
-                "Reference genome not found. SNP calling requires a reference genome."
-            )
-            return ""
+            if annotation_only:
+                logger.warning(
+                    "Reference genome not found, continuing because annotation-only mode is enabled."
+                )
+            else:
+                logger.error(
+                    "Reference genome not found. SNP calling requires a reference genome."
+                )
+                return ""
 
         logger.info(f"Starting SNP analysis for sample: {os.path.basename(sample_dir)}")
         logger.info(f"Reference: {reference}")
         logger.info(f"Target BAM: {target_bam}")
         logger.info(f"Targets BED: {targets_bed}")
 
-        logger.info("STEP 4: Sorting target BAM for Clair3")
-        sorted_bam = os.path.join(clair_dir, "sorted_targets_exceeding.bam")
-        logger.info(f"Sorting BAM: {target_bam} -> {sorted_bam}")
-
-        try:
-            # Check if sorted BAM already exists and is valid
-            if os.path.exists(sorted_bam) and os.path.exists(sorted_bam + ".bai"):
-                logger.info(f"Sorted BAM already exists: {sorted_bam}")
-                # Verify the file is readable
-                try:
-                    test_bam = pysam.AlignmentFile(sorted_bam, "rb")
-                    test_bam.close()
-                    logger.info("Sorted BAM file is valid and readable")
-                except Exception as e:
-                    logger.warning(
-                        f"Existing sorted BAM appears corrupted, regenerating: {e}"
-                    )
-                    os.remove(sorted_bam)
-                    if os.path.exists(sorted_bam + ".bai"):
-                        os.remove(sorted_bam + ".bai")
-                    raise Exception("Corrupted BAM file")
-            else:
-                logger.info("Creating new sorted BAM file...")
-
-            # Sort the BAM file
-            logger.info(f"Sorting BAM with {threads} threads...")
-            pysam.sort(f"-@{threads}", "-o", sorted_bam, target_bam)
-
-            # Verify the sorted file was created
-            if not os.path.exists(sorted_bam):
-                raise Exception(f"Sorted BAM file was not created: {sorted_bam}")
-
-            # Create index
-            logger.info("Creating BAM index...")
-            pysam.index(sorted_bam)
-
-            # Verify index was created
-            if not os.path.exists(sorted_bam + ".bai"):
-                raise Exception(f"BAM index was not created: {sorted_bam}.bai")
-
-            # Final verification
-            file_size = os.path.getsize(sorted_bam)
-            logger.info(
-                f"BAM sorting completed successfully: {sorted_bam} ({file_size / (1024**2):.1f} MB)"
-            )
-
-        except Exception as e:
-            logger.error(f"BAM sorting failed: {e}")
-            # Clean up any partial files
-            for file_path in [sorted_bam, sorted_bam + ".bai"]:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-                    logger.info(f"Cleaned up partial file: {file_path}")
-            return ""
-
-        logger.info("STEP 5: Running Clair3 pipeline")
-        logger.info("Running Clair3 pipeline...")
-
-        # Run Clair3 pipeline using Docker
-        logger.info("CHECKING DOCKER AVAILABILITY")
-        if docker is None:
-            logger.error("Docker module not available. Cannot run Clair3 pipeline.")
-            return ""
+        if annotation_only:
+            logger.info("Annotation-only mode enabled; skipping Clair3 variant calling.")
+            sorted_bam = os.path.join(clair_dir, "sorted_targets_exceeding.bam")
         else:
-            logger.info("Docker module is available")
+            logger.info("STEP 4: Sorting target BAM for Clair3")
+            sorted_bam = os.path.join(clair_dir, "sorted_targets_exceeding.bam")
+            logger.info(f"Sorting BAM: {target_bam} -> {sorted_bam}")
 
-        try:
+            try:
+                # Check if sorted BAM already exists and is valid
+                if os.path.exists(sorted_bam) and os.path.exists(sorted_bam + ".bai"):
+                    logger.info(f"Sorted BAM already exists: {sorted_bam}")
+                    # Verify the file is readable
+                    try:
+                        test_bam = pysam.AlignmentFile(sorted_bam, "rb")
+                        test_bam.close()
+                        logger.info("Sorted BAM file is valid and readable")
+                    except Exception as e:
+                        logger.warning(
+                            f"Existing sorted BAM appears corrupted, regenerating: {e}"
+                        )
+                        os.remove(sorted_bam)
+                        if os.path.exists(sorted_bam + ".bai"):
+                            os.remove(sorted_bam + ".bai")
+                        raise Exception("Corrupted BAM file")
+                else:
+                    logger.info("Creating new sorted BAM file...")
+
+                # Sort the BAM file
+                logger.info(f"Sorting BAM with {threads} threads...")
+                pysam.sort(f"-@{threads}", "-o", sorted_bam, target_bam)
+
+                # Verify the sorted file was created
+                if not os.path.exists(sorted_bam):
+                    raise Exception(f"Sorted BAM file was not created: {sorted_bam}")
+
+                # Create index
+                logger.info("Creating BAM index...")
+                pysam.index(sorted_bam)
+
+                # Verify index was created
+                if not os.path.exists(sorted_bam + ".bai"):
+                    raise Exception(f"BAM index was not created: {sorted_bam}.bai")
+
+                # Final verification
+                file_size = os.path.getsize(sorted_bam)
+                logger.info(
+                    f"BAM sorting completed successfully: {sorted_bam} ({file_size / (1024**2):.1f} MB)"
+                )
+
+            except Exception as e:
+                logger.error(f"BAM sorting failed: {e}")
+                # Clean up any partial files
+                for file_path in [sorted_bam, sorted_bam + ".bai"]:
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                        logger.info(f"Cleaned up partial file: {file_path}")
+                return ""
+
+            logger.info("STEP 5: Running Clair3 pipeline")
+            logger.info("Running Clair3 pipeline...")
+
+            # Run Clair3 pipeline using Docker
+            logger.info("CHECKING DOCKER AVAILABILITY")
+            if docker is None:
+                logger.error("Docker module not available. Cannot run Clair3 pipeline.")
+                return ""
+            else:
+                logger.info("Docker module is available")
+
             client = docker.from_env()
 
             # Test Docker connectivity
@@ -2766,6 +3266,12 @@ def run_snp_analysis(
             except Exception as docker_error:
                 logger.error(f"Docker daemon not accessible: {docker_error}")
                 return ""
+
+            # Define container-specific paths using the original working pattern
+            container_bamfile = f"/data/output/{os.path.basename(sorted_bam)}"  # BAM goes to output directory
+            container_bedfile = f"/data/bed/{os.path.basename(targets_bed)}"  # BED goes to bed directory
+            container_reference = f"/data/reference/{os.path.basename(reference)}"  # Reference goes to reference directory
+            container_output = "/data/output"
 
             # Check if Clair3 image exists
             try:
@@ -2781,12 +3287,6 @@ def run_snp_analysis(
                 except Exception as pull_error:
                     logger.error(f"Failed to pull Clair3 image: {pull_error}")
                     return ""
-
-            # Create container-specific paths using the original working pattern
-            container_bamfile = f"/data/output/{os.path.basename(sorted_bam)}"  # BAM goes to output directory
-            container_bedfile = f"/data/bed/{os.path.basename(targets_bed)}"  # BED goes to bed directory
-            container_reference = f"/data/reference/{os.path.basename(reference)}"  # Reference goes to reference directory
-            container_output = "/data/output"
 
             # Clean up old debugging - no longer needed with the fixed approach
 
@@ -2841,16 +3341,18 @@ def run_snp_analysis(
 
             host_config = client.api.create_host_config(binds=volume_bindings)
 
-            # Function to split BED file into manageable regions
-            def split_bed_into_regions(bed_file, max_region_size=150000000):
-                """Split BED file into efficient regions up to max_region_size bases"""
-                regions = []
+            # Function to split BED file into manageable chunks.
+            # Chunks can include multiple chromosomes, constrained by covered genomic span.
+            def split_bed_into_chunks(bed_file, max_chunk_size=150000000):
+                """Split BED entries into chunks up to max_chunk_size covered genomic span."""
+                chunks = []
                 try:
                     # Read all BED entries and sort them
                     bed_entries = []
                     with open(bed_file, "r") as f:
                         for line_num, line in enumerate(f, 1):
-                            line = line.strip()
+                            raw_line = line.rstrip("\n")
+                            line = raw_line.strip()
                             if not line or line.startswith("#"):
                                 continue
 
@@ -2864,108 +3366,122 @@ def run_snp_analysis(
                             chrom = parts[0]
                             start = int(parts[1])
                             end = int(parts[2])
-                            bed_entries.append((chrom, start, end))
+                            if end <= start:
+                                continue
+                            entry_len = end - start
+                            bed_entries.append((chrom, start, end, raw_line, entry_len))
 
                     # Sort by chromosome and start position
                     bed_entries.sort(key=lambda x: (x[0], x[1]))
 
-                    # Group into efficient regions
-                    current_chrom = None
-                    current_start = None
-                    current_end = None
+                    def covered_span(chrom_bounds):
+                        # Sum per-chromosome spans so sparse targets cannot inflate a chunk indefinitely.
+                        return sum((end - start) for start, end in chrom_bounds.values())
 
-                    for chrom, start, end in bed_entries:
-                        if chrom != current_chrom:
-                            # New chromosome, start new region
-                            if current_chrom is not None:
-                                regions.append(
-                                    f"{current_chrom}:{current_start+1}-{current_end}"
-                                )
-                            current_chrom = chrom
-                            current_start = start
-                            current_end = end
-                        elif end - current_start <= max_region_size:
-                            # Can extend current region
-                            current_end = end
+                    current_chunk = []
+                    current_bounds = {}
+
+                    for chrom, start, end, raw_line, entry_len in bed_entries:
+                        projected_bounds = dict(current_bounds)
+                        if chrom in projected_bounds:
+                            prev_start, prev_end = projected_bounds[chrom]
+                            projected_bounds[chrom] = (min(prev_start, start), max(prev_end, end))
                         else:
-                            # Current region would exceed max size, start new one
-                            regions.append(
-                                f"{current_chrom}:{current_start+1}-{current_end}"
-                            )
-                            current_start = start
-                            current_end = end
+                            projected_bounds[chrom] = (start, end)
 
-                    # Add final region
-                    if current_chrom is not None:
-                        regions.append(
-                            f"{current_chrom}:{current_start+1}-{current_end}"
-                        )
+                        if current_chunk and covered_span(projected_bounds) > max_chunk_size:
+                            chunks.append(current_chunk)
+                            current_chunk = []
+                            current_bounds = {}
+
+                        if chrom in current_bounds:
+                            prev_start, prev_end = current_bounds[chrom]
+                            current_bounds[chrom] = (min(prev_start, start), max(prev_end, end))
+                        else:
+                            current_bounds[chrom] = (start, end)
+                        current_chunk.append((chrom, start, end, raw_line, entry_len))
+
+                    if current_chunk:
+                        chunks.append(current_chunk)
 
                     logger.info(
-                        f"Combined BED entries into {len(regions)} efficient regions (max size: {max_region_size:,} bases)"
+                        f"Combined BED entries into {len(chunks)} chunks (max chunk size: {max_chunk_size:,} bases)"
                     )
-                    return regions
+                    return chunks
                 except Exception as e:
-                    logger.error(f"Error splitting BED file: {e}")
+                    logger.error(f"Error splitting BED file into chunks: {e}")
                     return []
 
-            # Split BED file into regions
-            logger.info("Splitting BED file into efficient regions...")
-            regions = split_bed_into_regions(targets_bed, max_region_size=150000000)
+            # Default to region-split mode to keep INDEL calling memory usage bounded.
+            # Set ROBIN_CLAIRS_SPLIT_REGIONS=0 to force single-pass mode.
+            split_regions_env = os.environ.get("ROBIN_CLAIRS_SPLIT_REGIONS")
+            if split_regions_env is None:
+                use_split_regions = True
+            else:
+                use_split_regions = split_regions_env.lower() in ("1", "true", "yes", "on")
 
-            if not regions:
-                logger.error("Failed to split BED file into regions")
-                return ""
+            if use_split_regions:
+                logger.info(
+                    "Using region-split ClairS mode (recommended for INDEL memory stability)."
+                )
+                chunked_entries = split_bed_into_chunks(targets_bed, max_chunk_size=250000000)
+                if not chunked_entries:
+                    logger.error("Failed to split BED file into chunks")
+                    return ""
+                chunk_bed_dir = os.path.join(clair_dir, "chunk_beds")
+                os.makedirs(chunk_bed_dir, exist_ok=True)
 
-            logger.info(
-                f"Processing {len(regions)} efficient regions: {regions[:5]}{'...' if len(regions) > 5 else ''}"
-            )
+                regions = []
+                for i, chunk in enumerate(chunked_entries, 1):
+                    chunk_host_bed = os.path.join(chunk_bed_dir, f"region_{i}.bed")
+                    with open(chunk_host_bed, "w") as f_out:
+                        for _, _, _, raw_line, _ in chunk:
+                            f_out.write(raw_line + "\n")
 
-            # Log region sizes for efficiency analysis
-            total_bases = 0
-            for i, region in enumerate(regions):
-                try:
-                    chrom_part, pos_part = region.split(":")
-                    start_end = pos_part.split("-")
-                    start = int(start_end[0]) - 1  # Convert back to 0-based
-                    end = int(start_end[1])
-                    region_size = end - start
-                    total_bases += region_size
-                    logger.info(f"Region {i+1}: {region} (size: {region_size:,} bases)")
-                except Exception as e:
-                    logger.warning(f"Could not parse region size for {region}: {e}")
+                    first_chrom, first_start = chunk[0][0], chunk[0][1]
+                    last_chrom, last_end = chunk[-1][0], chunk[-1][2]
+                    chrom_bounds = {}
+                    for chrom, start, end, _, _ in chunk:
+                        if chrom in chrom_bounds:
+                            prev_start, prev_end = chrom_bounds[chrom]
+                            chrom_bounds[chrom] = (min(prev_start, start), max(prev_end, end))
+                        else:
+                            chrom_bounds[chrom] = (start, end)
+                    span_bases = sum((end - start) for start, end in chrom_bounds.values())
+                    label = f"{first_chrom}:{first_start+1}-{last_end}"
+                    if first_chrom != last_chrom:
+                        label = f"{first_chrom}:{first_start+1}..{last_chrom}:{last_end}"
 
-            logger.info(
-                f"Total bases to process: {total_bases:,} across {len(regions)} regions"
-            )
-            logger.info(f"Average region size: {total_bases // len(regions):,} bases")
+                    regions.append(
+                        {
+                            "label": label,
+                            "bed_container": f"{container_output}/chunk_beds/region_{i}.bed",
+                            "is_split": True,
+                            "span_bases": span_bases,
+                        }
+                    )
+                    logger.info(
+                        f"Chunk {i}: {label} (entries: {len(chunk)}, span: {span_bases:,} bases)"
+                    )
+            else:
+                logger.info(
+                    "Running ClairS in single-pass mode over full BED."
+                )
+                logger.info(
+                    "Set ROBIN_CLAIRS_SPLIT_REGIONS=1 to re-enable region-splitting mode."
+                )
+                regions = [
+                    {
+                        "label": "full_target_bed",
+                        "bed_container": container_bedfile,
+                        "is_split": False,
+                        "span_bases": None,
+                    }
+                ]
 
-            # Process each region separately
+            # Process each region separately (or single pass)
             all_snv_vcfs = []
             all_indel_vcfs = []
-
-            for i, region in enumerate(regions):
-                logger.info(f"Processing region {i+1}/{len(regions)}: {region}")
-                print(
-                    f"Processing region {i+1}/{len(regions)}: {region} - PRINT STATEMENT"
-                )
-                # Create region-specific output directory
-                region_output = f"{container_output}/region_{i+1}"
-
-                # Build Clair3 command for this region
-                command = (
-                    f"/opt/bin/run_clairs_to "
-                    f"--tumor_bam_fn {container_bamfile} "
-                    f"--ref_fn {container_reference} "
-                    f"--threads 4 "
-                    f"--remove_intermediate_dir "
-                    f"--platform ont_r10_guppy_hac_5khz "
-                    f"--output_dir {region_output} "
-                    f"-b {container_bedfile} "
-                    f"--chunk_size 5000000 "
-                    f"--disable_intermediate_phasing "
-                    f"--region {region}"
-                )
 
             logger.info(f"Container input BAM: {container_bamfile}")
             logger.info(f"Container input BED: {container_bedfile}")
@@ -3034,28 +3550,31 @@ def run_snp_analysis(
                 logger.info("psutil not available, skipping resource logging")
 
             # Process each region
-            for i, region in enumerate(regions):
+            for i, region_spec in enumerate(regions):
+                region_label = region_spec["label"]
                 print(
-                    f"Processing region {i+1}/{len(regions)}: {region} - PRINT STATEMENT"
+                    f"Processing region {i+1}/{len(regions)}: {region_label} - PRINT STATEMENT"
                 )
-                logger.info(f"Processing region {i+1}/{len(regions)}: {region}")
+                logger.info(f"Processing region {i+1}/{len(regions)}: {region_label}")
 
                 # Create region-specific output directory
-                region_output = f"{container_output}/region_{i+1}"
+                if region_spec["is_split"]:
+                    region_output = f"{container_output}/region_{i+1}"
+                else:
+                    region_output = container_output
 
                 # Build Clair3 command for this region
                 command = (
                     f"/opt/bin/run_clairs_to "
                     f"--tumor_bam_fn {container_bamfile} "
                     f"--ref_fn {container_reference} "
-                    f"--threads 4 "
+                    f"--threads {threads} "
                     f"--remove_intermediate_dir "
                     f"--platform ont_r10_guppy_hac_5khz "
                     f"--output_dir {region_output} "
-                    f"-b {container_bedfile} "
+                    f"-b {region_spec['bed_container']} "
                     f"--chunk_size 5000000 "
                     f"--disable_intermediate_phasing "
-                    f"--region {region}"
                 )
 
                 logger.info(f"Running Clair3 command for region {i+1}: {command}")
@@ -3082,9 +3601,31 @@ def run_snp_analysis(
                 # Wait for completion
                 result = client.api.wait(container=container.get("Id"))
                 if result["StatusCode"] != 0:
+                    status_code = result.get("StatusCode")
+                    container_id = container.get("Id")
+
+                    # Classify abnormal termination (OOM/SIGKILL/SIGTERM) for clearer diagnostics.
+                    oom_killed = False
+                    kill_reason = None
+                    try:
+                        inspect_data = client.api.inspect_container(container=container_id)
+                        state = inspect_data.get("State", {}) if inspect_data else {}
+                        oom_killed = bool(state.get("OOMKilled", False))
+                    except Exception as inspect_exc:
+                        logger.debug(
+                            f"Could not inspect Clair3 container state for region {i+1}: {inspect_exc}"
+                        )
+
+                    if oom_killed:
+                        kill_reason = "oom_killed"
+                    elif status_code == 137:
+                        kill_reason = "sigkill_or_oom"
+                    elif status_code == 143:
+                        kill_reason = "sigterm"
+
                     # Get detailed error logs before removing container
                     error_logs = client.api.logs(
-                        container=container.get("Id"), stderr=True, stdout=False
+                        container=container_id, stderr=True, stdout=False
                     )
                     error_details = error_logs.decode().strip()
                     if error_details:
@@ -3092,7 +3633,7 @@ def run_snp_analysis(
 
                     # Also get stdout logs for context
                     stdout_logs = client.api.logs(
-                        container=container.get("Id"), stdout=True, stderr=False
+                        container=container_id, stdout=True, stderr=False
                     )
                     stdout_details = stdout_logs.decode().strip()
                     if stdout_details:
@@ -3100,17 +3641,31 @@ def run_snp_analysis(
                             f"Clair3 region {i+1} stdout logs: {stdout_details}"
                         )
 
+                    if kill_reason is not None:
+                        logger.error(
+                            "Clair3 region %s terminated abnormally (%s, exit=%s). "
+                            "This is often memory pressure (especially for oom_killed/sigkill_or_oom). "
+                            "Consider lowering threads or reducing chunk span.",
+                            i + 1,
+                            kill_reason,
+                            status_code,
+                        )
+
                     logger.warning(
-                        f"Clair3 region {i+1} failed with status code {result['StatusCode']}, skipping this region"
+                        f"Clair3 region {i+1} failed with status code {status_code}, skipping this region"
                     )
                     continue
 
                 # Clean up container
                 client.api.remove_container(container=container.get("Id"))
 
-                # Check if output files were created for this region
-                region_snv = f"{clair_dir}/region_{i+1}/snv.vcf.gz"
-                region_indel = f"{clair_dir}/region_{i+1}/indel.vcf.gz"
+                # Check if output files were created for this region/pass
+                if region_spec["is_split"]:
+                    region_snv = f"{clair_dir}/region_{i+1}/snv.vcf.gz"
+                    region_indel = f"{clair_dir}/region_{i+1}/indel.vcf.gz"
+                else:
+                    region_snv = f"{clair_dir}/snv.vcf.gz"
+                    region_indel = f"{clair_dir}/indel.vcf.gz"
 
                 if os.path.exists(region_snv):
                     all_snv_vcfs.append(region_snv)
@@ -3126,40 +3681,55 @@ def run_snp_analysis(
                         f"Region {i+1} INDEL output not found: {region_indel}"
                     )
 
-            # Merge all region outputs
-            logger.info(
-                f"Merging {len(all_snv_vcfs)} SNV VCF files and {len(all_indel_vcfs)} INDEL VCF files..."
-            )
-
-            if all_snv_vcfs:
-                # Merge SNV VCFs
-                merged_snv = f"{clair_dir}/merged_snv.vcf.gz"
-                merge_vcf_files(all_snv_vcfs, merged_snv, "SNV")
-                shutil.copy2(merged_snv, f"{clair_dir}/output_done.vcf.gz")
-                logger.info(f"Merged SNV VCFs into: {clair_dir}/output_done.vcf.gz")
-            else:
-                logger.error("No SNV VCF files were successfully created")
-                return ""
-
-            if all_indel_vcfs:
-                # Merge INDEL VCFs
-                merged_indel = f"{clair_dir}/merged_indel.vcf.gz"
-                merge_vcf_files(all_indel_vcfs, merged_indel, "INDEL")
-                shutil.copy2(merged_indel, f"{clair_dir}/output_indel_done.vcf.gz")
+            if use_split_regions:
+                # Merge all split-region outputs
                 logger.info(
-                    f"Merged INDEL VCFs into: {clair_dir}/output_indel_done.vcf.gz"
+                    f"Merging {len(all_snv_vcfs)} SNV VCF files and {len(all_indel_vcfs)} INDEL VCF files..."
                 )
+
+                if all_snv_vcfs:
+                    merged_snv = f"{clair_dir}/merged_snv.vcf.gz"
+                    merge_vcf_files(all_snv_vcfs, merged_snv, "SNV")
+                    shutil.copy2(merged_snv, f"{clair_dir}/output_done.vcf.gz")
+                    logger.info(f"Merged SNV VCFs into: {clair_dir}/output_done.vcf.gz")
+                else:
+                    logger.error("No SNV VCF files were successfully created")
+                    return ""
+
+                if all_indel_vcfs:
+                    merged_indel = f"{clair_dir}/merged_indel.vcf.gz"
+                    merge_vcf_files(all_indel_vcfs, merged_indel, "INDEL")
+                    shutil.copy2(merged_indel, f"{clair_dir}/output_indel_done.vcf.gz")
+                    logger.info(
+                        f"Merged INDEL VCFs into: {clair_dir}/output_indel_done.vcf.gz"
+                    )
+                else:
+                    logger.warning("No INDEL VCF files were successfully created")
+                logger.info("Clair3 pipeline completed successfully for all regions")
             else:
-                logger.warning("No INDEL VCF files were successfully created")
+                # Single-pass output normalization (no merge step needed).
+                single_snv = f"{clair_dir}/snv.vcf.gz"
+                single_indel = f"{clair_dir}/indel.vcf.gz"
+                if not os.path.exists(single_snv):
+                    logger.error(f"Single-pass SNV output not found: {single_snv}")
+                    return ""
+                shutil.copy2(single_snv, f"{clair_dir}/output_done.vcf.gz")
+                logger.info(f"Single-pass SNV output copied to: {clair_dir}/output_done.vcf.gz")
 
-            logger.info("Clair3 pipeline completed successfully for all regions")
+                if os.path.exists(single_indel):
+                    shutil.copy2(single_indel, f"{clair_dir}/output_indel_done.vcf.gz")
+                    logger.info(
+                        f"Single-pass INDEL output copied to: {clair_dir}/output_indel_done.vcf.gz"
+                    )
+                else:
+                    logger.warning(f"Single-pass INDEL output not found: {single_indel}")
+                logger.info("Clair3 pipeline completed successfully in single-pass mode")
 
-        except ImportError:
-            logger.error("Docker not available. Cannot run Clair3 pipeline.")
-            return ""
-        except Exception as e:
-            logger.error(f"Error running Clair3 pipeline: {e}")
-            return ""
+
+        if annotation_only:
+            logger.info(
+                "Proceeding directly to annotation pipeline using existing Clair3 outputs."
+            )
 
         logger.info("STEP 6: Running annotation pipeline")
         logger.info("Running annotation pipeline...")
@@ -3167,7 +3737,7 @@ def run_snp_analysis(
         try:
             # SNP annotation with snpEff
             logger.info("Starting snpEff annotation for SNPs...")
-            logger.info(f"Input file: {clair_dir}/output_done.vcf.gz")
+            logger.info(f"Input file: {output_snv_vcf}")
             logger.info(f"Output file: {clair_dir}/snpeff_output.vcf")
 
             # Define output file paths
@@ -3177,15 +3747,15 @@ def run_snp_analysis(
             snpsift_indel_out = f"{clair_dir}/snpsift_indel_output.vcf"
 
             # Check if input file exists and has content
-            if os.path.exists(f"{clair_dir}/output_done.vcf.gz"):
-                file_size = os.path.getsize(f"{clair_dir}/output_done.vcf.gz")
+            if os.path.exists(output_snv_vcf):
+                file_size = os.path.getsize(output_snv_vcf)
                 logger.info(f"Input VCF file exists, size: {file_size} bytes")
 
                 # Check first few lines to verify it's a valid VCF
                 try:
                     import gzip
 
-                    with gzip.open(f"{clair_dir}/output_done.vcf.gz", "rt") as f:
+                    with gzip.open(output_snv_vcf, "rt") as f:
                         first_lines = [next(f) for _ in range(5)]
                     logger.info("First 5 lines of input VCF:")
                     for i, line in enumerate(first_lines):
@@ -3194,11 +3764,16 @@ def run_snp_analysis(
                     logger.warning(f"Could not read input VCF file: {e}")
             else:
                 logger.error(
-                    f"Input VCF file does not exist: {clair_dir}/output_done.vcf.gz"
+                    f"Input VCF file does not exist: {output_snv_vcf}"
                 )
 
-            snpeff_cmd = ["snpEff", "-q", "hg38", f"{clair_dir}/output_done.vcf.gz"]
+            snpeff_cmd = ["snpEff"]
+            snpeff_cmd.append("-v" if annotation_verbose else "-q")
+            snpeff_cmd.extend(["hg38", output_snv_vcf])
             logger.info(f"Running snpEff command: {' '.join(snpeff_cmd)}")
+
+            annotation_env = os.environ.copy()
+            annotation_env["_JAVA_OPTIONS"] = "-Xmx16g"
 
             # Check if snpEff is available
             try:
@@ -3217,11 +3792,17 @@ def run_snp_analysis(
             with open(snpeff_out, "w") as fout:
                 logger.info("Starting snpEff execution...")
                 result = subprocess.run(
-                    snpeff_cmd, stdout=fout, stderr=subprocess.PIPE, text=True
+                    snpeff_cmd,
+                    stdout=fout,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=annotation_env,
                 )
                 logger.info(
                     f"snpEff execution completed with return code: {result.returncode}"
                 )
+                if annotation_verbose and result.stderr:
+                    logger.info(f"snpEff stderr output:\n{result.stderr}")
 
             if result.returncode != 0:
                 logger.warning(f"snpEff failed with return code: {result.returncode}")
@@ -3230,7 +3811,7 @@ def run_snp_analysis(
                 # Decompress the gzipped file when copying to .vcf extension
                 import gzip
 
-                with gzip.open(f"{clair_dir}/output_done.vcf.gz", "rt") as f_in:
+                with gzip.open(output_snv_vcf, "rt") as f_in:
                     with open(snpeff_out, "w") as f_out:
                         f_out.write(f_in.read())
                 logger.info("Created uncompressed VCF from gzipped input")
@@ -3267,46 +3848,65 @@ def run_snp_analysis(
             else:
                 logger.error(f"snpEff output file does not exist: {snpeff_out}")
 
+            clinvar_db_path = _resolve_clinvar_db_for_snpsift(logger)
             try:
-                from robin import resources
-
-                clinvar_path = os.path.join(
-                    os.path.dirname(os.path.abspath(resources.__file__)), "clinvar.vcf"
-                )
-
-                logger.info(f"Looking for ClinVar file at: {clinvar_path}")
-
-                if os.path.exists(clinvar_path):
-                    clinvar_size = os.path.getsize(clinvar_path)
-                    logger.info(f"ClinVar file found, size: {clinvar_size} bytes")
+                if clinvar_db_path:
+                    clinvar_size = os.path.getsize(clinvar_db_path)
+                    logger.info(
+                        f"ClinVar DB found, size: {clinvar_size} bytes"
+                    )
 
                     # Check if SnpSift is available
                     try:
                         snpsift_version = subprocess.run(
-                            ["SnpSift", "-version"], capture_output=True, text=True
+                            ["SnpSift"], capture_output=True, text=True
                         )
-                        if snpsift_version.returncode == 0:
-                            logger.info(
-                                f"SnpSift version: {snpsift_version.stdout.strip()}"
+                        version_output = "\n".join(
+                            part.strip()
+                            for part in (
+                                snpsift_version.stdout,
+                                snpsift_version.stderr,
                             )
+                            if part
+                        )
+                        version_line = ""
+                        for line in version_output.splitlines():
+                            if "SnpSift version" in line:
+                                version_line = line.strip()
+                                break
+                        if version_line:
+                            logger.info(f"SnpSift version: {version_line}")
+                        elif snpsift_version.returncode == 0:
+                            logger.info("SnpSift command executed successfully")
                         else:
                             logger.warning(
-                                f"Could not get SnpSift version: {snpsift_version.stderr}"
+                                "Could not determine SnpSift version from command output"
                             )
                     except FileNotFoundError:
                         logger.error("SnpSift command not found in PATH")
 
-                    snpsift_cmd = ["SnpSift", "annotate", clinvar_path, snpeff_out]
+                    snpsift_cmd = ["SnpSift", "annotate"]
+                    if annotation_verbose:
+                        snpsift_cmd.append("-v")
+                    snpsift_cmd.extend([clinvar_db_path, snpeff_out])
                     logger.info(f"Running SnpSift command: {' '.join(snpsift_cmd)}")
+
+                    snpsift_env = annotation_env.copy()
 
                     with open(snpsift_out, "w") as fout:
                         logger.info("Starting SnpSift execution...")
                         result = subprocess.run(
-                            snpsift_cmd, stdout=fout, stderr=subprocess.PIPE, text=True
+                            snpsift_cmd,
+                            stdout=fout,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                            env=snpsift_env,
                         )
                         logger.info(
                             f"SnpSift execution completed with return code: {result.returncode}"
                         )
+                        if annotation_verbose and result.stderr:
+                            logger.info(f"SnpSift stderr output:\n{result.stderr}")
 
                     if result.returncode != 0:
                         logger.warning(
@@ -3339,7 +3939,7 @@ def run_snp_analysis(
                             logger.error("SnpSift output file was not created!")
                 else:
                     logger.warning(
-                        f"ClinVar file not found at {clinvar_path}, using snpEff output"
+                        "ClinVar bgzip/tabix database unavailable, using snpEff output"
                     )
                     shutil.copy2(snpeff_out, snpsift_out)
                     logger.info(
@@ -3356,19 +3956,19 @@ def run_snp_analysis(
 
             # INDEL annotation
             logger.info("Starting snpEff annotation for INDELs...")
-            logger.info(f"Input file: {clair_dir}/output_indel_done.vcf.gz")
+            logger.info(f"Input file: {output_indel_vcf}")
             logger.info(f"Output file: {snpeff_indel_out}")
 
             # Check if input file exists and has content
-            if os.path.exists(f"{clair_dir}/output_indel_done.vcf.gz"):
-                file_size = os.path.getsize(f"{clair_dir}/output_indel_done.vcf.gz")
+            if os.path.exists(output_indel_vcf):
+                file_size = os.path.getsize(output_indel_vcf)
                 logger.info(f"INDEL input VCF file exists, size: {file_size} bytes")
 
                 # Check first few lines to verify it's a valid VCF
                 try:
                     import gzip
 
-                    with gzip.open(f"{clair_dir}/output_indel_done.vcf.gz", "rt") as f:
+                    with gzip.open(output_indel_vcf, "rt") as f:
                         first_lines = [next(f) for _ in range(5)]
                     logger.info("First 5 lines of INDEL input VCF:")
                     for i, line in enumerate(first_lines):
@@ -3377,25 +3977,28 @@ def run_snp_analysis(
                     logger.warning(f"Could not read INDEL input VCF file: {e}")
             else:
                 logger.error(
-                    f"INDEL input VCF file does not exist: {clair_dir}/output_indel_done.vcf.gz"
+                    f"INDEL input VCF file does not exist: {output_indel_vcf}"
                 )
 
-            snpeff_indel_cmd = [
-                "snpEff",
-                "-q",
-                "hg38",
-                f"{clair_dir}/output_indel_done.vcf.gz",
-            ]
+            snpeff_indel_cmd = ["snpEff"]
+            snpeff_indel_cmd.append("-v" if annotation_verbose else "-q")
+            snpeff_indel_cmd.extend(["hg38", output_indel_vcf])
             logger.info(f"Running snpEff INDEL command: {' '.join(snpeff_indel_cmd)}")
 
             with open(snpeff_indel_out, "w") as fout:
                 logger.info("Starting snpEff INDEL execution...")
                 result = subprocess.run(
-                    snpeff_indel_cmd, stdout=fout, stderr=subprocess.PIPE, text=True
+                    snpeff_indel_cmd,
+                    stdout=fout,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=annotation_env,
                 )
                 logger.info(
                     f"snpEff INDEL execution completed with return code: {result.returncode}"
                 )
+                if annotation_verbose and result.stderr:
+                    logger.info(f"snpEff INDEL stderr output:\n{result.stderr}")
 
             if result.returncode != 0:
                 logger.warning(
@@ -3406,7 +4009,7 @@ def run_snp_analysis(
                 # Decompress the gzipped file when copying to .vcf extension
                 import gzip
 
-                with gzip.open(f"{clair_dir}/output_indel_done.vcf.gz", "rt") as f_in:
+                with gzip.open(output_indel_vcf, "rt") as f_in:
                     with open(snpeff_indel_out, "w") as f_out:
                         f_out.write(f_in.read())
                 logger.info("Created uncompressed INDEL VCF from gzipped input")
@@ -3448,20 +4051,20 @@ def run_snp_analysis(
                 )
 
             try:
-                if os.path.exists(clinvar_path):
+                if clinvar_db_path:
                     logger.info(
-                        f"Using ClinVar file for INDEL annotation: {clinvar_path}"
+                        f"Using ClinVar file for INDEL annotation: {clinvar_db_path}"
                     )
 
-                    snpsift_indel_cmd = [
-                        "SnpSift",
-                        "annotate",
-                        clinvar_path,
-                        snpeff_indel_out,
-                    ]
+                    snpsift_indel_cmd = ["SnpSift", "annotate"]
+                    if annotation_verbose:
+                        snpsift_indel_cmd.append("-v")
+                    snpsift_indel_cmd.extend([clinvar_db_path, snpeff_indel_out])
                     logger.info(
                         f"Running SnpSift INDEL command: {' '.join(snpsift_indel_cmd)}"
                     )
+
+                    snpsift_indel_env = annotation_env.copy()
 
                     with open(snpsift_indel_out, "w") as fout:
                         logger.info("Starting SnpSift INDEL execution...")
@@ -3470,10 +4073,13 @@ def run_snp_analysis(
                             stdout=fout,
                             stderr=subprocess.PIPE,
                             text=True,
+                            env=snpsift_indel_env,
                         )
                         logger.info(
                             f"SnpSift INDEL execution completed with return code: {result.returncode}"
                         )
+                        if annotation_verbose and result.stderr:
+                            logger.info(f"SnpSift INDEL stderr output:\n{result.stderr}")
 
                     if result.returncode != 0:
                         logger.warning(
@@ -3574,6 +4180,19 @@ def run_snp_analysis(
                 f"{clair_dir}/snpsift_indel_output.vcf.csv",
             )
 
+            # Build pre-formatted SNP display data for the GUI
+            try:
+                snp_display_path = Path(clair_dir) / "snpsift_output_display.json"
+                snp_display = build_snp_display_data(Path(clair_dir) / "snpsift_output.vcf")
+                if snp_display is not None:
+                    with snp_display_path.open("w", encoding="utf-8") as f_out:
+                        json.dump(snp_display, f_out)
+                    logger.info(f"SNP display data written to {snp_display_path}")
+                else:
+                    logger.warning("Could not generate SNP display data from VCF.")
+            except Exception as display_exc:
+                logger.warning(f"Failed to build SNP display data: {display_exc}")
+
             # Note: VCF files are now properly uncompressed when they have .vcf extensions
             # Compressed .vcf.gz files are only used as input to processing tools
 
@@ -3608,6 +4227,8 @@ def snp_analysis_handler(job, work_dir: Optional[str] = None) -> None:
     - reference: Path to reference genome (optional, will auto-detect)
     - threads: Number of threads to use (default: 4)
     - force_regenerate: Whether to force regeneration of existing results (default: False)
+    - annotation_only: Run only the annotation steps (default: False)
+    - annotation_verbose: Enable verbose logging for snpEff/SnpSift (default: False)
     """
     logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
 
@@ -3676,12 +4297,33 @@ def snp_analysis_handler(job, work_dir: Optional[str] = None) -> None:
         threads = job.context.metadata.get("threads", 4)
         force_regenerate = job.context.metadata.get("force_regenerate", False)
         reference = job.context.metadata.get("reference")
+        annotation_only = job.context.metadata.get("annotation_only", False)
+        annotation_verbose = job.context.metadata.get("annotation_verbose", False)
+        target_panel = job.context.metadata.get("target_panel")
+        if not target_panel:
+            try:
+                master_csv = os.path.join(sample_dir, "master.csv")
+                if os.path.exists(master_csv):
+                    import csv
+
+                    with open(master_csv, "r", newline="") as fh:
+                        reader = csv.DictReader(fh)
+                        first_row = next(reader, None)
+                        if first_row:
+                            panel = first_row.get("analysis_panel", "").strip()
+                            if panel:
+                                target_panel = panel
+            except Exception:
+                pass
 
         # Debug logging for reference genome
         logger.info("=== SNP ANALYSIS HANDLER DEBUGGING ===")
         logger.info(f"Job metadata keys: {list(job.context.metadata.keys())}")
         logger.info(f"Job metadata: {job.context.metadata}")
         logger.info(f"Extracted reference: {reference}")
+        logger.info(f"Annotation-only: {annotation_only}")
+        logger.info(f"Annotation-verbose: {annotation_verbose}")
+        logger.info(f"Target panel: {target_panel}")
         logger.info("=== END SNP ANALYSIS HANDLER DEBUGGING ===")
 
         if force_regenerate:
@@ -3699,7 +4341,17 @@ def snp_analysis_handler(job, work_dir: Optional[str] = None) -> None:
         # Run SNP analysis
         logger.info("ABOUT TO CALL run_snp_analysis function")
         logger.info(
-            f"Calling run_snp_analysis with: sample_dir={sample_dir}, threads={threads}, force_regenerate={force_regenerate}, reference={reference}"
+            "Calling run_snp_analysis with: sample_dir=%s, threads=%s, "
+            "force_regenerate=%s, reference=%s, annotation_only=%s, annotation_verbose=%s, target_panel=%s"
+            % (
+                sample_dir,
+                threads,
+                force_regenerate,
+                reference,
+                annotation_only,
+                annotation_verbose,
+                target_panel,
+            )
         )
 
         output_dir = run_snp_analysis(
@@ -3707,6 +4359,9 @@ def snp_analysis_handler(job, work_dir: Optional[str] = None) -> None:
             threads=threads,
             force_regenerate=force_regenerate,
             reference=reference,
+            annotation_only=annotation_only,
+            annotation_verbose=annotation_verbose,
+            target_panel=target_panel,
         )
 
         logger.info(f"run_snp_analysis returned: {output_dir}")

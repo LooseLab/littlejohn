@@ -7,18 +7,15 @@ for each sample, tracking comprehensive metadata across multiple BAM files.
 """
 
 import os
+import tempfile
 import pandas as pd
 from typing import Dict, Any
 from dataclasses import dataclass
 import logging
 import time
 
-# Import file locking (Unix/macOS)
-try:
-    import fcntl
-    HAS_FCNTL = True
-except ImportError:
-    HAS_FCNTL = False
+# Per-sample file lock for master.csv read-modify-write
+from robin.analysis.master_bed_generator import FileLock
 
 
 @dataclass
@@ -27,75 +24,55 @@ class MasterCSVManager:
 
     work_dir: str
 
-    def _acquire_lock(self, file_handle, exclusive=True, timeout=10.0):
+    def _get_master_csv_lock_path(self, sample_id: str) -> str:
+        """Path to per-sample lock file; caller must hold this lock for read-modify-write of master.csv."""
+        sample_dir = os.path.join(self.work_dir, sample_id)
+        lock_dir = os.path.join(sample_dir, "_locks")
+        os.makedirs(lock_dir, exist_ok=True)
+        return os.path.join(lock_dir, "master_csv.lock")
+
+    def _write_csv_internal(self, data: Dict[str, Any], csv_path: str) -> None:
         """
-        Acquire a file lock with timeout.
-        
-        Args:
-            file_handle: Open file handle to lock
-            exclusive: If True, acquire exclusive lock (for writing). If False, shared lock (for reading)
-            timeout: Maximum time to wait for lock in seconds
-        
-        Returns:
-            True if lock acquired, False otherwise
+        Write data to CSV using atomic temp-file + rename. Caller must hold the
+        per-sample master_csv lock so that read-modify-write is serialized.
         """
-        if not HAS_FCNTL:
-            return True  # No locking available, proceed anyway
-        
-        lock_type = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-        start_time = time.time()
-        
-        while True:
-            try:
-                fcntl.flock(file_handle.fileno(), lock_type | fcntl.LOCK_NB)
-                return True
-            except (IOError, OSError):
-                # Lock is held by another process
-                if time.time() - start_time >= timeout:
-                    return False
-                time.sleep(0.01)  # Wait 10ms before retry
-    
-    def _release_lock(self, file_handle):
-        """Release a file lock."""
-        if not HAS_FCNTL:
-            return
-        
+        df = pd.DataFrame([data])
+        csv_dir = os.path.dirname(csv_path)
+        temp_fd, temp_path = tempfile.mkstemp(dir=csv_dir, prefix='.master_', suffix='.csv.tmp')
         try:
-            fcntl.flock(file_handle.fileno(), fcntl.LOCK_UN)
-        except (IOError, OSError):
-            pass  # Lock already released or file closed
+            with os.fdopen(temp_fd, 'w') as f:
+                df.to_csv(f, index=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, csv_path)
+        except Exception:
+            try:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+            except Exception:
+                pass
+            raise
 
     def update_master_csv(
         self, sample_id: str, bam_data: Dict[str, Any], bam_info: Dict[str, Any]
     ) -> None:
-        """Update or create master.csv file for a sample with new BAM data"""
+        """Update or create master.csv file for a sample with new BAM data. Uses per-sample lock for full read-modify-write."""
         try:
-            # Create sample directory if it doesn't exist
             sample_dir = os.path.join(self.work_dir, sample_id)
             os.makedirs(sample_dir, exist_ok=True)
-
             master_csv_path = os.path.join(sample_dir, "master.csv")
+            lock_path = self._get_master_csv_lock_path(sample_id)
 
-            # Load existing data or create new
-            existing_data = self._load_existing_data(master_csv_path)
-
-            # Update counters based on BAM state
-            if bam_info.get("state") == "pass":
-                existing_data = self._update_pass_counters(existing_data, bam_data)
-            else:
-                existing_data = self._update_fail_counters(existing_data, bam_data)
-
-            # Update combined counters
-            existing_data = self._update_combined_counters(existing_data, bam_data)
-
-            # Update run information
-            existing_data = self._update_run_info(existing_data, bam_info)
-
-            # Update BAM tracking
-            existing_data = self._update_bam_tracking(existing_data, bam_info)
-
-            # Save to CSV
-            self._save_to_csv(existing_data, master_csv_path)
+            with FileLock(lock_path, timeout=10.0):
+                existing_data = self._load_existing_data(master_csv_path)
+                if bam_info.get("state") == "pass":
+                    existing_data = self._update_pass_counters(existing_data, bam_data)
+                else:
+                    existing_data = self._update_fail_counters(existing_data, bam_data)
+                existing_data = self._update_combined_counters(existing_data, bam_data)
+                existing_data = self._update_run_info(existing_data, bam_info)
+                existing_data = self._update_bam_tracking(existing_data, bam_info)
+                self._write_csv_internal(existing_data, master_csv_path)
 
             logger = logging.getLogger("robin.master_csv")
             logger.info(f"Updated master.csv for sample {sample_id}")
@@ -182,6 +159,7 @@ class MasterCSVManager:
             "analysis_panel": "",
             # Samples overview (persisted GUI table aggregates)
             "samples_overview_active_jobs": 0,
+            "samples_overview_pending_jobs": 0,
             "samples_overview_total_jobs": 0,
             "samples_overview_completed_jobs": 0,
             "samples_overview_failed_jobs": 0,
@@ -291,72 +269,25 @@ class MasterCSVManager:
     def update_analysis_panel(self, sample_id: str, panel: str) -> None:
         """
         Update the analysis panel information for a sample.
-        
-        Args:
-            sample_id: The sample ID
-            panel: The analysis panel used (rCNS2, AML, PanCan)
+        Uses per-sample lock for full read-modify-write.
         """
         try:
             sample_dir = os.path.join(self.work_dir, sample_id)
             os.makedirs(sample_dir, exist_ok=True)
             master_csv_path = os.path.join(sample_dir, "master.csv")
+            lock_path = self._get_master_csv_lock_path(sample_id)
 
-            existing_data = self._load_existing_data(master_csv_path)
-            
-            # Update the analysis panel
-            existing_data["analysis_panel"] = str(panel)
-            
-            # Save to CSV
-            self._save_to_csv(existing_data, master_csv_path)
-            
+            with FileLock(lock_path, timeout=10.0):
+                existing_data = self._load_existing_data(master_csv_path)
+                existing_data["analysis_panel"] = str(panel)
+                self._write_csv_internal(existing_data, master_csv_path)
+
             logger = logging.getLogger("robin.master_csv")
             logger.info(f"Updated analysis panel to '{panel}' for sample {sample_id}")
-            
+
         except Exception as e:
             logger = logging.getLogger("robin.master_csv")
             logger.error(f"Error updating analysis panel for {sample_id}: {e}")
-
-    def _save_to_csv(self, data: Dict[str, Any], csv_path: str) -> None:
-        """
-        Save data to CSV file with exclusive locking to prevent concurrent writes.
-        Uses atomic write-and-rename pattern to prevent partial reads.
-        """
-        import tempfile
-        
-        # Create dataframe
-        df = pd.DataFrame([data])
-        
-        # Write to temporary file in the same directory (for atomic rename)
-        csv_dir = os.path.dirname(csv_path)
-        temp_fd, temp_path = tempfile.mkstemp(dir=csv_dir, prefix='.master_', suffix='.csv.tmp')
-        
-        try:
-            # Write to temp file with exclusive lock
-            with os.fdopen(temp_fd, 'w') as f:
-                # Acquire exclusive lock
-                if not self._acquire_lock(f, exclusive=True, timeout=10.0):
-                    raise IOError(f"Could not acquire exclusive lock for writing {csv_path}")
-                
-                try:
-                    # Write CSV content
-                    df.to_csv(f, index=False)
-                    # Ensure data is written to disk
-                    f.flush()
-                    os.fsync(f.fileno())
-                finally:
-                    self._release_lock(f)
-            
-            # Atomically rename temp file to target (this is atomic on Unix/macOS)
-            os.replace(temp_path, csv_path)
-            
-        except Exception as e:
-            # Clean up temp file if something went wrong
-            try:
-                if os.path.exists(temp_path):
-                    os.unlink(temp_path)
-            except Exception:
-                pass
-            raise e
 
     # ---------------------------------------------------------------------
     # Public helpers for GUI/workflow to persist overview stats
@@ -367,6 +298,7 @@ class MasterCSVManager:
 
         Expected keys in ``overview`` (all optional, defaults applied when missing):
           - active_jobs: int
+          - pending_jobs: int
           - total_jobs: int
           - completed_jobs: int
           - failed_jobs: int
@@ -377,66 +309,66 @@ class MasterCSVManager:
             sample_dir = os.path.join(self.work_dir, sample_id)
             os.makedirs(sample_dir, exist_ok=True)
             master_csv_path = os.path.join(sample_dir, "master.csv")
+            lock_path = self._get_master_csv_lock_path(sample_id)
 
-            existing_data = self._load_existing_data(master_csv_path)
-
-            # Update numeric counters
-            existing_data["samples_overview_active_jobs"] = int(
-                overview.get(
-                    "active_jobs", existing_data.get("samples_overview_active_jobs", 0)
+            with FileLock(lock_path, timeout=10.0):
+                existing_data = self._load_existing_data(master_csv_path)
+                existing_data["samples_overview_active_jobs"] = int(
+                    overview.get(
+                        "active_jobs", existing_data.get("samples_overview_active_jobs", 0)
+                    )
                 )
-            )
-            existing_data["samples_overview_total_jobs"] = int(
-                overview.get(
-                    "total_jobs", existing_data.get("samples_overview_total_jobs", 0)
+                existing_data["samples_overview_pending_jobs"] = int(
+                    overview.get(
+                        "pending_jobs",
+                        existing_data.get("samples_overview_pending_jobs", 0),
+                    )
                 )
-            )
-            existing_data["samples_overview_completed_jobs"] = int(
-                overview.get(
-                    "completed_jobs",
-                    existing_data.get("samples_overview_completed_jobs", 0),
+                existing_data["samples_overview_total_jobs"] = int(
+                    overview.get(
+                        "total_jobs", existing_data.get("samples_overview_total_jobs", 0)
+                    )
                 )
-            )
-            existing_data["samples_overview_failed_jobs"] = int(
-                overview.get(
-                    "failed_jobs", existing_data.get("samples_overview_failed_jobs", 0)
+                existing_data["samples_overview_completed_jobs"] = int(
+                    overview.get(
+                        "completed_jobs",
+                        existing_data.get("samples_overview_completed_jobs", 0),
+                    )
                 )
-            )
-
-            # Job types: normalize to comma-separated sorted unique values
-            jt_value = overview.get("job_types")
-            if isinstance(jt_value, str):
-                new_types = {t.strip() for t in jt_value.split(",") if t.strip()}
-            elif jt_value is None:
-                new_types = set()
-            else:
-                try:
-                    new_types = {str(t).strip() for t in jt_value if str(t).strip()}
-                except Exception:
+                existing_data["samples_overview_failed_jobs"] = int(
+                    overview.get(
+                        "failed_jobs", existing_data.get("samples_overview_failed_jobs", 0)
+                    )
+                )
+                jt_value = overview.get("job_types")
+                if isinstance(jt_value, str):
+                    new_types = {t.strip() for t in jt_value.split(",") if t.strip()}
+                elif jt_value is None:
                     new_types = set()
+                else:
+                    try:
+                        new_types = {str(t).strip() for t in jt_value if str(t).strip()}
+                    except Exception:
+                        new_types = set()
+                if existing_data.get("samples_overview_job_types"):
+                    old_types = {
+                        t.strip()
+                        for t in str(
+                            existing_data.get("samples_overview_job_types", "")
+                        ).split(",")
+                        if t.strip()
+                    }
+                else:
+                    old_types = set()
+                all_types = sorted(old_types.union(new_types))
+                existing_data["samples_overview_job_types"] = ",".join(all_types)
+                try:
+                    last_seen = float(overview.get("last_seen"))
+                except Exception:
+                    last_seen = float(existing_data.get("samples_overview_last_seen", 0.0))
+                existing_data["samples_overview_last_seen"] = last_seen
+                self._write_csv_internal(existing_data, master_csv_path)
 
-            if existing_data.get("samples_overview_job_types"):
-                old_types = {
-                    t.strip()
-                    for t in str(
-                        existing_data.get("samples_overview_job_types", "")
-                    ).split(",")
-                    if t.strip()
-                }
-            else:
-                old_types = set()
-            all_types = sorted(old_types.union(new_types))
-            existing_data["samples_overview_job_types"] = ",".join(all_types)
-
-            # Last seen timestamp
-            try:
-                last_seen = float(overview.get("last_seen"))
-            except Exception:
-                last_seen = float(existing_data.get("samples_overview_last_seen", 0.0))
-            existing_data["samples_overview_last_seen"] = last_seen
-
-            # Save
-            self._save_to_csv(existing_data, master_csv_path)
             logger = logging.getLogger("robin.master_csv")
             logger.debug(
                 f"Updated samples overview in master.csv for sample {sample_id}"

@@ -40,6 +40,58 @@ except ImportError:  # pragma: no cover
     ui = None
 
 
+def _is_dark_mode() -> bool:
+    """Match Quasar ``body--dark`` via app storage (see theme.frame)."""
+    try:
+        from nicegui import app
+
+        return bool(app.storage.user.get("dark_mode"))
+    except Exception:
+        return False
+
+
+def _apply_fusion_figure_theme(fig: Any, dark: bool) -> None:
+    """Adjust matplotlib fusion figure for light vs dark UI (same surface as MGMT, design.md §6)."""
+    if fig is None:
+        return
+    if dark:
+        bg = "#0f172a"
+        fg = "#e2e8f0"
+        fg_muted = "#94a3b8"
+    else:
+        bg = "#ffffff"
+        fg = "#0f172a"
+        fg_muted = "#475569"
+    try:
+        fig.patch.set_facecolor(bg)
+        for ax in fig.get_axes():
+            try:
+                ax.set_facecolor(bg)
+                ax.tick_params(colors=fg_muted)
+                ax.xaxis.label.set_color(fg_muted)
+                ax.yaxis.label.set_color(fg_muted)
+                ax.title.set_color(fg)
+                for spine in ax.spines.values():
+                    spine.set_color(fg_muted)
+                leg = ax.get_legend()
+                if leg is not None:
+                    fr = leg.get_frame()
+                    if fr is not None:
+                        fr.set_facecolor(bg)
+                        fr.set_edgecolor(fg_muted)
+                    for t in leg.get_texts():
+                        t.set_color(fg)
+            except Exception:
+                continue
+        for txt in getattr(fig, "texts", []) or []:
+            try:
+                txt.set_color(fg)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def _rename_and_sort(df: pd.DataFrame) -> pd.DataFrame:
     """Rename columns to friendly names and sort for display."""
     if df is None or df.empty:
@@ -272,8 +324,8 @@ def _generate_summary_files_from_pickle(sample_dir: Path, force_regenerate: bool
             pass  # Will overwrite existing file
         
         # Load data from pickle files
-        target_file = sample_dir / "fusion_candidates_master_processed.csv"
-        genome_file = sample_dir / "fusion_candidates_all_processed.csv"
+        target_file = sample_dir / "fusion_candidates_master_processed.pkl"
+        genome_file = sample_dir / "fusion_candidates_all_processed.pkl"
         
         logging.info(f"[Fusion] Checking for target file: {target_file}")
         logging.info(f"[Fusion] Target file exists: {target_file.exists()}")
@@ -355,7 +407,7 @@ def _generate_summary_files_from_pickle(sample_dir: Path, force_regenerate: bool
 def _load_processed_pickle(file_path: Path) -> Optional[Dict[str, Any]]:
     """Load the preprocessed fusion data structure written by preprocess_fusion_data_standalone.
 
-    Note: Although the extension is .csv, the file is a pickle per current pipeline.
+    Note: The file is a pickle format with .pkl extension.
     """
     try:
         logging.info(f"[Fusion] Attempting to load pickle from: {file_path}")
@@ -460,6 +512,557 @@ def _make_fusion_table(container: Any, df: pd.DataFrame) -> Any:
                     ui.icon("search")
         except Exception:
             pass
+        
+        return table
+
+
+def _cluster_nearby_regions(regions_df: pd.DataFrame, max_distance: int = 200) -> pd.DataFrame:
+    """
+    Cluster nearby regions together to merge similar breakpoint events.
+    
+    Args:
+        regions_df: DataFrame with region data (chromosome, start, end, read_ids, etc.)
+        max_distance: Maximum distance for clustering regions (default: 200bp)
+        
+    Returns:
+        DataFrame with clustered/merged regions
+    """
+    if regions_df.empty:
+        return pd.DataFrame()
+    
+    clustered_results = []
+    used_indices = set()
+    
+    # Group by chromosome first
+    for chromosome, chr_group in regions_df.groupby("chromosome", observed=True):
+        chr_regions = chr_group.reset_index(drop=True)
+        
+        for i, row in chr_regions.iterrows():
+            if i in used_indices:
+                continue
+            
+            # Start a new cluster with this region
+            cluster_indices = [i]
+            used_indices.add(i)
+            
+            cluster_start = row["start"]
+            cluster_end = row["end"]
+            cluster_reads = set()
+            cluster_mapqs = []
+            cluster_spans = []
+            cluster_types = set()
+            
+            # Add reads from this region (using set to ensure uniqueness)
+            if "read_ids" in row:
+                read_ids = row["read_ids"]
+                # Handle both set and list types (pandas may convert sets to lists)
+                if isinstance(read_ids, set):
+                    cluster_reads.update(read_ids)
+                elif isinstance(read_ids, list):
+                    cluster_reads.update(read_ids)  # set.update() handles duplicates automatically
+                elif "read_count" in row:
+                    # Fallback: if we don't have actual read IDs, we can't properly track uniqueness
+                    logging.warning(f"[Fusion] Missing read_ids for region, using read_count estimate")
+                    for k in range(int(row["read_count"])):
+                        cluster_reads.add(f"read_{i}_{k}")
+            elif "read_count" in row:
+                # Fallback: if we don't have actual read IDs, we can't properly track uniqueness
+                logging.warning(f"[Fusion] Missing read_ids for region, using read_count estimate")
+                for k in range(int(row["read_count"])):
+                    cluster_reads.add(f"read_{i}_{k}")
+            
+            if "avg_mapping_quality" in row:
+                cluster_mapqs.append(row["avg_mapping_quality"])
+            if "avg_mapping_span" in row:
+                cluster_spans.append(row["avg_mapping_span"])
+            if "event_type" in row:
+                cluster_types.add(row["event_type"])
+            
+            # Find nearby regions to merge
+            for j, other_row in chr_regions.iterrows():
+                if j in used_indices:
+                    continue
+                
+                other_start = other_row["start"]
+                other_end = other_row["end"]
+                
+                # Check if regions overlap or are close
+                overlap = not (cluster_end < other_start or cluster_start > other_end)
+                # Check if start/end positions are within max_distance
+                start_close = abs(cluster_start - other_start) <= max_distance
+                end_close = abs(cluster_end - other_end) <= max_distance
+                # Also check if midpoints are close
+                midpoint1 = (cluster_start + cluster_end) // 2
+                midpoint2 = (other_start + other_end) // 2
+                midpoints_close = abs(midpoint1 - midpoint2) <= max_distance
+                
+                if overlap or (start_close and end_close) or midpoints_close:
+                    cluster_indices.append(j)
+                    used_indices.add(j)
+                    
+                    # Expand cluster boundaries
+                    cluster_start = min(cluster_start, other_start)
+                    cluster_end = max(cluster_end, other_end)
+                    
+                    # Merge read counts and statistics (using set to ensure uniqueness)
+                    if "read_ids" in other_row:
+                        other_read_ids = other_row["read_ids"]
+                        # Handle both set and list types (pandas may convert sets to lists)
+                        if isinstance(other_read_ids, set):
+                            cluster_reads.update(other_read_ids)
+                        elif isinstance(other_read_ids, list):
+                            cluster_reads.update(other_read_ids)  # set.update() handles duplicates automatically
+                        elif "read_count" in other_row:
+                            # Fallback: if we don't have actual read IDs, we can't properly track uniqueness
+                            logging.warning(f"[Fusion] Missing read_ids for merged region, using read_count estimate")
+                            for k in range(int(other_row["read_count"])):
+                                cluster_reads.add(f"read_{j}_{k}")
+                    elif "read_count" in other_row:
+                        # Fallback: if we don't have actual read IDs, we can't properly track uniqueness
+                        logging.warning(f"[Fusion] Missing read_ids for merged region, using read_count estimate")
+                        for k in range(int(other_row["read_count"])):
+                            cluster_reads.add(f"read_{j}_{k}")
+                    
+                    if "avg_mapping_quality" in other_row:
+                        cluster_mapqs.append(other_row["avg_mapping_quality"])
+                    if "avg_mapping_span" in other_row:
+                        cluster_spans.append(other_row["avg_mapping_span"])
+                    if "event_type" in other_row:
+                        cluster_types.add(other_row["event_type"])
+            
+            # Create merged region
+            # read_count is the number of UNIQUE reads supporting this clustered event
+            # (using len() on the set ensures we count each read only once, even if it appears in multiple merged regions)
+            clustered_results.append({
+                "chromosome": chromosome,
+                "start": cluster_start,
+                "end": cluster_end,
+                "event_type": "master_bed_region" if "master_bed_region" in cluster_types else "supplementary",
+                "read_count": len(cluster_reads),  # Count of unique reads (set automatically handles deduplication)
+                "avg_mapping_quality": round(sum(cluster_mapqs) / len(cluster_mapqs), 1) if cluster_mapqs else 0,
+                "avg_mapping_span": round(sum(cluster_spans) / len(cluster_spans), 0) if cluster_spans else 0,
+            })
+    
+    if not clustered_results:
+        return pd.DataFrame()
+    
+    return pd.DataFrame(clustered_results)
+
+
+def _summarize_master_bed_events(df: pd.DataFrame, min_read_support: int = 3, min_mapq: int = 50, 
+                                  cluster_distance: int = 5000) -> pd.DataFrame:
+    """
+    Summarize master BED data into detected breakpoint pair events.
+    
+    Uses the same breakpoint pair extraction logic as _extract_master_bed_breakpoints:
+    - Identifies reads with both primary and supplementary alignments
+    - Creates breakpoint pairs (primary + supplementary for each read)
+    - Clusters similar breakpoint pairs (both primary and supplementary locations must be close)
+    - Returns both primary and supplementary regions as separate events
+    
+    Only includes high-quality supplementary mappings (MapQ >= min_mapq).
+    
+    Args:
+        df: DataFrame with master BED fusion candidates (individual reads)
+        min_read_support: Minimum number of reads required to show an event (default: 3)
+        min_mapq: Minimum mapping quality for supplementary mappings (default: 50)
+        cluster_distance: Maximum distance for clustering breakpoint pairs (default: 5000bp)
+        
+    Returns:
+        DataFrame with summarized breakpoint pair events (both primary and supplementary regions)
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+    
+    try:
+        # Early exit: if dataset is very large, limit processing to avoid blocking UI
+        # This prevents the GUI from freezing when processing very large datasets
+        MAX_ROWS_TO_PROCESS = 20000  # Limit to prevent UI blocking (reduced from 50000 for better responsiveness)
+        if len(df) > MAX_ROWS_TO_PROCESS:
+            logging.warning(f"[Fusion] Master BED dataset too large ({len(df)} rows), limiting to {MAX_ROWS_TO_PROCESS} rows for UI performance")
+            # Sample rows rather than just taking head() to get better coverage
+            df = df.sample(n=MAX_ROWS_TO_PROCESS, random_state=42).copy() if len(df) > MAX_ROWS_TO_PROCESS else df.copy()
+        
+        # Check required columns
+        if "read_id" not in df.columns:
+            logging.debug("[Fusion] Missing required column (read_id) in master BED candidates")
+            return pd.DataFrame()
+        
+        df = df.copy()
+        
+        # Filter to only high-quality supplementary mappings (MapQ >= min_mapq)
+        # For master_bed_region entries, we keep them all (they're primary alignments)
+        # For supplementary entries, we filter by MapQ
+        if "mapping_quality" in df.columns and "col4" in df.columns:
+            # Keep master_bed_region entries regardless of MapQ (they're primary alignments)
+            # Filter supplementary entries to only high-quality ones
+            high_quality_mask = (
+                (df["col4"] == "master_bed_region") |
+                (df["mapping_quality"] >= min_mapq)
+            )
+            df = df[high_quality_mask].copy()
+            
+            if df.empty:
+                logging.debug(f"[Fusion] No high-quality mappings found (MapQ >= {min_mapq})")
+                return pd.DataFrame()
+        
+        # Separate primary and supplementary alignments using col4
+        # col4 is more reliable: "master_bed_region" = primary alignment, "master_bed_supplementary" = supplementary
+        if "col4" in df.columns:
+            primary_df = df[df["col4"] == "master_bed_region"].copy()
+            supplementary_df = df[df["col4"] == "master_bed_supplementary"].copy()
+        else:
+            # Fallback: use is_supplementary if col4 is not available
+            if "is_supplementary" not in df.columns:
+                logging.debug("[Fusion] Missing required columns (col4 or is_supplementary) in master BED candidates")
+                return pd.DataFrame()
+            primary_df = df[df["is_supplementary"] == False].copy()
+            supplementary_df = df[df["is_supplementary"] == True].copy()
+        
+        if primary_df.empty or supplementary_df.empty:
+            logging.debug("[Fusion] Need both primary and supplementary alignments to identify breakpoint pairs")
+            return pd.DataFrame()
+        
+        # Find reads that have both primary and supplementary alignments
+        primary_read_ids = set(primary_df["read_id"].unique())
+        supplementary_read_ids = set(supplementary_df["read_id"].unique())
+        reads_with_both = primary_read_ids & supplementary_read_ids
+        
+        if not reads_with_both:
+            logging.debug("[Fusion] No reads have both primary and supplementary alignments")
+            return pd.DataFrame()
+        
+        # Filter to only reads with both primary and supplementary alignments
+        primary_filtered = primary_df[primary_df["read_id"].isin(reads_with_both)].copy()
+        supplementary_filtered = supplementary_df[supplementary_df["read_id"].isin(reads_with_both)].copy()
+        
+        # Build breakpoint pairs: for each read, pair its primary alignment with each supplementary alignment
+        breakpoint_pairs = []
+        
+        # Group by read_id for efficient lookup
+        primary_by_read = primary_filtered.groupby("read_id", observed=True)
+        supplementary_by_read = supplementary_filtered.groupby("read_id", observed=True)
+        
+        for read_id in reads_with_both:
+            # Get all primary and supplementary alignments for this read
+            read_primaries = primary_by_read.get_group(read_id) if read_id in primary_by_read.groups else pd.DataFrame()
+            read_supplementaries = supplementary_by_read.get_group(read_id) if read_id in supplementary_by_read.groups else pd.DataFrame()
+            
+            if read_primaries.empty or read_supplementaries.empty:
+                continue
+            
+            # Create pairs using cross product
+            # Get columns that exist (mapping_quality and mapping_span may not always be present)
+            primary_cols = ["reference_id", "reference_start", "reference_end"]
+            supp_cols = ["reference_id", "reference_start", "reference_end"]
+            if "mapping_quality" in read_primaries.columns:
+                primary_cols.append("mapping_quality")
+            if "mapping_span" in read_primaries.columns:
+                primary_cols.append("mapping_span")
+            if "mapping_quality" in read_supplementaries.columns:
+                supp_cols.append("mapping_quality")
+            if "mapping_span" in read_supplementaries.columns:
+                supp_cols.append("mapping_span")
+            
+            primaries_list = read_primaries[primary_cols].to_dict("records")
+            supplementaries_list = read_supplementaries[supp_cols].to_dict("records")
+            
+            # Create all combinations
+            for primary_row in primaries_list:
+                for supp_row in supplementaries_list:
+                    breakpoint_pairs.append({
+                        "read_id": read_id,
+                        "primary_chrom": primary_row["reference_id"],
+                        "primary_start": int(primary_row["reference_start"]),
+                        "primary_end": int(primary_row["reference_end"]),
+                        "primary_mapq": primary_row.get("mapping_quality", 0) if "mapping_quality" in primary_row else 0,
+                        "primary_span": primary_row.get("mapping_span", 0) if "mapping_span" in primary_row else 0,
+                        "supp_chrom": supp_row["reference_id"],
+                        "supp_start": int(supp_row["reference_start"]),
+                        "supp_end": int(supp_row["reference_end"]),
+                        "supp_mapq": supp_row.get("mapping_quality", 0) if "mapping_quality" in supp_row else 0,
+                        "supp_span": supp_row.get("mapping_span", 0) if "mapping_span" in supp_row else 0,
+                    })
+        
+        if not breakpoint_pairs:
+            logging.debug("[Fusion] No breakpoint pairs created")
+            return pd.DataFrame()
+        
+        # Early exit: if too many breakpoint pairs, limit to prevent UI blocking
+        MAX_PAIRS_TO_PROCESS = 10000  # Limit clustering to prevent UI blocking
+        if len(breakpoint_pairs) > MAX_PAIRS_TO_PROCESS:
+            logging.warning(f"[Fusion] Too many breakpoint pairs ({len(breakpoint_pairs)}), limiting to {MAX_PAIRS_TO_PROCESS} for UI performance")
+            # Sample pairs to get better coverage
+            import random
+            breakpoint_pairs = random.sample(breakpoint_pairs, MAX_PAIRS_TO_PROCESS)
+        
+        # Cluster similar breakpoint pairs
+        # Two breakpoint pairs are similar if:
+        # - Primary locations are close (same chromosome, within cluster_distance)
+        # - Supplementary locations are close (same chromosome, within cluster_distance)
+        clustered_pairs = []
+        used_indices = set()
+        
+        # Group pairs by chromosome combination for faster clustering
+        pairs_by_chrom = {}
+        for i, pair in enumerate(breakpoint_pairs):
+            chrom_key = (pair["primary_chrom"], pair["supp_chrom"])
+            if chrom_key not in pairs_by_chrom:
+                pairs_by_chrom[chrom_key] = []
+            pairs_by_chrom[chrom_key].append((i, pair))
+        
+        # Cluster within each chromosome combination
+        for chrom_key, chrom_pairs in pairs_by_chrom.items():
+            if len(chrom_pairs) == 0:
+                continue
+            
+            # Sort pairs within this chromosome combination
+            sorted_chrom_pairs = sorted(chrom_pairs, key=lambda x: (
+                x[1]["primary_start"], x[1]["supp_start"]
+            ))
+            
+            # Cluster pairs in this chromosome group
+            for idx, (orig_i, pair) in enumerate(sorted_chrom_pairs):
+                if orig_i in used_indices:
+                    continue
+                
+                # Start a new cluster
+                cluster_read_ids = {pair["read_id"]}
+                cluster_primary_chrom = pair["primary_chrom"]
+                cluster_primary_starts = [pair["primary_start"]]
+                cluster_primary_ends = [pair["primary_end"]]
+                cluster_primary_mapqs = [pair["primary_mapq"]]
+                cluster_primary_spans = [pair["primary_span"]]
+                cluster_supp_chrom = pair["supp_chrom"]
+                cluster_supp_starts = [pair["supp_start"]]
+                cluster_supp_ends = [pair["supp_end"]]
+                cluster_supp_mapqs = [pair["supp_mapq"]]
+                cluster_supp_spans = [pair["supp_span"]]
+                used_indices.add(orig_i)
+                
+                # Calculate cluster bounds once
+                cluster_primary_min = min(cluster_primary_starts)
+                cluster_primary_max = max(cluster_primary_ends)
+                cluster_supp_min = min(cluster_supp_starts)
+                cluster_supp_max = max(cluster_supp_ends)
+                
+                # Iteratively find all similar breakpoint pairs in this chromosome group
+                changed = True
+                while changed:
+                    changed = False
+                    for j, (other_orig_i, other_pair) in enumerate(sorted_chrom_pairs):
+                        if other_orig_i in used_indices:
+                            continue
+                        
+                        # Check if primary locations are similar (same chromosome, close coordinates)
+                        primary_similar = (
+                            other_pair["primary_start"] <= cluster_primary_max + cluster_distance and
+                            other_pair["primary_end"] >= cluster_primary_min - cluster_distance
+                        )
+                        
+                        # Check if supplementary locations are similar (same chromosome, close coordinates)
+                        supp_similar = (
+                            other_pair["supp_start"] <= cluster_supp_max + cluster_distance and
+                            other_pair["supp_end"] >= cluster_supp_min - cluster_distance
+                        )
+                        
+                        # Both primary and supplementary must be similar to cluster
+                        if primary_similar and supp_similar:
+                            cluster_read_ids.add(other_pair["read_id"])
+                            cluster_primary_starts.append(other_pair["primary_start"])
+                            cluster_primary_ends.append(other_pair["primary_end"])
+                            cluster_primary_mapqs.append(other_pair["primary_mapq"])
+                            cluster_primary_spans.append(other_pair["primary_span"])
+                            cluster_supp_starts.append(other_pair["supp_start"])
+                            cluster_supp_ends.append(other_pair["supp_end"])
+                            cluster_supp_mapqs.append(other_pair["supp_mapq"])
+                            cluster_supp_spans.append(other_pair["supp_span"])
+                            used_indices.add(other_orig_i)
+                            changed = True
+                            # Update cluster bounds for next iteration
+                            cluster_primary_min = min(cluster_primary_starts)
+                            cluster_primary_max = max(cluster_primary_ends)
+                            cluster_supp_min = min(cluster_supp_starts)
+                            cluster_supp_max = max(cluster_supp_ends)
+                
+                # Create clustered breakpoint pair
+                clustered_pairs.append({
+                    "primary_chrom": cluster_primary_chrom,
+                    "primary_start": min(cluster_primary_starts),
+                    "primary_end": max(cluster_primary_ends),
+                    "primary_avg_mapq": sum(cluster_primary_mapqs) / len(cluster_primary_mapqs) if cluster_primary_mapqs else 0,
+                    "primary_avg_span": sum(cluster_primary_spans) / len(cluster_primary_spans) if cluster_primary_spans else 0,
+                    "supp_chrom": cluster_supp_chrom,
+                    "supp_start": min(cluster_supp_starts),
+                    "supp_end": max(cluster_supp_ends),
+                    "supp_avg_mapq": sum(cluster_supp_mapqs) / len(cluster_supp_mapqs) if cluster_supp_mapqs else 0,
+                    "supp_avg_span": sum(cluster_supp_spans) / len(cluster_supp_spans) if cluster_supp_spans else 0,
+                    "read_count": len(cluster_read_ids),
+                })
+        
+        # Filter for breakpoint pairs with sufficient read support
+        supported_pairs = [
+            p for p in clustered_pairs 
+            if p["read_count"] >= min_read_support
+        ]
+        
+        if not supported_pairs:
+            logging.debug(f"[Fusion] No breakpoint pairs found with >= {min_read_support} read support")
+            return pd.DataFrame()
+        
+        # Convert to DataFrame format - include both primary and supplementary regions
+        events = []
+        for pair in supported_pairs:
+            # Add primary region event
+            if pair["primary_start"] > 0 and pair["primary_end"] > pair["primary_start"]:
+                events.append({
+                    "chromosome": pair["primary_chrom"],
+                    "start": pair["primary_start"],
+                    "end": pair["primary_end"],
+                    "event_type": "breakpoint_pair_primary",
+                    "read_count": pair["read_count"],
+                    "avg_mapping_quality": round(pair["primary_avg_mapq"], 1),
+                    "avg_mapping_span": round(pair["primary_avg_span"], 0),
+                })
+            
+            # Add supplementary region event
+            if pair["supp_start"] > 0 and pair["supp_end"] > pair["supp_start"]:
+                events.append({
+                    "chromosome": pair["supp_chrom"],
+                    "start": pair["supp_start"],
+                    "end": pair["supp_end"],
+                    "event_type": "breakpoint_pair_supplementary",
+                    "read_count": pair["read_count"],
+                    "avg_mapping_quality": round(pair["supp_avg_mapq"], 1),
+                    "avg_mapping_span": round(pair["supp_avg_span"], 0),
+                })
+        
+        if not events:
+            return pd.DataFrame()
+        
+        result_df = pd.DataFrame(events)
+        
+        # Sort by read count (descending), then by chromosome and start
+        result_df = result_df.sort_values(
+            ["read_count", "chromosome", "start"],
+            ascending=[False, True, True]
+        )
+        
+        return result_df
+        
+    except Exception as e:
+        logging.warning(f"[Fusion] Failed to summarize master BED events: {e}")
+        import traceback
+        logging.debug(f"[Fusion] Traceback: {traceback.format_exc()}")
+        return pd.DataFrame()
+
+
+def _make_master_bed_summary_table(container: Any, df: pd.DataFrame, sample_dir: Optional[Path] = None) -> Any:
+    """Create a summary table for master BED events (regions) instead of individual reads.
+    
+    Args:
+        container: UI container for the table
+        df: Master BED candidates DataFrame (for backward compatibility, but not used if summary file exists)
+        sample_dir: Sample directory path to load pre-computed summary file
+    """
+    # Try to load pre-computed summary file first (generated by analysis code)
+    summary_df = pd.DataFrame()
+    if sample_dir:
+        summary_file = sample_dir / "master_bed_events_summary.csv"
+        if summary_file.exists():
+            try:
+                summary_df = pd.read_csv(summary_file)
+                logging.debug(f"[Fusion] Loaded pre-computed master BED events summary from {summary_file}")
+            except Exception as e:
+                logging.warning(f"[Fusion] Failed to load pre-computed summary: {e}")
+    
+    # Fallback to computing on the fly if summary file doesn't exist (backward compatibility)
+    if summary_df.empty and df is not None and not df.empty:
+        logging.debug("[Fusion] Pre-computed summary not found, computing on the fly (this may be slow)")
+        summary_df = _summarize_master_bed_events(df, min_read_support=3, min_mapq=50, cluster_distance=5000)
+    
+    if summary_df.empty:
+        with container:
+            ui.label("No master BED events found").classes("text-gray-600")
+        return None
+    
+    with container:
+        # Use styled_table for consistent styling
+        from robin.gui.theme import styled_table
+        
+        # Define columns for the summary table
+        columns = [
+            {
+                "name": "chromosome",
+                "label": "Chromosome",
+                "field": "chromosome",
+                "sortable": True,
+            },
+            {
+                "name": "start",
+                "label": "Start",
+                "field": "start",
+                "sortable": True,
+            },
+            {
+                "name": "end",
+                "label": "End",
+                "field": "end",
+                "sortable": True,
+            },
+            {
+                "name": "event_type",
+                "label": "Type",
+                "field": "event_type",
+                "sortable": True,
+            },
+            {
+                "name": "read_count",
+                "label": "Reads",
+                "field": "read_count",
+                "sortable": True,
+            },
+            {
+                "name": "avg_mapping_quality",
+                "label": "Avg MapQ",
+                "field": "avg_mapping_quality",
+                "sortable": True,
+            },
+            {
+                "name": "avg_mapping_span",
+                "label": "Avg Span",
+                "field": "avg_mapping_span",
+                "sortable": True,
+            },
+        ]
+        
+        # Convert to rows
+        rows = summary_df.to_dict('records')
+        
+        # Create styled table
+        table_container, table = styled_table(
+            columns=columns,
+            rows=rows,
+            pagination=20,
+            class_size="table-xs"
+        )
+        
+        # Add search functionality
+        try:
+            with table.add_slot("top-right"):
+                with ui.input(placeholder="Search events...").props("type=search").bind_value(
+                    table, "filter"
+                ).add_slot("append"):
+                    ui.icon("search")
+        except Exception:
+            pass
+        
+        # Add summary information
+        total_events = len(summary_df)
+        total_reads = summary_df["read_count"].sum()
+        ui.label(
+            f"Total events: {total_events} | Total supporting reads: {total_reads}"
+        ).classes("text-xs text-gray-500 mt-1")
         
         return table
 
@@ -1256,6 +1859,7 @@ def _plot_gene_group(
     gene_group: List[str],
     annotated_data: pd.DataFrame,
     goodpairs: pd.Series,
+    section_state: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Advanced fusion visualization matching the original sophisticated plotting code.
 
@@ -1314,12 +1918,17 @@ def _plot_gene_group(
                         gene_group, subset, annotated_data, goodpairs
                     )
 
+                    _dark = _is_dark_mode()
+                    _apply_fusion_figure_theme(fig, _dark)
                     # Update the matplotlib element
                     # Close previous figure if it exists before assigning new one
                     if hasattr(mpl_element, 'figure') and mpl_element.figure is not None:
                         plt.close(mpl_element.figure)
                     mpl_element.figure = fig
                     mpl_element.update()
+                    if section_state is not None:
+                        section_state["fusion_mpl"] = mpl_element
+                        section_state["fusion_plot_theme_dark"] = _dark
                 
                 with ui.tab_panel(reads_tab):
                     # Create reads table
@@ -2056,8 +2665,8 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
     """Build the Fusion UI section (target panel and genome-wide only).
 
     Expects files written by fusion_work.preprocess_fusion_data_standalone:
-    - fusion_candidates_master_processed.csv (pickle payload)
-    - fusion_candidates_all_processed.csv (pickle payload)
+    - fusion_candidates_master_processed.pkl (pickle format)
+    - fusion_candidates_all_processed.pkl (pickle format)
     """
     logging.info(f"[Fusion] add_fusion_section() called with sample_dir: {sample_dir}")
     
@@ -2099,6 +2708,13 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             "selected_gene_pair": None,  # Persist selected gene pair
             "dropdown": None,  # Reference to dropdown for value updates
         },
+        "master_bed": {
+            "data": None,
+            "mtime": None,
+            "table_container": None,
+            "table": None,
+            "status_container": None,
+        },
     }
 
     def _handle_gene_pair_selection(section: str, gene_pair: List[str], data: Dict[str, Any]) -> None:
@@ -2112,12 +2728,15 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 gene_pair,
                 data.get("annotated_data"),
                 data.get("goodpairs"),
+                section_state=state[section],
             )
         except Exception as e:
             logging.exception(f"[Fusion] Failed to handle gene pair selection: {e}")
 
     def refresh_fusion() -> None:
         """Refresh fusion data."""
+        import time as _time
+        t_start = _time.perf_counter()
         try:
             logging.info(f"[Fusion] refresh_fusion() called for sample_dir: {sample_dir}")
             
@@ -2127,20 +2746,27 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 return
             
             logging.info(f"[Fusion] Loading fusion data from: {sample_dir}")
+            t_before_load = _time.perf_counter()
             
             # Load fusion data directly (already in background)
             fusion_data = _load_fusion_data(sample_dir)
             
-            logging.info(f"[Fusion] Loaded fusion data: {fusion_data}")
+            t_after_load = _time.perf_counter()
+            logging.info(f"[Fusion] Loaded fusion data (load took {t_after_load - t_before_load:.2f}s): {fusion_data}")
             
             # Update UI directly
-            _update_fusion_ui(fusion_data, state)
+            t_before_ui = _time.perf_counter()
+            _update_fusion_ui(fusion_data, state, sample_dir)
+            t_after_ui = _time.perf_counter()
+            logging.info(f"[Fusion] refresh_fusion() completed in {t_after_ui - t_start:.2f}s (load={t_after_load - t_before_load:.2f}s, ui={t_after_ui - t_before_ui:.2f}s)")
                 
         except Exception as e:
             logging.exception(f"[Fusion] Refresh failed: {e}")
 
     def _load_fusion_data(sample_dir: Path) -> Dict[str, Any]:
         """Load fusion data from files with optional breakpoint validation."""
+        import time as _time
+        t_load_start = _time.perf_counter()
         try:
             logging.info(f"[Fusion] _load_fusion_data() called with sample_dir: {sample_dir}")
             
@@ -2150,14 +2776,19 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             MAX_BREAKPOINT_DISTANCE = 100  # Maximum distance for breakpoint clustering
             
             # Load target panel processed
-            target_file = sample_dir / "fusion_candidates_master_processed.csv"
-            genome_file = sample_dir / "fusion_candidates_all_processed.csv"
+            target_file = sample_dir / "fusion_candidates_master_processed.pkl"
+            genome_file = sample_dir / "fusion_candidates_all_processed.pkl"
+            # Master BED CSV file loading has been deprecated
             
             logging.info(f"[Fusion] Target file: {target_file}")
             logging.info(f"[Fusion] Genome file: {genome_file}")
 
             t = _load_processed_pickle(target_file)
             g = _load_processed_pickle(genome_file)
+            
+            # Master BED CSV loading has been deprecated - the table is no longer displayed in the GUI
+            # The Parquet file (master_bed_candidates.parquet) is still used for BED generation
+            master_bed_df = None
             
             # Apply breakpoint validation if enabled
             if USE_BREAKPOINT_VALIDATION:
@@ -2259,11 +2890,15 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             # Get file modification times
             target_mtime = target_file.stat().st_mtime if target_file.exists() else None
             genome_mtime = genome_file.stat().st_mtime if genome_file.exists() else None
+            # Master BED CSV file has been deprecated - no longer track mtime
+            master_bed_mtime = None
             
             # Create data hashes
             target_data_hash = _create_data_hash(t) if t is not None else None
             genome_data_hash = _create_data_hash(g) if g is not None else None
             
+            elapsed = _time.perf_counter() - t_load_start
+            logging.info(f"[Fusion] _load_fusion_data() completed in {elapsed:.2f}s")
             return {
                 "target": {
                     "data": t,
@@ -2274,21 +2909,32 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     "data": g,
                     "mtime": genome_mtime,
                     "data_hash": genome_data_hash
-                }
+                },
+                "master_bed": {
+                    "data": master_bed_df,
+                    "mtime": master_bed_mtime,
+                },
+                "sample_dir": sample_dir,  # Pass sample_dir for loading pre-computed summary files
             }
         except Exception as e:
-            logging.exception(f"[Fusion] Failed to load fusion data: {e}")
-            return {"target": {"data": None, "mtime": None, "data_hash": None}, 
-                   "genome": {"data": None, "mtime": None, "data_hash": None}}
+            elapsed = _time.perf_counter() - t_load_start
+            logging.exception(f"[Fusion] Failed to load fusion data after {elapsed:.2f}s: {e}")
+            return {
+                "target": {"data": None, "mtime": None, "data_hash": None}, 
+                "genome": {"data": None, "mtime": None, "data_hash": None},
+                "master_bed": {"data": None, "mtime": None}
+            }
 
-    def _update_fusion_ui(fusion_data: Dict[str, Any], state: Dict[str, Any]) -> None:
+    def _update_fusion_ui(fusion_data: Dict[str, Any], state: Dict[str, Any], sample_dir: Path) -> None:
         """Update fusion UI elements - runs on main UI thread."""
         try:
             target_data = fusion_data.get("target", {})
             genome_data = fusion_data.get("genome", {})
+            master_bed_data = fusion_data.get("master_bed", {})
             
             t = target_data.get("data")
             g = genome_data.get("data")
+            master_bed_df = master_bed_data.get("data")
             
             # Update target panel UI
             target_mtime = target_data.get("mtime")
@@ -2609,53 +3255,107 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                         _handle_gene_pair_selection("genome", state["genome"]["selected_gene_pair"], g)
                     except Exception as e:
                         logging.warning(f"[Fusion] Failed to restore genome selection: {e}")
+            
+            # Update master BED UI
+            master_bed_mtime = master_bed_data.get("mtime")
+            
+            # Always update when file changes
+            if master_bed_mtime != state["master_bed"].get("mtime"):
+                state["master_bed"]["data"] = master_bed_df
+                state["master_bed"]["mtime"] = master_bed_mtime
+                
+                # Master BED summary label has been deprecated
+                try:
+                    if "summary" in state and state["summary"].get("master_bed_lbl"):
+                        state["summary"]["master_bed_lbl"].text = "Master BED: (deprecated)"
+                except Exception:
+                    pass
+                
+                # Master BED table display has been deprecated
+                try:
+                    state["master_bed"]["table_container"].clear()
+                    state["master_bed"]["status_container"].clear()
+                    with state["master_bed"]["status_container"].classes("w-full"):
+                        ui.label("Master BED table display has been deprecated").classes("text-gray-500 text-sm")
+                        ui.label("(Data is still processed and used for BED generation)").classes("text-gray-400 text-xs")
+                except Exception:
+                    pass
         except Exception as e:
             logging.exception(f"[Fusion] Refresh failed: {e}")
 
-    # Build UI
-    with ui.card().classes("w-full"):
-        ui.label("🧪 Fusions").classes("text-lg font-semibold mb-2")
-        # Summary row (counts)
-        with ui.row().classes("w-full items-center justify-between mb-2"):
-            with ui.column().classes("gap-1"):
-                ui.label("Fusion Analysis").classes("text-sm font-medium")
-            with ui.column().classes("gap-1 items-end"):
-                state.setdefault("summary", {})
-                state["summary"]["target_lbl"] = ui.label(
-                    "Target: -- pairs, -- groups"
-                ).classes("text-sm text-gray-600")
-                state["summary"]["genome_lbl"] = ui.label(
-                    "Genome-wide: -- pairs, -- groups"
-                ).classes("text-sm text-gray-600")
+    # Build UI — design.md §6–§9 (Digital Curator shell; no emoji in title)
+    with ui.element("div").classes("w-full min-w-0").props("id=analysis-detail-fusion"):
+        with ui.element("div").classes("classification-insight-shell w-full min-w-0"):
+            ui.label("Fusion analysis").classes(
+                "classification-insight-heading text-headline-small"
+            )
+            with ui.element("div").classes(
+                "classification-insight-card w-full min-w-0"
+            ):
+                with ui.column().classes("w-full min-w-0 gap-2 p-2 md:p-3"):
+                    with ui.row().classes("items-center gap-2 min-w-0"):
+                        ui.icon("merge").classes("classification-insight-icon")
+                        ui.label("Candidate summary").classes(
+                            "classification-insight-model flex-1 min-w-0"
+                        )
+                    state.setdefault("summary", {})
+                    state["summary"]["target_lbl"] = ui.label(
+                        "Target: -- pairs, -- groups"
+                    ).classes("classification-insight-meta w-full")
+                    state["summary"]["genome_lbl"] = ui.label(
+                        "Genome-wide: -- pairs, -- groups"
+                    ).classes("classification-insight-meta w-full")
+                    state["summary"]["master_bed_lbl"] = ui.label(
+                        "Master BED: (deprecated)"
+                    ).classes("hidden")
+                    ui.label(
+                        "From supplementary alignments; tables and plots below."
+                    ).classes("classification-insight-foot")
 
-        # Target Panel
-        ui.label("Target Panel").classes("text-base font-medium mt-1 mb-1")
-        state["target"]["summary_table_container"] = ui.column().classes("w-full")
-        state["target"]["groups_table_container"] = ui.column().classes("w-full mt-2")
-        state["target"]["plot_container"] = ui.column().classes("w-full")
-        state["target"]["table_container"] = ui.column().classes("w-full mt-2")
-        state["target"]["status_container"] = ui.column().classes("w-full mt-2")
+            ui.label("Target panel").classes(
+                "target-coverage-panel__meta-label mt-4 mb-1"
+            )
+            state["target"]["summary_table_container"] = ui.column().classes("w-full")
+            state["target"]["groups_table_container"] = ui.column().classes(
+                "w-full mt-2"
+            )
+            state["target"]["plot_container"] = ui.column().classes("w-full")
+            state["target"]["table_container"] = ui.column().classes("w-full mt-2")
+            state["target"]["status_container"] = ui.column().classes("w-full mt-2")
 
-        # Genome-wide
-        ui.separator()
-        ui.label("Genome-wide").classes("text-base font-medium mt-2 mb-1")
-        state["genome"]["summary_table_container"] = ui.column().classes("w-full")
-        state["genome"]["groups_table_container"] = ui.column().classes("w-full mt-2")
-        state["genome"]["plot_container"] = ui.column().classes("w-full")
-        state["genome"]["table_container"] = ui.column().classes("w-full mt-2")
-        state["genome"]["status_container"] = ui.column().classes("w-full mt-2")
+            # Genome-wide
+            ui.separator().classes("mgmt-detail-separator")
+            ui.label("Genome-wide").classes(
+                "target-coverage-panel__meta-label mt-2 mb-1"
+            )
+            state["genome"]["summary_table_container"] = ui.column().classes("w-full")
+            state["genome"]["groups_table_container"] = ui.column().classes(
+                "w-full mt-2"
+            )
+            state["genome"]["plot_container"] = ui.column().classes("w-full")
+            state["genome"]["table_container"] = ui.column().classes("w-full mt-2")
+            state["genome"]["status_container"] = ui.column().classes("w-full mt-2")
+
+            # Master BED Targets section has been deprecated
+            # Keep containers initialized for backward compatibility
+            state["master_bed"]["table_container"] = ui.column().classes(
+                "w-full hidden"
+            )
+            state["master_bed"]["status_container"] = ui.column().classes(
+                "w-full mt-2 hidden"
+            )
 
     # Initial refresh and timer
     try:
         # Prime summary values on first load
         try:
             t0 = _load_processed_pickle(
-                (sample_dir / "fusion_candidates_master_processed.csv")
+                (sample_dir / "fusion_candidates_master_processed.pkl")
                 if sample_dir
                 else Path("/dev/null")
             )
             g0 = _load_processed_pickle(
-                (sample_dir / "fusion_candidates_all_processed.csv")
+                (sample_dir / "fusion_candidates_all_processed.pkl")
                 if sample_dir
                 else Path("/dev/null")
             )
@@ -2671,14 +3371,63 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     state["summary"][
                         "genome_lbl"
                     ].text = f"Genome-wide: {g_pairs0} pairs, {g_groups0} groups"
+                    
+                    # Master BED summary has been deprecated
+                    try:
+                        state["summary"]["master_bed_lbl"].text = "Master BED: (deprecated)"
+                    except Exception:
+                        pass
                 except Exception:
                     pass
         except Exception:
             pass
         
         # Start the refresh timer (every 30 seconds)
-        logging.info("[Fusion] Setting up refresh timer with immediate=True")
-        ui.timer(30.0, refresh_fusion, active=True, immediate=True)
+        logging.info("[Fusion] Setting up refresh timer (30s interval + 0.5s deferred + immediate)")
+        refresh_timer = ui.timer(30.0, refresh_fusion, active=True, immediate=False)
+        ui.timer(0.5, refresh_fusion, once=True)
+
+        def _sync_fusion_plot_theme_if_needed() -> None:
+            try:
+                dark = _is_dark_mode()
+            except Exception:
+                dark = False
+            for sec in ("target", "genome"):
+                st = state.get(sec, {})
+                if st.get("fusion_plot_theme_dark") == dark:
+                    continue
+                mpl = st.get("fusion_mpl")
+                if mpl is None:
+                    continue
+                fig = getattr(mpl, "figure", None)
+                if fig is None:
+                    continue
+                _apply_fusion_figure_theme(fig, dark)
+                try:
+                    mpl.update()
+                except Exception:
+                    pass
+                st["fusion_plot_theme_dark"] = dark
+
+        from robin.gui.theme import register_theme_sync_callback
+
+        unregister_fusion_theme_sync = register_theme_sync_callback(
+            _sync_fusion_plot_theme_if_needed,
+            element=state.get("target", {}).get("fusion_mpl"),
+            interval_s=0.5,
+            immediate=True,
+        )
+        try:
+            ui.context.client.on_disconnect(
+                lambda: (
+                    refresh_timer.deactivate(),
+                    unregister_fusion_theme_sync(),
+                )
+            )
+        except Exception:
+            pass
         logging.info("[Fusion] Timer set up successfully")
+        # Populate fusion UI immediately so it matches Summary without waiting for 0.5s/30s
+        refresh_fusion()
     except Exception as e:
         logging.exception(f"[Fusion] Exception in timer setup: {e}")

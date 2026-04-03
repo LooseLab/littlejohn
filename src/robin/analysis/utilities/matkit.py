@@ -1,4 +1,13 @@
+"""
+Modkit/matkit utilities for BAM methylation. Requires Python 3.12+.
+"""
+from __future__ import annotations
+
 import warnings
+import sys
+if sys.version_info < (3, 12):
+    raise RuntimeError("robin matkit utilities require Python 3.12 or newer")
+
 from typing import List, Optional
 import gc
 import os
@@ -10,13 +19,12 @@ from datetime import datetime
 from pathlib import Path
 import pandas as pd
 import polars as pl
-
-
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 import pyranges as pr
 import pysam
 from alive_progress import alive_bar
-from tqdm import tqdm
 from robin.analysis.utilities.ReadBam import ReadBam
 from robin.analysis.utilities.mnp_flex import APIClient as MnpFlexClient
 from robin import resources
@@ -30,6 +38,97 @@ warnings.filterwarnings(
 warnings.filterwarnings(
     "ignore", message="The figure layout has changed to tight", category=UserWarning
 )
+
+# Schema for optimized parquet: only these columns are read/written in the merge path
+ESSENTIAL_COLS = [
+    "chrom",
+    "chromStart",
+    "mod_code",
+    "strand",
+    "valid_cov",
+    "percent_modified",
+    "n_mod",
+    "n_canonical",
+]
+
+# Per-BAM parquet schema: string columns stored as binary to avoid UTF-8 validation on read
+_PARQUET_STR_COLS = ("chrom", "mod_code", "strand")
+PARQUET_SCHEMA_BINARY = pa.schema([
+    ("chrom", pa.binary()),
+    ("chromStart", pa.int64()),
+    ("mod_code", pa.binary()),
+    ("strand", pa.binary()),
+    ("valid_cov", pa.uint32()),
+    ("percent_modified", pa.float32()),
+    ("n_mod", pa.uint32()),
+    ("n_canonical", pa.uint32()),
+])
+
+# Minimum primary alignment QS (BAM tag "qs") to include a read in methylation analysis.
+# Same rule as fusion_work: only process alignments for reads whose primary has qs >= this.
+# Reads without the qs tag are included; only reads with qs present and < MIN_PRIMARY_QS are excluded.
+MIN_PRIMARY_QS = 12
+
+# Cache of opened reference FASTA by real path so the same ref is not re-indexed/re-opened per BAM.
+_ref_fasta_cache: dict[str, pysam.FastaFile] = {}
+
+
+def _primary_meets_min_qs(read) -> bool:
+    """
+    Return True if this alignment is the primary and either has no 'qs' tag, or qs >= MIN_PRIMARY_QS.
+    Reads without the qs tag are processed; only reads with qs present and < MIN_PRIMARY_QS are excluded.
+    Matches fusion_work._primary_meets_min_qs for consistent behaviour across robin analysis.
+    """
+    if read.is_secondary or read.is_supplementary:
+        return False
+    if not read.has_tag("qs"):
+        return True
+    try:
+        return read.get_tag("qs") >= MIN_PRIMARY_QS
+    except (TypeError, KeyError):
+        return True
+
+
+def _decode_binary_columns(table: pa.Table) -> pa.Table:
+    """Decode binary columns (chrom, mod_code, strand) to UTF-8 string with errors='replace'."""
+    arrays = []
+    schema_fields = []
+    for i, name in enumerate(table.column_names):
+        col = table.column(i)
+        if name in _PARQUET_STR_COLS and (
+            pa.types.is_binary(col.type) or pa.types.is_large_binary(col.type)
+        ):
+            str_vals = [
+                (b.decode("utf-8", errors="replace") if b is not None else None)
+                for b in col
+            ]
+            arrays.append(pa.array(str_vals, type=pa.string()))
+            schema_fields.append(pa.field(name, pa.string()))
+        else:
+            arrays.append(col)
+            schema_fields.append(pa.field(name, col.type))
+    return pa.Table.from_arrays(arrays, schema=pa.schema(schema_fields))
+
+
+def _read_parquet_robust(path: str, columns: list[str]):
+    """
+    Read per-BAM parquet (essential columns only). String columns may be stored
+    as binary; they are decoded to str with errors='replace'. If the file has
+    invalid UTF-8 in string columns (legacy writer), use fixed binary schema so
+    no decode runs inside the reader.
+    """
+    try:
+        pl_df = pl.read_parquet(path, columns=columns)
+        table = pl_df.to_arrow()
+        table = _decode_binary_columns(table)
+        return pl.from_arrow(table)
+    except Exception as e:
+        err_msg = str(e).lower()
+        if "utf-8" not in err_msg and "utf8" not in err_msg and "decode" not in err_msg:
+            raise
+        table = pq.read_table(path, schema=PARQUET_SCHEMA_BINARY)
+        table = _decode_binary_columns(table)
+        return pl.from_arrow(table)
 
 
 def _ensure_fasta_index(ref_fasta: str) -> None:
@@ -124,17 +223,8 @@ def merge_modkit_files(
     sample_output_dir = os.path.join(output_dir, sample_id)
     os.makedirs(sample_output_dir, exist_ok=True)
 
-    # Define optimized schema with only essential columns
-    essential_cols = [
-        "chrom",
-        "chromStart",
-        "mod_code",
-        "strand",
-        "valid_cov",
-        "percent_modified",
-        "n_mod",
-        "n_canonical",
-    ]
+    # Use module-level schema so per-BAM parquet and merge path stay in sync
+    essential_cols = ESSENTIAL_COLS
 
     categorical_cols = ["chrom", "mod_code", "strand"]
     unsigned_int_cols = ["chromStart", "valid_cov", "n_mod", "n_canonical"]
@@ -151,7 +241,7 @@ def merge_modkit_files(
         if os.path.exists(existing_file):
             try:
                 # Read existing metadata
-                metadata_file = existing_file.replace(".parquet", "_metadata.json")
+                metadata_file = existing_file.removesuffix(".parquet") + "_metadata.json"
                 if os.path.exists(metadata_file):
                     with open(metadata_file, "r") as f:
                         metadata = json.load(f)
@@ -170,23 +260,43 @@ def merge_modkit_files(
             f"Total cumulative BAM files contributing to parquet: {cumulative_bam_file_count} (added {num_bam_files_seen} new files)"
         )
 
-        # Cache or build PyRanges filter with improved caching
+        # Cache or build PyRanges filter. Key is (sample_output_dir, basename(filter_bed_file), suffix);
+        # use a stable filter_bed_file path so the cache is hit on subsequent runs.
+        # Use distinct cache for .txt (1-based converted) vs .gz (0-based) to avoid stale data.
+        cache_suffix = "_1based" if filter_bed_file.endswith(".txt") else ""
         cache_path = os.path.join(
-            sample_output_dir, f"{os.path.basename(filter_bed_file)}.pgr_cache"
+            sample_output_dir,
+            f"{os.path.basename(filter_bed_file)}{cache_suffix}.pgr_cache",
         )
         if os.path.exists(cache_path):
             with open(cache_path, "rb") as f:
                 filter_ranges = pickle.load(f)
         else:
             comp = "gzip" if filter_bed_file.endswith(".gz") else None
-            bed_df = pd.read_csv(
-                filter_bed_file,
-                sep="\t",
-                header=None,
-                names=["Chromosome", "Start", "End", "cg_label"],
-                compression=comp,
-                dtype={"Chromosome": str},
-            )
+            if filter_bed_file.endswith(".txt"):
+                # parquet_filter.txt format: header "chr start end IlmnID" (spaces/tabs)
+                # Illumina-derived files use 1-based coordinates; BED/PyRanges expect 0-based.
+                bed_df = pd.read_csv(
+                    filter_bed_file,
+                    sep=r"\s+",
+                    header=0,
+                    dtype=str,
+                )
+                # Map to expected column names (handle chr/start/end) – dict comp inlined in 3.12
+                col_map = {"chr": "Chromosome", "start": "Start", "end": "End"}
+                rename = {c: col_map[c.lower()] for c in bed_df.columns if c.lower() in col_map}
+                bed_df = bed_df.rename(columns=rename)
+                bed_df["Start"] = bed_df["Start"].astype(int) - 1  # 1-based -> 0-based
+                bed_df["End"] = bed_df["End"].astype(int)  # 1-based end inclusive -> 0-based exclusive
+            else:
+                bed_df = pd.read_csv(
+                    filter_bed_file,
+                    sep="\t",
+                    header=None,
+                    names=["Chromosome", "Start", "End", "cg_label"],
+                    compression=comp,
+                    dtype={"Chromosome": str},
+                )
             filter_ranges = pr.PyRanges(bed_df[["Chromosome", "Start", "End"]])
             with open(cache_path, "wb") as f:
                 pickle.dump(filter_ranges, f)
@@ -195,47 +305,42 @@ def merge_modkit_files(
         new_frames = []
         for bed in new_files:
             try:
-                # Read with pandas first to handle regex separator
-                # Read all 18 columns from the input file
-                full_cols = [
-                    "chrom",
-                    "chromStart",
-                    "chromEnd",
-                    "mod_code",
-                    "score_bed",
-                    "strand",
-                    "thickStart",
-                    "thickEnd",
-                    "color",
-                    "valid_cov",
-                    "percent_modified",
-                    "n_mod",
-                    "n_canonical",
-                    "n_othermod",
-                    "n_delete",
-                    "n_fail",
-                    "n_diff",
-                    "n_nocall",
-                ]
-
-                df = pd.read_csv(
-                    bed,
-                    sep="\s+",
-                    header=None,
-                    names=full_cols,
-                    dtype={c: str for c in ["chrom", "mod_code", "strand", "color"]},
-                )
-
-                # Validate required columns
-                missing_cols = set(full_cols) - set(df.columns)
-                if missing_cols:
-                    raise ValueError(f"Missing required columns: {missing_cols}")
-
-                # Extract only essential columns for processing
-                df_essential = df[essential_cols].copy()
-
-                # Convert to Polars for efficient processing
-                pl_df = pl.from_pandas(df_essential)
+                if bed.endswith(".parquet"):
+                    # Per-BAM parquet: load only essential columns (same schema as write_counts_to_parquet)
+                    pl_df = _read_parquet_robust(bed, essential_cols)
+                else:
+                    # Legacy BEDMethyl text: read full columns then keep only essential
+                    full_cols = [
+                        "chrom",
+                        "chromStart",
+                        "chromEnd",
+                        "mod_code",
+                        "score_bed",
+                        "strand",
+                        "thickStart",
+                        "thickEnd",
+                        "color",
+                        "valid_cov",
+                        "percent_modified",
+                        "n_mod",
+                        "n_canonical",
+                        "n_othermod",
+                        "n_delete",
+                        "n_fail",
+                        "n_diff",
+                        "n_nocall",
+                    ]
+                    df = pd.read_csv(
+                        bed,
+                        sep=r"\s+",
+                        header=None,
+                        names=full_cols,
+                        dtype={c: str for c in ["chrom", "mod_code", "strand", "color"]},
+                    )
+                    missing_cols = set(full_cols) - set(df.columns)
+                    if missing_cols:
+                        raise ValueError(f"Missing required columns: {missing_cols}")
+                    pl_df = pl.from_pandas(df[essential_cols].copy())
 
                 # Convert numeric columns with proper error handling
                 for c in unsigned_int_cols:
@@ -244,15 +349,13 @@ def merge_modkit_files(
                     pl_df = pl_df.with_columns(pl.col(c).cast(pl.Float32, strict=False))
 
                 # Filter using PyRanges
-                # Rename columns using Polars syntax
                 pr_df = pl_df.rename({"chrom": "Chromosome", "chromStart": "Start"})
-                # Add chromEnd for filtering (calculate from chromStart)
                 pr_df = pr_df.with_columns((pl.col("Start") + 1).alias("End"))
 
-                # Convert to pandas for PyRanges
                 pr_df_pandas = pr_df.to_pandas()
                 gr = pr.PyRanges(pr_df_pandas[["Chromosome", "Start", "End"]])
                 inter = gr.intersect(filter_ranges).df
+                pl_df_pandas = pl_df.to_pandas()
                 filt = pd.merge(
                     inter.rename(
                         columns={
@@ -260,13 +363,13 @@ def merge_modkit_files(
                             "Start": "chromStart",
                         }
                     ),
-                    pl_df.to_pandas(),
+                    pl_df_pandas,
                     on=["chrom", "chromStart"],
                     how="inner",
                 )
                 new_frames.append(filt)
             except Exception as e:
-                logging.error(f"Error processing file {bed}: {str(e)}")
+                logging.error(f"Error processing file {bed}: {e}")
                 continue
 
         if not new_frames:
@@ -279,9 +382,14 @@ def merge_modkit_files(
         else:
             new_df = new_frames[0]
 
-        # If no existing file, just save the new data
+        # If no existing file, just save the new data (use canonical types for consistency)
         if not os.path.exists(existing_file):
             pl_df = pl.from_pandas(new_df)
+            for c in ["valid_cov", "n_mod", "n_canonical"]:
+                if c in pl_df.columns:
+                    pl_df = pl_df.with_columns(pl.col(c).cast(pl.UInt32, strict=False))
+            if "percent_modified" in pl_df.columns:
+                pl_df = pl_df.with_columns(pl.col("percent_modified").cast(pl.Float32, strict=False))
             pl_df.write_parquet(output_file)
 
             # Save metadata with cumulative BAM file count
@@ -292,7 +400,7 @@ def merge_modkit_files(
                 "files_added_in_this_update": num_bam_files_seen,
                 "column_format": "optimized",  # Mark as optimized format
             }
-            metadata_file = output_file.replace(".parquet", "_metadata.json")
+            metadata_file = output_file.removesuffix(".parquet") + "_metadata.json"
             with open(metadata_file, "w") as f:
                 json.dump(metadata, f, indent=2)
 
@@ -301,14 +409,38 @@ def merge_modkit_files(
             )
             return
 
-        # Process existing data in chunks
-        existing_df = pl.scan_parquet(existing_file)
+        # Process existing data
+        existing_df = pl.scan_parquet(existing_file).collect()
 
-        # Convert new data to Polars
+        # If existing parquet is empty, replace it with new data (no merge).
+        # This avoids Int64/UInt32 mismatch: empty file from write_counts_to_parquet
+        # uses UInt32; pl.from_pandas(new_df) uses Int64; concat would fail.
+        if existing_df.is_empty():
+            pl_df = pl.from_pandas(new_df)
+            for c in ["valid_cov", "n_mod", "n_canonical"]:
+                if c in pl_df.columns:
+                    pl_df = pl_df.with_columns(pl.col(c).cast(pl.UInt32, strict=False))
+            if "percent_modified" in pl_df.columns:
+                pl_df = pl_df.with_columns(pl.col("percent_modified").cast(pl.Float32, strict=False))
+            pl_df.write_parquet(output_file)
+            metadata = {
+                "bam_file_count": cumulative_bam_file_count,
+                "last_updated": datetime.now().isoformat(),
+                "sample_id": sample_id,
+                "files_added_in_this_update": num_bam_files_seen,
+                "column_format": "optimized",
+            }
+            metadata_file = output_file.removesuffix(".parquet") + "_metadata.json"
+            with open(metadata_file, "w") as f:
+                json.dump(metadata, f, indent=2)
+            logging.info(
+                "Existing parquet was empty; replaced with new data "
+                f"({len(new_df)} rows from {num_bam_files_seen} BAM files)"
+            )
+            return
+
+        # Convert new data to Polars for merge
         pl_new_df = pl.from_pandas(new_df)
-
-        # Convert existing data to regular DataFrame for concatenation
-        existing_df = existing_df.collect()
 
         # Check if existing file is in old format (18 columns) or new format (8 columns)
         is_old_format = (
@@ -337,6 +469,18 @@ def merge_modkit_files(
                 f"Column mismatch: missing {missing_cols}, extra {extra_cols}"
             )
 
+        # Cast count/float columns to canonical types so concat never sees Int64 vs UInt32.
+        for c in ["valid_cov", "n_mod", "n_canonical"]:
+            if c in existing_df.columns:
+                existing_df = existing_df.with_columns(pl.col(c).cast(pl.UInt32, strict=False))
+            if c in pl_new_df.columns:
+                pl_new_df = pl_new_df.with_columns(pl.col(c).cast(pl.UInt32, strict=False))
+        for c in ["percent_modified"]:
+            if c in existing_df.columns:
+                existing_df = existing_df.with_columns(pl.col(c).cast(pl.Float32, strict=False))
+            if c in pl_new_df.columns:
+                pl_new_df = pl_new_df.with_columns(pl.col(c).cast(pl.Float32, strict=False))
+
         # Combine existing and new data
         combined = pl.concat([existing_df, pl_new_df])
 
@@ -362,7 +506,7 @@ def merge_modkit_files(
             "files_added_in_this_update": num_bam_files_seen,
             "column_format": "optimized",  # Mark as optimized format
         }
-        metadata_file = output_file.replace(".parquet", "_metadata.json")
+        metadata_file = output_file.removesuffix(".parquet") + "_metadata.json"
         with open(metadata_file, "w") as f:
             json.dump(metadata, f, indent=2)
 
@@ -622,26 +766,27 @@ def reconstruct_full_bedmethyl_for_mnpflex(parquet_file_path: str) -> pd.DataFra
         raise
 
 
-# Pre-compile default count dictionary to avoid repeated creation
-DEFAULT_COUNT_DICT = {
-    "mod": 0,
-    "canonical": 0,
-    "other_mod": 0,
-    "delete": 0,
-    "fail": 0,
-    "diff": 0,
-    "nocall": 0,
-    "total": 0,
-    "max_prob_C": 0,
-    "max_prob_m": 0,
-    "max_prob_h": 0,
-}
+# Count storage: list of 11 ints per site (avoids dict allocation in hot loop).
+# Order: mod, canonical, other_mod, delete, fail, diff, nocall, total, max_prob_C, max_prob_m, max_prob_h
+COUNT_IDX_MOD = 0
+COUNT_IDX_CANONICAL = 1
+COUNT_IDX_OTHER_MOD = 2
+COUNT_IDX_DELETE = 3
+COUNT_IDX_FAIL = 4
+COUNT_IDX_DIFF = 5
+COUNT_IDX_NOCALL = 6
+COUNT_IDX_TOTAL = 7
+COUNT_IDX_MAX_PROB_C = 8
+COUNT_IDX_MAX_PROB_M = 9
+COUNT_IDX_MAX_PROB_H = 10
+COUNT_LEN = 11
 
 # Pre-define constants to avoid repeated string creation and calculations
 PLUS_STRAND = "+"
 MINUS_STRAND = "-"
 COLOR_VALUE = "255,0,0"
 CANONICAL_CODE = "C"
+COMBINED_MOD_CODE = "m"
 
 
 def run_matkit(sortfile: str, temp: str) -> None:
@@ -656,7 +801,7 @@ def run_matkit(sortfile: str, temp: str) -> None:
     logging.info(f"Processing BAM file with modkit2: {sortfile}")
 
     # Use the improved approach from modkit2.py with memory efficiency and better classification
-    counts, debug_data = process_bam_counts_improved(
+    counts, mod_sites, debug_data = process_bam_counts_improved(
         sortfile,
         threshold=0.73,
         combine_mods=True,
@@ -665,10 +810,14 @@ def run_matkit(sortfile: str, temp: str) -> None:
         ref_fasta=None,
     )
 
-    # Write output to BEDMethyl format
-    write_bedmethyl_improved(temp, counts, debug_probs=False)
+    # Write parquet (same schema as merge path) or BEDMethyl text
+    if temp.endswith(".parquet"):
+        write_counts_to_parquet(counts, mod_sites, temp)
+    else:
+        write_bedmethyl_improved(temp, counts, mod_sites, debug_probs=False)
     # Clear memory
     del counts
+    del mod_sites
     del debug_data
     logging.info(f"Modkit2 processing complete. Output written to: {temp}")
     gc.collect()
@@ -861,26 +1010,16 @@ def map_read_to_ref_positions(read):
         - Modkit pileup documentation: https://nanoporetech.github.io/modkit/intro_pileup.html
         - BAM format specification for modified bases
     """
-    # Optimized version: use direct iteration and avoid try/except overhead
+    # Use matches_only=True only; with_seq is not needed (we only use read_pos/ref_pos)
+    # and avoids MD-tag parsing and base sequence allocation (faster).
     ref_map = {}
-    try:
-        # Try with sequence first (requires MD tag for base information)
-        # This provides the most accurate mapping when MD tag is available
-        for read_pos, ref_pos, base in read.get_aligned_pairs(
-            with_seq=True, matches_only=True
-        ):
-            if read_pos is not None and ref_pos is not None:
-                ref_map[read_pos] = ref_pos
-    except ValueError:
-        # Fall back to without sequence if MD tag is missing
-        # This is less precise but still functional for modification calling
-        for read_pos, ref_pos in read.get_aligned_pairs(matches_only=True):
-            if read_pos is not None and ref_pos is not None:
-                ref_map[read_pos] = ref_pos
+    for read_pos, ref_pos in read.get_aligned_pairs(matches_only=True):
+        if read_pos is not None and ref_pos is not None:
+            ref_map[read_pos] = ref_pos
     return ref_map
 
 
-def write_bedmethyl_improved(output_path, counts, debug_probs=False):
+def write_bedmethyl_improved(output_path, counts, mod_sites, debug_probs=False):
     """
     Write counts to BEDMethyl format with improved performance.
 
@@ -910,63 +1049,128 @@ def write_bedmethyl_improved(output_path, counts, debug_probs=False):
 
     Args:
         output_path: Path to output BEDMethyl file
-        counts: Dictionary containing classification counts with tuple keys
+        counts: Dict mapping (chrom, pos, strand, mod_code) to list of 11 ints (see COUNT_IDX_*)
+        mod_sites: Set of (chrom, pos, strand, mod_code) to include (modkit output sites)
         debug_probs: Whether to include probability columns for debugging
 
     References:
         - BEDMethyl format specification: https://github.com/nanoporetech/modkit?tab=readme-ov-file#description-of-bedmethyl-output
         - Modkit pileup output documentation
     """
-    with open(output_path, "w") as out:
-        # Sort by chromosome, position, strand, and modification code for consistent output
-        sorted_sites = sorted(counts.keys(), key=lambda x: (x[0], x[1], x[2], x[3]))
-
-        # Pre-allocate string templates for better performance
-        pos_str = str
-        percent_str = "{:.2f}".format
-
-        for site_key in sorted_sites:
-            chrom, pos, strand, mod_code = site_key
+    # Large buffer reduces syscalls (Python 3.12 default is 8KiB)
+    with open(output_path, "w", buffering=2**20) as out:
+        # Tuples compare lexicographically; no key= needed
+        for site_key in sorted(counts.keys()):
+            if site_key not in mod_sites:
+                continue
             c = counts[site_key]
-            total = c["total"]
-            # Calculate fraction modified as Nmod / Nvalid_cov
-            percent = (c["mod"] / total) * 100 if total else 0.0
-
-            # Construct the 18-column BEDMethyl line using optimized string operations
+            if not (c[COUNT_IDX_MOD] > 0 or c[COUNT_IDX_CANONICAL] > 0):
+                continue
+            chrom, pos, strand, mod_code = site_key
+            total = c[COUNT_IDX_TOTAL]
+            percent = (c[COUNT_IDX_MOD] / total) * 100 if total else 0.0
             pos_plus_1 = pos + 1
             fields = [
                 chrom,
-                pos_str(pos),
-                pos_str(pos_plus_1),  # Columns 1-3: chrom, start, end
+                str(pos),
+                str(pos_plus_1),
                 mod_code,
-                pos_str(total),
-                strand,  # Columns 4-6: mod_code, score, strand
-                pos_str(pos),
-                pos_str(pos_plus_1),
-                COLOR_VALUE,  # Columns 7-9: start, end, color
-                pos_str(total),
-                percent_str(percent),  # Columns 10-11: Nvalid_cov, fraction_modified
-                pos_str(c["mod"]),
-                pos_str(c["canonical"]),  # Columns 12-13: Nmod, Ncanonical
-                pos_str(c["other_mod"]),
-                pos_str(c["delete"]),  # Columns 14-15: Nother_mod, Ndelete
-                pos_str(c["fail"]),
-                pos_str(c["diff"]),
-                pos_str(c["nocall"]),  # Columns 16-18: Nfail, Ndiff, Nnocall
+                str(total),
+                strand,
+                str(pos),
+                str(pos_plus_1),
+                COLOR_VALUE,
+                str(total),
+                f"{percent:.2f}",
+                str(c[COUNT_IDX_MOD]),
+                str(c[COUNT_IDX_CANONICAL]),
+                str(c[COUNT_IDX_OTHER_MOD]),
+                str(c[COUNT_IDX_DELETE]),
+                str(c[COUNT_IDX_FAIL]),
+                str(c[COUNT_IDX_DIFF]),
+                str(c[COUNT_IDX_NOCALL]),
             ]
-
-            # Add probability columns only if debug_probs is True
             if debug_probs:
-                # Compute probabilities for canonical, 5mC, and 5hmC for each site
-                # Output as 0-1 float (divide by 255)
-                prob_canonical = c.get("max_prob_C", 0.0) / 255.0
-                prob_5mc = c.get("max_prob_m", 0.0) / 255.0
-                prob_5hmc = c.get("max_prob_h", 0.0) / 255.0
+                prob_canonical = c[COUNT_IDX_MAX_PROB_C] / 255.0
+                prob_5mc = c[COUNT_IDX_MAX_PROB_M] / 255.0
+                prob_5hmc = c[COUNT_IDX_MAX_PROB_H] / 255.0
                 fields.extend(
                     [f"{prob_canonical:.3f}", f"{prob_5mc:.3f}", f"{prob_5hmc:.3f}"]
                 )
-
             out.write("\t".join(fields) + "\n")
+
+
+def _ensure_utf8(s: str | bytes) -> str:
+    """Ensure value is a valid UTF-8 str for parquet string columns (avoids decode errors on read)."""
+    if isinstance(s, bytes):
+        return s.decode("utf-8", errors="replace")
+    if isinstance(s, str):
+        return s.encode("utf-8", errors="replace").decode("utf-8")
+    return str(s)
+
+
+def write_counts_to_parquet(counts: dict, mod_sites: set, output_path: str) -> None:
+    """
+    Write methylation counts to parquet with the essential 8-column schema.
+    counts maps (chrom, pos, strand, mod_code) to list of 11 ints (see COUNT_IDX_*).
+    String columns (chrom, mod_code, strand) are stored as binary so readers
+    never trigger UTF-8 validation; downstream decode with errors='replace'.
+    """
+    chrom_b = []
+    chrom_start = []
+    mod_code_b = []
+    strand_b = []
+    valid_cov = []
+    percent_modified = []
+    n_mod = []
+    n_canonical = []
+    for (chrom, pos, strand, mod_code), c in counts.items():
+        if (chrom, pos, strand, mod_code) not in mod_sites:
+            continue
+        if not (c[COUNT_IDX_MOD] > 0 or c[COUNT_IDX_CANONICAL] > 0):
+            continue
+        total = c[COUNT_IDX_TOTAL]
+        pct = (c[COUNT_IDX_MOD] / total) * 100.0 if total else 0.0
+        chrom_b.append(_ensure_utf8(chrom).encode("utf-8"))
+        chrom_start.append(pos)
+        mod_code_b.append(_ensure_utf8(mod_code).encode("utf-8"))
+        strand_b.append(_ensure_utf8(strand).encode("utf-8"))
+        valid_cov.append(total)
+        percent_modified.append(round(pct, 2))
+        n_mod.append(c[COUNT_IDX_MOD])
+        n_canonical.append(c[COUNT_IDX_CANONICAL])
+    if not chrom_b:
+        pq.write_table(
+            pa.table(
+                {
+                    "chrom": pa.array([], type=pa.binary()),
+                    "chromStart": pa.array([], type=pa.int64()),
+                    "mod_code": pa.array([], type=pa.binary()),
+                    "strand": pa.array([], type=pa.binary()),
+                    "valid_cov": pa.array([], type=pa.uint32()),
+                    "percent_modified": pa.array([], type=pa.float32()),
+                    "n_mod": pa.array([], type=pa.uint32()),
+                    "n_canonical": pa.array([], type=pa.uint32()),
+                },
+                schema=PARQUET_SCHEMA_BINARY,
+            ),
+            output_path,
+        )
+        return
+    table = pa.table(
+        {
+            "chrom": pa.array(chrom_b, type=pa.binary()),
+            "chromStart": pa.array(chrom_start, type=pa.int64()),
+            "mod_code": pa.array(mod_code_b, type=pa.binary()),
+            "strand": pa.array(strand_b, type=pa.binary()),
+            "valid_cov": pa.array(valid_cov, type=pa.uint32()),
+            "percent_modified": pa.array(percent_modified, type=pa.float32()),
+            "n_mod": pa.array(n_mod, type=pa.uint32()),
+            "n_canonical": pa.array(n_canonical, type=pa.uint32()),
+        },
+        schema=PARQUET_SCHEMA_BINARY,
+    )
+    pq.write_table(table, output_path)
 
 
 def process_bam_counts_improved(
@@ -1019,6 +1223,8 @@ def process_bam_counts_improved(
     iterable = (
         bam.fetch(contig=chrom_filter) if chrom_filter else bam.fetch(until_eof=True)
     )
+    # Cache reference names to avoid repeated get_reference_name() lookups per read
+    ref_names = bam.references
 
     # Use a flat dictionary with tuple keys for memory efficiency
     # Structure: counts[(chrom, pos, strand, mod_code)] = count_dict
@@ -1028,28 +1234,41 @@ def process_bam_counts_improved(
     # This ensures we only output sites that modkit would output
     mod_sites = set()
 
-    # Load reference genome if provided for validation
+
+    # Load reference genome if provided for validation. Reuse cached handle when the same
+    # path is used across calls (e.g. one ref for many BAMs) to avoid re-indexing/re-opening.
     ref_fasta_obj = None
+    ref_fasta_cached = False
     if ref_fasta:
-        # Ensure the reference FASTA has an index before opening
-        # If index creation fails, log warning but continue without reference
-        try:
-            _ensure_fasta_index(ref_fasta)
-            ref_fasta_obj = pysam.FastaFile(ref_fasta)
-        except (RuntimeError, FileNotFoundError) as e:
-            logging.warning(
-                f"Could not create FASTA index for {ref_fasta}: {e}. "
-                "Continuing without reference genome validation."
-            )
-            ref_fasta_obj = None
+        ref_fasta_path = os.path.realpath(ref_fasta)
+        if ref_fasta_path in _ref_fasta_cache:
+            ref_fasta_obj = _ref_fasta_cache[ref_fasta_path]
+            ref_fasta_cached = True
+        else:
+            try:
+                _ensure_fasta_index(ref_fasta)
+                ref_fasta_obj = pysam.FastaFile(ref_fasta)
+                _ref_fasta_cache[ref_fasta_path] = ref_fasta_obj
+                ref_fasta_cached = True
+            except (RuntimeError, FileNotFoundError) as e:
+                logging.warning(
+                    f"Could not create FASTA index for {ref_fasta}: {e}. "
+                    "Continuing without reference genome validation."
+                )
+                ref_fasta_obj = None
 
     # Debug tracking for specific positions
     debug_data = {} if debug_positions else None
+    # Reads whose primary alignment failed QS (exclude all alignments for these reads)
+    primary_qs_excluded: set = set()
 
-    for read in tqdm(iterable, desc="Processing reads", disable=True):
+    for read in iterable:
+        # Skip all alignments for reads whose primary failed QS (same rule as fusion_work)
+        if read.query_name in primary_qs_excluded:
+            continue
+
         # Skip unmapped, secondary, and optionally supplementary alignments
         # Note: modkit appears to filter out secondary alignments by default
-        # This matches the behavior of the original modkit tool
         if (
             read.is_unmapped
             or read.is_secondary
@@ -1057,8 +1276,12 @@ def process_bam_counts_improved(
         ):
             continue
 
-        chrom = bam.get_reference_name(read.reference_id)
-        ref_map = map_read_to_ref_positions(read)
+        # Only process alignments for reads whose primary mapping has qs >= MIN_PRIMARY_QS
+        if not read.is_supplementary:
+            # Inline `_primary_meets_min_qs` to avoid redundant checks and per-read function overhead.
+            if read.has_tag("qs") and read.get_tag("qs") < MIN_PRIMARY_QS:
+                primary_qs_excluded.add(read.query_name)
+                continue
 
         try:
             # Extract modification data from MM/ML tags
@@ -1066,13 +1289,24 @@ def process_bam_counts_improved(
         except AttributeError:
             mods = {}
 
+        if not mods:
+            continue
+
+        chrom = ref_names[read.reference_id]
+        ref_map = map_read_to_ref_positions(read)
+
         if combine_mods:
+            ## This is what we use.
             # Combine all modification types into a single 'mod' category
             # This matches modkit's --combine-mods behavior
             # Use a more memory-efficient approach with direct processing
 
-            # Collect all modification data for this read
-            read_sites = {}  # (refpos, strand) -> {mod_code: [probs]}
+            # Collect per-site max probability per mod_code for this read.
+            # Avoids allocating lists of probs when we only ever use max(probs).
+            read_sites: dict[tuple[int, str], dict[str, int]] = {}  # (refpos, strand) -> {mod_code: max_prob_255}
+            seen_sites: set[tuple[int, str]] = set()
+            ref_map_get = ref_map.get
+            read_sites_get = read_sites.get
 
             for key, values in mods.items():
                 if not isinstance(key, tuple) or len(key) != 3:
@@ -1080,68 +1314,75 @@ def process_bam_counts_improved(
                 _, strand_flag, mod_code = key
                 strand = PLUS_STRAND if strand_flag == 0 else MINUS_STRAND
                 for rpos, prob in values:
-                    if rpos not in ref_map:
+                    refpos = ref_map_get(rpos)
+                    if refpos is None:
                         continue
-                    refpos = ref_map[rpos]
-
-                    # Store modification probabilities for this site
                     site_key = (refpos, strand)
-                    if site_key not in read_sites:
-                        read_sites[site_key] = {}
-                    if mod_code not in read_sites[site_key]:
-                        read_sites[site_key][mod_code] = []
-                    read_sites[site_key][mod_code].append(prob)
-                    # Track this as a modkit output site
-                    mod_sites.add((chrom, refpos, strand, CANONICAL_CODE))
+                    seen_sites.add(site_key)
+                    mod_max = read_sites_get(site_key)
+                    if mod_max is None:
+                        read_sites[site_key] = {mod_code: prob}
+                        continue
+                    prev = mod_max.get(mod_code)
+                    if prev is None or prob > prev:
+                        mod_max[mod_code] = prob
+
+            # Track each site once per read (avoid repeated set-add in inner loop)
+            mod_sites_add = mod_sites.add
+            for refpos, strand in seen_sites:
+                mod_sites_add((chrom, refpos, strand, COMBINED_MOD_CODE))
 
             # Process each site for this read
+            counts_local = counts
             for (refpos, strand), mod_probs in read_sites.items():
                 # Update counts directly - each read contributes once per site
-                site_key = (chrom, refpos, strand, CANONICAL_CODE)
-                if site_key not in counts:
-                    counts[site_key] = DEFAULT_COUNT_DICT.copy()
+                site_key = (chrom, refpos, strand, COMBINED_MOD_CODE)
+                c = counts_local.get(site_key)
+                if c is None:
+                    c = [0] * COUNT_LEN
+                    counts_local[site_key] = c
+                c[COUNT_IDX_TOTAL] += 1
 
-                c = counts[site_key]
-                c["total"] += 1
+                # Track per-read max probabilities for C, m, h from the original mod_probs
+                sum_max_mod_probs_255 = 0
+                local_max_prob_m = 0
+                local_max_prob_h = 0
 
-                # Track max probabilities for C, m, h from the original mod_probs
-                total_mod_prob = 0.0
-                max_prob_m = c["max_prob_m"]
-                max_prob_h = c["max_prob_h"]
-
-                for mod_code, probs in mod_probs.items():
+                for mod_code, max_mod_prob in mod_probs.items():
                     if mod_code != CANONICAL_CODE:  # Skip canonical base
-                        max_mod_prob = max(probs)
-                        max_mod_prob_01 = max_mod_prob / 255.0  # Convert to 0-1
-                        total_mod_prob += max_mod_prob_01
+                        sum_max_mod_probs_255 += max_mod_prob
                         if mod_code == "m":
-                            if max_mod_prob > max_prob_m:
-                                max_prob_m = max_mod_prob
-                                c["max_prob_m"] = max_mod_prob
+                            if max_mod_prob > local_max_prob_m:
+                                local_max_prob_m = max_mod_prob
                         elif mod_code == "h":
-                            if max_mod_prob > max_prob_h:
-                                max_prob_h = max_mod_prob
-                                c["max_prob_h"] = max_mod_prob
+                            if max_mod_prob > local_max_prob_h:
+                                local_max_prob_h = max_mod_prob
 
                 # Canonical probability is the complement
-                canonical_prob = max(0.0, 1.0 - total_mod_prob)
-                canonical_prob_255 = int(canonical_prob * 255)
-                if canonical_prob_255 > c["max_prob_C"]:
-                    c["max_prob_C"] = canonical_prob_255
+                canonical_prob_255 = 255 - sum_max_mod_probs_255
+                if canonical_prob_255 < 0:
+                    canonical_prob_255 = 0
+                if canonical_prob_255 > c[COUNT_IDX_MAX_PROB_C]:
+                    c[COUNT_IDX_MAX_PROB_C] = canonical_prob_255
+                if local_max_prob_m > c[COUNT_IDX_MAX_PROB_M]:
+                    c[COUNT_IDX_MAX_PROB_M] = local_max_prob_m
+                if local_max_prob_h > c[COUNT_IDX_MAX_PROB_H]:
+                    c[COUNT_IDX_MAX_PROB_H] = local_max_prob_h
 
                 # Use the highest probability among canonical, 5mC, and 5hmC for classification
-                max_prob = max(canonical_prob_255, max_prob_m, max_prob_h)
+                max_prob = max(canonical_prob_255, local_max_prob_m, local_max_prob_h)
 
                 # Apply modkit classification logic based on the highest probability
                 if max_prob >= thresh:
                     if canonical_prob_255 == max_prob:
-                        c["canonical"] += 1  # Canonical call
+                        c[COUNT_IDX_CANONICAL] += 1  # Canonical call
                     else:
-                        c["mod"] += 1  # Modified call
+                        c[COUNT_IDX_MOD] += 1  # Modified call
                 elif max_prob == 0:
-                    c["canonical"] += 1  # Canonical call
+                    c[COUNT_IDX_CANONICAL] += 1  # Canonical call
                 else:
-                    c["fail"] += 1  # Failed call (0 < prob < threshold)
+                    c[COUNT_IDX_FAIL] += 1  # Failed call (0 < prob < threshold)
+
 
                 # Debug tracking for specific positions
                 if debug_positions and (chrom, refpos, strand) in debug_positions:
@@ -1154,9 +1395,9 @@ def process_bam_counts_improved(
                         }
 
                     # Store probabilities for this read
-                    for mod_code, probs in mod_probs.items():
+                    for mod_code, max_prob in mod_probs.items():
                         if mod_code in ["C", "m", "h"]:
-                            debug_data[debug_key]["probs"][mod_code].extend(probs)
+                            debug_data[debug_key]["probs"][mod_code].append(max_prob)
 
                     # Store classification
                     if max_prob >= thresh:
@@ -1210,20 +1451,20 @@ def process_bam_counts_improved(
             for (rp, strand, mod_code), probs in read_mod_calls.items():
                 site_key = (chrom, rp, strand, mod_code)
                 if site_key not in counts:
-                    counts[site_key] = DEFAULT_COUNT_DICT.copy()
+                    counts[site_key] = [0] * COUNT_LEN
 
                 c = counts[site_key]
-                c["total"] += 1
+                c[COUNT_IDX_TOTAL] += 1
                 max_prob = max(probs)
+                has_other_mod_above_thresh = False
 
                 # Apply modkit classification logic
                 if max_prob >= thresh:
-                    c["mod"] += 1  # Modified call
+                    c[COUNT_IDX_MOD] += 1  # Modified call
                 elif max_prob == 0:
                     # Check if there are other modification types at this site with prob >= threshold
                     # Only classify as other_mod if the other modification is above threshold
                     # Optimized: use early exit for better performance
-                    has_other_mod_above_thresh = False
                     for (r, s, m), ps in read_mod_calls.items():
                         if (r, s) == (rp, strand) and m != mod_code:
                             for prob in ps:
@@ -1234,14 +1475,13 @@ def process_bam_counts_improved(
                                 break
 
                     if has_other_mod_above_thresh:
-                        c["other_mod"] += 1  # Other modification call
+                        c[COUNT_IDX_OTHER_MOD] += 1  # Other modification call
                     else:
-                        c["canonical"] += 1  # Canonical call
+                        c[COUNT_IDX_CANONICAL] += 1  # Canonical call
                 else:
                     # Check if there are other modification types at this site with prob >= threshold
                     # If so, classify as other_mod instead of fail
                     # Optimized: use early exit for better performance
-                    has_other_mod_above_thresh = False
                     for (r, s, m), ps in read_mod_calls.items():
                         if (r, s) == (rp, strand) and m != mod_code:
                             for prob in ps:
@@ -1252,34 +1492,21 @@ def process_bam_counts_improved(
                                 break
 
                     if has_other_mod_above_thresh:
-                        c["other_mod"] += 1  # Other modification call
+                        c[COUNT_IDX_OTHER_MOD] += 1  # Other modification call
                     else:
-                        c["fail"] += 1  # Failed call (0 < prob < threshold)
+                        c[COUNT_IDX_FAIL] += 1  # Failed call (0 < prob < threshold)
 
-        # Process reads without modification data as canonical bases
-        # Note: modkit only outputs positions with explicit modification data (MM tags)
-        # Reads without modification data are not used to generate output positions
-        # This matches modkit's behavior of only outputting sites with modification data
-        if not mods:
-            continue  # Skip reads without modification data
 
     bam.close()
-    if ref_fasta_obj:
+    # Only close the ref handle when we opened it in this call and it is not in the cache.
+    if ref_fasta_obj and not ref_fasta_cached:
         ref_fasta_obj.close()
-
-    # Filter counts to only include sites that match modkit's filtering logic
-    # and have at least one passing call (Nmod > 0 or Ncanonical > 0)
-    filtered_counts = {}
-    for site_key, c in counts.items():
-        chrom, pos, strand, mod_code = site_key
-        # modkit outputs only positions with at least one passing call
-        if site_key in mod_sites and (c["mod"] > 0 or c["canonical"] > 0):
-            filtered_counts[site_key] = c
 
     # Force garbage collection to free memory
     gc.collect()
 
-    return filtered_counts, debug_data
+    # Caller filters via mod_sites when writing (avoids intermediate dict)
+    return counts, mod_sites, debug_data
 
 
 def get_bam_file_count(parquet_file_path: str) -> int:
@@ -1293,7 +1520,7 @@ def get_bam_file_count(parquet_file_path: str) -> int:
         int: Cumulative number of BAM files that have contributed to the parquet file
     """
     try:
-        metadata_file = parquet_file_path.replace(".parquet", "_metadata.json")
+        metadata_file = parquet_file_path.removesuffix(".parquet") + "_metadata.json"
         if os.path.exists(metadata_file):
             with open(metadata_file, "r") as f:
                 metadata = json.load(f)
@@ -1317,7 +1544,7 @@ def get_parquet_metadata(parquet_file_path: str) -> dict:
         dict: Dictionary containing metadata (bam_file_count, last_updated, sample_id, files_added_in_this_update)
     """
     try:
-        metadata_file = parquet_file_path.replace(".parquet", "_metadata.json")
+        metadata_file = parquet_file_path.removesuffix(".parquet") + "_metadata.json"
         if os.path.exists(metadata_file):
             with open(metadata_file, "r") as f:
                 return json.load(f)
@@ -1348,5 +1575,5 @@ def get_bam_file_history(parquet_file_path: str) -> dict:
         "last_update": metadata.get("last_updated", "Unknown"),
         "sample_id": metadata.get("sample_id", "Unknown"),
         "files_in_last_update": metadata.get("files_added_in_this_update", 0),
-        "metadata_file": parquet_file_path.replace(".parquet", "_metadata.json"),
+        "metadata_file": parquet_file_path.removesuffix(".parquet") + "_metadata.json",
     }

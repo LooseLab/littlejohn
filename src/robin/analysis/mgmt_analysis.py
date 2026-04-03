@@ -272,25 +272,192 @@ def validate_methylation_data(bam_file: str, logger: logging.Logger) -> Dict[str
     return validation_result
 
 
-def run_methylartist_safely(
-    bam_file: str, 
-    output_file: str, 
+
+def extract_mgmt_site_rows_from_bed(bed_path: str) -> List[Dict[str, Any]]:
+    """
+    Extract MGMT-specific CpG site information from a bedmethyl file.
+    
+    Args:
+        bed_path (str): Path to bedmethyl file
+        
+    Returns:
+        List of dictionaries containing site information for annotation
+    """
+    try:
+        import pandas as pd
+        
+        if not os.path.exists(bed_path):
+            return []
+        
+        df = pd.read_csv(bed_path, sep="\t", header=None)
+        
+        # Check if column 10 contains space-separated values (old format)
+        has_space_separated_col10 = False
+        if df.shape[1] > 10 and len(df) > 0:
+            sample_val = str(df.iloc[0, 9])
+            has_space_separated_col10 = ' ' in sample_val or '\t' in sample_val
+        
+        # Check if this is the new bedmethyl format (separate columns) or old format
+        if df.shape[1] >= 12 and not has_space_separated_col10:
+            # New bedmethyl format with separate columns
+            cols = [
+                "Chromosome", "Start", "End", "Modified_Base_Code", "Score",
+                "Strand", "Start2", "End2", "RGB",
+                "Nvalid_cov", "Fraction_Modified", "Nmod",
+            ]
+            num_cols_to_read = min(len(cols), df.shape[1])
+            df = df.iloc[:, :num_cols_to_read]
+            df.columns = cols[:num_cols_to_read]
+            
+            df["Nvalid_cov"] = df["Nvalid_cov"].astype(float)
+            df["Fraction_Modified"] = df["Fraction_Modified"].astype(float)
+            # Some bedmethyl outputs store fraction as percent (0-100).
+            # Normalize to 0-1 if needed.
+            if len(df) > 0 and (df["Fraction_Modified"] > 1.0).any():
+                df["Fraction_Modified"] = df["Fraction_Modified"] / 100.0
+            if "Nmod" in df.columns:
+                df["Nmod"] = df["Nmod"].astype(float)
+            else:
+                df["Nmod"] = df["Nvalid_cov"] * df["Fraction_Modified"]
+            
+            df["Start"] = df["Start"].astype(int)
+            df["Coverage"] = df["Nvalid_cov"]
+            df["Modified_Fraction"] = df["Fraction_Modified"] * 100.0
+        elif df.shape[1] >= 10:
+            # Old format with space-separated Coverage_Info in column 10
+            cols = [
+                "Chromosome", "Start", "End", "Name", "Score",
+                "Strand", "Start2", "End2", "RGB", "Coverage_Info",
+            ]
+            df = df.iloc[:, :len(cols)]
+            df.columns = cols
+            
+            cov_split = df["Coverage_Info"].astype(str).str.split()
+            df["Coverage"] = cov_split.str[0].astype(float)
+            fraction_val = cov_split.str[1].astype(float).fillna(0.0)
+            is_percentage = (fraction_val > 1.0).any() if len(fraction_val) > 0 else False
+            
+            if is_percentage:
+                df["Modified_Fraction"] = fraction_val
+                df["Fraction_Modified"] = df["Modified_Fraction"] / 100.0
+            else:
+                df["Fraction_Modified"] = fraction_val
+                df["Modified_Fraction"] = df["Fraction_Modified"] * 100.0
+            
+            df["Nvalid_cov"] = df["Coverage"]
+            df["Nmod"] = df["Coverage"] * df["Fraction_Modified"]
+            df["Start"] = df["Start"].astype(int)
+        else:
+            return []
+        
+        cpg_pairs = [
+            (129467255, 129467256),
+            (129467258, 129467259),
+            (129467262, 129467263),
+            (129467272, 129467273),
+        ]
+        rows: List[Dict[str, Any]] = []
+        label_map = {
+            "129467255/129467256": "1",
+            "129467258/129467259": "2",
+            "129467262/129467263": "3",
+            "129467272/129467273": "4",
+        }
+        
+        for p1, p2 in cpg_pairs:
+            pos_key = f"{p1}/{p2}"
+            site_label = label_map.get(pos_key, "Unknown")
+            
+            # Check forward strand reads at position p1
+            fwd_p1 = df[
+                (df["Chromosome"] == "chr10")
+                & (df["Start"] == p1 - 1)
+                & (df["Strand"] == "+")
+            ]
+            
+            # Check reverse strand reads at position p2
+            rev_p2 = df[
+                (df["Chromosome"] == "chr10")
+                & (df["Start"] == p2 - 1)
+                & (df["Strand"] == "-")
+            ]
+            
+            # Get forward strand data from p1
+            if not fwd_p1.empty:
+                cov_f = float(fwd_p1["Nvalid_cov"].iloc[0])
+                mf = float(fwd_p1["Fraction_Modified"].iloc[0])
+                nmod_f = float(fwd_p1["Nmod"].iloc[0])
+                meth_fwd_count = int(round(nmod_f))
+            else:
+                cov_f = 0.0
+                mf = 0.0
+                meth_fwd_count = 0
+            
+            # Get reverse strand data from p2
+            if not rev_p2.empty:
+                cov_r = float(rev_p2["Nvalid_cov"].iloc[0])
+                mr = float(rev_p2["Fraction_Modified"].iloc[0])
+                nmod_r = float(rev_p2["Nmod"].iloc[0])
+                meth_rev_count = int(round(nmod_r))
+            else:
+                cov_r = 0.0
+                mr = 0.0
+                meth_rev_count = 0
+            
+            # Only add row if we have data
+            if cov_f > 0 or cov_r > 0:
+                tot = cov_f + cov_r
+                weighted = ((cov_f * mf) + (cov_r * mr)) / tot if tot > 0 else 0.0
+                weighted_pct = weighted * 100.0
+                
+                rows.append({
+                    "site": f"{site_label} (CpG {pos_key})",
+                    "chr": "chr10",
+                    "pos": pos_key,
+                    "cov_fwd": int(cov_f),
+                    "cov_rev": int(cov_r),
+                    "cov_total": int(tot),
+                    "meth": round(weighted_pct, 2),
+                    "meth_fwd": int(meth_fwd_count),
+                    "meth_rev": int(meth_rev_count),
+                    "notes": "Combined methylation from both strands of CpG pair",
+                })
+        
+        return rows
+    except Exception as e:
+        logging.getLogger("robin.mgmt").debug(f"Failed to extract site rows from {bed_path}: {e}")
+        return []
+
+
+def generate_mgmt_visualization(
+    bam_file: str,
+    output_png: str,
     interval: str = "chr10:129466536-129467536",
     reference: Optional[str] = None,
-    logger: Optional[logging.Logger] = None
+    bed_file: Optional[str] = None,
+    logger: Optional[logging.Logger] = None,
+    extra_cli: Optional[List[str]] = None,
+    use_fallback: bool = False
 ) -> Dict[str, Any]:
     """
-    Run methylartist with robust error handling and fallback options.
+    Generate MGMT methylation visualization with both PNG and pickle outputs.
+    
+    This unified function uses the locus_figure approach to capture the matplotlib
+    figure object, then saves both a PNG file (for reports) and a pickle file
+    (for fast GUI loading). The figure includes MGMT CpG site annotations.
     
     Args:
         bam_file (str): Path to BAM file
-        output_file (str): Output PNG file path
+        output_png (str): Output PNG file path
         interval (str): Genomic interval for analysis
         reference (Optional[str]): Reference genome path
+        bed_file (Optional[str]): Path to bedmethyl file for extracting site annotations
         logger (Optional[logging.Logger]): Logger instance
+        extra_cli (Optional[List[str]]): Extra CLI parameters for methylartist
+        use_fallback (bool): Whether to use fallback parameters (more lenient)
         
     Returns:
-        Dict containing execution results and metadata
+        Dict containing execution results, metadata, and paths to generated files
     """
     if logger is None:
         logger = logging.getLogger("robin.mgmt")
@@ -298,13 +465,19 @@ def run_methylartist_safely(
     result = {
         "success": False,
         "error_message": None,
-        "command_used": None,
         "validation_passed": False,
-        "fallback_used": False
+        "fallback_used": use_fallback,
+        "png_path": output_png,
+        "pickle_path": None,
+        "figure": None
     }
     
+    # Determine pickle path (same directory as PNG, with .pkl extension)
+    pickle_path = os.path.splitext(output_png)[0] + ".pkl"
+    result["pickle_path"] = pickle_path
+    
     try:
-        # Step 1: Validate methylation data before running methylartist
+        # Step 1: Validate methylation data
         logger.info(f"Validating methylation data in {os.path.basename(bam_file)}")
         validation = validate_methylation_data(bam_file, logger)
         
@@ -316,104 +489,176 @@ def run_methylartist_safely(
         result["validation_passed"] = True
         logger.info("Methylation data validation passed, proceeding with methylartist")
         
-        # Step 2: Build methylartist command with robust parameters
-        methylartist_cmd = [
-            "methylartist", "locus",
-            "-i", interval,
-            "-b", bam_file,
-            "-o", output_file,
-            "--motif", "CG",
-            "--mods", "m",
-            "--minreads", "5",  # Minimum reads per position
-            "--minqual", "10",  # Minimum quality score
-            "--smoothwindowsize", "5",  # Smaller smoothing window for sparse data
-            "--modspace", "1"  # Explicit mod space setting
-        ]
+        # Step 2: Extract site_rows from bed file if provided
+        site_rows = None
+        if bed_file and os.path.exists(bed_file):
+            try:
+                site_rows = extract_mgmt_site_rows_from_bed(bed_file)
+                if site_rows:
+                    logger.debug(f"Extracted {len(site_rows)} site rows from {bed_file}")
+            except Exception as e:
+                logger.debug(f"Failed to extract site rows from {bed_file}: {e}")
         
-        if reference and os.path.exists(reference):
-            methylartist_cmd.extend(["--ref", reference])
-            logger.info(f"Using reference genome: {reference}")
+        # Step 3: Build extra_cli parameters
+        if extra_cli is None:
+            extra_cli = []
         
-        result["command_used"] = " ".join(methylartist_cmd)
-        logger.debug(f"Methylartist command: {result['command_used']}")
+        # Add figure size parameters if not already specified
+        has_width = any("--width" in str(arg) for arg in extra_cli)
+        has_height = any("--height" in str(arg) for arg in extra_cli)
+        if not has_width:
+            extra_cli.extend(["--width", "24"])
+        if not has_height:
+            extra_cli.extend(["--height", "12"])
         
-        # Step 3: Execute methylartist with timeout and error handling
-        process_result = subprocess.run(
-            methylartist_cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,  # 5 minute timeout
-            cwd=os.path.dirname(output_file)  # Run in output directory
-        )
-        
-        if process_result.returncode == 0:
-            # Check if output file was actually created
-            if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
-                result["success"] = True
-                logger.info(f"Methylartist visualization completed successfully: {os.path.basename(output_file)}")
-            else:
-                result["error_message"] = "Methylartist completed but no output file was created"
-                logger.error(result["error_message"])
+        # Add quality/read parameters based on fallback mode
+        if use_fallback:
+            # More lenient parameters for fallback
+            if not any("--minreads" in str(arg) for arg in extra_cli):
+                extra_cli.extend(["--minreads", "1"])
+            if not any("--minqual" in str(arg) for arg in extra_cli):
+                extra_cli.extend(["--minqual", "5"])
+            if not any("--smoothwindowsize" in str(arg) for arg in extra_cli):
+                extra_cli.extend(["--smoothwindowsize", "1"])
+            if not any("--reads" in str(arg) for arg in extra_cli):
+                extra_cli.extend(["--reads", "100"])
         else:
-            # Parse error output for specific issues
-            stderr = process_result.stderr.strip()
-            stdout = process_result.stdout.strip()
+            # Standard parameters
+            if not any("--minreads" in str(arg) for arg in extra_cli):
+                extra_cli.extend(["--minreads", "5"])
+            if not any("--minqual" in str(arg) for arg in extra_cli):
+                extra_cli.extend(["--minqual", "10"])
+            if not any("--smoothwindowsize" in str(arg) for arg in extra_cli):
+                extra_cli.extend(["--smoothwindowsize", "5"])
+        
+        # Step 4: Generate figure using locus_figure
+        try:
+            from robin.analysis.methylation_wrapper import locus_figure, save_figure_pickle
             
-            if "ZeroDivisionError" in stderr:
-                result["error_message"] = f"Methylartist failed due to insufficient data points: {stderr}"
-            elif "cannot smooth segment" in stderr:
-                result["error_message"] = f"Methylartist failed due to insufficient data for smoothing: {stderr}"
-            elif "found mods:" in stdout and "mod space positions: 1" in stdout:
-                result["error_message"] = f"Methylartist found insufficient methylation sites: {stdout}"
-            else:
-                result["error_message"] = f"Methylartist failed with return code {process_result.returncode}: {stderr}"
-            
-            logger.error(result["error_message"])
-            
-            # Try fallback with even more conservative parameters
-            logger.info("Attempting fallback methylartist with ultra-conservative parameters")
-            fallback_cmd = [
-                "methylartist", "locus",
-                "-i", interval,
-                "-b", bam_file,
-                "-o", output_file,
-                "--motif", "CG",
-                "--mods", "m",
-                "--minreads", "1",  # Absolute minimum
-                "--minqual", "5",   # Very low quality threshold
-                "--smoothwindowsize", "1",  # Minimal smoothing
-                "--modspace", "1",
-                "--reads", "100"  # Limit to small number of reads
-            ]
-            
-            if reference and os.path.exists(reference):
-                fallback_cmd.extend(["--ref", reference])
-            
-            fallback_result = subprocess.run(
-                fallback_cmd,
-                capture_output=True,
-                text=True,
-                timeout=180,  # Shorter timeout for fallback
-                cwd=os.path.dirname(output_file)
+            logger.info(f"Generating methylation visualization using locus_figure")
+            fig = locus_figure(
+                interval=interval,
+                bam_path=bam_file,
+                motif="CG",
+                mods="m",
+                extra_cli=extra_cli,
+                site_rows=site_rows
             )
             
-            if fallback_result.returncode == 0 and os.path.exists(output_file) and os.path.getsize(output_file) > 0:
-                result["success"] = True
-                result["fallback_used"] = True
-                logger.info("Fallback methylartist visualization completed successfully")
+            result["figure"] = fig
+            
+            # Step 5: Save PNG file
+            try:
+                fig.savefig(output_png, dpi=150, bbox_inches='tight')
+                logger.info(f"Saved PNG visualization: {os.path.basename(output_png)}")
+            except Exception as e:
+                logger.warning(f"Failed to save PNG file: {e}")
+                # Continue anyway - pickle is more important for GUI
+            
+            # Step 6: Save pickle file for fast GUI loading
+            try:
+                save_figure_pickle(fig, pickle_path)
+                logger.info(f"Saved pickle file for fast GUI loading: {os.path.basename(pickle_path)}")
+            except Exception as e:
+                logger.warning(f"Failed to save pickle file: {e}")
+                # Not fatal, but less optimal
+            
+            result["success"] = True
+            logger.info("Methylation visualization generated successfully")
+            
+        except RuntimeError as e:
+            # Check if this is a validation error we can handle
+            error_msg = str(e)
+            if "not indexed" in error_msg or "index" in error_msg.lower():
+                result["error_message"] = f"BAM file indexing issue: {error_msg}"
+            elif "did not produce a figure" in error_msg:
+                result["error_message"] = f"Methylartist failed to produce figure: {error_msg}"
             else:
-                result["error_message"] += f" | Fallback also failed: {fallback_result.stderr}"
-                logger.error("Both primary and fallback methylartist attempts failed")
-                
-    except subprocess.TimeoutExpired:
-        result["error_message"] = "Methylartist execution timed out"
-        logger.error(result["error_message"])
-    except FileNotFoundError:
-        result["error_message"] = "methylartist command not found in PATH"
-        logger.error(result["error_message"])
+                result["error_message"] = f"Methylartist error: {error_msg}"
+            logger.error(result["error_message"])
+            
+            # Try fallback if not already using it
+            if not use_fallback:
+                logger.info("Attempting fallback with more lenient parameters")
+                return generate_mgmt_visualization(
+                    bam_file=bam_file,
+                    output_png=output_png,
+                    interval=interval,
+                    reference=reference,
+                    bed_file=bed_file,
+                    logger=logger,
+                    extra_cli=extra_cli,  # Keep any custom extra_cli
+                    use_fallback=True
+                )
+        except Exception as e:
+            result["error_message"] = f"Unexpected error generating visualization: {str(e)}"
+            logger.error(result["error_message"], exc_info=True)
+            
+            # Try fallback if not already using it
+            if not use_fallback:
+                logger.info("Attempting fallback with more lenient parameters")
+                return generate_mgmt_visualization(
+                    bam_file=bam_file,
+                    output_png=output_png,
+                    interval=interval,
+                    reference=reference,
+                    bed_file=bed_file,
+                    logger=logger,
+                    extra_cli=extra_cli,
+                    use_fallback=True
+                )
+    
     except Exception as e:
-        result["error_message"] = f"Unexpected error running methylartist: {str(e)}"
-        logger.error(result["error_message"])
+        result["error_message"] = f"Unexpected error in visualization generation: {str(e)}"
+        logger.error(result["error_message"], exc_info=True)
+    
+    return result
+
+
+def run_methylartist_safely(
+    bam_file: str, 
+    output_file: str, 
+    interval: str = "chr10:129466536-129467536",
+    reference: Optional[str] = None,
+    logger: Optional[logging.Logger] = None,
+    bed_file: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Run methylartist with robust error handling and fallback options.
+    
+    This function now uses the unified generate_mgmt_visualization function
+    which saves both PNG and pickle files for optimal performance.
+    
+    Args:
+        bam_file (str): Path to BAM file
+        output_file (str): Output PNG file path
+        interval (str): Genomic interval for analysis
+        reference (Optional[str]): Reference genome path
+        logger (Optional[logging.Logger]): Logger instance
+        bed_file (Optional[str]): Path to bedmethyl file for extracting site annotations
+        
+    Returns:
+        Dict containing execution results and metadata (backward compatible format)
+    """
+    # Use the unified visualization function
+    viz_result = generate_mgmt_visualization(
+        bam_file=bam_file,
+        output_png=output_file,
+        interval=interval,
+        reference=reference,
+        bed_file=bed_file,
+        logger=logger,
+        use_fallback=False
+    )
+    
+    # Convert to backward-compatible format
+    result = {
+        "success": viz_result["success"],
+        "error_message": viz_result["error_message"],
+        "command_used": None,  # Not applicable with locus_figure approach
+        "validation_passed": viz_result["validation_passed"],
+        "fallback_used": viz_result["fallback_used"]
+    }
     
     return result
 
@@ -792,13 +1037,21 @@ def process_bam_file(
 
             plot_out = os.path.join(sample_dir, f"{file_number}_mgmt.png")
             
+            # Look for corresponding bed file for site annotations
+            bed_file = os.path.join(sample_dir, f"{file_number}_mgmt.bed")
+            if not os.path.exists(bed_file):
+                # Try alternative naming
+                alt_bed = os.path.join(sample_dir, f"{file_number}_mgmt_mgmt.bed")
+                bed_file = alt_bed if os.path.exists(alt_bed) else None
+            
             # Use the new safe methylartist wrapper
             methylartist_result = run_methylartist_safely(
                 bam_file=mgmt_bam_for_plot,
                 output_file=plot_out,
                 interval="chr10:129466536-129467536",
                 reference=reference,
-                logger=logger
+                logger=logger,
+                bed_file=bed_file if bed_file and os.path.exists(bed_file) else None
             )
 
             if methylartist_result["success"]:
@@ -1104,13 +1357,21 @@ def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, reference=
 
             plot_out = os.path.join(sample_dir, "final_mgmt.png")
             
+            # Look for corresponding bed file for site annotations
+            bed_file = os.path.join(sample_dir, "final_mgmt.bed")
+            if not os.path.exists(bed_file):
+                # Try alternative naming
+                alt_bed = os.path.join(sample_dir, "final_mgmt_mgmt.bed")
+                bed_file = alt_bed if os.path.exists(alt_bed) else None
+            
             # Use the new safe methylartist wrapper
             methylartist_result = run_methylartist_safely(
                 bam_file=mgmt_bam_for_plot,
                 output_file=plot_out,
                 interval="chr10:129466536-129467536",
                 reference=reference,
-                logger=logger
+                logger=logger,
+                bed_file=bed_file if bed_file and os.path.exists(bed_file) else None
             )
 
             if methylartist_result["success"]:

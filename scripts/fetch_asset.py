@@ -14,11 +14,14 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 
-def load_assets_manifest() -> Dict[str, Any]:
-    """Load the assets manifest from assets.json"""
-    script_dir = Path(__file__).parent
-    project_root = script_dir.parent
-    assets_file = project_root / "assets.json"
+def load_assets_manifest(manifest_path: Optional[str] = None) -> Dict[str, Any]:
+    """Load the assets manifest from assets.json (or an explicit path)."""
+    if manifest_path:
+        assets_file = Path(manifest_path).expanduser().resolve()
+    else:
+        script_dir = Path(__file__).parent
+        project_root = script_dir.parent
+        assets_file = project_root / "assets.json"
     
     if not assets_file.exists():
         raise FileNotFoundError(f"assets.json not found at {assets_file}")
@@ -57,9 +60,14 @@ def download_file(url: str, target_path: Path, github_token: Optional[str] = Non
             raise RuntimeError(f"HTTP error {e.code}: {e.reason}")
 
 
-def fetch_asset(asset_name: str, target_path: str, github_token: Optional[str] = None) -> None:
+def fetch_asset(
+    asset_name: str,
+    target_path: str,
+    github_token: Optional[str] = None,
+    manifest_path: Optional[str] = None,
+) -> None:
     """Fetch and verify a release asset"""
-    manifest = load_assets_manifest()
+    manifest = load_assets_manifest(manifest_path=manifest_path)
     
     if asset_name not in manifest["assets"]:
         available = ", ".join(manifest["assets"].keys())

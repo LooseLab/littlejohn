@@ -561,7 +561,7 @@ class CNVSection(ReportSection):
                 [
                     Paragraph("Variance:", self.styles.styles["Normal"]),
                     Paragraph(
-                        f"{cnv_dict.get('variance', 0):.3f}",
+                        f"{cnv_dict.get('variance', 0):.2f}",
                         self.styles.styles["Normal"],
                     ),
                 ]
@@ -637,7 +637,10 @@ class CNVSection(ReportSection):
                     formatted_summary_data.append(formatted_row)
 
                 summary_table = self.create_table(
-                    formatted_summary_data, auto_col_width=True
+                    formatted_summary_data,
+                    auto_col_width=True,
+                    compact=True,
+                    font_size=9,
                 )
                 # Add specific styling while preserving modern table style
                 summary_table.setStyle(
@@ -660,26 +663,20 @@ class CNVSection(ReportSection):
                                 "FONTSIZE",
                                 (0, 0),
                                 (-1, -1),
-                                10,
-                            ),  # Consistent font size
-                            (
-                                "LEADING",
-                                (0, 0),
-                                (-1, -1),
-                                12,
-                            ),  # Line spacing
+                                9,
+                            ),  # Unified font size
                             (
                                 "TOPPADDING",
                                 (0, 0),
                                 (-1, -1),
-                                6,
-                            ),  # Top padding
+                                4,
+                            ),
                             (
                                 "BOTTOMPADDING",
                                 (0, 0),
                                 (-1, -1),
-                                6,
-                            ),  # Bottom padding
+                                4,
+                            ),
                         ]
                     )
                 )
@@ -762,7 +759,7 @@ class CNVSection(ReportSection):
                 logger.debug(f"Found {len(summary_arm_events)} arm events to report")
                 self.summary_elements.append(
                     Paragraph(
-                        "Chromosome Arm Events:<br/> "
+                        "Chromosome Arm Events (requires visual inspection):<br/> "
                         + " <br/> ".join(summary_arm_events),
                         ParagraphStyle(
                             "SummaryText",
@@ -811,7 +808,7 @@ class CNVSection(ReportSection):
                     whole_chr_events.append([
                         event.chromosome.replace("chr", ""),
                         event_type,
-                        f"{event.mean_cnv:.3f}",
+                        f"{event.mean_cnv:.2f}",
                     ])
                 else:
                     arm_label = f"{event.arm}-arm" if event.arm else "arm"
@@ -819,7 +816,7 @@ class CNVSection(ReportSection):
                         event.chromosome.replace("chr", ""),
                         arm_label,
                         event.event_type,
-                        f"{event.mean_cnv:.3f}",
+                        f"{event.mean_cnv:.2f}",
                         f"{event.proportion_affected:.1%}",
                     ])
                 
@@ -829,15 +826,25 @@ class CNVSection(ReportSection):
                         event.chromosome.replace("chr", ""),
                         region_name.replace(f"{event.chromosome} ", ""),
                         event.event_type.replace("WHOLE_CHR_", ""),
-                        f"{event.mean_cnv:.3f}",
+                        f"{event.mean_cnv:.2f}",
                         ", ".join(event.genes),
                     ])
 
             # Add whole chromosome events summary if any exist
             if whole_chr_events:
                 self.elements.append(
-                    Paragraph("Whole Chromosome Events", self.styles.styles["Heading4"])
+                    Paragraph(
+                        "Whole Chromosome Events",
+                        ParagraphStyle(
+                            "CNVTableTitle",
+                            parent=self.styles.styles["Normal"],
+                            fontSize=9,
+                            fontName="Helvetica-Bold",
+                            spaceAfter=4,
+                        ),
+                    )
                 )
+                self.elements.append(Spacer(1, 2))
                 whole_chr_data = [["Chr", "State", "Mean CNV"]]
                 whole_chr_data.extend(whole_chr_events)
                 whole_chr_table = self.create_table(
@@ -845,72 +852,112 @@ class CNVSection(ReportSection):
                     repeat_rows=1,
                     auto_col_width=False,
                     col_widths=[inch * x for x in [0.4, 0.8, 0.8]],
+                    compact=True,
+                    font_size=9,
                 )
                 whole_chr_table.setStyle(
                     TableStyle(
                         [
                             *self.MODERN_TABLE_STYLE._cmds,
-                            ("ALIGN", (2, 1), (2, -1), "RIGHT"),  # Right-align mean CNV
-                            ("ALIGN", (1, 1), (1, -1), "CENTER"),  # Center-align state
+                            ("FONTSIZE", (0, 0), (-1, -1), 9),
+                            ("ALIGN", (2, 1), (2, -1), "RIGHT"),
+                            ("ALIGN", (1, 1), (1, -1), "CENTER"),
+                            ("TOPPADDING", (0, 0), (-1, -1), 4),
+                            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
                         ]
                     )
                 )
                 self.elements.append(whole_chr_table)
+                self.elements.append(Spacer(1, 4))
 
-            # Add chromosome arm events summary if any exist
+            # Build arm and gene event tables. Always stack vertically (never nested
+            # side-by-side) so each table can split across pages. Nested tables
+            # cannot split and cause LayoutError when content exceeds frame height.
+            arm_col_widths = [inch * x for x in [0.35, 0.55, 0.5, 0.5, 0.8]]
+            gene_col_widths = [inch * x for x in [0.35, 0.65, 0.45, 0.45, 1.2]]
+
+            arm_header = None
+            arm_table = None
+            gene_header = None
+            gene_events_table = None
+
             if arm_events:
-                self.elements.append(
-                    Paragraph("Chromosome Arm Events", self.styles.styles["Heading4"])
-                )
                 arm_data = [["Chr", "Arm", "State", "Mean CNV", "Proportion Affected"]]
                 arm_data.extend(arm_events)
                 arm_table = self.create_table(
                     arm_data,
                     repeat_rows=1,
                     auto_col_width=False,
-                    col_widths=[inch * x for x in [0.4, 0.4, 0.8, 0.8, 1.0]],
+                    col_widths=arm_col_widths,
+                    compact=True,
+                    font_size=9,
                 )
                 arm_table.setStyle(
                     TableStyle(
                         [
                             *self.MODERN_TABLE_STYLE._cmds,
-                            ("ALIGN", (3, 1), (3, -1), "RIGHT"),  # Right-align mean CNV
-                            ("ALIGN", (2, 1), (2, -1), "CENTER"),  # Center-align state
-                            (
-                                "ALIGN",
-                                (4, 1),
-                                (4, -1),
-                                "RIGHT",
-                            ),  # Right-align proportion
+                            ("FONTSIZE", (0, 0), (-1, -1), 9),
+                            ("ALIGN", (3, 1), (3, -1), "RIGHT"),
+                            ("ALIGN", (2, 1), (2, -1), "CENTER"),
+                            ("ALIGN", (4, 1), (4, -1), "RIGHT"),
+                            ("TOPPADDING", (0, 0), (-1, -1), 4),
+                            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
                         ]
                     )
                 )
-                self.elements.append(arm_table)
-
-            # Add gene-containing events if any exist
-            if gene_containing_events:
-                self.elements.append(
-                    Paragraph(
-                        "CNV Events Containing Genes", self.styles.styles["Heading4"]
-                    )
+                arm_header = Paragraph(
+                    "Arm Events (visual inspection)",
+                    ParagraphStyle(
+                        "CNVTableTitle",
+                        parent=self.styles.styles["Normal"],
+                        fontSize=9,
+                        fontName="Helvetica-Bold",
+                        spaceAfter=4,
+                    ),
                 )
+
+            if gene_containing_events:
                 gene_events_data = [["Chr", "Region", "State", "Mean CNV", "Genes"]]
                 gene_events_data.extend(gene_containing_events)
                 gene_events_table = self.create_table(
                     gene_events_data,
                     repeat_rows=1,
                     auto_col_width=False,
-                    col_widths=[inch * x for x in [0.4, 1.0, 0.6, 0.6, 4.0]],
+                    col_widths=gene_col_widths,
+                    compact=True,
+                    font_size=9,
                 )
                 gene_events_table.setStyle(
                     TableStyle(
                         [
                             *self.MODERN_TABLE_STYLE._cmds,
-                            ("ALIGN", (3, 1), (3, -1), "RIGHT"),  # Right-align mean CNV
-                            ("ALIGN", (2, 1), (2, -1), "CENTER"),  # Center-align state
+                            ("FONTSIZE", (0, 0), (-1, -1), 9),
+                            ("ALIGN", (3, 1), (3, -1), "RIGHT"),
+                            ("ALIGN", (2, 1), (2, -1), "CENTER"),
+                            ("TOPPADDING", (0, 0), (-1, -1), 4),
+                            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
                         ]
                     )
                 )
+                gene_header = Paragraph(
+                    "CNV Events Containing Genes",
+                    ParagraphStyle(
+                        "CNVTableTitle",
+                        parent=self.styles.styles["Normal"],
+                        fontSize=9,
+                        fontName="Helvetica-Bold",
+                        spaceAfter=4,
+                    ),
+                )
+
+            # Stack vertically as separate flowables so each table can split across pages
+            if arm_header is not None:
+                self.elements.append(arm_header)
+                self.elements.append(arm_table)
+            if gene_header is not None:
+                if arm_header is not None:
+                    self.elements.append(Spacer(1, 8))
+                self.elements.append(gene_header)
                 self.elements.append(gene_events_table)
 
             # Add note about detailed view
@@ -920,10 +967,10 @@ class CNVSection(ReportSection):
                     ParagraphStyle(
                         "Note",
                         parent=self.styles.styles["Normal"],
-                        fontSize=8,
+                        fontSize=9,
                         textColor=self.styles.COLORS["text"],
-                        spaceBefore=6,
-                        spaceAfter=6,
+                        spaceBefore=3,
+                        spaceAfter=3,
                         italics=True,
                     ),
                 )
@@ -1005,7 +1052,7 @@ class CNVSection(ReportSection):
                         self.current_row = []
 
                 # Add detailed CNV table
-                self.elements.append(Spacer(1, 12))
+                self.elements.append(Spacer(1, 6))
                 self.elements.append(
                     Paragraph("Detailed CNV Events", self.styles.styles["Heading3"])
                 )
@@ -1020,7 +1067,7 @@ class CNVSection(ReportSection):
                         f"{event.start_pos/1e6:.2f}",
                         f"{event.end_pos/1e6:.2f}",
                         f"{event.length/1e6:.2f}",
-                        f"{event.mean_cnv:.3f}",
+                        f"{event.mean_cnv:.2f}",
                         event.event_type.replace("WHOLE_CHR_", ""),
                         ", ".join(event.genes) if event.genes else "",
                     ])
@@ -1094,7 +1141,7 @@ class CNVSection(ReportSection):
                             ]
                         )
 
-                    # Create detailed table
+                    # Create detailed table (compact)
                     detailed_table = self.create_table(
                         detailed_data,
                         repeat_rows=1,
@@ -1102,6 +1149,8 @@ class CNVSection(ReportSection):
                         col_widths=[
                             inch * x for x in [0.4, 1.0, 0.6, 0.6, 0.6, 0.6, 0.6, 3.0]
                         ],
+                        compact=True,
+                        font_size=9,
                     )
 
                     # Add specific styling while preserving modern table style
@@ -1109,13 +1158,13 @@ class CNVSection(ReportSection):
                         TableStyle(
                             [
                                 *self.MODERN_TABLE_STYLE._cmds,
-                                # Right-align numeric columns (Start, End, Length, Mean CNV)
                                 ("ALIGN", (2, 1), (5, -1), "RIGHT"),
-                                # Center-align the state column
                                 ("ALIGN", (6, 1), (6, -1), "CENTER"),
-                                # Left-align the remaining columns (Chr, Region, Genes)
                                 ("ALIGN", (0, 1), (1, -1), "LEFT"),
                                 ("ALIGN", (7, 1), (7, -1), "LEFT"),
+                                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
                             ]
                         )
                     )

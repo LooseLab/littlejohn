@@ -35,9 +35,14 @@ warnings.filterwarnings(
 )
 
 import os
+import threading
 import time
+import tempfile
+import pickle
+import uuid
 import asyncio
 import argparse
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple, Callable
 import inspect
@@ -50,11 +55,51 @@ from tqdm import tqdm
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+try:
+    from rich.progress import (
+        BarColumn,
+        Progress,
+        SpinnerColumn,
+        TaskProgressColumn,
+        TextColumn,
+        TimeElapsedColumn,
+        TimeRemainingColumn,
+    )
+    from rich.console import Console
+
+    _RICH_AVAILABLE = True
+except Exception:
+    _RICH_AVAILABLE = False
+
+_RICH_CONSOLE = Console() if _RICH_AVAILABLE else None
+
+
+def _print_styled(message: str, level: str = "info") -> None:
+    """Print with optional rich styling (no emojis)."""
+    if not _RICH_AVAILABLE or _RICH_CONSOLE is None:
+        print(message)
+        return
+
+    styles = {
+        "info": "cyan",
+        "success": "green",
+        "warn": "yellow",
+        "error": "red",
+        "header": "bold magenta",
+        "muted": "dim",
+    }
+    style = styles.get(level, "white")
+    _RICH_CONSOLE.print(message, style=style)
+
 # Import memory management
 try:
     from robin.memory_manager import MemoryManager
 except ImportError:
     MemoryManager = None
+
+# Disable memory manager for testing via env flag
+DISABLE_MEMORY_MANAGER = True #os.getenv("ROBIN_DISABLE_MEMORY_MANAGER", "0") == "1"
+_HANDLER_IMPORT_ERRORS: Dict[str, str] = {}
 
 # Optional GUI hook integration
 try:
@@ -102,27 +147,31 @@ try:
         get_sample_cache_stats,
         cleanup_sample_cache_on_completion
     )
-except Exception:
+except Exception as exc:
     _cnv_handler = None
     clear_sample_cache = None
     get_sample_cache_stats = None
     cleanup_sample_cache_on_completion = None
+    _HANDLER_IMPORT_ERRORS["cnv"] = str(exc)
 
 try:
     from robin.analysis.target_analysis import (
         target_handler as _target_handler,
         igv_bam_handler as _igv_bam_handler,
         snp_analysis_handler as _snp_analysis_handler,
+        target_bam_finalize_handler as _target_bam_finalize_handler,
     )
 except Exception:
     _target_handler = None
     _igv_bam_handler = None
     _snp_analysis_handler = None
+    _target_bam_finalize_handler = None
 
 try:
     from robin.analysis.fusion_analysis import fusion_handler as _fusion_handler
-except Exception:
+except Exception as exc:
     _fusion_handler = None
+    _HANDLER_IMPORT_ERRORS["fusion"] = str(exc)
 
 try:
     from robin.analysis.sturgeon_analysis import (
@@ -186,8 +235,8 @@ BATCH_CONFIG: Dict[str, Dict[str, Any]] = {
     "preprocessing": {"max_batch_size": 1, "timeout_seconds": 0},  # Force no batching
     "bed_conversion": {"max_batch_size": 20, "timeout_seconds": 2},
     "mgmt": {"max_batch_size": 20, "timeout_seconds": 2},
-    "cnv": {"max_batch_size": 50, "timeout_seconds": 2},
-    "target": {"max_batch_size": 100, "timeout_seconds": 10},
+    "cnv": {"max_batch_size": 20, "timeout_seconds": 2},
+    "target": {"max_batch_size": 20, "timeout_seconds": 2},
     "fusion": {"max_batch_size": 20, "timeout_seconds": 2},
     "sturgeon": {"max_batch_size": 20, "timeout_seconds": 2},
     "nanodx": {"max_batch_size": 20, "timeout_seconds": 2},
@@ -316,7 +365,7 @@ QUEUE_TO_TYPES: Dict[str, Set[str]] = {
     "target": {"target"},
     "fusion": {"fusion"},
     "classification": {"sturgeon", "nanodx", "pannanodx"},
-    "slow": {"random_forest", "igv_bam"},
+    "slow": {"random_forest", "igv_bam", "snp_analysis", "target_bam_finalize"},
 }
 
 TRIGGERS: Dict[str, List[str]] = {
@@ -330,8 +379,15 @@ TRIGGERS: Dict[str, List[str]] = {
 
 # Per-sample de-duplication to avoid output races. Ensure only one job of these types
 # runs concurrently per sample (max 1 running + 1 pending).
-# Only deduplicate classifiers/slow per sample; analysis/bed_conversion should queue, not skip
-DEDUP_TYPES: Set[str] = {"sturgeon", "nanodx", "pannanodx", "random_forest"}
+# Only deduplicate selected per-sample jobs; analysis/bed_conversion should queue, not skip.
+# Include SNP analysis to avoid duplicate manual submissions for the same sample.
+DEDUP_TYPES: Set[str] = {
+    "sturgeon",
+    "nanodx",
+    "pannanodx",
+    "random_forest",
+    "snp_analysis",
+}
 
 # Per-sample serialization by type to avoid races on shared per-sample outputs
 # Disabled: treat CNV like other analysis jobs (mgmt/target/fusion)
@@ -343,20 +399,27 @@ CLASSIFICATION_TYPES: Set[str] = {"sturgeon", "nanodx", "pannanodx", "random_for
 # Job types that must be serialized per sample (no overlap across these types)
 ## Removed per-sample cross-type serialization to allow one job per type globally
 
+# Ray memory is in bytes. Default 1 GiB per task; fusion 4 GiB; snp_analysis 8 GiB (Clair3/variant calling).
+_GB = 1024 * 1024 * 1024
+_DEFAULT_MEMORY = 1 * _GB
+_FUSION_MEMORY = 4 * _GB
+_SNP_ANALYSIS_MEMORY = 8 * _GB
 RESOURCE_HINTS: Dict[str, Dict[str, Any]] = {
     # Tune these to your cluster
-    "preprocessing": {"num_cpus": 1},
-    "bed_conversion": {"num_cpus": 1},
-    "mgmt": {"num_cpus": 1},
-    "cnv": {"num_cpus": 1},  # CNV gets dedicated CPU but only 1 thread
-    "target": {"num_cpus": 1},
-    "fusion": {"num_cpus": 1},
+    "preprocessing": {"num_cpus": 1, "memory": _DEFAULT_MEMORY},
+    "bed_conversion": {"num_cpus": 1, "memory": _DEFAULT_MEMORY},
+    "mgmt": {"num_cpus": 1, "memory": _DEFAULT_MEMORY},
+    "cnv": {"num_cpus": 1, "memory": _DEFAULT_MEMORY},  # CNV gets dedicated CPU but only 1 thread
+    "target": {"num_cpus": 1, "memory": _DEFAULT_MEMORY},
+    "fusion": {"num_cpus": 1, "memory": _FUSION_MEMORY},  # Fusion needs 4 GiB (BAM scan, breakpoint aggregation)
     # Classifiers do not require GPU by default (CPU-only)
-    "sturgeon": {"num_cpus": 1},
-    "nanodx": {"num_cpus": 1},
-    "pannanodx": {"num_cpus": 1},
-    "random_forest": {"num_cpus": 1},
-    "igv_bam": {"num_cpus": 1},
+    "sturgeon": {"num_cpus": 1, "memory": _DEFAULT_MEMORY},
+    "nanodx": {"num_cpus": 1, "memory": _DEFAULT_MEMORY},
+    "pannanodx": {"num_cpus": 1, "memory": _DEFAULT_MEMORY},
+    "random_forest": {"num_cpus": 1, "memory": _DEFAULT_MEMORY},
+    "igv_bam": {"num_cpus": 1, "memory": _DEFAULT_MEMORY},
+    "snp_analysis": {"num_cpus": 1, "memory": _SNP_ANALYSIS_MEMORY},  # Clair3/variant calling needs 8 GiB
+    "target_bam_finalize": {"num_cpus": 1, "memory": _DEFAULT_MEMORY},
 }
 
 # ---------- Sample Job Batcher ----------
@@ -366,14 +429,22 @@ class SampleJobBatcher:
         self.pending_jobs: Dict[str, Dict[str, List[Job]]] = {}
         # sample_id -> job_type -> timestamp
         self.last_job_time: Dict[str, Dict[str, float]] = {}
-        self.lock = asyncio.Lock() if asyncio else None
+        # Lock created lazily to avoid serialization issues in Ray actors
+        self._lock: Optional[asyncio.Lock] = None
+    
+    def _get_lock(self) -> Optional[asyncio.Lock]:
+        """Get or create the asyncio lock lazily."""
+        if self._lock is None and asyncio:
+            self._lock = asyncio.Lock()
+        return self._lock
     
     async def add_job(self, job: Job) -> List[BatchedJob]:
         """Add a job and return any completed batches"""
         sample_id = job.context.get_sample_id()
         job_type = job.job_type
         
-        async with self.lock if self.lock else nullcontext():
+        lock = self._get_lock()
+        async with lock if lock else nullcontext():
             # Initialize if needed
             if sample_id not in self.pending_jobs:
                 self.pending_jobs[sample_id] = {}
@@ -392,24 +463,30 @@ class SampleJobBatcher:
             return batches
     
     def _check_and_create_batches(self, sample_id: str, job_type: str) -> List[BatchedJob]:
-        """Check if we should create batches for a sample/job_type combination"""
+        """Check if we should create batches for a sample/job_type combination.
+        Jobs with force_individual_batch (e.g. large BAMs) are emitted as single-file batches.
+        """
         config = BATCH_CONFIG.get(job_type, {"max_batch_size": 20, "timeout_seconds": 10})
         max_batch_size = config["max_batch_size"]
         
         pending = self.pending_jobs[sample_id][job_type]
         batches = []
         
-        # Create batches of max_batch_size
-        while len(pending) >= max_batch_size:
-            batch_jobs = pending[:max_batch_size]
-            pending = pending[max_batch_size:]
-            
-            # Create batched job
+        # Emit single-file batches for jobs marked force_individual_batch (e.g. large BAMs)
+        individual = [j for j in pending if (j.context.metadata or {}).get("force_individual_batch")]
+        rest = [j for j in pending if not (j.context.metadata or {}).get("force_individual_batch")]
+        for job in individual:
+            batches.append(self._create_batched_job([job], sample_id, job_type))
+        
+        # Create batches of max_batch_size from the rest
+        while len(rest) >= max_batch_size:
+            batch_jobs = rest[:max_batch_size]
+            rest = rest[max_batch_size:]
             batched_job = self._create_batched_job(batch_jobs, sample_id, job_type)
             batches.append(batched_job)
         
-        # Update pending list
-        self.pending_jobs[sample_id][job_type] = pending
+        # Update pending list (only unbatched jobs remain)
+        self.pending_jobs[sample_id][job_type] = rest
         
         return batches
     
@@ -418,7 +495,8 @@ class SampleJobBatcher:
         current_time = time.time()
         timed_out_batches = []
         
-        async with self.lock if self.lock else nullcontext():
+        lock = self._get_lock()
+        async with lock if lock else nullcontext():
             for sample_id in list(self.pending_jobs.keys()):
                 for job_type in list(self.pending_jobs[sample_id].keys()):
                     jobs = self.pending_jobs[sample_id][job_type]
@@ -501,6 +579,35 @@ def job_queue_of(job_type: str) -> str:
     return "slow"
 
 
+def _get_ray_runtime_ids() -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    try:
+        ctx = ray.get_runtime_context()
+        task_id = str(ctx.get_task_id())
+        job_id = str(ctx.get_job_id())
+        node_id = None
+        try:
+            node_id = str(ctx.get_node_id())
+        except Exception:
+            node_id = None
+        return task_id, job_id, node_id
+    except Exception:
+        return None, None, None
+
+
+def _get_sample_id(job: Job) -> Optional[str]:
+    try:
+        if hasattr(job.context, "get_sample_id"):
+            sample_id = job.context.get_sample_id()
+            if sample_id:
+                return sample_id
+    except Exception:
+        pass
+    try:
+        return job.context.metadata.get("sample_id")
+    except Exception:
+        return None
+
+
 # ---------- Real handler wrappers as Ray tasks ----------
 # Each wrapper returns an updated WorkflowContext.
 
@@ -517,17 +624,25 @@ NEEDS_WORK_DIR: Set[str] = {
 }
 
 
+def _notify_coordinator_handler_started(job_id: int) -> None:
+    """Tell Coordinator the Ray worker has begun running the handler (not queued in Pool)."""
+    try:
+        ray.get_actor("robin_coordinator").mark_handler_started.remote(job_id)
+    except Exception:
+        pass
+
+
 def _wrap_real_handler(
     py_handler: Optional[Callable[[Job], None]], job_type: str
 ) -> Callable[[Job], WorkflowContext]:
     def _impl(job: Job) -> WorkflowContext:
         # Initialize memory manager for this handler execution
         memory_manager = None
-        if MemoryManager is not None:
+        if MemoryManager is not None and not DISABLE_MEMORY_MANAGER:
             try:
                 # Configure memory management based on job type
                 gc_every = 10 if job_type in {"mgmt", "cnv", "target", "fusion"} else 25
-                rss_trigger = 512 if job_type in {"mgmt", "cnv", "target", "fusion"} else 1024
+                rss_trigger = 1024 if job_type in {"mgmt", "cnv", "target", "fusion"} else 1024
                 memory_manager = MemoryManager(
                     gc_every=gc_every,
                     rss_trigger_mb=rss_trigger,
@@ -543,8 +658,30 @@ def _wrap_real_handler(
         except Exception:
             pass
         logger = _get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
+        task_id, ray_job_id, node_id = _get_ray_runtime_ids()
+        sample_id = _get_sample_id(job)
+        filepath = getattr(job.context, "filepath", None)
+        logger.info(
+            f"ray_task_start job_type={job_type} "
+            f"job_id={getattr(job, 'job_id', None)} "
+            f"ray_job_id={ray_job_id} task_id={task_id} node_id={node_id} "
+            f"pid={os.getpid()} sample_id={sample_id} filepath={filepath}"
+        )
+        # Progress UI "duration" prefers handler wall time (excludes Pool/Ray queue after dispatch).
+        try:
+            jid = getattr(job, "job_id", None)
+            if jid is not None:
+                _notify_coordinator_handler_started(int(jid))
+        except Exception:
+            pass
         try:
             if py_handler is None:
+                import_reason = _HANDLER_IMPORT_ERRORS.get(job_type)
+                if import_reason:
+                    raise RuntimeError(
+                        f"No implementation available for job_type='{job_type}'. "
+                        f"Handler import failed: {import_reason}"
+                    )
                 raise RuntimeError(
                     f"No implementation available for job_type='{job_type}'"
                 )
@@ -628,13 +765,48 @@ def _wrap_real_handler(
             else:
                 logger.info(f"{job_type} completed")
         except Exception as e:
-            job.context.add_error(job_type, str(e))
-            logger.error(f"{job_type} failed: {e}")
-            # still return context with error recorded
+            # Suppress expected downstream failures for fail-only BAM submissions.
+            # Requirement: if *any* BAM in the submission contains 'pass', errors must remain visible.
+            suppress = False
+            try:
+                if job_type in (CLASSIFICATION_TYPES | {"bed_conversion"}):
+                    if bool(job.context.metadata.get("fail_only_bam_submission", False)):
+                        fp = getattr(job.context, "filepath", "") or ""
+                        if _bam_filename_kind(fp) == "fail":
+                            suppress = True
+            except Exception:
+                suppress = False
+
+            if suppress:
+                # Expected: downstream tools may not support fail-only read BAMs.
+                # We still attempted analysis; we just don't treat this as a failing job.
+                try:
+                    job.context.add_result(
+                        job_type,
+                        {
+                            "status": "expected_failure",
+                            "reason": "fail_only_bam_submission",
+                            "message": str(e),
+                        },
+                    )
+                except Exception:
+                    pass
+                logger.warning(
+                    f"{job_type} expected failure for fail-only BAM submission: {e}"
+                )
+            else:
+                job.context.add_error(job_type, str(e))
+                logger.error(f"{job_type} failed: {e}")
+                raise  # Re-raise so task fails and coordinator gets failure_kind="exception"
         finally:
-            # Mark result if user handler didn't
+            # Mark result if user handler didn't add one.
+            # Keep a dict payload so downstream code can safely call .get(...).
             if job_type not in job.context.results:
-                job.context.add_result(job_type, f"{job_type}_ok")
+                had_error = any(
+                    (err.get("job_type") == job_type) for err in (job.context.errors or [])
+                )
+                fallback_result = {"status": "failed"} if had_error else {"status": "success"}
+                job.context.add_result(job_type, fallback_result)
             
             # Trigger memory cleanup after handler execution
             # Let memory manager decide if cleanup is needed based on its heuristics
@@ -667,7 +839,7 @@ def enhanced_handler(job: BatchedJob) -> None:
         try:
             # Process individual file within batch
             process_single_file_in_batch(context, job_type, i, batch_size)
-            context.add_result(job_type, f"{job_type}_ok")
+            context.add_result(job_type, {"status": "success"})
             
         except Exception as e:
             # Fail entire batch if any file fails
@@ -678,7 +850,7 @@ def enhanced_handler(job: BatchedJob) -> None:
     
     # Mark batch as completed
     for context in job.contexts:
-        context.add_result(job_type, f"{job_type}_batch_completed")
+        context.add_result(job_type, {"status": "batch_completed"})
 
 def process_single_file_in_batch(context: WorkflowContext, job_type: str, index: int, total: int) -> None:
     """Process a single file within a batch - to be implemented per job type"""
@@ -720,7 +892,7 @@ class TypeProcessor:
         
         # Initialize memory manager for long-running actor
         self.memory_manager = None
-        if MemoryManager is not None:
+        if MemoryManager is not None and not DISABLE_MEMORY_MANAGER:
             try:
                 # Configure memory management based on job type
                 gc_every = 25 if job_type in {"mgmt", "cnv", "target", "fusion"} else 50
@@ -779,6 +951,15 @@ class TypeProcessor:
         return ctx
 
 
+def _job_timeout_seconds() -> int:
+    """Per-job timeout in seconds (0 = disabled). From env ROBIN_JOB_TIMEOUT_SECONDS."""
+    try:
+        val = os.environ.get("ROBIN_JOB_TIMEOUT_SECONDS", "0").strip()
+        return max(0, int(val))
+    except (ValueError, TypeError):
+        return 0
+
+
 @ray.remote
 class Coordinator:
     def __init__(
@@ -788,6 +969,7 @@ class Coordinator:
         preset: Optional[str] = None,
         reference: Optional[str] = None,
         enable_batching: bool = True,
+        job_timeout_seconds: int = 0,
     ):
         # dedup maps
         self.pending: Dict[Tuple[str, str], int] = {}
@@ -826,6 +1008,44 @@ class Coordinator:
         self.max_inflight_per_type: int = 64
         self.inflight_by_type: Dict[str, int] = {}
         self.waiting_by_type_global: Dict[str, List[Job]] = {}
+        # backpressure: global and per-queue caps to prevent queue explosions
+        queue_count = max(1, len(QUEUE_TO_TYPES))
+        self.max_total_inflight: int = self.max_inflight_per_type * queue_count
+        # Backpressure cap for total waiting jobs.
+        # Test change: temporarily allow 2x waiting capacity to see if we
+        # simply stall because the queue limit is reached.
+        self.max_total_waiting: int = self.max_total_inflight * 40
+        self.max_inflight_per_queue: Dict[str, int] = {
+            q: self.max_inflight_per_type for q in QUEUE_TO_TYPES
+        }
+        self.max_waiting_per_queue: Dict[str, int] = {
+            q: self.max_inflight_per_type * 200 for q in QUEUE_TO_TYPES
+        }
+        # Optional debug logging when backpressure caps are hit.
+        # Enable with:
+        #   ROBIN_DEBUG_BACKPRESSURE=1
+        #   ROBIN_DEBUG_BACKPRESSURE_INTERVAL_S=10
+        self._debug_backpressure: bool = os.getenv("ROBIN_DEBUG_BACKPRESSURE", "0") == "1"
+        try:
+            self._debug_backpressure_interval_s: float = float(
+                os.getenv("ROBIN_DEBUG_BACKPRESSURE_INTERVAL_S", "10")
+            )
+        except Exception:
+            self._debug_backpressure_interval_s = 10.0
+        self._last_backpressure_log_ts: float = 0.0
+        self.inflight_by_queue: Dict[str, int] = {}
+        self.waiting_by_queue: Dict[str, List[Job]] = {}
+        self.waiting_global: List[Job] = []
+        # Optional on-disk spooling of waiting jobs to reduce memory pressure
+        self._spool_enabled: bool = os.getenv("ROBIN_QUEUE_SPOOL", "1") != "0"
+        self._spool_dir_source: str = "env"
+        self.queue_spool_dir: Optional[str] = os.getenv("ROBIN_QUEUE_SPOOL_DIR")
+        if not self.queue_spool_dir:
+            self._spool_dir_source = "temp"
+            self.queue_spool_dir = os.path.join(
+                tempfile.gettempdir(), f"robin_queue_{os.getpid()}"
+            )
+        self._spool_counter: int = 0
         # per-sample tracking for GUI
         self.samples_by_id: Dict[str, Dict[str, Any]] = {}
         # Sample cleanup tracking to prevent unbounded memory growth
@@ -861,7 +1081,8 @@ class Coordinator:
         self._csv_buffer: List[Dict[str, Any]] = []
         self._csv_buffer_size: int = 100  # Flush every 100 jobs
         self._csv_buffer_max_size: int = 500  # Maximum buffer size before forced flush
-        self._csv_buffer_lock = asyncio.Lock() if asyncio else None
+        # Lock created lazily to avoid serialization issues in Ray actors
+        self._csv_buffer_lock: Optional[asyncio.Lock] = None
         
         # Stats caching for performance (avoid recomputing stats on every GUI update)
         self._stats_cache: Optional[Dict[str, Any]] = None
@@ -871,6 +1092,19 @@ class Coordinator:
         # Batching support
         self.enable_batching = enable_batching
         self.sample_batcher = SampleJobBatcher() if enable_batching else None
+
+        # Work directory (set by set_work_dir(); used for failed_jobs log)
+        self.work_dir: Optional[str] = None
+        # Bounded log of failed job details for tracking and OOM diagnosis (last 5000)
+        self._failed_jobs_log: deque = deque(maxlen=5000)
+        # Per-job timeout: cancel jobs running longer than this (0 = disabled)
+        self.job_timeout_seconds: int = max(0, int(job_timeout_seconds))
+    
+    def _get_csv_buffer_lock(self) -> Optional[asyncio.Lock]:
+        """Get or create the CSV buffer lock lazily."""
+        if self._csv_buffer_lock is None and asyncio:
+            self._csv_buffer_lock = asyncio.Lock()
+        return self._csv_buffer_lock
 
     def get_reference(self) -> Optional[str]:
         """Get the reference genome path."""
@@ -883,6 +1117,85 @@ class Coordinator:
     def set_work_dir(self, work_dir: Optional[str]) -> None:
         """Set the work directory for the coordinator."""
         self.work_dir = work_dir
+        # If no explicit spool dir was provided, prefer work_dir for spooling
+        if (
+            self._spool_enabled
+            and self._spool_dir_source == "temp"
+            and work_dir
+            and not os.getenv("ROBIN_QUEUE_SPOOL_DIR")
+        ):
+            self.queue_spool_dir = os.path.join(work_dir, ".robin_queue")
+
+    def _write_failed_jobs_file(self) -> Optional[str]:
+        """Write failed jobs log to work_dir/failed_jobs.csv for inspection. Returns path or None."""
+        if not self._failed_jobs_log or not getattr(self, "work_dir", None) or not self.work_dir:
+            return None
+        try:
+            import csv
+            path = os.path.join(self.work_dir, "failed_jobs.csv")
+            os.makedirs(self.work_dir, exist_ok=True)
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(["sample_id", "filepath", "job_type", "failure_kind", "is_oom", "error"])
+                for e in self._failed_jobs_log:
+                    w.writerow([
+                        e.get("sample_id", ""),
+                        e.get("filepath", ""),
+                        e.get("job_type", ""),
+                        e.get("failure_kind", ""),
+                        "yes" if e.get("is_oom") else "no",
+                        (e.get("error") or "").replace("\r", " ").replace("\n", " "),
+                    ])
+            return path
+        except Exception as e:
+            logging.warning(f"Could not write failed_jobs.csv: {e}")
+            return None
+
+    def _ensure_spool_dir(self) -> None:
+        if not self._spool_enabled or not self.queue_spool_dir:
+            return
+        try:
+            os.makedirs(self.queue_spool_dir, exist_ok=True)
+        except Exception:
+            pass
+
+    def _spool_job(self, job: Job, sample_id: Optional[str]) -> Any:
+        if not self._spool_enabled:
+            return job
+        self._ensure_spool_dir()
+        if not self.queue_spool_dir:
+            return job
+        self._spool_counter += 1
+        fname = f"job_{self._spool_counter}_{job.job_id}_{uuid.uuid4().hex}.pkl"
+        path = os.path.join(self.queue_spool_dir, fname)
+        try:
+            with open(path, "wb") as fh:
+                pickle.dump(job, fh, protocol=pickle.HIGHEST_PROTOCOL)
+            return {"spool_path": path, "sample_id": sample_id or "unknown"}
+        except Exception:
+            return job
+
+    def _unspool_job(self, entry: Any) -> Tuple[Optional[Job], Optional[str]]:
+        if isinstance(entry, dict) and entry.get("spool_path"):
+            path = entry.get("spool_path")
+            sample_id = entry.get("sample_id") or "unknown"
+            try:
+                with open(path, "rb") as fh:
+                    job = pickle.load(fh)
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+                return job, sample_id
+            except Exception:
+                return None, sample_id
+        if isinstance(entry, Job):
+            try:
+                sid = entry.context.get_sample_id()
+            except Exception:
+                sid = "unknown"
+            return entry, sid
+        return None, None
 
     # ----- handler registration API -----
     async def register_handler(self, job_type: str, remote_func) -> None:
@@ -909,6 +1222,14 @@ class Coordinator:
             (
                 "snp_analysis",
                 ray.remote(_wrap_real_handler(_snp_analysis_handler, "snp_analysis")),
+            ),
+            (
+                "target_bam_finalize",
+                ray.remote(
+                    _wrap_real_handler(
+                        _target_bam_finalize_handler, "target_bam_finalize"
+                    )
+                ),
             ),
         ]
 
@@ -951,6 +1272,7 @@ class Coordinator:
                 "slow": [
                     "igv_bam",
                     "snp_analysis",
+                    "target_bam_finalize",
                 ],  # Slow pool for igv_bam and snp_analysis jobs
             }
 
@@ -982,10 +1304,11 @@ class Coordinator:
             for pool_name, job_types in groups.items():
                 par = pool_parallel(pool_name)
                 actor_name = f"pool_{pool_name}"
+                job_timeout = getattr(self, "job_timeout_seconds", 0) or 0
                 try:
                     pool = Pool.options(
                         name=actor_name, max_concurrency=max(1, int(par)), num_cpus=0
-                    ).remote(pool_name, par)
+                    ).remote(pool_name, par, job_timeout)
                 except Exception:
                     try:
                         # Some Ray versions don't allow num_cpus=0; use a tiny fractional CPU to avoid reservation deadlock
@@ -993,10 +1316,10 @@ class Coordinator:
                             name=actor_name,
                             max_concurrency=max(1, int(par)),
                             num_cpus=0.001,
-                        ).remote(pool_name, par)
+                        ).remote(pool_name, par, job_timeout)
                     except Exception:
                         pool = Pool.options(max_concurrency=max(1, int(par))).remote(
-                            pool_name, par
+                            pool_name, par, job_timeout
                         )
                 pools[pool_name] = pool
                 # Wire coordinator callback
@@ -1065,6 +1388,275 @@ class Coordinator:
             except Exception:
                 pass
 
+    def _total_inflight(self) -> int:
+        try:
+            return len(self.active)
+        except Exception:
+            return 0
+
+    def _total_waiting(self) -> int:
+        try:
+            waiting_types = sum(len(v) for v in self.waiting_by_type_global.values())
+        except Exception:
+            waiting_types = 0
+        try:
+            waiting_queues = sum(len(v) for v in self.waiting_by_queue.values())
+        except Exception:
+            waiting_queues = 0
+        try:
+            waiting_global = len(self.waiting_global)
+        except Exception:
+            waiting_global = 0
+        return waiting_types + waiting_queues + waiting_global
+
+    def _queue_inflight_cap(self, queue_name: str) -> int:
+        return int(self.max_inflight_per_queue.get(queue_name, self.max_inflight_per_type))
+
+    def _queue_waiting_cap(self, queue_name: str) -> int:
+        return int(self.max_waiting_per_queue.get(queue_name, self.max_inflight_per_type * 20))
+
+    async def _wait_for_global_capacity(self) -> None:
+        while self._total_waiting() >= self.max_total_waiting:
+            await asyncio.sleep(0.05)
+
+    async def _wait_for_queue_capacity(self, queue_name: str) -> None:
+        while len(self.waiting_by_queue.get(queue_name, [])) >= self._queue_waiting_cap(queue_name):
+            await asyncio.sleep(0.05)
+
+    async def can_accept_jobs(self, n: int = 1) -> bool:
+        try:
+            n = int(n or 0)
+        except Exception:
+            n = 0
+        return (self._total_waiting() + n) < self.max_total_waiting
+
+    async def _dispatch_ready_job(self, job: Job, sample_id: str, from_waiting: bool = False) -> None:
+        # Ensure global waiting does not grow without bound for new submissions
+        if not from_waiting:
+            await self._wait_for_global_capacity()
+
+        # Global inflight cap
+        if self._total_inflight() >= self.max_total_inflight:
+            if self._debug_backpressure:
+                now = time.time()
+                if (now - self._last_backpressure_log_ts) >= self._debug_backpressure_interval_s:
+                    self._last_backpressure_log_ts = now
+                    logging.info(
+                        "[ROBIN][backpressure] global inflight cap hit: "
+                        f"inflight={self._total_inflight()}/{self.max_total_inflight}, "
+                        f"waiting_global={len(self.waiting_global)}, "
+                        f"waiting_serialized={self._total_waiting()}"
+                    )
+            self.waiting_global.append(self._spool_job(job, sample_id))
+            try:
+                sid_pending = sample_id or "unknown"
+                if sid_pending != "unknown":
+                    ent_pending = self.samples_by_id.get(sid_pending)
+                    if ent_pending is None:
+                        ent_pending = {
+                            "sample_id": sid_pending,
+                            "active_jobs": 0,
+                            "pending_jobs": 0,
+                            "total_jobs": 0,
+                            "completed_jobs": 0,
+                            "failed_jobs": 0,
+                            "job_types": set(),
+                            "last_seen": time.time(),
+                        }
+                        self.samples_by_id[sid_pending] = ent_pending
+                    ent_pending["pending_jobs"] = ent_pending.get("pending_jobs", 0) + 1
+                    ent_pending["last_seen"] = time.time()
+            except Exception:
+                pass
+            return
+
+        q = job_queue_of(job.job_type)
+        # Per-queue inflight cap
+        if int(self.inflight_by_queue.get(q, 0)) >= self._queue_inflight_cap(q):
+            await self._wait_for_queue_capacity(q)
+            if self._debug_backpressure:
+                now = time.time()
+                if (now - self._last_backpressure_log_ts) >= self._debug_backpressure_interval_s:
+                    self._last_backpressure_log_ts = now
+                    logging.info(
+                        "[ROBIN][backpressure] queue inflight cap hit: "
+                        f"queue={q}, inflight={self.inflight_by_queue.get(q,0)}/{self._queue_inflight_cap(q)}, "
+                        f"waiting_queue={len(self.waiting_by_queue.get(q, []))}/{self._queue_waiting_cap(q)}"
+                    )
+            self.waiting_by_queue.setdefault(q, []).append(
+                self._spool_job(job, sample_id)
+            )
+            try:
+                sid_pending = sample_id or "unknown"
+                if sid_pending != "unknown":
+                    ent_pending = self.samples_by_id.get(sid_pending)
+                    if ent_pending is None:
+                        ent_pending = {
+                            "sample_id": sid_pending,
+                            "active_jobs": 0,
+                            "pending_jobs": 0,
+                            "total_jobs": 0,
+                            "completed_jobs": 0,
+                            "failed_jobs": 0,
+                            "job_types": set(),
+                            "last_seen": time.time(),
+                        }
+                        self.samples_by_id[sid_pending] = ent_pending
+                    ent_pending["pending_jobs"] = ent_pending.get("pending_jobs", 0) + 1
+                    ent_pending["last_seen"] = time.time()
+            except Exception:
+                pass
+            return
+
+        # Per-type inflight cap
+        inflight_for_type = int(self.inflight_by_type.get(job.job_type, 0))
+        if inflight_for_type >= self.max_inflight_per_type:
+            if self._debug_backpressure:
+                now = time.time()
+                if (now - self._last_backpressure_log_ts) >= self._debug_backpressure_interval_s:
+                    self._last_backpressure_log_ts = now
+                    logging.info(
+                        "[ROBIN][backpressure] per-type inflight cap hit: "
+                        f"type={job.job_type}, inflight={inflight_for_type}/{self.max_inflight_per_type}, "
+                        f"waiting_global={len(self.waiting_by_type_global.get(job.job_type, []))}"
+                    )
+            self.waiting_by_type_global.setdefault(job.job_type, []).append(
+                self._spool_job(job, sample_id)
+            )
+            try:
+                sid_pending = sample_id or "unknown"
+                if sid_pending != "unknown":
+                    ent_pending = self.samples_by_id.get(sid_pending)
+                    if ent_pending is None:
+                        ent_pending = {
+                            "sample_id": sid_pending,
+                            "active_jobs": 0,
+                            "pending_jobs": 0,
+                            "total_jobs": 0,
+                            "completed_jobs": 0,
+                            "failed_jobs": 0,
+                            "job_types": set(),
+                            "last_seen": time.time(),
+                        }
+                        self.samples_by_id[sid_pending] = ent_pending
+                    ent_pending["pending_jobs"] = ent_pending.get("pending_jobs", 0) + 1
+                    ent_pending["last_seen"] = time.time()
+            except Exception:
+                pass
+            return
+
+        # Found processor for job type
+        proc = self.processors.get(job.job_type)
+        if proc is None:
+            return  # Skip jobs without processors
+
+        # Mark submission only when actually dispatching to a processor
+        self.total_enqueued += 1
+        try:
+            self.submitted_by_type[job.job_type] = (
+                self.submitted_by_type.get(job.job_type, 0) + 1
+            )
+        except Exception:
+            pass
+        self.active[job.job_id] = {
+            "job_type": job.job_type,
+            "filepath": job.context.filepath,
+            "queue": q,
+            "start_time": time.time(),
+        }
+        # Update per-sample totals/active only when a real sample_id is known
+        try:
+            sid = sample_id or "unknown"
+            if sid != "unknown":
+                ent = self.samples_by_id.get(sid)
+                if ent is None:
+                    ent = {
+                        "sample_id": sid,
+                        "active_jobs": 0,
+                        "pending_jobs": 0,
+                        "total_jobs": 0,
+                        "completed_jobs": 0,
+                        "failed_jobs": 0,
+                        "job_types": set(),
+                        "last_seen": time.time(),
+                    }
+                    self.samples_by_id[sid] = ent
+                ent["total_jobs"] += 1
+                ent["active_jobs"] += 1
+                try:
+                    ent["job_types"].add(job.job_type)
+                except Exception:
+                    pass
+                ent["last_seen"] = time.time()
+        except Exception:
+            pass
+        if getattr(self, "using_pools", False):
+            try:
+                proc.enqueue.remote(job)
+            except Exception:
+                pass
+        else:
+            ref = proc.process.remote(job)
+            self._inflight[ref] = job
+        self.inflight_by_type[job.job_type] = inflight_for_type + 1
+        self.inflight_by_queue[q] = int(self.inflight_by_queue.get(q, 0)) + 1
+
+    async def _drain_waiting_jobs(self, queue_name: Optional[str], job_type: str) -> None:
+        # Try one global waiting job first to avoid starvation
+        if self.waiting_global and self._total_inflight() < self.max_total_inflight:
+            entry = self.waiting_global.pop(0)
+            nxt_global, sid = self._unspool_job(entry)
+            if nxt_global is None:
+                return
+            try:
+                if sid != "unknown":
+                    ent_pending = self.samples_by_id.get(sid)
+                    if ent_pending and ent_pending.get("pending_jobs", 0) > 0:
+                        ent_pending["pending_jobs"] -= 1
+                        ent_pending["last_seen"] = time.time()
+            except Exception:
+                pass
+            await self._dispatch_ready_job(nxt_global, sid, from_waiting=True)
+
+        # Then try one queued-by-queue job
+        if queue_name:
+            queue_jobs = self.waiting_by_queue.get(queue_name, [])
+            if queue_jobs and int(self.inflight_by_queue.get(queue_name, 0)) < self._queue_inflight_cap(queue_name):
+                entry = queue_jobs.pop(0)
+                if not queue_jobs:
+                    self.waiting_by_queue.pop(queue_name, None)
+                nxt_queue, sid = self._unspool_job(entry)
+                if nxt_queue is None:
+                    return
+                try:
+                    if sid != "unknown":
+                        ent_pending = self.samples_by_id.get(sid)
+                        if ent_pending and ent_pending.get("pending_jobs", 0) > 0:
+                            ent_pending["pending_jobs"] -= 1
+                            ent_pending["last_seen"] = time.time()
+                except Exception:
+                    pass
+                await self._dispatch_ready_job(nxt_queue, sid, from_waiting=True)
+
+        # Finally, release one per-type waiting job
+        queue_global = self.waiting_by_type_global.get(job_type, [])
+        if queue_global and int(self.inflight_by_type.get(job_type, 0)) < self.max_inflight_per_type:
+            entry = queue_global.pop(0)
+            if not queue_global:
+                self.waiting_by_type_global.pop(job_type, None)
+            nxt_job_g, sid = self._unspool_job(entry)
+            if nxt_job_g is None:
+                return
+            try:
+                if sid != "unknown":
+                    ent_pending = self.samples_by_id.get(sid)
+                    if ent_pending and ent_pending.get("pending_jobs", 0) > 0:
+                        ent_pending["pending_jobs"] -= 1
+                        ent_pending["last_seen"] = time.time()
+            except Exception:
+                pass
+            await self._dispatch_ready_job(nxt_job_g, sid, from_waiting=True)
+
     # ----- submission & lifecycle -----
     async def submit_jobs(self, jobs: List[Job]) -> None:
         # Check if shutdown has been requested
@@ -1086,8 +1678,44 @@ class Coordinator:
             
             # Process other jobs through batcher
             for job in other_jobs:
+                try:
+                    sid_pending = job.context.get_sample_id() if job.context else "unknown"
+                except Exception:
+                    sid_pending = "unknown"
+                try:
+                    if sid_pending != "unknown":
+                        ent_pending = self.samples_by_id.get(sid_pending)
+                        if ent_pending is None:
+                            ent_pending = {
+                                "sample_id": sid_pending,
+                                "active_jobs": 0,
+                                "pending_jobs": 0,
+                                "total_jobs": 0,
+                                "completed_jobs": 0,
+                                "failed_jobs": 0,
+                                "job_types": set(),
+                                "last_seen": time.time(),
+                            }
+                            self.samples_by_id[sid_pending] = ent_pending
+                        ent_pending["pending_jobs"] = ent_pending.get("pending_jobs", 0) + 1
+                        ent_pending["last_seen"] = time.time()
+                except Exception:
+                    pass
                 batches = await self.sample_batcher.add_job(job)
                 if batches:
+                    try:
+                        for batch in batches:
+                            sid_batch = batch.sample_id
+                            if sid_batch != "unknown":
+                                ent_pending = self.samples_by_id.get(sid_batch)
+                                if ent_pending and ent_pending.get("pending_jobs", 0) > 0:
+                                    ent_pending["pending_jobs"] = max(
+                                        0,
+                                        ent_pending.get("pending_jobs", 0) - len(batch.contexts),
+                                    )
+                                    ent_pending["last_seen"] = time.time()
+                    except Exception:
+                        pass
                     # Convert BatchedJob to regular Job for processing
                     regular_jobs = self._convert_batched_jobs(batches)
                     await self._submit_jobs_internal(regular_jobs)
@@ -1116,70 +1744,30 @@ class Coordinator:
                 if (ra + pa) > 0:
                     self.waiting_by_type_sample.setdefault(key_ts, []).append(job)
                     self.pending_by_type_sample[key_ts] = pa + 1
+                    try:
+                        if sid != "unknown":
+                            ent_pending = self.samples_by_id.get(sid)
+                            if ent_pending is None:
+                                ent_pending = {
+                                    "sample_id": sid,
+                                    "active_jobs": 0,
+                                    "pending_jobs": 0,
+                                    "total_jobs": 0,
+                                    "completed_jobs": 0,
+                                    "failed_jobs": 0,
+                                    "job_types": set(),
+                                    "last_seen": time.time(),
+                                }
+                                self.samples_by_id[sid] = ent_pending
+                            ent_pending["pending_jobs"] = ent_pending.get("pending_jobs", 0) + 1
+                            ent_pending["last_seen"] = time.time()
+                    except Exception:
+                        pass
                     continue
                 else:
                     self.running_by_type_sample[key_ts] = ra + 1
 
-            # submit to dedicated job-type processor
-            proc = self.processors.get(job.job_type)
-            if proc is None:
-                continue  # Skip jobs without processors
-            # Found processor for job type
-            # Backpressure: if too many outstanding for this type, queue locally
-            inflight_for_type = int(self.inflight_by_type.get(job.job_type, 0))
-            if inflight_for_type >= self.max_inflight_per_type:
-                self.waiting_by_type_global.setdefault(job.job_type, []).append(job)
-                # do not count as submitted yet; GUI totals reflect actual submissions
-                continue
-            # Mark submission only when actually dispatching to a processor
-            q = job_queue_of(job.job_type)
-            self.total_enqueued += 1
-            try:
-                self.submitted_by_type[job.job_type] = (
-                    self.submitted_by_type.get(job.job_type, 0) + 1
-                )
-            except Exception:
-                pass
-            self.active[job.job_id] = {
-                "job_type": job.job_type,
-                "filepath": job.context.filepath,
-                "queue": q,
-                "start_time": time.time(),
-            }
-            # Update per-sample totals/active only when a real sample_id is known
-            try:
-                sid = sample_id or "unknown"
-                if sid != "unknown":
-                    ent = self.samples_by_id.get(sid)
-                    if ent is None:
-                        ent = {
-                            "sample_id": sid,
-                            "active_jobs": 0,
-                            "total_jobs": 0,
-                            "completed_jobs": 0,
-                            "failed_jobs": 0,
-                            "job_types": set(),
-                            "last_seen": time.time(),
-                        }
-                        self.samples_by_id[sid] = ent
-                    ent["total_jobs"] += 1
-                    ent["active_jobs"] += 1
-                    try:
-                        ent["job_types"].add(job.job_type)
-                    except Exception:
-                        pass
-                    ent["last_seen"] = time.time()
-            except Exception:
-                pass
-            if getattr(self, "using_pools", False):
-                try:
-                    proc.enqueue.remote(job)
-                except Exception:
-                    pass
-            else:
-                ref = proc.process.remote(job)
-                self._inflight[ref] = job
-            self.inflight_by_type[job.job_type] = inflight_for_type + 1
+            await self._dispatch_ready_job(job, sample_id)
 
     async def submit_sample_job(
         self,
@@ -1263,9 +1851,35 @@ class Coordinator:
         Returns:
             True if job was successfully submitted, False otherwise
         """
+        logger = logging.getLogger("robin.workflow")
         try:
             if sample_id is None:
                 sample_id = Path(sample_dir).name
+            logger.info(
+                "Submitting SNP analysis job: sample_id=%s sample_dir=%s reference=%s threads=%s force_regenerate=%s",
+                sample_id,
+                sample_dir,
+                reference,
+                threads,
+                force_regenerate,
+            )
+
+            # Determine target panel from master.csv if present
+            target_panel = None
+            try:
+                master_csv = Path(sample_dir) / "master.csv"
+                if master_csv.exists():
+                    import csv
+
+                    with master_csv.open("r", newline="") as fh:
+                        reader = csv.DictReader(fh)
+                        first_row = next(reader, None)
+                        if first_row:
+                            panel = first_row.get("analysis_panel", "").strip()
+                            if panel:
+                                target_panel = panel
+            except Exception:
+                pass
 
             # Create a context for this sample with SNP-specific metadata
             metadata = {
@@ -1279,9 +1893,17 @@ class Coordinator:
                 "bam_metadata": {"sample_id": sample_id},
             }
 
+            if target_panel:
+                metadata["target_panel"] = target_panel
+
             # Add reference genome if provided
             if reference:
                 metadata["reference"] = reference
+            else:
+                logger.warning(
+                    "SNP submission for sample_id=%s has no reference in metadata; downstream handler may skip.",
+                    sample_id,
+                )
 
             context = WorkflowContext(filepath=sample_dir, metadata=metadata)
 
@@ -1297,10 +1919,95 @@ class Coordinator:
 
             # Submit the job
             await self.submit_jobs([job])
+            logger.info("SNP analysis job queued: sample_id=%s job_id=%s", sample_id, job.job_id)
 
             return True
 
-        except Exception:
+        except Exception as e:
+            logger.error(
+                "Failed to submit SNP analysis job: sample_id=%s sample_dir=%s error=%s",
+                sample_id,
+                sample_dir,
+                e,
+                exc_info=True,
+            )
+            return False
+
+    async def submit_target_bam_finalize_job(
+        self,
+        sample_dir: str,
+        sample_id: str = None,
+        target_panel: str = None,
+        reference: str = None,
+    ) -> bool:
+        """
+        Submit a target BAM finalization job for an existing sample directory.
+        """
+        logger = logging.getLogger("robin.workflow")
+        try:
+            if sample_id is None:
+                sample_id = Path(sample_dir).name
+            logger.info(
+                "Submitting target_bam_finalize job: sample_id=%s sample_dir=%s target_panel=%s",
+                sample_id,
+                sample_dir,
+                target_panel,
+            )
+
+            if target_panel is None:
+                try:
+                    import csv
+                    master_csv = Path(sample_dir) / "master.csv"
+                    if master_csv.exists():
+                        with master_csv.open("r", newline="") as fh:
+                            reader = csv.DictReader(fh)
+                            first_row = next(reader, None)
+                            if first_row:
+                                panel = first_row.get("analysis_panel", "").strip()
+                                if panel:
+                                    target_panel = panel
+                except Exception:
+                    pass
+
+            metadata = {
+                "sample_id": sample_id,
+                "sample_dir": sample_dir,
+                "work_dir": os.path.dirname(sample_dir),
+                "bam_metadata": {"sample_id": sample_id},
+            }
+
+            if target_panel:
+                metadata["target_panel"] = target_panel
+            if reference:
+                metadata["reference"] = reference
+
+            context = WorkflowContext(filepath=sample_dir, metadata=metadata)
+
+            job = Job(
+                job_id=next(_job_id_counter),
+                job_type="target_bam_finalize",
+                origin="manual",
+                workflow=["slow:target_bam_finalize"],
+                step=0,
+                context=context,
+            )
+
+            await self.submit_jobs([job])
+            logger.info(
+                "target_bam_finalize job queued: sample_id=%s job_id=%s",
+                sample_id,
+                job.job_id,
+            )
+            return True
+
+        except Exception as e:
+            logger.error(
+                "Failed to submit target_bam_finalize job: sample_id=%s sample_dir=%s error=%s",
+                sample_id,
+                sample_dir,
+                e,
+                exc_info=True,
+            )
             return False
 
     def is_sample_ready_for_snp_analysis(
@@ -1454,51 +2161,110 @@ class Coordinator:
                 print("[SHUTDOWN] No samples to finalize")
                 return
             
-            print(f"[SHUTDOWN] Finalizing target.bam for {len(samples_to_finalize)} sample(s) using work_dir: {work_dir}")
+            total = len(samples_to_finalize)
+            start_time = time.time()
+            heartbeat_seconds = 10
+            last_heartbeat = 0.0
+
+            print(
+                f"[SHUTDOWN] Finalizing target.bam for {total} sample(s) using work_dir: {work_dir}",
+                flush=True,
+            )
+            print(
+                "[SHUTDOWN] Progress updates will appear as each sample finalization completes.",
+                flush=True,
+            )
             
             # Submit all finalization tasks to Ray workers in parallel
             tasks = []
-            for sample_id in samples_to_finalize:
+            max_queue_print = 10
+            for i, sample_id in enumerate(samples_to_finalize):
+                if i < max_queue_print:
+                    print(f"[SHUTDOWN] Queued finalization for sample: {sample_id}", flush=True)
+                elif i == max_queue_print:
+                    remaining_to_queue = total - max_queue_print
+                    if remaining_to_queue > 0:
+                        print(f"[SHUTDOWN] Queued additional {remaining_to_queue} sample(s)...", flush=True)
                 task_ref = finalize_sample_task.remote(
                     sample_id=sample_id,
                     work_dir=work_dir,
                     target_panel=self.target_panel
                 )
                 tasks.append((sample_id, task_ref))
-            
-            # Wait for all tasks to complete using asyncio.gather to yield to event loop
+
+            # Wait for tasks to complete with periodic progress output.
+            # (Avoids an apparently "stuck" period while asyncio.gather() waits silently.)
             completed = 0
-            # Collect all task refs for concurrent awaiting
-            task_refs = [task_ref for _, task_ref in tasks]
-            sample_ids = [sample_id for sample_id, _ in tasks]
-            
-            # Await all tasks concurrently
-            results = await asyncio.gather(*task_refs, return_exceptions=True)
-            
-            # Process results
-            for sample_id, result in zip(sample_ids, results):
+            task_ref_to_sample_id = {task_ref: sample_id for sample_id, task_ref in tasks}
+            remaining_refs = [task_ref for _, task_ref in tasks]
+
+            while remaining_refs:
+                # Wait briefly for at least one task to become ready.
                 try:
-                    print(f"[SHUTDOWN] Finalizing target.bam for sample: {sample_id}...")
-                    if isinstance(result, Exception):
-                        print(f"[SHUTDOWN] Warning: Failed to finalize target.bam for {sample_id}: {result}")
-                        logging.warning(f"Failed to finalize target.bam for {sample_id}: {result}")
-                        continue
-                    
-                    completed += 1
-                    if result.get("status") == "error":
-                        print(f"[SHUTDOWN] Warning: Finalization error for {sample_id}: {result.get('error', 'Unknown')}")
-                        logging.warning(f"Finalization error for {sample_id}: {result.get('error', 'Unknown')}")
-                    else:
-                        batch_count = result.get("batch_files_merged", 0)
-                        if batch_count > 0:
-                            print(f"[SHUTDOWN] Completed: {sample_id} (merged {batch_count} batch files)")
-                        else:
-                            print(f"[SHUTDOWN] Completed: {sample_id}")
+                    ready_refs, remaining_refs = await asyncio.to_thread(
+                        ray.wait,
+                        remaining_refs,
+                        1,
+                        5.0,  # timeout seconds; keeps the shutdown console responsive
+                    )
                 except Exception as e:
-                    print(f"[SHUTDOWN] Warning: Failed to finalize target.bam for {sample_id}: {e}")
-                    logging.warning(f"Failed to finalize target.bam for {sample_id}: {e}")
-            
-            print(f"[SHUTDOWN] Target BAM finalization: {completed}/{len(tasks)} samples completed")
+                    print(f"[SHUTDOWN] Warning: Error while waiting for target.bam finalization tasks: {e}", flush=True)
+                    logging.warning(f"Error while waiting for target.bam finalization tasks: {e}")
+                    break
+
+                if ready_refs:
+                    for ref in ready_refs:
+                        sample_id = task_ref_to_sample_id.get(ref, "unknown")
+                        try:
+                            result = await asyncio.to_thread(ray.get, ref)
+                            completed += 1
+
+                            if isinstance(result, Exception):
+                                print(
+                                    f"[SHUTDOWN] Warning: Failed to finalize target.bam for {sample_id}: {result}",
+                                    flush=True,
+                                )
+                                logging.warning(f"Failed to finalize target.bam for {sample_id}: {result}")
+                                continue
+
+                            if isinstance(result, dict) and result.get("status") == "error":
+                                print(
+                                    f"[SHUTDOWN] Warning: Finalization error for {sample_id}: {result.get('error', 'Unknown')}",
+                                    flush=True,
+                                )
+                                logging.warning(
+                                    f"Finalization error for {sample_id}: {result.get('error', 'Unknown')}"
+                                )
+                            else:
+                                batch_count = 0
+                                if isinstance(result, dict):
+                                    batch_count = result.get("batch_files_merged", 0) or 0
+                                if batch_count > 0:
+                                    print(
+                                        f"[SHUTDOWN] Completed: {sample_id} (merged {batch_count} batch files)",
+                                        flush=True,
+                                    )
+                                else:
+                                    print(f"[SHUTDOWN] Completed: {sample_id}", flush=True)
+                        except Exception as e:
+                            print(
+                                f"[SHUTDOWN] Warning: Failed to finalize target.bam for {sample_id}: {e}",
+                                flush=True,
+                            )
+                            logging.warning(f"Failed to finalize target.bam for {sample_id}: {e}")
+
+                # Heartbeat: user-friendly output during long waits.
+                now = time.time()
+                if now - last_heartbeat >= heartbeat_seconds:
+                    elapsed_seconds = int(now - start_time)
+                    remaining = len(remaining_refs)
+                    print(
+                        f"[SHUTDOWN] Still finalizing target.bam... {completed}/{total} completed, {remaining} remaining (elapsed {elapsed_seconds}s)",
+                        flush=True,
+                    )
+                    last_heartbeat = now
+
+            print(f"[SHUTDOWN] Target BAM finalization: {completed}/{total} samples completed", flush=True)
         except Exception as e:
             print(f"[SHUTDOWN] Error during target BAM finalization: {e}")
             logging.warning(f"Error during target BAM finalization: {e}")
@@ -1509,8 +2275,9 @@ class Coordinator:
             return
         
         # Use lock to prevent concurrent flushes
-        if self._csv_buffer_lock:
-            async with self._csv_buffer_lock:
+        lock = self._get_csv_buffer_lock()
+        if lock:
+            async with lock:
                 buffer_to_write = self._csv_buffer[:]
                 self._csv_buffer.clear()
         else:
@@ -1564,8 +2331,22 @@ class Coordinator:
                 pass  # Silently continue on write errors
 
     async def _on_finish(
-        self, job: Job, ok: bool, ctx: WorkflowContext, err: Optional[str]
+        self,
+        job: Job,
+        ok: bool,
+        ctx: WorkflowContext,
+        err: Optional[str],
+        failure_kind: Optional[str] = None,
     ):
+        # Infer structured failure kind when not provided (for filtering/alerting)
+        if not ok and failure_kind is None and err:
+            failure_kind = (
+                "timed_out"
+                if "timed out" in (err or "").lower()
+                else "exception"
+            )
+        elif ok:
+            failure_kind = None
         # capture start info for duration logging, then update dedup maps
         active_info = self.active.pop(job.job_id, None)
         start_time = None
@@ -1722,6 +2503,7 @@ class Coordinator:
                                         ent_local = {
                                             "sample_id": sid_local,
                                             "active_jobs": 0,
+                                            "pending_jobs": 0,
                                             "total_jobs": 0,
                                             "completed_jobs": 0,
                                             "failed_jobs": 0,
@@ -1785,8 +2567,44 @@ class Coordinator:
                         
                         # For CNV jobs, add them to the batcher
                         for cnv_job in cnv_jobs:
+                            try:
+                                sid_pending = cnv_job.context.get_sample_id() if cnv_job.context else "unknown"
+                            except Exception:
+                                sid_pending = "unknown"
+                            try:
+                                if sid_pending != "unknown":
+                                    ent_pending = self.samples_by_id.get(sid_pending)
+                                    if ent_pending is None:
+                                        ent_pending = {
+                                            "sample_id": sid_pending,
+                                            "active_jobs": 0,
+                                            "pending_jobs": 0,
+                                            "total_jobs": 0,
+                                            "completed_jobs": 0,
+                                            "failed_jobs": 0,
+                                            "job_types": set(),
+                                            "last_seen": time.time(),
+                                        }
+                                        self.samples_by_id[sid_pending] = ent_pending
+                                    ent_pending["pending_jobs"] = ent_pending.get("pending_jobs", 0) + 1
+                                    ent_pending["last_seen"] = time.time()
+                            except Exception:
+                                pass
                             batches = await self.sample_batcher.add_job(cnv_job)
                             if batches:
+                                try:
+                                    for batch in batches:
+                                        sid_batch = batch.sample_id
+                                        if sid_batch != "unknown":
+                                            ent_pending = self.samples_by_id.get(sid_batch)
+                                            if ent_pending and ent_pending.get("pending_jobs", 0) > 0:
+                                                ent_pending["pending_jobs"] = max(
+                                                    0,
+                                                    ent_pending.get("pending_jobs", 0) - len(batch.contexts),
+                                                )
+                                                ent_pending["last_seen"] = time.time()
+                                except Exception:
+                                    pass
                                 # Convert BatchedJob to regular Job for processing
                                 regular_jobs = self._convert_batched_jobs(batches)
                                 await self._submit_jobs_internal(regular_jobs)
@@ -1805,6 +2623,41 @@ class Coordinator:
                 self.failed_by_type[job.job_type] = (
                     self.failed_by_type.get(job.job_type, 0) + 1
                 )
+                # Record failed job for tracking and OOM diagnosis
+                try:
+                    err_str = (err or "")[:1500]  # Keep more of traceback so root cause is visible
+                    err_lower = err_str.lower()
+                    # Ray OOM: worker is killed by raylet; error often says "worker died" / "connection" / "SIGKILL" not "oom"
+                    is_oom = (
+                        "oom" in err_lower
+                        or "out of memory" in err_lower
+                        or "outofmemory" in err_lower
+                        or "worker killed" in err_lower
+                        or "killed (oom)" in err_lower
+                        or "memory error" in err_lower
+                        or "worker died" in err_lower
+                        or "worker unexpectedly exits" in err_lower
+                        or "worker exit" in err_lower
+                        or "sigkill" in err_lower
+                        or "connection error" in err_lower
+                        or "system_error" in err_lower
+                    )
+                    sid_fail = (
+                        job.context.get_sample_id()
+                        if hasattr(job.context, "get_sample_id")
+                        else "unknown"
+                    )
+                    fp_fail = getattr(job.context, "filepath", "") or ""
+                    self._failed_jobs_log.append({
+                        "sample_id": sid_fail,
+                        "filepath": fp_fail,
+                        "job_type": job.job_type,
+                        "error": err_str,
+                        "is_oom": is_oom,
+                        "failure_kind": failure_kind or "",
+                    })
+                except Exception:
+                    pass
 
         # per-sample finish updates
         try:
@@ -1872,6 +2725,14 @@ class Coordinator:
                 )
                 if self.pending_by_type_sample[key_ts] == 0:
                     self.pending_by_type_sample.pop(key_ts, None)
+                try:
+                    if sid != "unknown":
+                        ent_pending = self.samples_by_id.get(sid)
+                        if ent_pending and ent_pending.get("pending_jobs", 0) > 0:
+                            ent_pending["pending_jobs"] -= 1
+                            ent_pending["last_seen"] = time.time()
+                except Exception:
+                    pass
                 self.running_by_type_sample[key_ts] = (
                     self.running_by_type_sample.get(key_ts, 0) + 1
                 )
@@ -1900,6 +2761,7 @@ class Coordinator:
                                 ent_local2 = {
                                     "sample_id": sid_local2,
                                     "active_jobs": 0,
+                                    "pending_jobs": 0,
                                     "total_jobs": 0,
                                     "completed_jobs": 0,
                                     "failed_jobs": 0,
@@ -1923,9 +2785,7 @@ class Coordinator:
                         "start_time": time.time(),
                     }
 
-        # Promote next classification job for this type if any (single global pipeline)
-        # Global backpressure release: for the finished job type, submit one waiting
-        # job if we are below the max_inflight threshold.
+        # Release backpressure queues after a job finishes
         try:
             jt = job.job_type
             # decrement inflight count for this type
@@ -1933,64 +2793,15 @@ class Coordinator:
                 self.inflight_by_type[jt] -= 1
                 if self.inflight_by_type[jt] == 0:
                     self.inflight_by_type.pop(jt, None)
-            queue_global = self.waiting_by_type_global.get(jt, [])
-            if (
-                queue_global
-                and int(self.inflight_by_type.get(jt, 0)) < self.max_inflight_per_type
-            ):
-                nxt_job_g = queue_global.pop(0)
-                if not queue_global:
-                    self.waiting_by_type_global.pop(jt, None)
-                proc_g = self.processors.get(jt)
-                if proc_g is not None:
-                    if getattr(self, "using_pools", False):
-                        try:
-                            proc_g.enqueue.remote(nxt_job_g)
-                        except Exception:
-                            pass
-                    else:
-                        ref_g = proc_g.process.remote(nxt_job_g)
-                        self._inflight[ref_g] = nxt_job_g
-                    self.inflight_by_type[jt] = (
-                        int(self.inflight_by_type.get(jt, 0)) + 1
-                    )
-                    self.submitted_by_type[jt] = self.submitted_by_type.get(jt, 0) + 1
-                    self.total_enqueued += 1
-                    # Update per-sample aggregate for GUI samples view
-                    try:
-                        sid_local_g = (
-                            nxt_job_g.context.get_sample_id()
-                            if hasattr(nxt_job_g.context, "get_sample_id")
-                            else "unknown"
-                        )
-                        if sid_local_g != "unknown":
-                            ent_local_g = self.samples_by_id.get(sid_local_g)
-                            if ent_local_g is None:
-                                ent_local_g = {
-                                    "sample_id": sid_local_g,
-                                    "active_jobs": 0,
-                                    "total_jobs": 0,
-                                    "completed_jobs": 0,
-                                    "failed_jobs": 0,
-                                    "job_types": set(),
-                                    "last_seen": time.time(),
-                                }
-                                self.samples_by_id[sid_local_g] = ent_local_g
-                            ent_local_g["total_jobs"] += 1
-                            ent_local_g["active_jobs"] += 1
-                            try:
-                                ent_local_g["job_types"].add(nxt_job_g.job_type)
-                            except Exception:
-                                pass
-                            ent_local_g["last_seen"] = time.time()
-                    except Exception:
-                        pass
-                    self.active[nxt_job_g.job_id] = {
-                        "job_type": nxt_job_g.job_type,
-                        "filepath": nxt_job_g.context.filepath,
-                        "queue": job_queue_of(nxt_job_g.job_type),
-                        "start_time": time.time(),
-                    }
+            # decrement inflight count for this queue
+            qn = queue_name or job_queue_of(jt)
+            if self.inflight_by_queue.get(qn, 0) > 0:
+                self.inflight_by_queue[qn] -= 1
+                if self.inflight_by_queue[qn] == 0:
+                    self.inflight_by_queue.pop(qn, None)
+            await self._drain_waiting_jobs(qn, jt)
+        except Exception:
+            pass
         except Exception:
             pass
         if job.job_type in CLASSIFICATION_TYPES:
@@ -2035,6 +2846,7 @@ class Coordinator:
                                 ent_local3 = {
                                     "sample_id": sid_local3,
                                     "active_jobs": 0,
+                                    "pending_jobs": 0,
                                     "total_jobs": 0,
                                     "completed_jobs": 0,
                                     "failed_jobs": 0,
@@ -2064,7 +2876,30 @@ class Coordinator:
                 if not self._inflight:
                     await asyncio.sleep(0.1)
                     continue
+                now = time.time()
+                timeout_sec = getattr(self, "job_timeout_seconds", 0) or 0
+                # Cancel any jobs that have exceeded the per-job timeout
+                if timeout_sec > 0:
+                    for ref, job in list(self._inflight.items()):
+                        start = None
+                        try:
+                            info = self.active.get(job.job_id)
+                            if isinstance(info, dict):
+                                start = info.get("start_time")
+                        except Exception:
+                            pass
+                        if start is not None and (now - start) >= timeout_sec:
+                            try:
+                                ray.cancel(ref)
+                            except Exception:
+                                pass
+                            self._inflight.pop(ref, None)
+                            err_msg = f"Job timed out after {timeout_sec}s"
+                            await self._on_finish(job, False, job.context, err_msg, "timed_out")
                 refs = list(self._inflight.keys())
+                if not refs:
+                    await asyncio.sleep(0.1)
+                    continue
                 ready, _ = ray.wait(refs, num_returns=1, timeout=0.1)
                 for r in ready:
                     job = self._inflight.pop(r, None)
@@ -2088,6 +2923,19 @@ class Coordinator:
                 
                 # Submit timed-out batches
                 if timed_out_batches:
+                    try:
+                        for batch in timed_out_batches:
+                            sid_batch = batch.sample_id
+                            if sid_batch != "unknown":
+                                ent_pending = self.samples_by_id.get(sid_batch)
+                                if ent_pending and ent_pending.get("pending_jobs", 0) > 0:
+                                    ent_pending["pending_jobs"] = max(
+                                        0,
+                                        ent_pending.get("pending_jobs", 0) - len(batch.contexts),
+                                    )
+                                    ent_pending["last_seen"] = time.time()
+                    except Exception:
+                        pass
                     regular_jobs = self._convert_batched_jobs(timed_out_batches)
                     await self._submit_jobs_internal(regular_jobs)
                 
@@ -2148,6 +2996,18 @@ class Coordinator:
                 self.pending.pop(key, None)
             self.running[key] = self.running.get(key, 0) + 1
 
+    async def mark_handler_started(self, job_id: int) -> None:
+        """Worker calls this when the real handler body begins (Ray task running)."""
+        try:
+            info = self.active.get(int(job_id))
+            if info is None:
+                return
+            if info.get("handler_start_time") is not None:
+                return
+            info["handler_start_time"] = time.time()
+        except Exception:
+            pass
+
     async def stats(self) -> Dict[str, Any]:
         # Check cache first for performance
         now = time.time()
@@ -2155,17 +3015,113 @@ class Coordinator:
             return self._stats_cache
         
         # per-queue active summary (also expose as 'active_by_worker' for GUI compat)
+        # IMPORTANT: We keep two representations:
+        # - active_by_queue: truncated to the 2 most recently started jobs (UI display)
+        # - active_count_by_queue/job_type: full counts (debugging "Act" discrepancies)
         active_by_queue: Dict[str, List[Dict[str, Any]]] = {}
+        active_count_by_queue: Dict[str, int] = {}
+        active_count_by_job_type: Dict[str, int] = {}
         for jid, info in self.active.items():
             q = info["queue"]
+            jt = info["job_type"]
+            active_count_by_queue[q] = active_count_by_queue.get(q, 0) + 1
+            active_count_by_job_type[jt] = active_count_by_job_type.get(jt, 0) + 1
+            hs = info.get("handler_start_time")
+            st = info.get("start_time")
+            if hs is not None:
+                duration_s = int(now - float(hs))
+                dispatch_wait = (
+                    int(float(hs) - float(st)) if st is not None else None
+                )
+            else:
+                duration_s = int(now - float(st)) if st is not None else 0
+                dispatch_wait = None
             active_by_queue.setdefault(q, []).append(
                 {
                     "job_id": jid,
-                    "job_type": info["job_type"],
+                    "job_type": jt,
                     "filepath": info["filepath"],
-                    "duration": int(now - info["start_time"]),
+                    "duration": duration_s,
+                    "dispatch_wait_seconds": dispatch_wait,
+                    "start_time": info["start_time"],
                 }
             )
+
+        # Sort each queue's list by start_time descending (newest first), then keep only first 2
+        for q in active_by_queue:
+            active_by_queue[q] = sorted(
+                active_by_queue[q], key=lambda x: x["start_time"], reverse=True
+            )[:2]
+            for entry in active_by_queue[q]:
+                entry.pop("start_time", None)
+
+        # Fallback path: if coordinator active bookkeeping is empty/missing while
+        # queue actors still report running jobs, surface those in monitor stats.
+        try:
+            runtime_rows = await asyncio.gather(
+                *[proc.runtime_status.remote() for proc in self.processors.values()],
+                return_exceptions=True,
+            )
+        except Exception:
+            runtime_rows = []
+        runtime_active_count_by_queue: Dict[str, int] = {}
+        runtime_active_count_by_job_type: Dict[str, int] = {}
+        runtime_active_by_queue: Dict[str, List[Dict[str, Any]]] = {}
+        for row in runtime_rows:
+            if isinstance(row, Exception) or not isinstance(row, dict):
+                continue
+            qn = str(row.get("queue") or "")
+            rc = int(row.get("running_count") or 0)
+            if qn:
+                runtime_active_count_by_queue[qn] = runtime_active_count_by_queue.get(qn, 0) + rc
+            for j in (row.get("inflight") or []):
+                if not isinstance(j, dict):
+                    continue
+                jt = str(j.get("job_type") or "")
+                if jt:
+                    runtime_active_count_by_job_type[jt] = runtime_active_count_by_job_type.get(jt, 0) + 1
+                if qn:
+                    runtime_active_by_queue.setdefault(qn, []).append(
+                        {
+                            "job_id": j.get("job_id"),
+                            "job_type": jt,
+                            "filepath": j.get("filepath", ""),
+                            "duration": int(j.get("duration", 0) or 0),
+                            "dispatch_wait_seconds": None,
+                        }
+                    )
+
+        if len(self.active) == 0:
+            # Use runtime fallback only when primary active map is empty.
+            if runtime_active_count_by_queue:
+                active_count_by_queue = runtime_active_count_by_queue
+            if runtime_active_count_by_job_type:
+                active_count_by_job_type = runtime_active_count_by_job_type
+            if runtime_active_by_queue:
+                active_by_queue = {
+                    q: sorted(v, key=lambda x: x.get("duration", 0), reverse=True)[:2]
+                    for q, v in runtime_active_by_queue.items()
+                }
+
+        # A compact dump of the longest-running active jobs (useful for "stuck" debugging)
+        active_top_by_duration = sorted(
+            [
+                {
+                    "job_id": jid,
+                    "job_type": info["job_type"],
+                    "queue": info["queue"],
+                    "filepath": info["filepath"],
+                    "duration": (
+                        int(now - float(info["handler_start_time"]))
+                        if info.get("handler_start_time") is not None
+                        else int(now - float(info["start_time"]))
+                    ),
+                }
+                for jid, info in self.active.items()
+            ],
+            key=lambda x: x["duration"],
+            reverse=True,
+        )[:10]
 
         # build category counts
         def _cat_of(jt: str) -> str:
@@ -2207,13 +3163,50 @@ class Coordinator:
             )
         except Exception:
             waiting_serialized = 0
-        # Count global backpressure queues (per-type)
+        # Count global backpressure queues (per-type, per-queue, and global)
         try:
             waiting_global = sum(
                 len(v) for v in getattr(self, "waiting_by_type_global", {}).values()
             )
         except Exception:
             waiting_global = 0
+        try:
+            waiting_global += sum(
+                len(v) for v in getattr(self, "waiting_by_queue", {}).values()
+            )
+        except Exception:
+            pass
+        try:
+            waiting_global += len(getattr(self, "waiting_global", []))
+        except Exception:
+            pass
+
+        waiting_count_by_queue: Dict[str, int] = {}
+        try:
+            # For debug: how much is queued per queue name
+            for qn, lst in getattr(self, "waiting_by_queue", {}).items():
+                waiting_count_by_queue[qn] = len(lst)
+        except Exception:
+            waiting_count_by_queue = {}
+
+        waiting_count_by_type_global: Dict[str, int] = {}
+        try:
+            # For debug: how much is queued in the per-job-type global backpressure lists
+            for jt, lst in getattr(self, "waiting_by_type_global", {}).items():
+                waiting_count_by_type_global[jt] = len(lst)
+        except Exception:
+            waiting_count_by_type_global = {}
+
+        inflight_by_type_debug: Dict[str, int] = {}
+        inflight_by_queue_debug: Dict[str, int] = {}
+        try:
+            inflight_by_type_debug = dict(getattr(self, "inflight_by_type", {}) or {})
+        except Exception:
+            inflight_by_type_debug = {}
+        try:
+            inflight_by_queue_debug = dict(getattr(self, "inflight_by_queue", {}) or {})
+        except Exception:
+            inflight_by_queue_debug = {}
         # Samples payload for GUI
         samples_payload: List[Dict[str, Any]] = []
         try:
@@ -2221,6 +3214,7 @@ class Coordinator:
                 sample_data = {
                     "sample_id": sid,
                     "active_jobs": ent.get("active_jobs", 0),
+                    "pending_jobs": ent.get("pending_jobs", 0),
                     "total_jobs": ent.get("total_jobs", 0),
                     "completed_jobs": ent.get("completed_jobs", 0),
                     "failed_jobs": ent.get("failed_jobs", 0),
@@ -2242,12 +3236,26 @@ class Coordinator:
             "active_by_queue": active_by_queue,
             "active_by_worker": active_by_queue,  # compatibility for GUI table
             "active_count": len(self.active),
+            "active_count_by_queue": active_count_by_queue,
+            "active_count_by_job_type": active_count_by_job_type,
+            "active_top_by_duration": active_top_by_duration,
             "waiting_serialized": waiting_serialized,
             "waiting_global": waiting_global,
+            "waiting_count_by_queue": waiting_count_by_queue,
+            "waiting_count_by_type_global": waiting_count_by_type_global,
+            "inflight_by_type_debug": inflight_by_type_debug,
+            "inflight_by_queue_debug": inflight_by_queue_debug,
             "running_by_category": running_counts,
             "totals_by_category": totals_counts,
             "samples": samples_payload,
+            "runtime_active_count_by_queue": runtime_active_count_by_queue,
+            "runtime_active_count_by_job_type": runtime_active_count_by_job_type,
+            # Failed job tracking: last 500 entries for inspection / OOM diagnosis
+            "failed_jobs_list": list(self._failed_jobs_log)[-500:],
+            "oom_count": sum(1 for e in self._failed_jobs_log if e.get("is_oom")),
         }
+        if result["active_count"] == 0 and runtime_active_count_by_queue:
+            result["active_count"] = int(sum(runtime_active_count_by_queue.values()))
         
         # Cache the result for future calls
         self._stats_cache = result
@@ -2282,6 +3290,14 @@ class Coordinator:
             # Stop accepting new jobs
             self._shutdown_requested = True
             print("[SHUTDOWN] Stopped accepting new jobs")
+
+            # Write failed jobs log so user can see which jobs failed (e.g. OOM)
+            try:
+                path = self._write_failed_jobs_file()
+                if path:
+                    print(f"[SHUTDOWN] Wrote failed jobs log: {path}")
+            except Exception as e:
+                print(f"[SHUTDOWN] Warning: Could not write failed jobs log: {e}")
             
             # Finalize target accumulation for all samples with batch BAMs pending merge
             try:
@@ -2349,21 +3365,30 @@ class Coordinator:
 
 @ray.remote
 class Pool:
-    def __init__(self, queue_name: str, max_parallel: int = 1):
+    def __init__(
+        self,
+        queue_name: str,
+        max_parallel: int = 1,
+        job_timeout_seconds: int = 0,
+    ):
         self.queue_name = queue_name
         self.max_parallel = max(1, int(max_parallel))
+        self.job_timeout_seconds = max(0, int(job_timeout_seconds))
         # job_type -> (remote_func, resource_options)
         self.handlers: Dict[str, Tuple[Any, Dict[str, Any]]] = {}
         # callback to Coordinator actor
         self._coordinator = None
         self._coordinator_name: Optional[str] = None
-        self._inflight: Set[ray.ObjectRef] = set()
+        # ref -> (job, start_time) for timeout and completion
+        self._inflight_data: Dict[Any, Tuple[Job, float]] = {}
+        self._timed_out_jobs: Set[str] = set()
         self._running_count: int = 0
         self._shutdown_requested: bool = False
+        self._timeout_task: Optional[asyncio.Task] = None
         
         # Initialize memory manager for long-running pool actor
         self.memory_manager = None
-        if MemoryManager is not None:
+        if MemoryManager is not None and not DISABLE_MEMORY_MANAGER:
             try:
                 # Configure memory management based on queue type
                 gc_every = 30 if queue_name in {"analysis", "classif"} else 50
@@ -2415,6 +3440,34 @@ class Pool:
     ):
         self.handlers[job_type] = (remote_func, resource_options)
 
+    async def runtime_status(self) -> Dict[str, Any]:
+        """
+        Lightweight runtime status for progress fallback/debugging.
+        Returns queue-local running count and a short list of inflight jobs.
+        """
+        now = time.time()
+        inflight: List[Dict[str, Any]] = []
+        try:
+            for ref, (job, start_time) in list(self._inflight_data.items())[:4]:
+                try:
+                    inflight.append(
+                        {
+                            "job_id": job.job_id,
+                            "job_type": job.job_type,
+                            "filepath": job.context.filepath if job.context else "",
+                            "duration": int(now - float(start_time)),
+                        }
+                    )
+                except Exception:
+                    continue
+        except Exception:
+            inflight = []
+        return {
+            "queue": self.queue_name,
+            "running_count": int(self._running_count),
+            "inflight": inflight,
+        }
+
     async def enqueue(self, job: Job):
         # Check if shutdown has been requested
         if self._shutdown_requested:
@@ -2444,26 +3497,43 @@ class Pool:
         while self._running_count >= self.max_parallel:
             await asyncio.sleep(0.005)
         ref = remote_func.options(**opts).remote(job)
-        self._inflight.add(ref)
+        self._inflight_data[ref] = (job, time.time())
         self._running_count += 1
+
+        # Start timeout loop once if per-job timeout is enabled
+        if self.job_timeout_seconds > 0 and (self._timeout_task is None or self._timeout_task.done()):
+            try:
+                self._timeout_task = asyncio.create_task(self._timeout_loop())
+            except Exception:
+                pass
 
         async def _wait(r):
             ok, ctx, err = True, None, None
+            failure_kind = None
             try:
                 ctx = await r
+                # Treat handler "error return" as failure: context has errors for this job_type
+                errors = getattr(ctx, "errors", []) or []
+                job_errors = [e for e in errors if isinstance(e, dict) and e.get("job_type") == job.job_type]
+                if job_errors:
+                    ok = False
+                    err = job_errors[-1].get("error", "handler reported error")
+                    failure_kind = "returned_error"
             except Exception as e:
                 ok, err = False, str(e)
                 ctx = job.context
                 ctx.add_error(job.job_type, err)
+                failure_kind = "exception"
+            self._inflight_data.pop(r, None)
             coord2 = self._get_coordinator()
-            if coord2 is not None:
-                await coord2._on_finish.remote(job, ok, ctx, err)
-            self._inflight.discard(r)
+            if coord2 is not None and job.job_id not in self._timed_out_jobs:
+                await coord2._on_finish.remote(job, ok, ctx, err, failure_kind)
+            elif job.job_id in self._timed_out_jobs:
+                self._timed_out_jobs.discard(job.job_id)
             if self._running_count > 0:
                 self._running_count -= 1
             
             # Trigger memory cleanup after job completion
-            # Check if pool is idle (no running jobs) before cleanup
             if self.memory_manager is not None:
                 try:
                     is_idle = self._running_count == 0
@@ -2491,8 +3561,8 @@ class Pool:
             self._shutdown_requested = True
             
             # Cancel all inflight tasks
-            if self._inflight:
-                for ref in list(self._inflight):
+            if self._inflight_data:
+                for ref in list(self._inflight_data):
                     try:
                         ray.cancel(ref)
                     except Exception:
@@ -2501,6 +3571,36 @@ class Pool:
             return True
         except Exception:
             return False
+
+    async def _timeout_loop(self) -> None:
+        """Cancel jobs that exceed job_timeout_seconds and report them as failed."""
+        while not self._shutdown_requested and self.job_timeout_seconds > 0:
+            try:
+                await asyncio.sleep(10)
+                now = time.time()
+                coord = self._get_coordinator()
+                if coord is None:
+                    continue
+                for ref, (job, start_time) in list(self._inflight_data.items()):
+                    if (now - start_time) >= self.job_timeout_seconds:
+                        self._timed_out_jobs.add(job.job_id)
+                        self._inflight_data.pop(ref, None)
+                        if self._running_count > 0:
+                            self._running_count -= 1
+                        try:
+                            ray.cancel(ref)
+                        except Exception:
+                            pass
+                        err_msg = (
+                            f"Job timed out after {self.job_timeout_seconds}s"
+                        )
+                        await coord._on_finish.remote(
+                            job, False, job.context, err_msg, "timed_out"
+                        )
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                pass
 
     # Adapter so callers using TypeProcessor-style .process() keep working
     async def process(self, job: Job):
@@ -2539,12 +3639,83 @@ def _matches_any_pattern(p: Path, patterns: Optional[List[str]]) -> bool:
 
 
 def _matches_no_ignores(p: Path, ignore_patterns: Optional[List[str]]) -> bool:
+    # Always ignore hidden dotfiles/directories by default.
+    # This keeps `robin workflow` from getting noisy when watch directories contain
+    # files like `.DS_Store` or editor artifacts.
+    if p.name.startswith("."):
+        return False
     if not ignore_patterns:
         return True
     try:
         return not any(p.match(pat) for pat in ignore_patterns)
     except Exception:
         return True
+
+
+def _is_bam_path(p: Path) -> bool:
+    try:
+        return p.suffix.lower() == ".bam"
+    except Exception:
+        return False
+
+
+def _bam_filename_kind(filepath: str) -> str:
+    """Classify BAM filenames by substring: 'pass' | 'fail' | 'unknown'."""
+    try:
+        n = os.path.basename(filepath).lower()
+    except Exception:
+        return "unknown"
+    if "pass" in n:
+        return "pass"
+    if "fail" in n:
+        return "fail"
+    return "unknown"
+
+
+def _detect_fail_only_bam_submission(
+    paths: List[str],
+    patterns: Optional[List[str]],
+    ignore_patterns: Optional[List[str]],
+    recursive: bool,
+) -> bool:
+    """
+    True iff this submission contains BAMs and *all* BAM filenames contain 'fail'
+    and none contain 'pass'. Used to suppress expected downstream failures on
+    fail-only read sets.
+    """
+    bam_total = 0
+    bam_fail = 0
+    bam_pass = 0
+    for p in paths:
+        pth = Path(p)
+        if pth.is_file():
+            files = [pth]
+        elif pth.is_dir():
+            try:
+                files = list(pth.rglob("*") if recursive else pth.glob("*"))
+            except Exception:
+                files = []
+        else:
+            files = []
+        for f in files:
+            try:
+                if not f.is_file():
+                    continue
+                if not _matches_any_pattern(f, patterns) or not _matches_no_ignores(
+                    f, ignore_patterns
+                ):
+                    continue
+                if not _is_bam_path(f):
+                    continue
+                bam_total += 1
+                k = _bam_filename_kind(str(f))
+                if k == "fail":
+                    bam_fail += 1
+                elif k == "pass":
+                    bam_pass += 1
+            except Exception:
+                continue
+    return bool(bam_total and bam_pass == 0 and bam_fail == bam_total)
 
 
 async def submit_existing_paths(
@@ -2568,6 +3739,13 @@ async def submit_existing_paths(
     except Exception:
         pass
     
+    fail_only_bam_submission = _detect_fail_only_bam_submission(
+        paths=paths,
+        patterns=patterns,
+        ignore_patterns=ignore_patterns,
+        recursive=recursive,
+    )
+
     seed_jobs: List[Job] = []
     for p in paths:
         pth = Path(p)
@@ -2579,6 +3757,10 @@ async def submit_existing_paths(
                 if work_dir:
                     for j in jobs:
                         j.context.add_metadata("work_dir", work_dir)
+                # If this submission is fail-only BAMs, downstream errors are expected/noisy.
+                if fail_only_bam_submission and _is_bam_path(pth):
+                    for j in jobs:
+                        j.context.add_metadata("fail_only_bam_submission", True)
                 # Add reference genome to job metadata if available
                 if coord_reference:
                     for j in jobs:
@@ -2603,6 +3785,9 @@ async def submit_existing_paths(
                 if work_dir:
                     for j in jobs:
                         j.context.add_metadata("work_dir", work_dir)
+                if fail_only_bam_submission and _is_bam_path(f):
+                    for j in jobs:
+                        j.context.add_metadata("fail_only_bam_submission", True)
                 # Add reference genome to job metadata if available
                 if coord_reference:
                     for j in jobs:
@@ -2613,15 +3798,40 @@ async def submit_existing_paths(
                         j.context.add_metadata("target_panel", coord_target_panel)
                 batch += jobs
                 if len(batch) >= 256:
-                    await coord.submit_jobs.remote(batch)
+                    while True:
+                        try:
+                            can_accept = await coord.can_accept_jobs.remote(len(batch))
+                        except Exception:
+                            can_accept = True
+                        if can_accept:
+                            await coord.submit_jobs.remote(batch)
+                            break
+                        await asyncio.sleep(0.2)
                     batch = []
             if batch:
-                await coord.submit_jobs.remote(batch)
+                while True:
+                    try:
+                        can_accept = await coord.can_accept_jobs.remote(len(batch))
+                    except Exception:
+                        can_accept = True
+                    if can_accept:
+                        await coord.submit_jobs.remote(batch)
+                        break
+                    await asyncio.sleep(0.2)
     if seed_jobs:
         # Submit in bounded batches to avoid flooding the coordinator/actors
         BATCH = 256
         for i in range(0, len(seed_jobs), BATCH):
-            await coord.submit_jobs.remote(seed_jobs[i : i + BATCH])
+            chunk = seed_jobs[i : i + BATCH]
+            while True:
+                try:
+                    can_accept = await coord.can_accept_jobs.remote(len(chunk))
+                except Exception:
+                    can_accept = True
+                if can_accept:
+                    await coord.submit_jobs.remote(chunk)
+                    break
+                await asyncio.sleep(0.2)
 
 
 async def tqdm_monitor(coord, continuous: bool = False) -> None:
@@ -2665,25 +3875,35 @@ async def tqdm_monitor(coord, continuous: bool = False) -> None:
 
             # Active per queue
             active_by_queue = s.get("active_by_queue", {})
+            active_count_by_queue = s.get("active_count_by_queue", {}) or {}
+            active_count_by_job_type = s.get("active_count_by_job_type", {}) or {}
+            waiting_count_by_queue = s.get("waiting_count_by_queue", {}) or {}
+            active_count_by_queue = s.get("active_count_by_queue", {}) or {}
+            active_count_by_job_type = s.get("active_count_by_job_type", {}) or {}
+            waiting_count_by_queue = s.get("waiting_count_by_queue", {}) or {}
 
             # Update per-queue bars
             for q in order:
                 completed_in_q = completed_queue_counts.get(q, 0)
-                active_in_q = len(active_by_queue.get(q, []))
+                # Use full active counts for debugging; UI list is truncated to 2/jobs/queue.
+                active_in_q = int(active_count_by_queue.get(q, 0) or 0)
                 total_for_q = completed_in_q + active_in_q
                 b = bars[q]
                 b.total = max(b.total or 0, total_for_q)
                 b.n = completed_in_q
-                # show up to 2 active jobs
+                # Show up to 2 active jobs with per-job duration (no full path to avoid clutter)
                 active_jobs_info = active_by_queue.get(q, [])
                 if active_jobs_info:
                     parts = []
                     for j in active_jobs_info[:2]:
                         fn = os.path.basename(j.get("filepath", ""))
-                        # Truncate long filenames to keep display compact
                         if len(fn) > 25:
                             fn = fn[:22] + "..."
-                        parts.append(f"{fn}({j['duration']}s)")
+                        dq = j.get("dispatch_wait_seconds")
+                        if dq is not None and int(dq) > 0:
+                            parts.append(f"{fn} ({j['duration']}s, +{int(dq)}q)")
+                        else:
+                            parts.append(f"{fn} ({j['duration']}s)")
                     b.set_postfix_str(" | ".join(parts))
                 else:
                     b.set_postfix_str("")
@@ -2695,9 +3915,26 @@ async def tqdm_monitor(coord, continuous: bool = False) -> None:
             ) + int(s.get("waiting_serialized", 0) or 0)
             overall.total = max(overall.total or 0, total_with_waiting) or 0
             overall.n = s["completed"] + s["failed"]
+            fail_str = f"Fail:{s['failed']}"
+            oom = s.get("oom_count", 0)
+            if oom and s["failed"]:
+                fail_str += f" (OOM:{oom})"
+            top_active_types = sorted(
+                active_count_by_job_type.items(), key=lambda x: x[1], reverse=True
+            )[:3]
+            top_waiting_queues = sorted(
+                waiting_count_by_queue.items(), key=lambda x: x[1], reverse=True
+            )[:3]
+            active_types_str = ", ".join([f"{k}:{v}" for k, v in top_active_types])
+            waiting_queues_str = ", ".join(
+                [f"{k}:{v}" for k, v in top_waiting_queues]
+            )
             overall.set_postfix_str(
-                f"Act:{s['active_count']} | Done:{s['completed']} | "
-                f"Fail:{s['failed']} | Skip:{s['total_skipped']} | Tot:{s['total_enqueued']}"
+                f"Act:{s['active_count']}[{active_types_str}] | "
+                f"Wait:{s.get('waiting_global',0)}+{s.get('waiting_serialized',0)} "
+                f"({waiting_queues_str}) | "
+                f"Done:{s['completed']} | {fail_str} | "
+                f"Skip:{s['total_skipped']} | Tot:{s['total_enqueued']}"
             )
             overall.refresh()
 
@@ -2715,6 +3952,147 @@ async def tqdm_monitor(coord, continuous: bool = False) -> None:
         for b in bars.values():
             b.close()
         overall.close()
+        # Write failed jobs log when run ends so user can inspect (e.g. OOM)
+        try:
+            final = ray.get(coord.stats.remote())
+            if final.get("failed", 0) > 0:
+                path = ray.get(coord._write_failed_jobs_file.remote())
+                if path:
+                    oom = final.get("oom_count", 0)
+                    print(f"\nFailed jobs log: {path} ({final['failed']} failures, {oom} likely OOM)")
+        except Exception:
+            pass
+
+
+def _should_use_rich_progress() -> bool:
+    if not _RICH_AVAILABLE:
+        return False
+    preference = os.environ.get("ROBIN_PROGRESS", "").strip().lower()
+    if preference in {"tqdm", "plain", "off", "0", "false", "no"}:
+        return False
+    if preference in {"rich", "on", "1", "true", "yes"}:
+        return True
+    return True
+
+
+async def rich_monitor(coord, continuous: bool = False) -> None:
+    order = [
+        "preprocessing",
+        "bed_conversion",
+        "mgmt",
+        "cnv",
+        "target",
+        "fusion",
+        "classification",
+        "slow",
+    ]
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("{task.description}"),
+        BarColumn(bar_width=20),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        TextColumn("{task.fields[detail]}"),
+        refresh_per_second=4,
+    )
+    task_ids = {
+        q: progress.add_task(q.title(), total=None, detail="") for q in order
+    }
+    overall_id = progress.add_task("Overall Progress", total=None, detail="")
+
+    if _RICH_CONSOLE:
+        _RICH_CONSOLE.print(
+            "[dim]Progress: time column = run elapsed; (Ns) = handler wall time once running "
+            "(+Mq = seconds after dispatch waiting in Pool/Ray); before handler starts, wall time since dispatch[/dim]"
+        )
+    progress.start()
+    try:
+        while True:
+            s = await coord.stats.remote()
+            completed_by_type = s.get("completed_by_type", {})
+            failed_by_type = s.get("failed_by_type", {})
+
+            completed_queue_counts: Dict[str, int] = {q: 0 for q in order}
+            for jt, c in completed_by_type.items():
+                q = job_queue_of(jt)
+                completed_queue_counts[q] += c
+            for jt, c in failed_by_type.items():
+                q = job_queue_of(jt)
+                completed_queue_counts[q] += c
+
+            active_by_queue = s.get("active_by_queue", {})
+            active_count_by_queue = s.get("active_count_by_queue", {}) or {}
+            active_count_by_job_type = s.get("active_count_by_job_type", {}) or {}
+            waiting_count_by_queue = s.get("waiting_count_by_queue", {}) or {}
+
+            for q in order:
+                completed_in_q = completed_queue_counts.get(q, 0)
+                # Use full active counts for debugging; UI list is truncated to 2/jobs/queue.
+                active_in_q = int(active_count_by_queue.get(q, 0) or 0)
+                total_for_q = completed_in_q + active_in_q
+                active_jobs_info = active_by_queue.get(q, [])
+                parts = []
+                total_for_q_display = str(total_for_q) if total_for_q > 0 else "-"
+                parts.append(f"{completed_in_q}/{total_for_q_display}")
+                if active_jobs_info:
+                    for j in active_jobs_info[:2]:
+                        fn = os.path.basename(j.get("filepath", ""))
+                        if len(fn) > 25:
+                            fn = fn[:22] + "..."
+                        dq = j.get("dispatch_wait_seconds")
+                        if dq is not None and int(dq) > 0:
+                            parts.append(f"{fn} ({j['duration']}s, +{int(dq)}q)")
+                        else:
+                            parts.append(f"{fn} ({j['duration']}s)")
+                detail = " | ".join(parts)
+                progress.update(
+                    task_ids[q],
+                    total=total_for_q if total_for_q > 0 else None,
+                    completed=completed_in_q,
+                    detail=detail,
+                )
+
+            total_with_waiting = (
+                s.get("total_enqueued", 0) - s.get("total_skipped", 0)
+            ) + int(s.get("waiting_serialized", 0) or 0)
+            fail_detail = f"Fail:{s['failed']}"
+            oom = s.get("oom_count", 0)
+            if oom and s.get("failed"):
+                fail_detail += f" (OOM:{oom})"
+            progress.update(
+                overall_id,
+                total=total_with_waiting if total_with_waiting > 0 else None,
+                completed=s["completed"] + s["failed"],
+                detail=(
+                    f"Done:{s['completed'] + s['failed']}/{total_with_waiting} | "
+                    f"Act:{s['active_count']}[{', '.join([f'{k}:{v}' for k, v in sorted(active_count_by_job_type.items(), key=lambda x: x[1], reverse=True)[:3]])}] | "
+                    f"Wait:{s.get('waiting_global',0)}+{s.get('waiting_serialized',0)} "
+                    f"({', '.join([f'{k}:{v}' for k, v in sorted(waiting_count_by_queue.items(), key=lambda x: x[1], reverse=True)[:3]])}) | "
+                    f"{fail_detail} | Skip:{s['total_skipped']}"
+                ),
+            )
+
+            if (
+                (not continuous)
+                and s["active_count"] == 0
+                and s["completed"] + s["failed"] >= total_with_waiting
+            ):
+                break
+
+            await asyncio.sleep(0.5)
+    finally:
+        progress.stop()
+        # Write failed jobs log when run ends so user can inspect (e.g. OOM)
+        try:
+            final = ray.get(coord.stats.remote())
+            if final.get("failed", 0) > 0:
+                path = ray.get(coord._write_failed_jobs_file.remote())
+                if path:
+                    oom = final.get("oom_count", 0)
+                    print(f"\nFailed jobs log: {path} ({final['failed']} failures, {oom} likely OOM)")
+        except Exception:
+            pass
 
 
 class RayFileWatcher(FileSystemEventHandler):
@@ -2741,6 +4119,10 @@ class RayFileWatcher(FileSystemEventHandler):
         self._last_flush: float = time.time()
         self._flush_interval_s: float = 0.5
         self._batch_size: int = 128
+        # Track whether this watch session has seen any "pass" BAMs.
+        # If a pass BAM is present, we want fail-BAM errors to remain visible.
+        self._watch_seen_bam: bool = False
+        self._watch_seen_pass_bam: bool = False
 
     def _should_process(self, fp: str) -> bool:
         p = Path(fp)
@@ -2776,10 +4158,28 @@ class RayFileWatcher(FileSystemEventHandler):
         if not self._should_process(fp):
             return
         self.processed.add(fp)
+        # Maintain watch-level pass/fail BAM state
+        try:
+            if _is_bam_path(Path(fp)):
+                self._watch_seen_bam = True
+                k = _bam_filename_kind(fp)
+                if k == "pass":
+                    self._watch_seen_pass_bam = True
+        except Exception:
+            pass
         jobs = default_file_classifier(fp, self.plan, self.target_panel)
         if self.work_dir:
             for j in jobs:
                 j.context.add_metadata("work_dir", self.work_dir)
+        # Tag fail-only BAM submissions for this watch session.
+        # If we've seen a pass BAM, do not suppress errors.
+        try:
+            if _is_bam_path(Path(fp)) and self._watch_seen_bam and (not self._watch_seen_pass_bam):
+                if _bam_filename_kind(fp) == "fail":
+                    for j in jobs:
+                        j.context.add_metadata("fail_only_bam_submission", True)
+        except Exception:
+            pass
         # enqueue and flush under rate limiter
         self._pending_jobs.extend(jobs)
         self._flush_if_needed()
@@ -2805,6 +4205,375 @@ class RayFileWatcher(FileSystemEventHandler):
 
 # Global coordinator reference for external access
 _GLOBAL_COORDINATOR = None
+
+# Global observer and watcher for adding paths at runtime (GUI "Add Folder to Watch")
+_GLOBAL_OBSERVER = None
+_GLOBAL_WATCHER = None
+_GLOBAL_WATCH_CONTEXT: Optional[Dict[str, Any]] = None
+# Maps normalized path string -> ObservedWatch for add/remove
+_GLOBAL_WATCHED_PATHS: Dict[str, Any] = {}
+
+
+def get_watched_paths() -> List[str]:
+    """Return list of currently watched directory paths (normalized)."""
+    global _GLOBAL_WATCHED_PATHS
+    return sorted(_GLOBAL_WATCHED_PATHS.keys())
+
+
+def remove_watch_path(path_to_remove: str) -> Tuple[bool, str]:
+    """
+    Remove a directory from the workflow's watch list.
+
+    Returns:
+        Tuple of (success: bool, message: str)
+    """
+    global _GLOBAL_OBSERVER, _GLOBAL_WATCHED_PATHS
+
+    if _GLOBAL_OBSERVER is None:
+        return False, "No workflow observer found. Is a Ray workflow with watch enabled running?"
+
+    pth = Path(path_to_remove).resolve()
+    path_key = str(pth)
+
+    if path_key not in _GLOBAL_WATCHED_PATHS:
+        return False, f"Path is not being watched: {path_to_remove}"
+
+    watch = _GLOBAL_WATCHED_PATHS[path_key]
+    try:
+        _GLOBAL_OBSERVER.unschedule(watch)
+        del _GLOBAL_WATCHED_PATHS[path_key]
+        return True, f"Removed watch path: {path_to_remove}"
+    except Exception as e:
+        return False, f"Failed to remove watch: {e}"
+
+
+def _path_overlaps_work_dir(candidate: Path, work_dir: Optional[str]) -> bool:
+    """
+    Return True if candidate path overlaps with work directory (should reject).
+
+    Rejects when:
+    - candidate equals work_dir
+    - candidate is inside work_dir (watching our own output)
+    - work_dir is inside candidate (would watch work_dir and its outputs)
+    """
+    if not work_dir:
+        return False
+    try:
+        wd = Path(work_dir).resolve()
+        cand = candidate.resolve()
+        if cand == wd:
+            return True
+        # Reject if candidate is inside work_dir (watching our own output)
+        cand.relative_to(wd)
+        return True
+    except ValueError:
+        pass
+    try:
+        wd = Path(work_dir).resolve()
+        cand = candidate.resolve()
+        # Reject if work_dir is inside candidate (would watch work_dir)
+        wd.relative_to(cand)
+        return True
+    except ValueError:
+        pass
+    return False
+
+
+def _scan_watch_folder_for_sample_dirs(
+    folder: Path,
+    work_dir: Optional[str],
+    patterns: Optional[List[str]],
+    ignore_patterns: Optional[List[str]],
+    recursive: bool,
+    max_bams_to_probe: int = 5000,
+    max_bams_per_dir: int = 8,
+) -> Tuple[List[Path], List[str], Optional[str]]:
+    """
+    Scan a candidate watch folder and return:
+    - A list of directory paths that are safe to watch (contain BAMs for samples
+      that do NOT appear previously analysed, and contain no BAMs for analysed samples)
+    - A sorted list of analysed sample IDs detected
+    - Optional error message
+
+    Returns:
+        (dirs_to_watch, analysed_sample_ids, error_message)
+    """
+    if not work_dir:
+        return [], [], None
+
+    try:
+        wd = Path(work_dir).resolve()
+    except Exception:
+        return [], [], None
+
+    if not wd.exists() or not wd.is_dir():
+        return [], [], None
+
+    def _sample_dir_has_analysis_artifacts_local(sample_dir: Path) -> bool:
+        """Heuristic: True if sample_dir contains real analysis outputs."""
+        try:
+            if not sample_dir.exists() or not sample_dir.is_dir():
+                return False
+
+            # Strong indicators (target outputs / SNP inputs)
+            if (sample_dir / "target.bam").exists() or (sample_dir / "target.bam.bai").exists():
+                return True
+            if (sample_dir / "targets_exceeding_threshold.bed").exists():
+                return True
+
+            # Fusion outputs
+            if (sample_dir / "target_fusion.csv").exists() or (sample_dir / "genome_wide_fusion.csv").exists():
+                return True
+
+            # Classifier outputs
+            if (sample_dir / "sturgeon_scores.csv").exists():
+                return True
+            if (sample_dir / "NanoDX_scores.csv").exists() or (sample_dir / "PanNanoDX_scores.csv").exists():
+                return True
+            if (sample_dir / "random_forest_scores.csv").exists():
+                return True
+
+            # Common analysis directories
+            if (sample_dir / "bed_files").is_dir():
+                return True
+            if (sample_dir / "igv").is_dir():
+                return True
+            if (sample_dir / "clair3").is_dir():
+                return True
+
+            # CNV outputs
+            try:
+                for child in sample_dir.glob("*_copy_numbers.pkl"):
+                    if child.is_file():
+                        return True
+            except Exception:
+                pass
+
+            return False
+        except Exception:
+            return False
+
+    # Import lazily so workflow can run even if analysis deps aren't present.
+    try:
+        from robin.analysis.bam_preprocessor import _extract_sample_id_from_bam  # type: ignore
+    except Exception:
+        return [], [], None
+
+    analysed_sample_ids: Set[str] = set()
+    unanalysed_sample_ids: Set[str] = set()
+    # Map directory containing BAMs -> set(sample_ids present in that directory)
+    dir_samples: Dict[Path, Set[str]] = {}
+    # To keep folder-add responsive, do not probe every BAM in a directory.
+    # We sample up to max_bams_per_dir BAMs per parent directory. If a directory
+    # contains multiple samples mixed together, this will usually be detected quickly
+    # and we will avoid auto-watching that directory.
+    dir_probe_counts: Dict[Path, int] = {}
+    bams_probed = 0
+    try:
+        walker = folder.rglob("*") if recursive else folder.glob("*")
+        for f in walker:
+            if not f.is_file():
+                continue
+            if not _matches_any_pattern(f, patterns) or not _matches_no_ignores(
+                f, ignore_patterns
+            ):
+                continue
+
+            try:
+                parent_dir = f.parent.resolve()
+            except Exception:
+                parent_dir = f.parent
+
+            # Limit per-directory probing to keep scan fast.
+            seen = int(dir_probe_counts.get(parent_dir, 0))
+            if seen >= max_bams_per_dir:
+                continue
+
+            bams_probed += 1
+            if bams_probed > max_bams_to_probe:
+                break
+
+            try:
+                sid = _extract_sample_id_from_bam(str(f))
+            except Exception:
+                sid = "unknown"
+
+            if not sid or sid == "unknown":
+                dir_probe_counts[parent_dir] = seen + 1
+                continue
+
+            # Track which sample IDs appear in which directories.
+            dir_samples.setdefault(parent_dir, set()).add(sid)
+            dir_probe_counts[parent_dir] = seen + 1
+
+            # Classify sample_id by presence of analysis artifacts in work_dir
+            sample_dir = wd / sid
+            if sample_dir.is_dir() and _sample_dir_has_analysis_artifacts_local(sample_dir):
+                analysed_sample_ids.add(sid)
+            else:
+                unanalysed_sample_ids.add(sid)
+    except Exception as e:
+        return [], [], f"{e}"
+
+    analysed_sorted = sorted(analysed_sample_ids)
+
+    # Choose directories to watch:
+    # Only watch directories that contain BAMs exclusively for unanalysed samples.
+    # This prevents reprocessing if a directory contains mixed samples.
+    dirs_to_watch: List[Path] = []
+    for d, sids_in_dir in dir_samples.items():
+        if not sids_in_dir:
+            continue
+        if any((sid in analysed_sample_ids) for sid in sids_in_dir):
+            continue
+        # Must contain at least one unanalysed sample
+        if any((sid in unanalysed_sample_ids) for sid in sids_in_dir):
+            dirs_to_watch.append(d)
+
+    # Stable ordering for messages/scheduling.
+    dirs_to_watch = sorted(set(dirs_to_watch), key=lambda p: str(p))
+    return dirs_to_watch, analysed_sorted, None
+
+
+def add_watch_path(new_path: str) -> Tuple[bool, str]:
+    """
+    Add a directory to the running workflow's watch list.
+
+    Schedules the path for file watching and submits existing BAM files for processing.
+    Uses the same plan, work_dir, panel, and patterns as the original workflow.
+
+    Returns:
+        Tuple of (success: bool, message: str)
+    """
+    global _GLOBAL_COORDINATOR, _GLOBAL_OBSERVER, _GLOBAL_WATCHER, _GLOBAL_WATCH_CONTEXT, _GLOBAL_WATCHED_PATHS
+
+    coord = get_coordinator_sync()
+    if coord is None:
+        return False, "No workflow coordinator found. Is a Ray workflow running?"
+
+    if _GLOBAL_WATCH_CONTEXT is None:
+        return False, "Workflow watch context not available (watch may be disabled)."
+
+    pth = Path(new_path).resolve()
+    if not pth.exists():
+        return False, f"Path does not exist: {new_path}"
+    if not pth.is_dir():
+        return False, f"Path is not a directory: {new_path}"
+
+    ctx = _GLOBAL_WATCH_CONTEXT
+    plan = ctx.get("plan") or []
+    work_dir = ctx.get("work_dir")
+
+    # Reject paths that overlap with work directory (would watch already-analysed output)
+    if _path_overlaps_work_dir(pth, work_dir):
+        return False, (
+            f"Cannot watch '{new_path}': it overlaps with the work directory. "
+            "Watched folders must not contain or be inside the analysis output directory."
+        )
+    patterns = ctx.get("patterns") or ["*.bam"]
+    ignore_patterns = ctx.get("ignore_patterns") or []
+    recursive = ctx.get("recursive", True)
+
+    # Option B behavior:
+    # When a user adds a folder that contains a mix of previously-analysed and new samples,
+    # automatically add only those subfolders that contain exclusively un-analysed samples.
+    dirs_to_watch, analysed_sample_ids, scan_err = _scan_watch_folder_for_sample_dirs(
+        folder=pth,
+        work_dir=work_dir,
+        patterns=patterns,
+        ignore_patterns=ignore_patterns,
+        recursive=recursive,
+    )
+    if scan_err:
+        return False, (
+            f"Cannot watch '{new_path}': error while scanning for existing analysed samples: {scan_err}"
+        )
+    if analysed_sample_ids and not dirs_to_watch:
+        shown = analysed_sample_ids[:10]
+        more = len(analysed_sample_ids) - len(shown)
+        shown_str = ", ".join(shown)
+        more_str = f" (+{more} more)" if more > 0 else ""
+        return False, (
+            f"Cannot watch '{new_path}': it contains only previously-analysed sample(s) (no new samples found to watch). "
+            f"Samples: {shown_str}{more_str}. "
+            "Move or delete the corresponding sample output folder(s) in the work directory if you want to reanalyse, "
+            "or choose a different watch folder."
+        )
+
+    # If there are no BAMs (or no sample IDs extracted), fall back to watching the path as-is.
+    if not analysed_sample_ids and not dirs_to_watch:
+        dirs_to_watch = [pth]
+
+    # Schedule for watching if observer is active
+    newly_added: List[Path] = []
+    already_watched: List[Path] = []
+    if _GLOBAL_OBSERVER is not None and _GLOBAL_WATCHER is not None:
+        for d in dirs_to_watch:
+            path_key = str(Path(d).resolve())
+            if path_key in _GLOBAL_WATCHED_PATHS:
+                already_watched.append(d)
+                continue
+            try:
+                watch = _GLOBAL_OBSERVER.schedule(
+                    _GLOBAL_WATCHER, str(d), recursive=recursive
+                )
+                _GLOBAL_WATCHED_PATHS[path_key] = watch
+                newly_added.append(d)
+            except Exception as e:
+                return False, f"Failed to schedule watch for '{d}': {e}"
+
+    # Submit existing paths for processing (run in a thread to avoid event loop conflict
+    # with NiceGUI or other async frameworks already running an event loop)
+    _submit_error: List[Optional[Exception]] = [None]
+
+    def _run_submit() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(
+                submit_existing_paths(
+                    coord,
+                    [str(d) for d in dirs_to_watch],
+                    plan,
+                    patterns=patterns,
+                    ignore_patterns=ignore_patterns,
+                    recursive=recursive,
+                    work_dir=work_dir,
+                )
+            )
+        except Exception as e:
+            _submit_error[0] = e
+        finally:
+            loop.close()
+
+    thread = threading.Thread(target=_run_submit)
+    thread.start()
+    thread.join()
+
+    if _submit_error[0] is not None:
+        return False, f"Failed to submit existing files: {_submit_error[0]}"
+
+    # Build a user-facing message
+    msg_parts: List[str] = []
+    if newly_added:
+        if len(newly_added) <= 5:
+            msg_parts.append("Added watch path(s): " + "; ".join(str(p) for p in newly_added))
+        else:
+            msg_parts.append(f"Added {len(newly_added)} watch path(s) under: {new_path}")
+    if already_watched:
+        msg_parts.append(f"{len(already_watched)} path(s) were already watched")
+    if analysed_sample_ids:
+        shown = analysed_sample_ids[:10]
+        more = len(analysed_sample_ids) - len(shown)
+        shown_str = ", ".join(shown)
+        more_str = f" (+{more} more)" if more > 0 else ""
+        msg_parts.append(
+            f"Skipped previously-analysed sample(s): {shown_str}{more_str} (not added to watch)"
+        )
+    if not msg_parts:
+        msg_parts.append(f"Added watch path: {new_path}")
+
+    return True, " | ".join(msg_parts)
 
 
 async def _get_coordinator():
@@ -2858,7 +4627,7 @@ async def run(
     center: str = None,
     enable_batching: bool = True,
 ):
-    global GLOBAL_LOG_LEVEL
+    global GLOBAL_LOG_LEVEL, _GLOBAL_OBSERVER, _GLOBAL_WATCHER, _GLOBAL_WATCH_CONTEXT, _GLOBAL_WATCHED_PATHS
     GLOBAL_LOG_LEVEL = (log_level or "INFO").upper()
 
     # Configure Ray logging to reduce verbose output
@@ -2899,13 +4668,16 @@ async def run(
     except Exception:
         pass
     # Start a fresh coordinator (not detached)
+    job_timeout = _job_timeout_seconds()
+    if job_timeout > 0:
+        logging.info(f"Per-job timeout enabled: jobs running longer than {job_timeout}s will be cancelled (ROBIN_JOB_TIMEOUT_SECONDS)")
     try:
         coord = Coordinator.options(name="robin_coordinator", num_cpus=0).remote(
-            target_panel=target_panel, analysis_workers=analysis_workers, preset=preset, reference=reference, enable_batching=enable_batching
+            target_panel=target_panel, analysis_workers=analysis_workers, preset=preset, reference=reference, enable_batching=enable_batching, job_timeout_seconds=job_timeout
         )
     except Exception:
         coord = Coordinator.options(name="robin_coordinator").remote(
-            target_panel=target_panel, analysis_workers=analysis_workers, preset=preset, reference=reference, enable_batching=enable_batching
+            target_panel=target_panel, analysis_workers=analysis_workers, preset=preset, reference=reference, enable_batching=enable_batching, job_timeout_seconds=job_timeout
         )
 
     # Set global coordinator reference for external access
@@ -2935,7 +4707,9 @@ async def run(
         elif not work_dir:
             print("GUI not launched: --work-dir not provided.")
         else:
-            print("Launching GUI early to ensure immediate availability...")
+            _print_styled(
+                "Launching GUI early to ensure immediate availability...", level="info"
+            )
             launcher = _gui_launch(
                 host=gui_host,
                 port=gui_port,
@@ -2951,9 +4725,9 @@ async def run(
                     if hasattr(launcher, "get_gui_url")
                     else "http://localhost:8081"
                 )
-                print(f"GUI launched successfully on {url}")
+                _print_styled(f"GUI launched successfully on {url}", level="success")
             except Exception:
-                print("GUI launched successfully")
+                _print_styled("GUI launched successfully", level="success")
 
             # Start GUI update publishing task immediately
             async def _publish_gui():
@@ -3123,16 +4897,18 @@ async def run(
                         rows = []
                         for qname, jobs in (s.get("active_by_queue", {}) or {}).items():
                             for j in jobs:
-                                rows.append(
-                                    {
-                                        "job_id": str(j.get("job_id", "")),
-                                        "job_type": j.get("job_type", ""),
-                                        "filepath": j.get("filepath", ""),
-                                        "worker_name": qname,
-                                        "duration": int(j.get("duration", 0) or 0),
-                                        "progress": 0.0,
-                                    }
-                                )
+                                rj = {
+                                    "job_id": str(j.get("job_id", "")),
+                                    "job_type": j.get("job_type", ""),
+                                    "filepath": j.get("filepath", ""),
+                                    "worker_name": qname,
+                                    "duration": int(j.get("duration", 0) or 0),
+                                    "progress": 0.0,
+                                }
+                                dw = j.get("dispatch_wait_seconds")
+                                if dw is not None:
+                                    rj["dispatch_wait_seconds"] = int(dw)
+                                rows.append(rj)
                         _gui_send_update(
                             _GUIUpdateType.JOB_UPDATE, {"active_jobs": rows}, priority=1
                         )
@@ -3145,21 +4921,25 @@ async def run(
                             priority=1,
                         )
 
-                        await asyncio.sleep(10.0)  # Poll every 10 seconds for faster updates
+                        await asyncio.sleep(15.0)  # Poll every 15 seconds to reduce update frequency
                     except asyncio.CancelledError:
                         break
                     except Exception:
-                        await asyncio.sleep(10.0)  # Poll every 10 seconds for faster updates
+                        await asyncio.sleep(15.0)  # Poll every 15 seconds to reduce update frequency
 
             gui_publish_task = asyncio.create_task(_publish_gui())
-            print("GUI monitoring started - workflow status will be updated in real-time")
+            _print_styled(
+                "GUI monitoring started - workflow status will be updated in real-time",
+                level="info",
+            )
     except Exception as e:
         print(f"Warning: GUI failed to launch: {e}")
 
     # Create monitoring tasks BEFORE submitting paths so progress appears immediately
     tasks = []
     if monitor:
-        tasks.append(asyncio.create_task(tqdm_monitor(coord, continuous=watch)))
+        monitor_fn = rich_monitor if _should_use_rich_progress() else tqdm_monitor
+        tasks.append(asyncio.create_task(monitor_fn(coord, continuous=watch)))
     
     # Add GUI publish task if GUI was launched
     if gui_publish_task is not None:
@@ -3192,8 +4972,20 @@ async def run(
         )
         for p in paths:
             if Path(p).is_dir():
-                observer.schedule(watcher, p, recursive=recursive)
+                watch = observer.schedule(watcher, p, recursive=recursive)
+                _GLOBAL_WATCHED_PATHS[str(Path(p).resolve())] = watch
         observer.start()
+
+        # Store globally for GUI "Add Folder to Watch"
+        _GLOBAL_OBSERVER = observer
+        _GLOBAL_WATCHER = watcher
+        _GLOBAL_WATCH_CONTEXT = {
+            "plan": plan,
+            "work_dir": work_dir,
+            "patterns": patterns,
+            "ignore_patterns": ignore_patterns,
+            "recursive": recursive,
+        }
 
     try:
         if tasks:
@@ -3243,7 +5035,13 @@ async def run(
             observer.stop()
             observer.join()
             print("[SHUTDOWN] File observer stopped")
-        
+
+        # Clear global watch state
+        _GLOBAL_OBSERVER = None
+        _GLOBAL_WATCHER = None
+        _GLOBAL_WATCH_CONTEXT = None
+        _GLOBAL_WATCHED_PATHS.clear()
+
         # Final cleanup: ensure Ray is properly shut down
         try:
             import ray
@@ -3308,6 +5106,16 @@ def parse_args():
         "--ray-address", default=None, help="Ray cluster address (None = local)"
     )
     p.add_argument(
+        "--no-clinvar-download",
+        action="store_true",
+        help="Do not auto-download ClinVar VCF files if missing",
+    )
+    p.add_argument(
+        "--update-clinvar-if-newer",
+        action="store_true",
+        help="If available, update ClinVar to the newest NCBI version (best-effort Last-Modified check)",
+    )
+    p.add_argument(
         "--preset",
         default=None,
         choices=["p2i", "standard", "high"],
@@ -3328,6 +5136,21 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
+
+    # Ensure ClinVar is present for variant annotation/reporting.
+    if not args.no_clinvar_download:
+        from robin.utils.clinvar_manager import (
+            ensure_clinvar_files,
+            update_clinvar_if_newer,
+        )
+
+        ensure_clinvar_files(download_if_missing=True)
+        if args.update_clinvar_if_newer:
+            update_clinvar_if_newer(download_if_missing=True)
+
+    # Raise dashboard/State API job list limit (Ray default 10k) if not set
+    if os.environ.get("RAY_MAX_LIMIT_FROM_DATA_SOURCE") is None:
+        os.environ["RAY_MAX_LIMIT_FROM_DATA_SOURCE"] = "100000"
     try:
         # Expose dashboard on all interfaces when supported
         init_kwargs = {"address": args.ray_address}

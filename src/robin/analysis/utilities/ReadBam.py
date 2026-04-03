@@ -1,3 +1,10 @@
+"""BAM read and RG tag extraction. Requires Python 3.12+."""
+from __future__ import annotations
+
+import sys
+if sys.version_info < (3, 12):
+    raise RuntimeError("robin ReadBam utilities require Python 3.12 or newer")
+
 import pysam
 import os
 from typing import Optional, Tuple, Dict, Any, Generator, Set
@@ -34,7 +41,7 @@ def configure_logging(level=None):
         logger.addHandler(console_handler)
 
 
-@dataclass
+@dataclass(slots=True)
 class BamRead:
     ID: Optional[str] = None
     time_of_run: Optional[str] = None
@@ -50,7 +57,7 @@ class BamRead:
     elapsed_time: Optional[int] = None
 
 
-@dataclass
+@dataclass(slots=True)
 class ReadBam:
     bam_file: Optional[str] = None
     sam_file: Optional[pysam.AlignmentFile] = None
@@ -166,9 +173,9 @@ class ReadBam:
             ds_tag = rg_tag.get("DS", "")
             ds_tags = ds_tag.split(" ")
             basecall_model_tag = (
-                ds_tags[1].replace("basecall_model=", "") if len(ds_tags) > 1 else None
+                ds_tags[1].removeprefix("basecall_model=") if len(ds_tags) > 1 else None
             )
-            runid_tag = ds_tags[0].replace("runid=", "") if ds_tags else None
+            runid_tag = ds_tags[0].removeprefix("runid=") if ds_tags else None
             lb_tag = rg_tag.get("LB")
             pl_tag = rg_tag.get("PL")
             pm_tag = rg_tag.get("PM")

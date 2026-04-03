@@ -92,6 +92,13 @@ class ReportSection(ABC):
             wordWrap="LTR",  # Enable left-to-right word wrapping
         )
 
+        # Compact cell style for dense tables
+        self.COMPACT_TABLE_CELL_STYLE = ParagraphStyle(
+            "TableCellCompact",
+            parent=self.TABLE_CELL_STYLE,
+            leading=7,
+        )
+
     @abstractmethod
     def add_content(self):
         """Add the section content to the report."""
@@ -99,9 +106,9 @@ class ReportSection(ABC):
 
     def add_section_header(self, title, level=1):
         """Add a section header with consistent styling."""
-        self.elements.append(Spacer(1, 6))
-        self.elements.append(Paragraph(title, self.styles.styles[f"Heading{level}"]))
         self.elements.append(Spacer(1, 4))
+        self.elements.append(Paragraph(title, self.styles.styles[f"Heading{level}"]))
+        self.elements.append(Spacer(1, 2))
 
     def add_summary_card(self, content):
         """Add a summary card with consistent styling."""
@@ -110,7 +117,15 @@ class ReportSection(ABC):
         )
         self.summary_elements.append(Spacer(1, 8))
 
-    def create_table(self, data, col_widths=None, repeat_rows=1, auto_col_width=True):
+    def create_table(
+        self,
+        data,
+        col_widths=None,
+        repeat_rows=1,
+        auto_col_width=True,
+        compact=False,
+        font_size=None,
+    ):
         """Create a table with consistent styling and automatic column width calculation.
 
         Args:
@@ -118,18 +133,39 @@ class ReportSection(ABC):
             col_widths: Optional list of column widths
             repeat_rows: Number of header rows to repeat on new pages
             auto_col_width: Whether to automatically calculate column widths
+            compact: Use tighter leading for more compact rows
+            font_size: Optional font size in points (overrides default for unified typography)
 
         Returns:
             Table object with applied styling
         """
         # Convert all data to Paragraphs with proper styling
+        cell_style = (
+            self.COMPACT_TABLE_CELL_STYLE if compact else self.TABLE_CELL_STYLE
+        )
+        header_style = self.TABLE_HEADER_STYLE
+        if font_size is not None:
+            # Use leading slightly larger than font size for readable line spacing
+            leading = max(font_size + 1, 10)
+            header_style = ParagraphStyle(
+                f"TableHeader_{font_size}",
+                parent=header_style,
+                fontSize=font_size,
+                leading=leading,
+            )
+            cell_style = ParagraphStyle(
+                f"TableCell_{font_size}",
+                parent=cell_style,
+                fontSize=font_size,
+                leading=leading,
+            )
         formatted_data = []
         for i, row in enumerate(data):
             formatted_row = []
             for cell in row:
                 if isinstance(cell, (int, float)):
                     cell = str(cell)
-                style = self.TABLE_HEADER_STYLE if i == 0 else self.TABLE_CELL_STYLE
+                style = header_style if i == 0 else cell_style
                 formatted_row.append(Paragraph(str(cell), style))
             formatted_data.append(formatted_row)
 
@@ -166,7 +202,7 @@ class ReportSection(ABC):
 
     def add_figure(self, img, caption=None, width=None, height=None):
         """Add a figure with optional caption."""
-        self.elements.append(Spacer(1, 8))
+        self.elements.append(Spacer(1, 4))
 
         if width is not None or height is not None:
             self.elements.append(Image(img, width=width, height=height))
@@ -174,9 +210,9 @@ class ReportSection(ABC):
             self.elements.append(Image(img))
 
         if caption:
-            self.elements.append(Spacer(1, 2))
+            self.elements.append(Spacer(1, 1))
             self.elements.append(Paragraph(caption, self.styles.styles["Caption"]))
-        self.elements.append(Spacer(1, 8))
+        self.elements.append(Spacer(1, 4))
 
     def get_export_frames(self):
         """Return a mapping of exportable DataFrames for this section.

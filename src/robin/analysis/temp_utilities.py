@@ -143,100 +143,127 @@ def merge_modkit_files(
             f"Total cumulative BAM files contributing to parquet: {cumulative_bam_file_count} (added {num_bam_files_seen} new files)"
         )
 
+        
         # Cache or build PyRanges filter with improved caching
+        # Use distinct cache for .txt (1-based converted) vs .gz (0-based) to avoid stale data
+        cache_suffix = "_1based" if filter_bed_file.endswith(".txt") else ""
         cache_path = os.path.join(
-            sample_output_dir, f"{os.path.basename(filter_bed_file)}.pgr_cache"
+            sample_output_dir,
+            f"{os.path.basename(filter_bed_file)}{cache_suffix}.pgr_cache",
         )
         if os.path.exists(cache_path):
             with open(cache_path, "rb") as f:
                 filter_ranges = pickle.load(f)
         else:
             comp = "gzip" if filter_bed_file.endswith(".gz") else None
-            bed_df = pd.read_csv(
-                filter_bed_file,
-                sep="\t",
-                header=None,
-                names=["Chromosome", "Start", "End", "cg_label"],
-                compression=comp,
-                dtype={"Chromosome": str},
-            )
+            if filter_bed_file.endswith(".txt"):
+                # parquet_filter.txt format: header "chr start end IlmnID" (spaces/tabs)
+                # Illumina-derived files use 1-based coordinates; BED/PyRanges expect 0-based.
+                bed_df = pd.read_csv(
+                    filter_bed_file,
+                    sep=r"\s+",
+                    header=0,
+                    dtype=str,
+                )
+                # Map to expected column names (handle chr/start/end)
+                rename = {}
+                for c in bed_df.columns:
+                    if c.lower() == "chr":
+                        rename[c] = "Chromosome"
+                    elif c.lower() == "start":
+                        rename[c] = "Start"
+                    elif c.lower() == "end":
+                        rename[c] = "End"
+                bed_df = bed_df.rename(columns=rename)
+                bed_df["Start"] = bed_df["Start"].astype(int) - 1  # 1-based -> 0-based
+                bed_df["End"] = bed_df["End"].astype(int)  # 1-based end inclusive -> 0-based exclusive
+            else:
+                bed_df = pd.read_csv(
+                    filter_bed_file,
+                    sep="\t",
+                    header=None,
+                    names=["Chromosome", "Start", "End", "cg_label"],
+                    compression=comp,
+                    dtype={"Chromosome": str},
+                )
             filter_ranges = pr.PyRanges(bed_df[["Chromosome", "Start", "End"]])
             with open(cache_path, "wb") as f:
                 pickle.dump(filter_ranges, f)
 
-        # Process new files in chunks using Polars/pandas
-        new_frames = []
+        # BEDMethyl 18-column names for modkit output (tab-separated)
+        full_cols = [
+            "chrom",
+            "chromStart",
+            "chromEnd",
+            "mod_code",
+            "score_bed",
+            "strand",
+            "thickStart",
+            "thickEnd",
+            "color",
+            "valid_cov",
+            "percent_modified",
+            "n_mod",
+            "n_canonical",
+            "n_othermod",
+            "n_delete",
+            "n_fail",
+            "n_diff",
+            "n_nocall",
+        ]
+
+        # Process new files: read with Polars, filter to CPG set, then combine
+        new_frames: List[pl.DataFrame] = []
         for bed in new_files:
             try:
-                # Read with pandas first to handle regex separator
-                # Read all 18 columns from the input file
-                full_cols = [
-                    "chrom",
-                    "chromStart",
-                    "chromEnd",
-                    "mod_code",
-                    "score_bed",
-                    "strand",
-                    "thickStart",
-                    "thickEnd",
-                    "color",
-                    "valid_cov",
-                    "percent_modified",
-                    "n_mod",
-                    "n_canonical",
-                    "n_othermod",
-                    "n_delete",
-                    "n_fail",
-                    "n_diff",
-                    "n_nocall",
-                ]
+                if bed.endswith(".parquet"):
+                    # Matkit wrote 8-column parquet; read directly (no CSV parse, types already correct)
+                    pl_df = pl.read_parquet(bed, columns=essential_cols)
+                    # Matkit may write chrom/mod_code/strand as binary; decode to Utf8 (Polars .str.decode is hex/base64 only)
+                    def _binary_to_utf8(s: pl.Series) -> pl.Series:
+                        return s.map_elements(
+                            lambda x: x.decode("utf-8", errors="replace") if x is not None else None,
+                            return_dtype=pl.Utf8,
+                        )
+                    for c in categorical_cols:
+                        if pl_df.schema.get(c) == pl.Binary:
+                            pl_df = pl_df.with_columns(_binary_to_utf8(pl.col(c)).alias(c))
+                else:
+                    # Legacy BEDMethyl text: read CSV, select essential columns, cast
+                    pl_df = pl.read_csv(
+                        bed,
+                        separator="\t",
+                        has_header=False,
+                        new_columns=full_cols,
+                        infer_schema_length=0,
+                    ).select(essential_cols)
+                    pl_df = pl_df.with_columns(
+                        [pl.col(c).cast(pl.UInt32, strict=False) for c in unsigned_int_cols]
+                        + [pl.col(c).cast(pl.Float32, strict=False) for c in float_cols]
+                    )
 
-                df = pd.read_csv(
-                    bed,
-                    sep="\s+",
-                    header=None,
-                    names=full_cols,
-                    dtype={c: str for c in ["chrom", "mod_code", "strand", "color"]},
+                # Skip empty files (e.g. parquet from a batch where no reads passed the QS filter)
+                if pl_df.is_empty():
+                    continue
+
+                # Build PyRanges for intersection (only need chrom/start/end)
+                pr_df = pl_df.rename({"chrom": "Chromosome", "chromStart": "Start"}).with_columns(
+                    (pl.col("Start") + 1).alias("End")
                 )
-
-                # Validate required columns
-                missing_cols = set(full_cols) - set(df.columns)
-                if missing_cols:
-                    raise ValueError(f"Missing required columns: {missing_cols}")
-
-                # Extract only essential columns for processing
-                df_essential = df[essential_cols].copy()
-
-                # Convert to Polars for efficient processing
-                pl_df = pl.from_pandas(df_essential)
-
-                # Convert numeric columns with proper error handling
-                for c in unsigned_int_cols:
-                    pl_df = pl_df.with_columns(pl.col(c).cast(pl.UInt32, strict=False))
-                for c in float_cols:
-                    pl_df = pl_df.with_columns(pl.col(c).cast(pl.Float32, strict=False))
-
-                # Filter using PyRanges
-                # Rename columns using Polars syntax
-                pr_df = pl_df.rename({"chrom": "Chromosome", "chromStart": "Start"})
-                # Add chromEnd for filtering (calculate from chromStart)
-                pr_df = pr_df.with_columns((pl.col("Start") + 1).alias("End"))
-
-                # Convert to pandas for PyRanges
-                pr_df_pandas = pr_df.to_pandas()
-                gr = pr.PyRanges(pr_df_pandas[["Chromosome", "Start", "End"]])
+                gr = pr.PyRanges(pr_df.to_pandas()[["Chromosome", "Start", "End"]])
                 inter = gr.intersect(filter_ranges).df
-                filt = pd.merge(
-                    inter.rename(
-                        columns={
-                            "Chromosome": "chrom",
-                            "Start": "chromStart",
-                        }
-                    ),
-                    pl_df.to_pandas(),
-                    on=["chrom", "chromStart"],
-                    how="inner",
+
+                # Join in Polars: keep only rows whose (chrom, chromStart) are in the intersection.
+                # Cast join keys to match pl_df (str + UInt32); from_pandas can infer Categorical for chrom.
+                inter_pl = pl.from_pandas(
+                    inter[["Chromosome", "Start"]].rename(
+                        columns={"Chromosome": "chrom", "Start": "chromStart"}
+                    )
+                ).with_columns(
+                    pl.col("chrom").cast(pl.Utf8),
+                    pl.col("chromStart").cast(pl.UInt32),
                 )
+                filt = pl_df.join(inter_pl, on=["chrom", "chromStart"], how="inner")
                 new_frames.append(filt)
             except Exception as e:
                 logging.error(f"Error processing file {bed}: {str(e)}")
@@ -246,11 +273,9 @@ def merge_modkit_files(
             logging.warning("No valid data to merge after filtering")
             return
 
-        # Combine new data
-        if len(new_frames) > 1:
-            new_df = pd.concat(new_frames, ignore_index=True)
-        else:
-            new_df = new_frames[0]
+        # Combine new data (all Polars)
+        new_df = pl.concat(new_frames) if len(new_frames) > 1 else new_frames[0]
+
         # Critical section: read/merge/write parquet guarded by an exclusive lock
         lock_path = f"{output_file}.lock"
         with _exclusive_file_lock(lock_path):
@@ -258,7 +283,7 @@ def merge_modkit_files(
             with pl.StringCache():
                 # If no existing file, just save the new data
                 if not os.path.exists(existing_file):
-                    pl_df = pl.from_pandas(new_df)
+                    pl_df = new_df
                     # Atomic write: write to temp then replace
                     fd, tmp_path = tempfile.mkstemp(
                         prefix="lj_parquet_",
@@ -309,8 +334,8 @@ def merge_modkit_files(
 
                 # Process existing data in chunks
                 existing_df = pl.scan_parquet(existing_file)
-                # Convert new data to Polars
-                pl_new_df = pl.from_pandas(new_df)
+                # New data is already Polars
+                pl_new_df = new_df
 
                 # Convert existing data to regular DataFrame for concatenation
                 existing_df = existing_df.collect()

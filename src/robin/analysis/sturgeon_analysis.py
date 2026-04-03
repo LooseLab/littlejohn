@@ -49,6 +49,18 @@ from robin import models
 logger = logging.getLogger(__name__)
 
 
+def _is_fail_only_expected(job) -> bool:
+    """True when errors are expected for fail-only BAM submissions."""
+    try:
+        if not bool(job.context.metadata.get("fail_only_bam_submission", False)):
+            return False
+        fp = getattr(job.context, "filepath", "") or ""
+        base = os.path.basename(fp).lower()
+        return ("fail" in base) and ("pass" not in base)
+    except Exception:
+        return False
+
+
 @dataclass
 class SturgeonMetadata:
     """Container for Sturgeon analysis metadata and results"""
@@ -309,6 +321,7 @@ def sturgeon_handler(job, work_dir=None):
     try:
         # Get job-specific logger
         logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
+        suppress_expected = _is_fail_only_expected(job)
         
         # Check if this is a batched job
         batched_job = job.context.metadata.get("_batched_job")
@@ -356,8 +369,15 @@ def sturgeon_handler(job, work_dir=None):
             
             if not parquet_paths:
                 error_msg = "No parquet paths found from bed conversion results in batch"
-                logger.error(error_msg)
-                job.context.add_error("sturgeon_analysis", error_msg)
+                if suppress_expected:
+                    logger.warning(f"{error_msg} (expected for fail-only BAM submission)")
+                    job.context.add_result(
+                        "sturgeon_analysis",
+                        {"status": "expected_failure", "reason": error_msg},
+                    )
+                else:
+                    logger.error(error_msg)
+                    job.context.add_error("sturgeon_analysis", error_msg)
                 return
             
             # Determine work directory for the batch
@@ -393,8 +413,23 @@ def sturgeon_handler(job, work_dir=None):
             logger.info(f"Files successfully processed: {batch_result.get('files_processed', len(parquet_paths))}/{batch_result.get('total_files', len(parquet_paths))}")
             
             if batch_result.get("error_message"):
-                logger.error(f"Batch processing completed with errors: {batch_result['error_message']}")
-                job.context.add_error("sturgeon_analysis", batch_result["error_message"])
+                if suppress_expected:
+                    logger.warning(
+                        f"Batch processing completed with expected errors (fail-only BAM submission): {batch_result['error_message']}"
+                    )
+                    job.context.add_result(
+                        "sturgeon_analysis",
+                        {
+                            "status": "expected_failure",
+                            "error_message": batch_result["error_message"],
+                            "sample_id": sample_id,
+                        },
+                    )
+                else:
+                    logger.error(
+                        f"Batch processing completed with errors: {batch_result['error_message']}"
+                    )
+                    job.context.add_error("sturgeon_analysis", batch_result["error_message"])
             else:
                 logger.info("Batch processing completed successfully with aggregated sturgeon analysis")
                 job.context.add_result(
@@ -478,6 +513,18 @@ def sturgeon_handler(job, work_dir=None):
                 )
 
     except Exception as e:
+        # suppress_expected may not be set if logger init failed
+        try:
+            suppress_expected = _is_fail_only_expected(job)
+        except Exception:
+            suppress_expected = False
+        if suppress_expected:
+            logger.warning(f"Expected Sturgeon failure for fail-only BAM submission: {e}")
+            job.context.add_result(
+                "sturgeon_analysis",
+                {"status": "expected_failure", "error_message": str(e)},
+            )
+            return
         job.context.add_error("sturgeon_analysis", str(e))
         logger.error(f"Error in Sturgeon analysis for {job.context.filepath}: {e}")
 
@@ -622,9 +669,7 @@ def predict_sample_from_dataframe(
 
     # Ensure output directory exists
     # os.makedirs(output_dir, exist_ok=True)
-    modelfile = os.path.join(
-        os.path.dirname(os.path.abspath(models.__file__)), "general.zip"
-    )
+    modelfile = str(models.DIR / "general.zip")
 
     # Save DataFrame as a temporary BED file
     with tempfile.NamedTemporaryFile(delete=False, suffix=".bed") as tmp_bed:

@@ -1,31 +1,56 @@
-name: robin_0_5
+# ROBIN conda environment (Python 3.12). Derived from the former robin_0_8.yml spec.
+#
+# If you see:
+#   libstdc++.so.6: version `CXXABI_1.3.15' not found (required by scipy...)
+# the dynamic linker is using the *system* libstdc++ instead of conda’s.
+# Fix (Linux): merge robin_linux_extras.yml after creating this env, and/or prepend
+# $CONDA_PREFIX/lib — see README.md (section "Common issues").
+# Note: `conda env create` ignores `# [linux]`-style selectors; those only work in
+# conda recipes / conda-lock preprocessing, not in plain environment.yml.
+#
+# conda-forge should win over defaults to avoid mixed runtimes:
+#   conda config --set channel_priority strict
+#
+name: robin
 channels:
-  - bioconda
   - conda-forge
+  - bioconda
   - defaults
+
+variables:
+  _JAVA_OPTIONS: "-Xmx8g"
+
 dependencies:
-  - git-lfs
-  - r-base=4.3
-  - bioconductor-genomicranges=1.54.1
-  - bioconda::snpsift
-  - bioconda::snpeff
-  - bioconda::samtools
-  - bioconda::bedtools
+  - python=3.12
+  - pip
+
+  # core python scientific stack
+  - numpy
+  # SciPy 1.14+ conda-forge builds often link against a newer libstdc++ (CXXABI_1.3.15).
+  # Staying on 1.11.x–1.13.x reduces that risk on older hosts.
+  - scipy>=1.11,<1.14
+  - scikit-learn
+  - ruptures
+
+  # bioinformatics
+  - samtools
+  - bedtools
+  - snpsift
+  - snpeff
+
+  # R + Bioconductor
+  - r-base
   - r-optparse
   - r-data.table
-  - conda-forge::r-ranger
-  - r-matrixStats
+  - r-ranger
+  - r-matrixstats
   - r-glmnet
-  - ruptures
-  - python >=3.9.0,<3.9.19
-  - pip
-  - pip:
-  #  - readfish
-  #  - ont-pyguppy-client-lib
-    - scikit-learn==1.0.2
-    - scipy==1.12.0
-  #  - psutil
-    #- git+https://github.com/LooseLab/robin
-variables:
-  _JAVA_OPTIONS: -Xmx8g
+  - bioconductor-genomicranges
+  - bioconductor-genomeinfodb
 
+  # graphics/system deps
+  - git-lfs
+  - pkg-config
+  - cairo
+  - pycairo
+  - gobject-introspection

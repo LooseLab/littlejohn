@@ -13,58 +13,141 @@ try:
 except ImportError:  # pragma: no cover
     ui = None
 
-from robin.gui.theme import styled_table
+from robin.gui.theme import styled_table, register_theme_sync_callback
+
+
+def _is_dark_mode() -> bool:
+    """Match Quasar ``body--dark`` via app storage (see theme.frame)."""
+    try:
+        from nicegui import app
+
+        return bool(app.storage.user.get("dark_mode"))
+    except Exception:
+        return False
+
+
+def _apply_mgmt_figure_theme(fig: Any, dark: bool) -> None:
+    """Adjust matplotlib locus figure for light vs dark UI (design.md §6). Methylartist is theme-agnostic."""
+    if fig is None:
+        return
+    # Light: clinical white surface; dark: slate-950 / midnight analysis strip
+    if dark:
+        bg = "#0f172a"
+        fg = "#e2e8f0"
+        fg_muted = "#94a3b8"
+    else:
+        bg = "#ffffff"
+        fg = "#0f172a"
+        fg_muted = "#475569"
+    try:
+        fig.patch.set_facecolor(bg)
+        for ax in fig.get_axes():
+            try:
+                ax.set_facecolor(bg)
+                ax.tick_params(colors=fg_muted)
+                ax.xaxis.label.set_color(fg_muted)
+                ax.yaxis.label.set_color(fg_muted)
+                ax.title.set_color(fg)
+                for spine in ax.spines.values():
+                    spine.set_color(fg_muted)
+                leg = ax.get_legend()
+                if leg is not None:
+                    fr = leg.get_frame()
+                    if fr is not None:
+                        fr.set_facecolor(bg)
+                        fr.set_edgecolor(fg_muted)
+                    for t in leg.get_texts():
+                        t.set_color(fg)
+            except Exception:
+                continue
+        for txt in getattr(fig, "texts", []) or []:
+            try:
+                txt.set_color(fg)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _mgmt_meth_tier(average: float) -> str:
+    """Methylation band for styling (design.md §9.2; matches analysis strip)."""
+    if average > 10:
+        return "high"
+    if average > 5:
+        return "medium"
+    return "low"
 
 
 def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
     """Build the MGMT section and attach refresh timer. Uses launcher._mgmt_state."""
-    with ui.card().classes("w-full"):
-        with ui.card().classes(
-            "w-full bg-gradient-to-r from-blue-50 to-indigo-50 mb-2 p-2"
-        ):
-            with ui.row().classes("gap-6 items-center"):
-                mgmt_status = ui.label("MGMT status: Unknown").classes(
-                    "text-sm font-semibold text-blue-800"
-                )
-                mgmt_avg = ui.label("Average: --%").classes("text-sm text-gray-700")
-                mgmt_pred = ui.label("Prediction: --%").classes("text-sm text-gray-700")
-        ui.label("MGMT methylation plot").classes("text-sm text-gray-700")
-        # mgmt_img = ui.image('')
-        # Matplotlib element for displaying the methylation plot
-        # Using ui.matplotlib() as it works with pre-existing figure objects
-        # Width is 2x relative to height (24:12 = 2:1 aspect ratio)
-        mgmt_mpl = ui.matplotlib(figsize=(24, 12)).classes("w-full")
-        ui.separator()
-        ui.label("MGMT results (latest)").classes("text-sm text-gray-700 mt-2")
-        _, mgmt_results_table = styled_table(
-            columns=[
-                {"name": "average", "label": "Average %", "field": "average"},
-                {"name": "pred", "label": "Prediction %", "field": "pred"},
-                {"name": "status", "label": "Status", "field": "status"},
-            ],
-            rows=[],
-            pagination=0,
-            class_size="table-xs",
-        )
-        ui.separator()
-        ui.label("MGMT CpG Site Methylation Data").classes("text-sm text-gray-700 mt-2")
-        _, mgmt_sites_table = styled_table(
-            columns=[
-                {"name": "site", "label": "Site", "field": "site"},
-                {"name": "chr", "label": "Chr", "field": "chr"},
-                {"name": "pos", "label": "CpG Position", "field": "pos"},
-                {"name": "cov_fwd", "label": "Forward Cov", "field": "cov_fwd"},
-                {"name": "cov_rev", "label": "Reverse Cov", "field": "cov_rev"},
-                {"name": "cov_total", "label": "Total Cov", "field": "cov_total"},
-                {"name": "meth", "label": "% Methylation", "field": "meth"},
-                {"name": "meth_fwd", "label": "Forward Methylated", "field": "meth_fwd"},
-                {"name": "meth_rev", "label": "Reverse Methylated", "field": "meth_rev"},
-                {"name": "notes", "label": "Notes", "field": "notes"},
-            ],
-            rows=[],
-            pagination=0,
-            class_size="table-xs",
-        )
+    # design.md §6–§9: insight shell, cards, semantic tiers, explicit .body--dark CSS
+    with ui.element("div").classes("w-full min-w-0").props("id=analysis-detail-mgmt"):
+        with ui.element("div").classes("classification-insight-shell w-full min-w-0"):
+            ui.label("MGMT methylation").classes(
+                "classification-insight-heading text-headline-small"
+            )
+            with ui.element("div").classes(
+                "classification-insight-card w-full min-w-0"
+            ):
+                with ui.column().classes("w-full min-w-0 gap-2 p-2 md:p-3"):
+                    with ui.row().classes("items-center gap-2 min-w-0"):
+                        ui.icon("science").classes("classification-insight-icon")
+                        ui.label("Promoter summary").classes(
+                            "classification-insight-model flex-1 min-w-0"
+                        )
+                    mgmt_status = ui.label("MGMT status: Unknown").classes(
+                        "classification-insight-result w-full"
+                    )
+                    mgmt_avg = ui.label("Average methylation: --%").classes(
+                        "classification-insight-level classification-insight-level--low w-full"
+                    )
+                    mgmt_pred = ui.label("Prediction score: --%").classes(
+                        "classification-insight-meta w-full"
+                    )
+                    ui.label(
+                        "chr10 MGMT promoter; per-site strand coverage below."
+                    ).classes("classification-insight-foot")
+            ui.label("Locus visualization").classes(
+                "target-coverage-panel__meta-label mt-4 mb-1"
+            )
+            with ui.element("div").classes("w-full target-coverage-panel__plot-wrap"):
+                # Width 2× height (24:12) for methylartist-style locus figure
+                mgmt_mpl = ui.matplotlib(figsize=(24, 12)).classes("w-full")
+            ui.separator().classes("mgmt-detail-separator")
+            ui.label("Latest results").classes(
+                "target-coverage-panel__meta-label mt-2 mb-1"
+            )
+            _, mgmt_results_table = styled_table(
+                columns=[
+                    {"name": "average", "label": "Average %", "field": "average"},
+                    {"name": "pred", "label": "Prediction %", "field": "pred"},
+                    {"name": "status", "label": "Status", "field": "status"},
+                ],
+                rows=[],
+                pagination=0,
+                class_size="table-xs",
+            )
+            ui.separator().classes("mgmt-detail-separator")
+            ui.label("CpG site methylation").classes(
+                "target-coverage-panel__meta-label mt-2 mb-1"
+            )
+            _, mgmt_sites_table = styled_table(
+                columns=[
+                    {"name": "site", "label": "Site", "field": "site"},
+                    {"name": "chr", "label": "Chr", "field": "chr"},
+                    {"name": "pos", "label": "CpG Position", "field": "pos"},
+                    {"name": "cov_fwd", "label": "Forward Cov", "field": "cov_fwd"},
+                    {"name": "cov_rev", "label": "Reverse Cov", "field": "cov_rev"},
+                    {"name": "cov_total", "label": "Total Cov", "field": "cov_total"},
+                    {"name": "meth", "label": "% Methylation", "field": "meth"},
+                    {"name": "meth_fwd", "label": "Forward Methylated", "field": "meth_fwd"},
+                    {"name": "meth_rev", "label": "Reverse Methylated", "field": "meth_rev"},
+                    {"name": "notes", "label": "Notes", "field": "notes"},
+                ],
+                rows=[],
+                pagination=0,
+                class_size="table-xs",
+            )
 
     def _extract_mgmt_specific_sites(bed_path: Path) -> List[Dict[str, Any]]:
         try:
@@ -332,8 +415,18 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                     average = float(df.get("average", pd.Series([0.0])).iloc[0])
                     pred = float(df.get("pred", pd.Series([0.0])).iloc[0])
                     mgmt_status.set_text(f"MGMT status: {status}")
-                    mgmt_avg.set_text(f"Average: {average:.2f}%")
-                    mgmt_pred.set_text(f"Prediction: {pred:.2f}%")
+                    mgmt_avg.set_text(f"Average methylation: {average:.2f}%")
+                    _tier = _mgmt_meth_tier(average)
+                    try:
+                        mgmt_avg.classes(
+                            replace=(
+                                f"classification-insight-level "
+                                f"classification-insight-level--{_tier} w-full"
+                            )
+                        )
+                    except Exception:
+                        pass
+                    mgmt_pred.set_text(f"Prediction score: {pred:.2f}%")
                     try:
                         mgmt_results_table.rows = [
                             {
@@ -392,32 +485,126 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                         pass
 
             bam_path = sample_dir / "mgmt_sorted.bam"
-            if bam_path.exists():
+            
+            # Determine pickle file path based on CSV file type
+            if is_final_file:
+                pickle_path = sample_dir / "final_mgmt.pkl"
+            else:
+                pickle_path = sample_dir / f"{current_count}_mgmt.pkl"
+            
+            # Check if figure needs to be updated (only if pickle or BAM changed)
+            pickle_mtime = pickle_path.stat().st_mtime if pickle_path.exists() else 0
+            bam_mtime = bam_path.stat().st_mtime if bam_path.exists() else 0
+            
+            # Check if pickle or BAM file has changed since last update
+            current_bam_path_str = str(bam_path) if bam_path.exists() else ""
+            current_pickle_path_str = str(pickle_path) if pickle_path.exists() else ""
+            
+            # Get previous state values (use sentinel values if not present)
+            prev_pickle_path = state.get("pickle_path", "")
+            prev_pickle_mtime = state.get("pickle_mtime", 0)
+            prev_bam_path = state.get("bam_path", "")
+            prev_bam_mtime = state.get("bam_mtime", 0)
+            
+            # Debug: log state comparison
+            pickle_changed = prev_pickle_path != current_pickle_path_str
+            pickle_mtime_changed = prev_pickle_mtime != pickle_mtime
+            bam_changed = prev_bam_path != current_bam_path_str
+            bam_mtime_changed = prev_bam_mtime != bam_mtime
+            
+            logging.debug(f"[MGMT] State comparison - pickle_path: {pickle_changed} (prev='{prev_pickle_path}' vs curr='{current_pickle_path_str}'), "
+                        f"pickle_mtime: {pickle_mtime_changed} (prev={prev_pickle_mtime} vs curr={pickle_mtime}), "
+                        f"bam_path: {bam_changed} (prev='{prev_bam_path}' vs curr='{current_bam_path_str}'), "
+                        f"bam_mtime: {bam_mtime_changed} (prev={prev_bam_mtime} vs curr={bam_mtime}), fresh={is_fresh_visit}")
+            
+            figure_needs_update = (
+                is_fresh_visit
+                or pickle_changed
+                or pickle_mtime_changed
+                or bam_changed
+                or bam_mtime_changed
+            )
+            
+            if figure_needs_update:
+                reasons = []
+                if is_fresh_visit:
+                    reasons.append("fresh_visit")
+                if pickle_changed:
+                    reasons.append("pickle_path_changed")
+                if pickle_mtime_changed:
+                    reasons.append("pickle_mtime_changed")
+                if bam_changed:
+                    reasons.append("bam_path_changed")
+                if bam_mtime_changed:
+                    reasons.append("bam_mtime_changed")
+                logging.debug(f"[MGMT] Figure update needed. Reasons: {', '.join(reasons)}")
+            
+            if not figure_needs_update and bam_path.exists():
+                logging.debug(f"[MGMT] Skipping figure update - no changes detected (pickle: {pickle_path.name if pickle_path.exists() else 'N/A'}, BAM: {bam_path.name})")
+            
+            if bam_path.exists() and figure_needs_update:
                 try:
+                    import matplotlib.pyplot as plt
+                    import warnings
                     from robin.analysis.methylation_wrapper import (
+                        has_bam_index,
                         locus_figure,
+                        load_figure_pickle,
                     )
-
-                    logging.debug(f"[MGMT] Creating locus figure for {bam_path}")
-                    fig = locus_figure(
-                        interval="chr10:129466536-129467536",
-                        bam_path=str(bam_path),
-                        motif="CG",
-                        mods="m",
-                        extra_cli=[
-                            # Set figure size to match our UI element (width 2x height)
-                            "--width", "18",
-                            "--height", "8",
-                            # "--minqual","20", "--reads","2000"
-                        ],
-                        site_rows=site_rows,
-                    )
-                    logging.debug(f"[MGMT] Locus figure created successfully, figure number: {fig.number}")
+                    
+                    # Check if pickle file exists and is newer than BAM file
+                    fig = None
+                    use_pickle = False
+                    if pickle_path.exists():
+                        try:
+                            # Use pickle if it's newer than or equal to BAM modification time
+                            if pickle_mtime >= bam_mtime:
+                                logging.debug(f"[MGMT] Loading figure from pickle: {pickle_path}")
+                                fig = load_figure_pickle(str(pickle_path))
+                                use_pickle = True
+                                logging.debug(f"[MGMT] Successfully loaded figure from pickle")
+                            else:
+                                logging.debug(f"[MGMT] Pickle file is older than BAM, regenerating figure")
+                        except Exception as e:
+                            logging.warning(f"[MGMT] Failed to load pickle file {pickle_path}: {e}")
+                            # Continue to generate new figure
+                    
+                    # If pickle doesn't exist or failed to load, generate new figure
+                    # Skip locus_figure if BAM has no index (avoids "fetch on bamfile without index")
+                    if fig is None:
+                        if not has_bam_index(str(bam_path)):
+                            raise RuntimeError(
+                                "BAM file is not indexed. Index file (.bai or .csi) not found or invalid."
+                            )
+                        logging.debug(f"[MGMT] Creating locus figure for {bam_path}")
+                        fig = locus_figure(
+                            interval="chr10:129466536-129467536",
+                            bam_path=str(bam_path),
+                            motif="CG",
+                            mods="m",
+                            extra_cli=[
+                                # Set figure size to match our UI element (width 2x height)
+                                "--width", "18",
+                                "--height", "8",
+                                # "--minqual","20", "--reads","2000"
+                            ],
+                            site_rows=site_rows,
+                        )
+                        logging.debug(f"[MGMT] Locus figure created successfully, figure number: {fig.number}")
+                        
+                        # Save pickle for future use (if not already saved by analysis)
+                        if not use_pickle:
+                            try:
+                                from robin.analysis.methylation_wrapper import save_figure_pickle
+                                save_figure_pickle(fig, str(pickle_path))
+                                logging.debug(f"[MGMT] Saved figure to pickle for future use: {pickle_path}")
+                                # Update pickle_mtime after saving
+                                pickle_mtime = pickle_path.stat().st_mtime
+                            except Exception as e:
+                                logging.debug(f"[MGMT] Failed to save pickle file (non-fatal): {e}")
                     
                     # Update matplotlib element with the figure
                     # Suppress GridSpec warnings when updating figure
-                    import warnings
-                    import matplotlib.pyplot as plt
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore", UserWarning)
                         # Close previous figure if it exists before assigning new one
@@ -427,6 +614,7 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                             except Exception:
                                 pass
                         logging.debug(f"[MGMT] Assigning figure to matplotlib element")
+                        _apply_mgmt_figure_theme(fig, _is_dark_mode())
                         mgmt_mpl.figure = fig
                         mgmt_mpl.update()
                         logging.debug(f"[MGMT] Plot updated successfully")
@@ -451,39 +639,87 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
                     ax.set_ylim(0, 1)
                     ax.axis('off')
                     ax.set_title("MGMT Methylation Plot")
-                    
+                    _apply_mgmt_figure_theme(fig, _is_dark_mode())
                     mgmt_mpl.figure = fig
                     mgmt_mpl.update()
-            else:
-                logging.warning(f"[MGMT] BAM file not found: {bam_path}")
-                # Create a placeholder plot indicating BAM file is missing
-                import matplotlib.pyplot as plt
-                if hasattr(mgmt_mpl, 'figure') and mgmt_mpl.figure is not None:
-                    try:
-                        plt.close(mgmt_mpl.figure)
-                    except Exception:
-                        pass
-                fig, ax = plt.subplots(figsize=(24, 12))
-                ax.text(0.5, 0.5, "MGMT BAM file not found\n(mgmt_sorted.bam)", 
-                       ha='center', va='center', transform=ax.transAxes,
-                       fontsize=10, color='orange')
-                ax.set_xlim(0, 1)
-                ax.set_ylim(0, 1)
-                ax.axis('off')
-                ax.set_title("MGMT Methylation Plot")
-                mgmt_mpl.figure = fig
-                mgmt_mpl.update()
+            elif not bam_path.exists():
+                # Only show warning/placeholder if BAM doesn't exist AND we haven't shown it before
+                if is_fresh_visit or state.get("bam_path") != str(bam_path):
+                    logging.warning(f"[MGMT] BAM file not found: {bam_path}")
+                    # Create a placeholder plot indicating BAM file is missing
+                    import matplotlib.pyplot as plt
+                    if hasattr(mgmt_mpl, 'figure') and mgmt_mpl.figure is not None:
+                        try:
+                            plt.close(mgmt_mpl.figure)
+                        except Exception:
+                            pass
+                    fig, ax = plt.subplots(figsize=(24, 12))
+                    ax.text(0.5, 0.5, "MGMT BAM file not found\n(mgmt_sorted.bam)", 
+                           ha='center', va='center', transform=ax.transAxes,
+                           fontsize=10, color='orange')
+                    ax.set_xlim(0, 1)
+                    ax.set_ylim(0, 1)
+                    ax.axis('off')
+                    ax.set_title("MGMT Methylation Plot")
+                    _apply_mgmt_figure_theme(fig, _is_dark_mode())
+                    mgmt_mpl.figure = fig
+                    mgmt_mpl.update()
 
+            # Update state with current values
             launcher._mgmt_state[key] = {
                 "last_count": current_count,
                 "csv_path": str(latest_csv),
                 "csv_mtime": csv_mtime,
-                #'png_path': str(img_path) if img_path.exists() else '', 'png_mtime': img_path.stat().st_mtime if img_path.exists() else 0,
                 "bed_path": str(bed_path) if bed_path.exists() else "",
                 "bed_mtime": bed_path.stat().st_mtime if bed_path.exists() else 0,
+                "pickle_path": current_pickle_path_str,
+                "pickle_mtime": pickle_mtime,
+                "bam_path": current_bam_path_str,
+                "bam_mtime": bam_mtime,
+                "last_visit_time": state.get("last_visit_time", time.time()),  # Preserve visit time
+                "mgmt_plot_theme_dark": _is_dark_mode(),
             }
+            
+            # Debug: log state after update
+            logging.debug(f"[MGMT] State saved - pickle_path='{current_pickle_path_str}', pickle_mtime={pickle_mtime}, "
+                        f"bam_path='{current_bam_path_str}', bam_mtime={bam_mtime}")
         except Exception as e:
             raise Exception(f"Failed to refresh MGMT section: {e}")
 
     # Start the refresh timer (every 30 seconds)
-    ui.timer(30.0, _refresh_mgmt, active=True, immediate=True)
+    refresh_timer = ui.timer(30.0, _refresh_mgmt, active=True, immediate=False)
+    ui.timer(0.5, _refresh_mgmt, once=True)
+
+    def _sync_mgmt_plot_theme_if_needed() -> None:
+        """Re-tint matplotlib locus figure when the user toggles light/dark mode."""
+        try:
+            dark = _is_dark_mode()
+        except Exception:
+            dark = False
+        key = str(sample_dir)
+        state = launcher._mgmt_state.get(key, {})
+        if state.get("mgmt_plot_theme_dark") == dark:
+            return
+        fig = getattr(mgmt_mpl, "figure", None)
+        if fig is None:
+            launcher._mgmt_state.setdefault(key, {})["mgmt_plot_theme_dark"] = dark
+            return
+        _apply_mgmt_figure_theme(fig, dark)
+        try:
+            mgmt_mpl.update()
+        except Exception:
+            pass
+        launcher._mgmt_state.setdefault(key, {})["mgmt_plot_theme_dark"] = dark
+
+    unregister_mgmt_theme_sync = register_theme_sync_callback(
+        _sync_mgmt_plot_theme_if_needed,
+        element=mgmt_mpl,
+        interval_s=0.5,
+        immediate=True,
+    )
+    try:
+        ui.context.client.on_disconnect(
+            lambda: (refresh_timer.deactivate(), unregister_mgmt_theme_sync())
+        )
+    except Exception:
+        pass

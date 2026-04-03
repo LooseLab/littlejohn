@@ -553,7 +553,7 @@ def run_ruptures(
     r_cnv: list, penalty_value: int, bin_width: int
 ) -> List[Tuple[int, int]]:
     """
-    Detect change points in a time series using the Kernel Change Point Detection algorithm.
+    Detect change points in a time series using kernel CPD with a linear (L2) kernel (mean-shift detection).
 
     Args:
         r_cnv: A list containing the time series data.
@@ -567,8 +567,8 @@ def run_ruptures(
     # Convert to numpy array once for better performance
     r_cnv_array = np.array(r_cnv)
 
-    # Initialize the Kernel Change Point Detection algorithm with the Radial Basis Function (RBF) kernel
-    algo_c = rpt.KernelCPD(kernel="rbf").fit(r_cnv_array)
+    # Linear kernel (L2 cost): detects mean shifts; faster than RBF for long signals
+    algo_c = rpt.KernelCPD(kernel="linear").fit(r_cnv_array)
 
     # Predict the change points using the provided penalty value
     ruptures_result = algo_c.predict(pen=penalty_value)
@@ -715,7 +715,7 @@ def detect_breakpoints_from_cnv(cnv_data: Dict, bin_width: int, logger) -> List[
             if key != "chrM" and len(data) > 3:
                 try:
                     paired_changepoints = run_ruptures(
-                        data, penalty_value=5, bin_width=bin_width
+                        data, penalty_value=10, bin_width=bin_width
                     )
 
                     for start, end in paired_changepoints:
@@ -817,16 +817,17 @@ def save_analysis_counter(sample_id: str, counter: int, work_dir: str, logger) -
         logger.error(f"Error saving counter for {sample_id}: {e}")
 
 
-def find_significant_regions(values, chrom):
+def find_significant_regions(values, chrom, bin_width):
     """
-    Find regions with significant CNV changes.
+    Find regions with significant CNV changes and merge adjacent regions.
 
     Args:
         values: CNV values for a chromosome
         chrom: Chromosome name
+        bin_width: Width of bins in base pairs
 
     Returns:
-        List of significant regions
+        List of significant regions (merged adjacent regions)
     """
     regions = []
     threshold = 0.5  # CNV change threshold
@@ -835,20 +836,50 @@ def find_significant_regions(values, chrom):
     values_array = np.array(values)
     significant_indices = np.where(np.abs(values_array) > threshold)[0]
 
-    for i in significant_indices:
-        regions.append(
-            {
-                "chromosome": chrom,
-                "start": i * 1000000,  # Approximate position
-                "end": (i + 1) * 1000000,
-                "type": "gain" if values_array[i] > 0 else "loss",
-            }
-        )
+    # If no significant regions, return empty list
+    if len(significant_indices) == 0:
+        return regions
+
+    # Merge adjacent indices into continuous regions
+    current_start_idx = significant_indices[0]
+    current_type = "gain" if values_array[significant_indices[0]] > 0 else "loss"
+
+    for i in range(1, len(significant_indices)):
+        idx = significant_indices[i]
+        prev_idx = significant_indices[i - 1]
+        idx_type = "gain" if values_array[idx] > 0 else "loss"
+
+        # If adjacent and same type, continue the region
+        if idx == prev_idx + 1 and idx_type == current_type:
+            continue
+        else:
+            # Save the previous region
+            regions.append(
+                {
+                    "chromosome": chrom,
+                    "start": current_start_idx * bin_width,
+                    "end": (significant_indices[i - 1] + 1) * bin_width,
+                    "type": current_type,
+                }
+            )
+            # Start new region
+            current_start_idx = idx
+            current_type = idx_type
+
+    # Don't forget the last region
+    regions.append(
+        {
+            "chromosome": chrom,
+            "start": current_start_idx * bin_width,
+            "end": (significant_indices[-1] + 1) * bin_width,
+            "type": current_type,
+        }
+    )
 
     return regions
 
 
-def generate_bed_files(bed_dir, analysis_counter, breakpoints, cnv_data, logger):
+def generate_bed_files(bed_dir, analysis_counter, breakpoints, cnv_data, bin_width, logger):
     """
     Generate BED files for CNV regions and breakpoints.
 
@@ -857,6 +888,7 @@ def generate_bed_files(bed_dir, analysis_counter, breakpoints, cnv_data, logger)
         analysis_counter: Current analysis counter
         breakpoints: Detected breakpoints
         cnv_data: CNV data
+        bin_width: Width of bins in base pairs
         logger: Logger instance
     """
     try:
@@ -866,7 +898,7 @@ def generate_bed_files(bed_dir, analysis_counter, breakpoints, cnv_data, logger)
             for chrom, values in cnv_data.items():
                 if len(values) > 0:
                     # Find regions with significant CNV changes
-                    significant_regions = find_significant_regions(values, chrom)
+                    significant_regions = find_significant_regions(values, chrom, bin_width)
                     for region in significant_regions:
                         f.write(
                             f"{chrom}\t{region['start']}\t{region['end']}\t{region['type']}\n"
@@ -901,6 +933,8 @@ def save_cnv_files(
     sex_estimate,
     copy_numbers,
     logger,
+    reference: Optional[str] = None,
+    generate_master_bed: bool = False,
 ):
     """
     Save CNV data files in the specified format from the documentation.
@@ -977,7 +1011,36 @@ def save_cnv_files(
         os.makedirs(bed_dir, exist_ok=True)
 
         # Generate BED files for CNV regions and breakpoints
-        generate_bed_files(bed_dir, analysis_counter, breakpoints, result3_cnv, logger)
+        generate_bed_files(bed_dir, analysis_counter, breakpoints, result3_cnv, bin_width, logger)
+
+        # Generate master BED file only if requested (should only be done once per batch at the end)
+        # Use async (non-blocking) generation to avoid blocking the analysis pipeline
+        if generate_master_bed:
+            try:
+                from robin.analysis.master_bed_generator import (
+                    generate_master_bed_async,
+                    _try_get_target_panel_from_fusion_metadata,
+                )
+                
+                # Extract sample_id from sample_dir
+                sample_id = os.path.basename(sample_dir)
+                # work_dir is the parent of sample_dir
+                work_dir = os.path.dirname(sample_dir)
+                
+                # Try to get target_panel from fusion metadata if available
+                target_panel = _try_get_target_panel_from_fusion_metadata(sample_id, work_dir)
+                
+                # Generate asynchronously (non-blocking)
+                generate_master_bed_async(
+                    sample_id=sample_id,
+                    work_dir=work_dir,
+                    analysis_counter=analysis_counter,
+                    target_panel=target_panel,
+                    logger_instance=logger,
+                    reference=reference,
+                )
+            except Exception as e:
+                logger.warning(f"Could not start async master BED generation: {e}")
 
         logger.debug(f"Saved all CNV files to {sample_dir}")
 
@@ -987,7 +1050,7 @@ def save_cnv_files(
 
 
 
-def process_single_bam(bam_path, metadata, work_dir, logger, threads=2):
+def process_single_bam(bam_path, metadata, work_dir, logger, threads=2, reference: Optional[str] = None):
     """
     Process a single BAM file for CNV analysis using the complete pipeline.
 
@@ -1237,6 +1300,7 @@ def process_single_bam(bam_path, metadata, work_dir, logger, threads=2):
         analysis_counter += 1
 
         # Save CNV data files as specified in the documentation
+        # Don't generate master BED here - it should only be generated once per batch
         save_cnv_files(
             sample_output_dir,
             analysis_counter,
@@ -1249,6 +1313,8 @@ def process_single_bam(bam_path, metadata, work_dir, logger, threads=2):
             sex_estimate,
             updated_copy_numbers,  # Pass updated copy_numbers (already saved to per-sample file above)
             logger,
+            reference=reference,
+            generate_master_bed=False,  # Single BAM - master BED should be generated at batch end
         )
 
         analysis_result["cnv_data_path"] = os.path.join(
@@ -1281,7 +1347,7 @@ def process_single_bam(bam_path, metadata, work_dir, logger, threads=2):
         return analysis_result
 
 
-def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, threads=2):
+def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, threads=2, reference: Optional[str] = None):
     """
     Process multiple BAM files for CNV analysis using aggregated CNV data.
     
@@ -1553,14 +1619,11 @@ def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, threads=2)
             save_start = time.time()
             with open(copy_numbers_path, "wb") as f:
                 pickle.dump(final_copy_numbers, f, protocol=pickle.HIGHEST_PROTOCOL)
-            save_time = time.time() - save_start
-            logger.debug(f"Saved aggregated copy_numbers to {copy_numbers_path} in {save_time:.3f}s")
-            
-            # Update cache with the saved copy_numbers
             update_sample_cache(sample_id, copy_numbers=final_copy_numbers)
-            
-            # Update the local copy_numbers variable for subsequent processing
             copy_numbers = final_copy_numbers
+            logger.info(
+                f"[cnv] Save copy_numbers + cache update completed in {time.time() - save_start:.2f}s"
+            )
 
             analysis_result["processing_steps"].append("cnv_data_extracted")
             logger.debug("Aggregated CNV data extracted successfully")
@@ -1576,7 +1639,7 @@ def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, threads=2)
 
         # Calculate normalized CNV data (difference between sample and reference)
         logger.debug("Calculating normalized CNV data from aggregated results")
-        
+        t0 = time.time()
         result3_cnv = {}
         for key in r_cnv.keys():
             if key != "chrM" and key in r2_cnv:
@@ -1586,21 +1649,28 @@ def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, threads=2)
                     moving_avg_data1, moving_avg_data2
                 )
                 result3_cnv[key] = moving_avg_data1 - moving_avg_data2
+        logger.info(f"[cnv] Normalized CNV (moving avg + diff) completed in {time.time() - t0:.2f}s")
 
         analysis_result["processing_steps"].append("normalized_cnv_calculated")
-        
+
         # Estimate sex from aggregated CNV data
+        t0 = time.time()
         sex_estimate = estimate_sex_from_cnv(result3_cnv, logger)
+        logger.info(f"[cnv] Sex estimate completed in {time.time() - t0:.2f}s")
         analysis_result["sex_estimate"] = sex_estimate
         analysis_result["processing_steps"].append("sex_estimated")
 
         # Detect breakpoints from aggregated CNV data
+        t0 = time.time()
         breakpoints = detect_breakpoints_from_cnv(r_cnv, r_bin, logger)
+        logger.info(f"[cnv] Breakpoint detection completed in {time.time() - t0:.2f}s")
         analysis_result["breakpoints"] = breakpoints
         analysis_result["processing_steps"].append("breakpoints_detected")
 
         # Calculate chromosome statistics from aggregated CNV data
+        t0 = time.time()
         chromosome_stats = calculate_chromosome_stats_from_cnv(result3_cnv, logger)
+        logger.info(f"[cnv] Chromosome stats completed in {time.time() - t0:.2f}s")
         analysis_result["chromosome_stats"] = chromosome_stats
         analysis_result["processing_steps"].append("chromosome_stats_calculated")
 
@@ -1608,6 +1678,8 @@ def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, threads=2)
         analysis_counter += 1
 
         # Save CNV data files as specified in the documentation
+        # Generate master BED here since this is batch processing (all BAMs processed)
+        t0 = time.time()
         save_cnv_files(
             sample_output_dir,
             analysis_counter,
@@ -1620,7 +1692,10 @@ def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, threads=2)
             sex_estimate,
             final_copy_numbers,  # Pass final aggregated copy_numbers
             logger,
+            reference=reference,
+            generate_master_bed=True,  # Batch processing - generate master BED once at the end
         )
+        logger.info(f"[cnv] save_cnv_files (incl. master BED) completed in {time.time() - t0:.2f}s")
 
         analysis_result["cnv_data_path"] = os.path.join(
             sample_output_dir, f"{analysis_counter}_cnv_data.json"
@@ -1628,12 +1703,11 @@ def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, threads=2)
         analysis_result["processing_steps"].append("cnv_data_saved")
 
         # Save updated analysis counter to disk
+        t0 = time.time()
         save_analysis_counter(sample_id, analysis_counter, work_dir, logger)
         analysis_result["analysis_counter"] = analysis_counter
-        logger.debug(f"Saved analysis counter: {analysis_counter}")
-
-        # Force garbage collection
         gc.collect()
+        logger.info(f"[cnv] Save analysis counter + gc completed in {time.time() - t0:.2f}s")
 
         analysis_result["processing_steps"].append("cnv_analysis_complete")
 
@@ -1724,14 +1798,23 @@ def cnv_handler(job, work_dir=None, target_panel=None, threads=2):
             batch_work_dir = work_dir
             logger.debug(f"Using specified work directory: {batch_work_dir}")
         
+        # Get reference from job metadata
+        reference = job.context.metadata.get("reference")
+        if reference:
+            # Expand user home directory if present
+            reference = os.path.expanduser(reference)
+            logger.debug(f"Using reference genome from job metadata: {reference}")
+        
         # Process all BAM files in the batch using the new aggregated function
         logger.info(f"Processing {batch_size} BAM files as aggregated batch for sample '{sample_id}'")
+        
         batch_result = process_multiple_bams(
             bam_paths=filepaths,
             metadata_list=metadata_list,
             work_dir=batch_work_dir,
             logger=logger,
-            threads=threads
+            threads=threads,
+            reference=reference,
         )
         
         # Store batch results in job context (maintain compatibility with existing structure)

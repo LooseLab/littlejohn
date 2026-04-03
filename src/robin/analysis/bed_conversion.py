@@ -2,23 +2,20 @@
 """
 BAM to parquet file conversion module for robin.
 
-This module provides automated conversion of BAM files to parquet format using
-matkit from the robin package. The analysis integrates with robin's
-preprocessing pipeline and provides comprehensive metadata output.
-
-Features:
-- Automated BAM processing with robin's preprocessing pipeline
-- BAM to parquet conversion using matkit from robin package
-- Parquet file management for incremental processing
-- Integration with CPG master file for methylation analysis
-- Comprehensive metadata extraction and logging
+Requires Python 3.12+. Automated conversion of BAM files to parquet using
+matkit; integrates with robin's preprocessing pipeline and CPG master file.
 """
+from __future__ import annotations
+
+import sys
+if sys.version_info < (3, 12):
+    raise RuntimeError("robin bed_conversion requires Python 3.12 or newer")
 
 import os
 import time
 import tempfile
-import itertools
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional
 
@@ -44,17 +41,22 @@ _LOGGER = logging.getLogger("robin.analysis.bed_conversion")
 # Cache CPGs master file path across instances
 _CPGS_MASTER_FILE_CACHE: Optional[str] = None
 
-# Fallback search paths for the CPGs master file
-_CPGS_POSSIBLE_PATHS = (
-    "sturg_nanodx_cpgs_0125.bed.gz",
-    "data/sturg_nanodx_cpgs_0125.bed.gz",
-    "/usr/local/share/sturg_nanodx_cpgs_0125.bed.gz",
-)
+
+def _is_fail_only_expected(job) -> bool:
+    """True when conversion 'failures' are expected for fail-only BAM submissions."""
+    try:
+        if not bool(job.context.metadata.get("fail_only_bam_submission", False)):
+            return False
+        fp = getattr(job.context, "filepath", "") or ""
+        base = os.path.basename(fp).lower()
+        return ("fail" in base) and ("pass" not in base)
+    except Exception:
+        return False
 
 
-@dataclass
+@dataclass(slots=True)
 class BedConversionMetadata:
-    """Container for BAM to parquet conversion metadata and results"""
+    """Container for BAM to parquet conversion metadata and results."""
 
     sample_id: str
     bam_path: str
@@ -74,10 +76,10 @@ class BedConversionMetadata:
 class BedConversionAnalysis:
     """BAM to parquet conversion analysis worker"""
 
-    def __init__(self, work_dir=None, threads=4):
+    def __init__(self, work_dir=None, threads=1):
         self.work_dir = work_dir or os.getcwd()
         self.threads = threads
-
+        
         # Find required files and paths
         self.cpgs_master_file = self._find_cpgs_master_file()
 
@@ -92,33 +94,27 @@ class BedConversionAnalysis:
         self.logger.debug(f"Threads: {self.threads}")
 
     def _find_cpgs_master_file(self) -> str:
-        """Find the CPGs master file from robin resources"""
+        """Find the parquet filter file (CPGs to retain) from robin resources.
+        Only parquet_filter.txt is used; no fallback to other files."""
         global _CPGS_MASTER_FILE_CACHE
         if _CPGS_MASTER_FILE_CACHE is not None:
             return _CPGS_MASTER_FILE_CACHE
 
-        if resources is not None:
-            try:
-                cpgs_path = os.path.join(
-                    os.path.dirname(os.path.abspath(resources.__file__)),
-                    "sturg_nanodx_cpgs_0125.bed.gz",
-                )
-                if os.path.exists(cpgs_path):
-                    _CPGS_MASTER_FILE_CACHE = cpgs_path
-                    return _CPGS_MASTER_FILE_CACHE
-            except Exception:
-                pass
+        if resources is None:
+            raise FileNotFoundError(
+                "robin.resources not available; cannot locate parquet_filter.txt"
+            )
 
-        # Fallback paths
-        for path in _CPGS_POSSIBLE_PATHS:
-            if os.path.exists(path):
-                _CPGS_MASTER_FILE_CACHE = path
-                return _CPGS_MASTER_FILE_CACHE
+        resources_dir = os.path.dirname(os.path.abspath(resources.__file__))
+        parquet_filter = os.path.join(resources_dir, "parquet_filter.txt")
+        if not os.path.exists(parquet_filter):
+            raise FileNotFoundError(
+                f"parquet_filter.txt not found at {parquet_filter}. "
+                "Bed conversion requires parquet_filter.txt in robin resources."
+            )
 
-        # If not found, create a placeholder (this will cause an error later)
-        logger = logging.getLogger("robin.analysis.bed_conversion")
-        logger.warning("CPGs master file not found, will use placeholder")
-        return "sturg_nanodx_cpgs_0125.bed.gz"
+        _CPGS_MASTER_FILE_CACHE = parquet_filter
+        return _CPGS_MASTER_FILE_CACHE
 
     def _get_next_file_number(self) -> int:
         """Get the next file number for incremental naming"""
@@ -131,7 +127,6 @@ class BedConversionAnalysis:
     ) -> BedConversionMetadata:
         """Process a single BAM file for parquet conversion"""
         logger = self.logger
-
         logger.info(f"Processing BAM file: {bam_path} for parquet conversion")
         sample_id = metadata.get("sample_id", "unknown")
         start_time = time.time()
@@ -196,29 +191,50 @@ class BedConversionAnalysis:
         """Process BAM files using matkit and return list of processed file paths"""
         logger = self.logger
         processed_files: List[str] = []
-        processed_files_append = processed_files.append
         run_matkit_callable = run_matkit  # local binding
+        threads = max(1, int(self.threads or 1))
 
-        for bam in bams:
+        def cleanup_temp_files(files: List[str]) -> None:
+            for file_path in files:
+                try:
+                    os.remove(file_path)
+                    logger.debug(f"Deleted temporary file: {file_path}")
+                except OSError as e:
+                    logger.warning(f"Failed to delete temporary file {file_path}: {e}")
+
+        def process_single_bam(bam: str) -> str:
             logger.debug(f"Processing BAM file: {bam}")
-
-            # Create temporary file for matkit output - exactly like the working code
+            # Temporary parquet path: matkit writes 8-column parquet so merge_modkit_files can read directly (no CSV parse).
             temp_file = tempfile.NamedTemporaryFile(
-                mode="w", suffix=".txt", prefix="modkit_", dir=work_dir, delete=False
+                suffix=".parquet", prefix="modkit_", dir=work_dir, delete=False
             )
             temp_file.close()
 
             try:
-                # Run matkit on the BAM file - using the same function as working code
+                # Run matkit on the BAM file (writes parquet when path ends in .parquet)
                 if run_matkit_callable is not None:
+                    logger.debug("Running matkit callable")
                     run_matkit_callable(bam, temp_file.name)
                 else:
-                    # Fallback if robin is not available
-                    with open(temp_file.name, "w") as f:
-                        f.write(f"# Dummy output for {bam}\n")
+                    # Fallback if robin is not available (write empty parquet not used in real runs)
+                    import pyarrow as pa
+                    import pyarrow.parquet as pq
+                    empty = pa.table(
+                        {
+                            "chrom": pa.array([], type=pa.binary()),
+                            "chromStart": pa.array([], type=pa.int64()),
+                            "mod_code": pa.array([], type=pa.binary()),
+                            "strand": pa.array([], type=pa.binary()),
+                            "valid_cov": pa.array([], type=pa.uint32()),
+                            "percent_modified": pa.array([], type=pa.float32()),
+                            "n_mod": pa.array([], type=pa.uint32()),
+                            "n_canonical": pa.array([], type=pa.uint32()),
+                        }
+                    )
+                    pq.write_table(empty, temp_file.name)
 
-                processed_files_append(temp_file.name)
                 logger.debug(f"Successfully processed: {temp_file.name}")
+                return temp_file.name
 
             except Exception as e:
                 logger.error(f"Failed to process {bam}: {e}")
@@ -230,13 +246,29 @@ class BedConversionAnalysis:
                     pass
                 raise
 
-        return processed_files
+        if threads == 1 or len(bams) <= 1:
+            return [process_single_bam(bam) for bam in bams]
+
+        # Parallel path: tolerate per-file failures so one bad BAM does not fail the batch
+        try:
+            with ThreadPoolExecutor(max_workers=threads) as executor:
+                futures = {executor.submit(process_single_bam, bam): bam for bam in bams}
+                for future in as_completed(futures):
+                    try:
+                        processed_files.append(future.result())
+                    except Exception as e:
+                        bam_path = futures[future]
+                        logger.warning(f"Failed to process BAM {os.path.basename(bam_path)}: {e}")
+            return processed_files
+        except Exception:
+            cleanup_temp_files(processed_files)
+            raise
 
     def _update_state(
         self, state: str, data: List[str], sample_id: str, file_number: int
     ) -> str:
         """Update the state with new data from BAM processing - creates parquet file directly"""
-        logger = logging.getLogger("robin.analysis.bed_conversion")
+        logger = _LOGGER
 
         if merge_modkit_files is None:
             logger.error(
@@ -246,8 +278,11 @@ class BedConversionAnalysis:
                 "robin.analysis.temp_utilities.merge_modkit_files is required for parquet creation"
             )
 
-        # Configuration for mnpflex - exactly like the working code
-        mnpflex_config = {"mnpuser": None, "mnppass": None}
+        # Configuration for mnpflex - allow env var overrides
+        mnpflex_config = {
+            "mnpuser": os.getenv("MNPFLEX_USER"),
+            "mnppass": os.getenv("MNPFLEX_PASS"),
+        }
 
         logger.debug(f"Creating parquet file: {state}")
         logger.debug(f"Processing {len(data)} matkit files")
@@ -265,9 +300,20 @@ class BedConversionAnalysis:
             1,  # Number of BAM files that contributed
         )
 
-        # Verify the parquet file was created
+        # When no reads passed the QS filter, all per-BAM parquets are empty and merge
+        # returns without writing; treat as non-fatal and carry on so next batches can run.
         if not os.path.exists(state):
-            raise FileNotFoundError(f"Parquet file was not created: {state}")
+            logger.info(
+                "No parquet written for this batch (no data after filtering); "
+                "continuing so next batches can be processed."
+            )
+            for file_path in data:
+                try:
+                    os.remove(file_path)
+                    logger.debug(f"Deleted temporary file: {file_path}")
+                except OSError as e:
+                    logger.warning(f"Failed to delete temporary file {file_path}: {e}")
+            return state
 
         parquet_size = os.path.getsize(state)
         logger.debug(
@@ -284,18 +330,9 @@ class BedConversionAnalysis:
 
         return state
 
-
-def grouper(iterable, n):
-    """Group items from iterable into chunks of size n"""
-    it = iter(iterable)
-    while True:
-        chunk = tuple(itertools.islice(it, n))
-        if not chunk:
-            return
-        yield chunk
-
-
-def process_multiple_files(bam_paths, metadata_list, work_dir, logger, threads=4):
+def process_multiple_files(
+    bam_paths, metadata_list, work_dir, logger, threads=4, expected_fail_only: bool = False
+):
     """
     Process multiple BAM files for bed conversion analysis.
     
@@ -326,10 +363,6 @@ def process_multiple_files(bam_paths, metadata_list, work_dir, logger, threads=4
     logger.info(f"Processing {len(bam_paths)} BAM files for sample {sample_id}")
     logger.info(f"Using {threads} threads for processing")
     
-    # Log essential metadata only
-    for i, (bam_path, metadata) in enumerate(zip(bam_paths, metadata_list)):
-        logger.debug(f"BAM file {i+1}: {os.path.basename(bam_path)}")
-
     analysis_result = {
         "sample_id": sample_id,
         "bam_paths": bam_paths,
@@ -359,34 +392,19 @@ def process_multiple_files(bam_paths, metadata_list, work_dir, logger, threads=4
         logger.info("Initialized bed conversion analyzer")
         analysis_result["processing_steps"].append("analyzer_initialized")
 
-        # Process each BAM file individually
-        logger.info("Processing BAM files individually")
-        processed_files = 0
-        all_processed_data = []
-        
-        for i, (bam_path, metadata) in enumerate(zip(bam_paths, metadata_list)):
-            logger.info(f"Processing BAM file {i+1}/{len(bam_paths)}: {os.path.basename(bam_path)}")
-            
-            try:
-                # Check if BAM file exists
-                if not os.path.exists(bam_path):
-                    logger.warning(f"BAM file not found: {bam_path}")
-                    continue
-                
-                # Process the BAM file using matkit
-                processed_data = bed_analyzer._process_bams([bam_path], sample_dir)
-                
-                if processed_data:
-                    all_processed_data.extend(processed_data)
-                    processed_files += 1
-                    logger.debug(f"Successfully processed file {i+1}: {os.path.basename(bam_path)}")
-                    logger.debug(f"Generated {len(processed_data)} temporary files")
-                else:
-                    logger.warning(f"No data generated for {os.path.basename(bam_path)}")
-                
-            except Exception as e:
-                logger.warning(f"Error processing {os.path.basename(bam_path)}: {e}")
-                continue
+        # Process all BAMs in one call so _process_bams can run them in parallel (threads)
+        valid_bam_paths = [p for p in bam_paths if os.path.exists(p)]
+        for p in bam_paths:
+            if not os.path.exists(p):
+                logger.warning(f"BAM file not found: {p}")
+        if not valid_bam_paths:
+            analysis_result["error_message"] = "No BAM files found or all paths missing"
+            analysis_result["processing_steps"].append("no_files_processed")
+            return analysis_result
+
+        logger.info(f"Processing {len(valid_bam_paths)} BAM files (up to {bed_analyzer.threads} in parallel)")
+        all_processed_data = bed_analyzer._process_bams(valid_bam_paths, sample_dir)
+        processed_files = len(all_processed_data)
 
         if processed_files == 0:
             analysis_result["error_message"] = "No files could be processed successfully"
@@ -416,7 +434,11 @@ def process_multiple_files(bam_paths, metadata_list, work_dir, logger, threads=4
                     parquet_size = os.path.getsize(parquet_path)
                     logger.info(f"Parquet file size: {parquet_size} bytes")
                 else:
-                    logger.error("Parquet file was not created")
+                    msg = "Parquet file was not created"
+                    if expected_fail_only:
+                        logger.warning(f"{msg} (expected for fail-only BAM submission)")
+                    else:
+                        logger.error(msg)
                     analysis_result["error_message"] = "Parquet file creation failed"
                     return analysis_result
                     
@@ -455,6 +477,7 @@ def bed_conversion_handler(job, work_dir=None):
     try:
         # Get job-specific logger
         logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
+        suppress_expected = _is_fail_only_expected(job)
         
         # Check if this is a batched job
         batched_job = job.context.metadata.get("_batched_job")
@@ -471,24 +494,13 @@ def bed_conversion_handler(job, work_dir=None):
             for i, filepath in enumerate(filepaths):
                 logger.info(f"  Batch file {i+1}/{batch_size}: {os.path.basename(filepath)}")
             
-            # Prepare metadata list for all BAM files in the batch
-            metadata_list = []
-            for i, bam_path in enumerate(filepaths):
-                # Get metadata from preprocessing for this specific file
-                file_metadata = batched_job.contexts[i].metadata.get("bam_metadata", {})
-                
-                # Get sample ID from preprocessing results for this specific file
-                file_context = batched_job.contexts[i]
-                file_sample_id = file_context.get_sample_id()
-                
-                # Use the sample ID from the file's context (which should have preprocessing results)
-                if file_sample_id != "unknown":
-                    file_metadata["sample_id"] = file_sample_id
-                else:
-                    file_metadata["sample_id"] = sample_id
-                
-                metadata_list.append(file_metadata)
-            
+            # Prepare metadata list for all BAM files in the batch (list comp inlined in 3.12)
+            def _batch_metadata(i: int) -> dict:
+                ctx = batched_job.contexts[i]
+                sid = ctx.get_sample_id()
+                return {**ctx.metadata.get("bam_metadata", {}), "sample_id": sid if sid != "unknown" else sample_id}
+            metadata_list = [_batch_metadata(i) for i in range(len(filepaths))]
+
             # Determine work directory for the batch
             if work_dir is None:
                 # Default to first BAM file directory
@@ -506,7 +518,8 @@ def bed_conversion_handler(job, work_dir=None):
                 metadata_list=metadata_list,
                 work_dir=batch_work_dir,
                 logger=logger,
-                threads=4  # Default thread count
+                threads=1,  # Default thread count
+                expected_fail_only=bool(suppress_expected),
             )
             
             # Store batch results in job context (maintain compatibility with existing structure)
@@ -523,8 +536,24 @@ def bed_conversion_handler(job, work_dir=None):
             logger.info(f"Files successfully processed: {batch_result.get('files_processed', batch_size)}/{batch_result.get('total_files', batch_size)}")
             
             if batch_result.get("error_message"):
-                logger.error(f"Batch processing completed with errors: {batch_result['error_message']}")
-                job.context.add_error("bed_conversion", batch_result["error_message"])
+                if suppress_expected:
+                    logger.warning(
+                        f"Batch processing completed with expected errors (fail-only BAM submission): {batch_result['error_message']}"
+                    )
+                    job.context.add_result(
+                        "bed_conversion",
+                        {
+                            "status": "expected_failure",
+                            "error_message": batch_result["error_message"],
+                            "sample_id": sample_id,
+                            "parquet_path": batch_result.get("parquet_path", ""),
+                        },
+                    )
+                else:
+                    logger.error(
+                        f"Batch processing completed with errors: {batch_result['error_message']}"
+                    )
+                    job.context.add_error("bed_conversion", batch_result["error_message"])
             else:
                 logger.info("Batch processing completed successfully with aggregated bed conversion")
                 job.context.add_result(
@@ -573,10 +602,24 @@ def bed_conversion_handler(job, work_dir=None):
             job.context.add_metadata("bed_processing_steps", bed_result.processing_steps)
 
             if bed_result.error_message:
-                job.context.add_error("bed_conversion", bed_result.error_message)
-                logger.error(
-                    f"BAM to parquet conversion failed: {bed_result.error_message}"
-                )
+                if suppress_expected:
+                    logger.warning(
+                        f"Expected BAM->parquet issue for fail-only BAM submission: {bed_result.error_message}"
+                    )
+                    job.context.add_result(
+                        "bed_conversion",
+                        {
+                            "status": "expected_failure",
+                            "error_message": bed_result.error_message,
+                            "sample_id": bed_result.sample_id,
+                            "parquet_path": bed_result.parquet_path,
+                        },
+                    )
+                else:
+                    job.context.add_error("bed_conversion", bed_result.error_message)
+                    logger.error(
+                        f"BAM to parquet conversion failed: {bed_result.error_message}"
+                    )
             else:
                 job.context.add_result(
                     "bed_conversion",
@@ -596,6 +639,17 @@ def bed_conversion_handler(job, work_dir=None):
                 logger.debug(f"Processing steps: {', '.join(bed_result.processing_steps)}")
 
     except Exception as e:
+        suppress_expected = _is_fail_only_expected(job)
+        if suppress_expected:
+            logger = get_job_logger(str(job.job_id), job.job_type, job.context.filepath)
+            logger.warning(
+                f"Expected bed conversion failure for fail-only BAM submission: {e}"
+            )
+            job.context.add_result(
+                "bed_conversion",
+                {"status": "expected_failure", "error_message": str(e)},
+            )
+            return
         job.context.add_error("bed_conversion", str(e))
         logger = logging.getLogger("robin.analysis.bed_conversion")
         logger.error(

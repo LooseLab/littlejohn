@@ -227,6 +227,7 @@ class VariantsSection(ReportSection):
     def _process_variant_files(self):
         """Process the variant files."""
         logger.debug("Starting variant file processing")
+        self.variant_detection_run = False
         try:
             # Paths to the annotated VCF files
             snp_vcf = os.path.join(self.report.output, "clair3", "snpsift_output.vcf")
@@ -239,6 +240,7 @@ class VariantsSection(ReportSection):
 
             # Process SNPs
             if os.path.exists(snp_vcf):
+                self.variant_detection_run = True
                 logger.debug("Processing SNP VCF file: %s", snp_vcf)
                 self.variant_analyzer.process_vcf(snp_vcf, "SNP", self.variant_result)
             else:
@@ -246,6 +248,7 @@ class VariantsSection(ReportSection):
 
             # Process indels
             if os.path.exists(indel_vcf):
+                self.variant_detection_run = True
                 logger.debug("Processing indel VCF file: %s", indel_vcf)
                 self.variant_analyzer.process_vcf(
                     indel_vcf, "INDEL", self.variant_result
@@ -300,14 +303,17 @@ class VariantsSection(ReportSection):
 
         # Add summary section
         self.elements.append(Paragraph("Summary", self.styles.styles["Heading2"]))
-        summary_text = (
-            f"Found {len(self.variant_result.snp_data)} candidate pathogenic SNPs and "
-            f"{len(self.variant_result.indel_data)} candidate pathogenic indels affecting "
-            f"{len(self.variant_result.affected_genes)} genes.<br/>"
-            f"Genes with candidate pathogenic variants: {', '.join(sorted(self.variant_result.affected_genes))}"
-        )
+        if self.variant_detection_run:
+            summary_text = (
+                f"Found {len(self.variant_result.snp_data)} candidate pathogenic SNPs and "
+                f"{len(self.variant_result.indel_data)} candidate pathogenic indels affecting "
+                f"{len(self.variant_result.affected_genes)} genes.<br/>"
+                f"Genes with candidate pathogenic variants: {', '.join(sorted(self.variant_result.affected_genes))}"
+            )
+        else:
+            summary_text = "Variant detection has not been run for this sample."
         self.elements.append(Paragraph(summary_text, self.styles.styles["Normal"]))
-        self.elements.append(Spacer(1, 12))
+        self.elements.append(Spacer(1, 4))
 
         # Add summary to summary section
         self.summary_elements.append(
@@ -317,13 +323,16 @@ class VariantsSection(ReportSection):
             Paragraph(summary_text, self.styles.styles["Normal"])
         )
 
-        if not self.variant_result.snp_data and not self.variant_result.indel_data:
-            self.elements.append(
-                Paragraph(
-                    "No pathogenic variants were identified.",
-                    self.styles.styles["Normal"],
+        if not self.variant_detection_run or (
+            not self.variant_result.snp_data and not self.variant_result.indel_data
+        ):
+            if self.variant_detection_run:
+                self.elements.append(
+                    Paragraph(
+                        "No pathogenic variants were identified.",
+                        self.styles.styles["Normal"],
+                    )
                 )
-            )
             # Build empty export frames for consistency
             try:
                 import pandas as pd
@@ -362,7 +371,7 @@ class VariantsSection(ReportSection):
         self.elements.append(
             Paragraph("Detailed Analysis", self.styles.styles["Heading2"])
         )
-        self.elements.append(Spacer(1, 12))
+        self.elements.append(Spacer(1, 4))
 
         # Create table for pathogenic variants
         if self.variant_result.snp_data or self.variant_result.indel_data:
@@ -461,7 +470,7 @@ class VariantsSection(ReportSection):
             )
 
             self.elements.append(table)
-            self.elements.append(Spacer(1, 6))
+            self.elements.append(Spacer(1, 4))
 
             # Add source file information
             source_style = ParagraphStyle(
@@ -485,7 +494,7 @@ class VariantsSection(ReportSection):
                 source_text += f"\nIndels: {indel_vcf}"
 
             self.elements.append(Paragraph(source_text, source_style))
-            self.elements.append(Spacer(1, 12))
+            self.elements.append(Spacer(1, 4))
 
             # Add a note about the variants
             note_style = ParagraphStyle(

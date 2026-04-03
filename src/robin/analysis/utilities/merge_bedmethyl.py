@@ -1,6 +1,11 @@
 """
-Helper functions to sort and merge bedmethyl files.
+Helper functions to sort and merge bedmethyl files. Requires Python 3.12+.
 """
+from __future__ import annotations
+
+import sys
+if sys.version_info < (3, 12):
+    raise RuntimeError("robin merge_bedmethyl utilities require Python 3.12 or newer")
 
 import pandas as pd
 import csv
@@ -190,7 +195,7 @@ def modkit_pileup_file_to_bed(
     margin: Optional[int] = 25,
     neg_threshold: Optional[float] = 0.3,
     pos_threshold: Optional[float] = 0.7,
-    fivemc_code: str = "C",
+    fivemc_code: str = "m",
 ) -> pd.DataFrame:
     """Processes a modkit pileup file or DataFrame and maps methylation data to probes."""
 
@@ -324,10 +329,8 @@ def modkit_pileup_file_to_bed(
         probes_df = probes_df[['chr', 'start', 'end', 'probe_name']].copy()
 
         # Ensure chromosome names match
-        probes_df["chr"] = probes_df["chr"].astype(str).str.replace("^chr", "", regex=True)  # Remove "chr" prefix
-        modkit_df["chr"] = (
-            modkit_df["chr"].astype(str).str.replace("^chr", "", regex=True)
-        )  # Remove "chr" prefix
+        probes_df["chr"] = probes_df["chr"].astype(str).str.removeprefix("chr")
+        modkit_df["chr"] = modkit_df["chr"].astype(str).str.removeprefix("chr")
         
         # Get unique chromosomes
         chromosomes = np.unique(probes_df["chr"].astype(str))

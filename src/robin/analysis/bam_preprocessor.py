@@ -1,11 +1,19 @@
-"""BAM file preprocessing and metadata extraction for robin."""
+"""BAM file preprocessing and metadata extraction for robin.
+
+Requires Python 3.12+ (slots=True, str.removeprefix, PEP 709 comprehensions).
+"""
+from __future__ import annotations
 
 import os
+import sys
 import time
 import re
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List, Tuple
 from pathlib import Path
+
+if sys.version_info < (3, 12):
+    raise RuntimeError("robin bam_preprocessor requires Python 3.12 or newer")
 
 import pysam
 from dateutil import parser
@@ -38,6 +46,10 @@ try:
 except ValueError:
     _LJ_BAM_THREADS = 0
 
+# When True, BAMs with >50k reads are processed (downstream batching uses batch size 1 per file).
+# Set ROBIN_PROCESS_LARGE_BAMS=1 to enable.
+_PROCESS_LARGE_BAMS_INDIVIDUALLY = os.getenv("ROBIN_PROCESS_LARGE_BAMS", "0").strip().lower() in ("1", "true", "yes", "on")
+
 # Constants for MGMT locus (chr10:129,466,536-129,467,536)
 _MGMT_CHR = "chr10"
 _MGMT_START = 129466536
@@ -48,9 +60,9 @@ _MGMT_END = 129467536
 # ============================================================================
 
 
-@dataclass
+@dataclass(slots=True)
 class BamMetadata:
-    """Container for BAM file metadata and extracted data"""
+    """Container for BAM file metadata and extracted data."""
 
     file_path: str
     file_size: int
@@ -100,9 +112,9 @@ def get_rg_tags_from_bam(sam_file) -> Optional[Tuple[Optional[str], ...]]:
         ds_tags = ds_tag.split(" ")
         ds_tags_len = len(ds_tags)
         basecall_model_tag = (
-            ds_tags[1].replace(_BASECALL_MODEL_PREFIX, "") if ds_tags_len > 1 else None
+            ds_tags[1].removeprefix(_BASECALL_MODEL_PREFIX) if ds_tags_len > 1 else None
         )
-        runid_tag = ds_tags[0].replace(_RUNID_PREFIX, "") if ds_tags else None
+        runid_tag = ds_tags[0].removeprefix(_RUNID_PREFIX) if ds_tags else None
     else:
         basecall_model_tag = None
         runid_tag = None
@@ -128,37 +140,73 @@ def get_rg_tags_from_bam(sam_file) -> Optional[Tuple[Optional[str], ...]]:
 
 def _extract_sample_id_from_bam(bam_path: str) -> str:
     """
-    Extract sample ID from BAM file read group tags.
-    This is a fallback function when comprehensive processing fails.
+    Extract sample ID from BAM file read group tags (and, if needed, a quick
+    barcode probe).
+
+    This is used both as a fallback when comprehensive processing fails and as
+    an early probe to decide whether this BAM's sample output directory
+    already exists (idempotency for re-adding watch folders).
     """
     try:
+        bam_basename = os.path.basename(bam_path)
+        unknown_fallback = f"unknown_sample_{bam_basename}"
+
         with pysam.AlignmentFile(bam_path, "rb") as bam:
             # Get read group tags
             rg_tags = bam.header.get(_RG_TAG, [])
-            if rg_tags:
-                # Process only the first RG tag for efficiency
-                rg_tag = rg_tags[0]
+            if not rg_tags:
+                return unknown_fallback
 
-                # Look for LB (Library) tag which contains the sample ID
-                lb_tag = rg_tag.get("LB")
-                if lb_tag:
-                    return lb_tag
+            # Process only the first RG tag for efficiency
+            rg_tag = rg_tags[0]
 
+            # Look for LB (Library) tag which contains the sample ID
+            lb_tag = rg_tag.get("LB")
+            if lb_tag:
+                sample_id = lb_tag
+            else:
                 # Fallback to runid from DS tag per ONT specification
                 ds_tag = rg_tag.get("DS", "")
                 if ds_tag:
                     ds_tags = ds_tag.split(" ")
                     if ds_tags and ds_tags[0].startswith(_RUNID_PREFIX):
-                        runid = ds_tags[0].replace(_RUNID_PREFIX, "")
-                        if runid:
-                            return runid
+                        runid = ds_tags[0].removeprefix(_RUNID_PREFIX)
+                        sample_id = runid if runid else unknown_fallback
+                    else:
+                        sample_id = unknown_fallback
+                else:
+                    sample_id = unknown_fallback
 
-            # If no RG tags or no valid sample ID found, return unknown
-            return "unknown"
+            # If the sample_id already ends with a barcode, we are done.
+            if _BARCODE_PATTERN.search(sample_id):
+                return sample_id
+
+            # Quick probe: scan reads until we find a barcode in the RG tag.
+            # This avoids loading/processing the full BAM for idempotency checks.
+            try:
+                for read in bam.fetch(until_eof=True):
+                    if not read.has_tag(_RG_TAG):
+                        continue
+                    rg_value = read.get_tag(_RG_TAG)
+                    barcode_match = _BARCODE_PATTERN.search(rg_value)
+                    if not barcode_match:
+                        continue
+
+                    barcode_num = int(barcode_match.group(1))
+                    if 1 <= barcode_num <= 96:
+                        barcode_str = f"_barcode{barcode_num:02d}"
+                        if not sample_id.endswith(barcode_str):
+                            sample_id = f"{sample_id}{barcode_str}"
+                        return sample_id
+            except Exception:
+                # If the probe scan fails, keep the header-derived sample_id.
+                pass
+
+            return sample_id
 
     except Exception:
-        # If pysam fails, return unknown
-        return "unknown"
+        # If pysam fails, return a stable directory-safe fallback.
+        return f"unknown_sample_{os.path.basename(bam_path)}"
 
 
 # ============================================================================
@@ -281,9 +329,24 @@ def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
                 is_supplementary = read.is_supplementary
                 query_name = read.query_name
 
-                # Track supplementary reads with size limit
+                # Track supplementary reads
+                # A read has supplementary alignments if:
+                # 1. This alignment itself is supplementary (is_supplementary=True), OR
+                # 2. ANY alignment (primary or secondary) has an SA tag (indicating supplementary alignments exist)
+                # 
+                # We check ALL reads (not just primaries) to ensure we catch every read with supplementary mappings,
+                # even if the SA tag is only present on certain alignment records
+                has_supplementary_alignments = False
                 if is_supplementary:
                     supplementary_reads += 1
+                    has_supplementary_alignments = True
+                
+                # Also check SA tag on ALL reads (primary, secondary, supplementary) to catch any we might miss
+                # Some BAM files may have SA tag on different records than expected
+                if read.has_tag("SA"):
+                    has_supplementary_alignments = True
+                
+                if has_supplementary_alignments:
                     reads_with_supplementary.add(query_name)
 
                 if not is_secondary:  # Only process primary alignments
@@ -597,6 +660,34 @@ def _send_alignment_warning_notification(
         pass
 
 
+def _send_skip_notification(
+    warning_msg: str,
+    sample_id: str,
+    filename: str,
+    sample_dir: str,
+) -> None:
+    """
+    Notify GUI that a BAM was skipped due to existing output artifacts.
+    """
+    try:
+        from robin.gui.app import send_gui_update
+        from robin.gui_launcher import UpdateType
+
+        send_gui_update(
+            UpdateType.WARNING_NOTIFICATION,
+            {
+                "message": warning_msg,
+                "sample_id": sample_id,
+                "filename": filename,
+                "sample_dir": sample_dir,
+                "title": "Previously Analysed Sample",
+            },
+            priority=5,
+        )
+    except Exception:
+        pass
+
+
 # ============================================================================
 # JOB HANDLER FUNCTION
 # ============================================================================
@@ -707,7 +798,7 @@ def bam_preprocessing_handler(job, center: str = None):
         else:
             logger.debug("No reference found in job context")
 
-        # Check read count threshold and deliberately skip large BAMs
+        # Check read count threshold: skip large BAMs unless ROBIN_PROCESS_LARGE_BAMS is set
         try:
             total_reads = int(metadata.extracted_data.get("mapped_reads", 0)) + int(
                 metadata.extracted_data.get("unmapped_reads", 0)
@@ -716,26 +807,35 @@ def bam_preprocessing_handler(job, center: str = None):
             total_reads = 0
         
         if total_reads > 50000:
-            # Mark in context to prevent downstream triggers; record reason and count
-            job.context.add_metadata("skip_downstream", True)
-            job.context.add_metadata("skip_reason", "too_many_reads")
-            job.context.add_metadata("skip_read_count", total_reads)
-            # Add an explicit result so the wrapper can log appropriately
-            job.context.add_result(
-                "preprocessing",
-                {
-                    "status": "skipped",
-                    "reason": "too_many_reads",
-                    "read_count": total_reads,
-                    "message": "Deliberately not processed (>50,000 reads)",
-                },
-            )
-            # CLI warning (logger goes to CLI) with filename
-            logger.warning(
-                f"Skipping {os.path.basename(bam_path)}: {total_reads} reads exceeds 50,000 limit. File deliberately not processed."
-            )
-            # Do not proceed with CSV updates or further processing
-            return
+            if _PROCESS_LARGE_BAMS_INDIVIDUALLY:
+                # Process this BAM; downstream batching will pass it to workers as a single-file batch
+                job.context.add_metadata("force_individual_batch", True)
+                job.context.add_metadata("large_bam_read_count", total_reads)
+                logger.info(
+                    f"Large BAM ({total_reads:,} reads) will be processed individually (ROBIN_PROCESS_LARGE_BAMS=1)."
+                )
+                # Fall through: persist supp, update CSV, add success result, trigger downstream
+            else:
+                # Mark in context to prevent downstream triggers; record reason and count
+                job.context.add_metadata("skip_downstream", True)
+                job.context.add_metadata("skip_reason", "too_many_reads")
+                job.context.add_metadata("skip_read_count", total_reads)
+                # Add an explicit result so the wrapper can log appropriately
+                job.context.add_result(
+                    "preprocessing",
+                    {
+                        "status": "skipped",
+                        "reason": "too_many_reads",
+                        "read_count": total_reads,
+                        "message": "Deliberately not processed (>50,000 reads)",
+                    },
+                )
+                # CLI warning (logger goes to CLI) with filename
+                logger.warning(
+                    f"Skipping {os.path.basename(bam_path)}: {total_reads} reads exceeds 50,000 limit. File deliberately not processed."
+                )
+                # Do not proceed with CSV updates or further processing
+                return
 
         # Persist supplementary_read_ids to a temp file to avoid retaining large lists in memory
         try:
@@ -778,9 +878,8 @@ def bam_preprocessing_handler(job, center: str = None):
             try:
                 csv_manager = MasterCSVManager(work_dir)
 
-                # Extract BAM statistics for CSV update
-                bam_stats = {}
-                for key in [
+                # Extract BAM statistics for CSV update (dict comp inlined in 3.12)
+                _bam_stat_keys = (
                     "mapped_reads",
                     "unmapped_reads",
                     "yield_tracking",
@@ -800,8 +899,8 @@ def bam_preprocessing_handler(job, center: str = None):
                     "reads_with_supplementary",
                     "has_mgmt_reads",
                     "mgmt_read_count",
-                ]:
-                    bam_stats[key] = metadata.extracted_data.get(key, 0)
+                )
+                bam_stats = {key: metadata.extracted_data.get(key, 0) for key in _bam_stat_keys}
 
                 # Update master.csv
                 csv_manager.update_master_csv(

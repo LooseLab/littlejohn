@@ -97,7 +97,7 @@ class RunDataSection(ReportSection):
         self.elements.append(
             Paragraph("Run Data Summary", self.styles.styles["Heading1"])
         )
-        self.elements.append(Spacer(1, 12))
+        self.elements.append(Spacer(1, 6))
 
         # Get master data
         masterdf = self.report.masterdf
@@ -127,7 +127,24 @@ class RunDataSection(ReportSection):
             self.elements.append(
                 self._create_info_table(sample_info, "Sample Information")
             )
-            self.elements.append(Spacer(1, 12))
+            self.elements.append(Spacer(1, 6))
+
+            # Sample identifiers (if decrypted and provided)
+            if getattr(self.report, "sample_identifiers", None):
+                si = self.report.sample_identifiers
+                sample_info = [
+                    ("Sample ID", si.get("sample_id", "") or self.report.sample_id or "—"),
+                    ("Test ID", si.get("test_id", "") or "—"),
+                    ("First name", si.get("first_name", "") or "—"),
+                    ("Last name", si.get("last_name", "") or "—"),
+                    ("Date of birth", si.get("dob", "") or "—"),
+                ]
+                if si.get("nhs_number"):
+                    sample_info.append(("Hospital Number", si["nhs_number"]))
+                self.elements.append(
+                    self._create_info_table(sample_info, "Sample Identifiers")
+                )
+                self.elements.append(Spacer(1, 6))
 
             # Run Statistics
             stats_info = [
@@ -160,7 +177,7 @@ class RunDataSection(ReportSection):
                 ),
             ]
             self.elements.append(self._create_info_table(stats_info, "Run Statistics"))
-            self.elements.append(Spacer(1, 12))
+            self.elements.append(Spacer(1, 6))
 
         except Exception as e:
             logger.error(f"Error generating run data section: {str(e)}")

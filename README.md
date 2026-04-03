@@ -6,153 +6,199 @@
 
 # ***This software is provided as is for research use only.***
 
-**Table of Contents**
+**IMPORTANT: use a fresh conda environment from `robin.yml` (`conda activate robin`). Do not reuse older ROBIN/little_john environment names from previous releases.**
+
+**IMPORTANT (input BAMs): each file must contain 50,000 reads or fewer.** In MinKNOW, configure **read-count–based** BAM output—**we recommend one BAM every 50,000 reads**. **Do not** use **time-based** BAM rollover (MinKNOW’s typical default, e.g. hourly); it is unsupported and usually violates the read limit. Details: [BAM read limit and MinKNOW](#bam-read-limit-and-minknow-settings).
+
+## Table of contents
 
 - [About](#about)
+- [Requirements](#requirements)
 - [Installation](#installation)
+  - [If the `robin` conda environment already exists](#if-the-robin-conda-environment-already-exists)
+- [Common issues](#common-issues)
 - [Usage](#usage)
-- [Known Issues](#known-issues)
-- [Available Commands](#available-commands)
-- [Performance Features](#performance-features)
+  - [BAM read limit and MinKNOW](#bam-read-limit-and-minknow-settings)
+- [Command reference](#command-reference)
+- [Known issues and limitations](#known-issues-and-limitations)
+- [Performance](#performance)
+- [Dependencies](#dependencies)
 - [License](#license)
+- [Acknowledgments](#acknowledgments)
 
-
------
+---
 
 ## About
 
-ROBIN (Rapid nanopOre Brain intraoperatIve classificatioN) is a comprehensive bioinformatics workflow system designed for processing and analyzing BAM files in the context of human oncology analysis. 
+**ROBIN** (Rapid nanopOre Brain intraoperatIve classificatioN) is a bioinformatics workflow system for processing and analysing human oncology BAM data from Oxford Nanopore sequencing. It was published in *Neuro-Oncology*: [ROBIN paper](https://academic.oup.com/neuro-oncology/article/27/8/2035/8139084).
 
-ROBIN was published in NeuroOncology - see [ROBIN Paper](https://academic.oup.com/neuro-oncology/article/27/8/2035/8139084)
+ROBIN provides automated preprocessing, multiple analysis pipelines, and real-time monitoring. It incorporates **LITTLE JOHN** (Lightweight Infrastructure for Task Tracking and Logging with Extensible Job Orchestration for High-throughput aNalysis), which handles orchestration and scaling behind the scenes.
 
-It provides automated preprocessing, multiple analysis pipelines, and real-time monitoring capabilities. 
+**Capabilities** include methylation analysis, copy-number variation, fusion detection, classification workflows, a multi-threaded execution model, and a web-based GUI for monitoring, progress, and visualisation.
 
-It now incorporates LITTLE JOHN (Lightweight Infrastructure for Task Tracking and Logging with Extensible Job Orchestration for High-throughput aNalysis), which handles the heavy lifting behind the scenes.
+This repository will replace the code at [LooseLab/ROBIN](https://github.com/LooseLab/ROBIN/) in the near future.
 
-## Overview
+## Requirements
 
-ROBIN processes BAM files through automated pipelines. It provides a robust, multi-threaded system for running complex analysis workflows with built-in support for methylation analysis, copy number variation detection, fusion detection, and various classification algorithms. The platform features an advanced web-based GUI for real-time workflow monitoring, progress tracking, and interactive data visualization.
+| Resource | Notes |
+|----------|--------|
+| **RAM** | ≥ 64 GB recommended |
+| **GPU** | As per ONT guidelines for adaptive sampling |
+| **CPU** | As per ONT guidelines (more is generally better) |
 
-## Memory usage
-
-We have faced challenges with the amount of memory used by ROBIN on certain systems. The incorporation of LITTLE JOHN addresses this and we can now run ROBIN on two promethION flowcells simultaneously on a Nanopore P2i sequencer. These positions can be running ligation (LSK114) or our modified ultra long protocol.
-
-## System requirements
-
-RAM >= 64 Gb
-
-GPU - as per ONT guidelines for running adaptive sampling
-
-CPU - as per ONT guidelines (more is always better)
-
-## Known Issues
-
-1. This first release is for testing purposes only and feedback to us.
-2. Variant calling in real time is currently unavailable. We will be reintroducing this in the near future.
-3. All anaylses must be interpreted by an expert.
-
-## The Future
-
-This version will replace the code available at https://github.com/LooseLab/ROBIN/ in the near future.
+With **LITTLE JOHN**, ROBIN can run two PromethION flow cells simultaneously on a Nanopore P2i (e.g. LSK114 or modified ultra-long protocol), subject to the above resources.
 
 ---
 
 ## Installation
 
-**We strongly recommend installing robin in a conda environment to ensure all dependencies are properly managed.**
+Use **conda** so native and Python dependencies stay consistent. Create the environment from **`robin.yml`** (Python 3.12); older Python 3.9-era env files are removed.
+
+For a step-by-step walkthrough, see [`docs/getting-started/installation.md`](docs/getting-started/installation.md).
 
 ### Prerequisites
 
-1. **Conda**: Install Miniconda or Anaconda if you haven't already.
+- [Miniconda](https://docs.conda.io/en/latest/miniconda.html) or Anaconda
 
-### Installation Steps
+### Steps
 
-1. **Clone the repository with submodules**:
+1. **Clone with submodules**
    ```bash
    git clone --recursive https://github.com/LooseLab/littlejohn.git
    cd littlejohn
    ```
 
-2. **Update and initialize submodules**:
+2. **Ensure submodules are current** (e.g. nanoDX, hv_rapidCNS2)
    ```bash
    git submodule update --init --recursive
    ```
-   *This ensures all submodules (nanoDX, hv_rapidCNS2) are properly initialized*
 
-3. **Create and activate conda environment**:
+3. **Create and activate the environment**
    ```bash
-   # For Linux/Windows
    conda env create -f robin.yml
-   conda activate robin_0_5
-   
-   # For macOS
-   conda env create -f robin_osx.yml
-   conda activate robin_0_5
+   conda activate robin
    ```
+   Linux and macOS share this file. On Linux, for `libstdc++` / `CXXABI_1.3.15` errors, see [Common issues](#common-issues).
 
-4. **Install robin in development mode**:
+4. **Install the package in editable mode**
    ```bash
    pip install -e .
    ```
 
-5. **Download required model assets**:
+5. **Download models and ClinVar data** (models are checksum-verified via the assets manifest)
    ```bash
-   # Download all models automatically
-   python setup_models.py
-   
-   # Or download individual models
-   python scripts/fetch_asset.py general_model src/robin/models/general.zip
-   python scripts/fetch_asset.py capper_model src/robin/models/Capper_et_al_NN.pkl
-   python scripts/fetch_asset.py pancan_model src/robin/models/pancan_devel_v5i_NN.pkl
+   robin utils update-models
+   robin utils update-clinvar
    ```
+   For **private** GitHub-hosted assets, set a token before `update-models`:
+   ```bash
+   export GITHUB_TOKEN=your_personal_access_token
+   robin utils update-models
+   ```
+   To **re-download** models (e.g. after a failed partial run), use `robin utils update-models --overwrite`. Advanced: `python scripts/fetch_asset.py` and [`src/robin/resources/assets.json`](src/robin/resources/assets.json).
+
+### If the `robin` conda environment already exists
+
+`robin.yml` defines `name: robin`. **`conda env create -f robin.yml` will fail** if an environment with that name already exists.
+
+- **Use a different env name** (keep your existing `robin` env untouched):
+
+  ```bash
+  conda env create -f robin.yml -n robin_littlejohn
+  conda activate robin_littlejohn
+  ```
+  
+- **Update the existing env** from the current file (keeps the name `robin`):
+
+  ```bash
+  conda env update -n robin -f robin.yml --prune
+  conda activate robin
+  ```
+
+  `--prune` removes packages no longer listed in the YAML (where supported).
+
+- **Remove and recreate** (closest to a clean install; preferred if the old env was from another project or an older ROBIN release):
+
+  ```bash
+  conda deactivate
+  conda env remove -n robin
+  conda env create -f robin.yml
+  conda activate robin
+  ```
 
 
 
-### Authentication
+After any of these, run **`pip install -e .`** again from the repository root with the env you intend to use.
 
-For private repositories, set your GitHub token:
+More detail: [`docs/getting-started/installation.md` → If the `robin` environment already exists](docs/getting-started/installation.md#if-the-robin-environment-already-exists).
+
+---
+
+## Possible issue
+
+### `libstdc++.so.6` / `CXXABI_1.3.15` (Linux: SciPy, ICU, native extensions)
+
+The linker may use the **system** `libstdc++.so.6` (e.g. under `/lib/x86_64-linux-gnu/`) instead of conda’s (`libstdcxx-ng` in `$CONDA_PREFIX/lib`), producing errors such as:
+
+`version 'CXXABI_1.3.15' not found (required by ... scipy ... or libicui18n ...)`
+
+After `conda activate robin`, prefer the env libraries first:
+
 ```bash
-export GITHUB_TOKEN=your_personal_access_token
-python setup_models.py
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH}"
 ```
 
-### Asset Verification
+You can add that to your shell config (after conda init). 
 
-All assets are automatically verified using SHA256 checksums. If verification fails, the download will be retried or the corrupted file will be removed.
+
+---
 
 ## Usage
 
-ROBIN expects to analyse BAM files generated during sequencing by an Oxford Nanopore Technologies sequencer. ROBIN presumes real time HAC basecalling (SUP is not required). ROBIN presumes data have been called with 5hmC 5mC methylation calling in MinKNOW. ROBIN presumes real time alignment is running in MinKNOW - ROBIN does not realign your reads. 
+### BAM read limit and MinKNOW settings
 
-ROBIN assumes that BAM files are being output in small batches. We recommend setting file output to one bam for every 10,000 to 50,000 reads. We do not support real time processing of BAM files in 1 hour chunks (the default output). 
+**ROBIN requires that each BAM file contain 50,000 reads or fewer.** Larger files are outside the supported real-time workflow.
 
-ROBIN does not pod5 data or fastq data from the sequencer - you can deselect these options if you wish.
+**MinKNOW configuration:** set BAM output to roll on **read count**, not on **time**. **Recommended:** **one BAM file every 50,000 reads** (smaller roll sizes, e.g. 10,000 reads per file, are also fine). Use whatever MinKNOW option splits or rotates BAMs by **number of reads** in each file.
 
-***Important***
+**Do not** use MinKNOW’s **time-based** BAM settings (for example the default behaviour of writing a new BAM every fixed period such as one hour). That mode is **unsupported**: it tends to produce BAMs with far more than 50,000 reads and does not match how ROBIN expects data to arrive.
 
-On platforms with 64Gb of RAM or less we recommend restarting your device prior to a run. As an example, if you are running a p2i and start a run on position A and later on position B we recommend you restart at the end of the run on position B (once base calling is complete). You can simply restart dorado if you know how to do this. We find dorado holds on to memory for an indefinite period of time and this can cause problems.
+### What ROBIN expects from your sequencing setup
 
+- BAMs from an Oxford Nanopore sequencer; **real-time HAC** basecalling (SUP not required).
+- **5hmC / 5mC** methylation calling enabled in MinKNOW.
+- **Real-time alignment in MinKNOW** — ROBIN does not realign reads.
+- BAMs must respect the **[50,000-read limit](#bam-read-limit-and-minknow-settings)** and MinKNOW read-count output settings above.
+- ROBIN does **not** consume POD5 or FASTQ; you can disable those outputs in MinKNOW if you wish.
 
-The primary command for running robin workflows is:
+### Memory and Dorado
+
+On machines with **≤ 64 GB RAM**, restart the machine (or at least Dorado) before a heavy run. Dorado can retain memory indefinitely; on a P2i, after a run on position A and then B, restarting after position B (once basecalling finishes) is recommended.
+
+### Example workflows
+
+Primary pattern:
 
 ```bash
-robin workflow <data_folder> --work-dir <output_folder> -w target,cnv,fusion,mgmt,sturgeon,nanodx,pannanodx,random_forest --reference ~/references/hg38_simple.fa --center <center_id>
+robin workflow <data_folder> --work-dir <output_folder> \
+  -w target,cnv,fusion,mgmt,sturgeon,nanodx,pannanodx,random_forest \
+  --reference ~/references/hg38_simple.fa \
+  --center <center_id>
 ```
 
-### Command Breakdown
+| Argument | Meaning |
+|----------|---------|
+| `<data_folder>` | Directory containing BAM files |
+| `--work-dir` | Output directory for results |
+| `-w` / `--workflow` | Comma-separated job types (see [`list-job-types`](#list-job-types)) |
+| `--reference` | Reference FASTA (required for many analyses) |
+| `--center` | Site ID (e.g. `Sherwood`, `Auckland`, `New York`) |
+| `--target-panel` | Panel for target/CNV/fusion (e.g. `rCNS2`, `PanCan`) |
 
-- `robin workflow`: The main workflow command
-- `<data_folder>`: Directory containing your BAM files
-- `--work-dir <output_folder>`: Directory where results will be saved
-- `-w`: Workflow specification (comma-separated list of analysis types)
-- `--reference`: Path to reference genome (required for some analyses)
-- `--center <center_id>`: Center ID running the analysis (e.g., 'Sherwood', 'Auckland', 'New York')
-- `--target-panel`: The specific panel that is being applied. 
-
-### Example Usage
+More examples:
 
 ```bash
-# Basic workflow with all analysis types
+# Full analysis set with panel
 robin workflow ~/data/bam_files \
   --work-dir ~/results \
   -w target,cnv,fusion,mgmt,sturgeon,nanodx,pannanodx,random_forest \
@@ -160,7 +206,7 @@ robin workflow ~/data/bam_files \
   --center Sherwood \
   --target-panel rCNS2
 
-# Simplified workflow with just a few analyses
+# Smaller workflow
 robin workflow ~/data/bam_files \
   --work-dir ~/results \
   -w mgmt,sturgeon \
@@ -168,7 +214,7 @@ robin workflow ~/data/bam_files \
   --center Auckland \
   --target-panel PanCan
 
-# With verbose output and custom logging
+# Verbose logging
 robin workflow ~/data/bam_files \
   --work-dir ~/results \
   -w mgmt,cnv,sturgeon \
@@ -179,93 +225,82 @@ robin workflow ~/data/bam_files \
   --log-level INFO
 ```
 
+Full CLI flags for `workflow` are listed under [Command reference](#command-reference).
 
-## Known Issues
+---
 
-1. Currently SNP calling is not enabled in this version of ROBIN. It will be re-enabled in the near future.
-2. CNV change inference is based on extensive heuristics - every call should be checked by visual inspection.
-3. If you ctrl-c to end ROBIN it will do its best to clean up and stop gracefully but may fail.
-4. CSV data export is in development but is not currently available - it will be enabled in the near future.
-5. Many other unknown issues - please open an issue and we will resolve where possible.
-
-## Available Commands
+## Command reference
 
 ### `list-job-types`
-List all available job types organized by queue category:
+
+Lists job types by queue:
 
 ```bash
 robin list-job-types
 ```
 
-**Available Job Types:**
-- **Preprocessing Queue**: `preprocessing`
-- **Bed Conversion Queue**: `bed_conversion`
-- **Analysis Queue**: `mgmt`, `cnv`, `target`, `fusion`
-- **Classification Queue**: `sturgeon`, `nanodx`, `pannanodx`
-- **Slow Queue**: `random_forest`
+| Queue | Job types |
+|-------|-----------|
+| Preprocessing | `preprocessing` |
+| BED conversion | `bed_conversion` |
+| Analysis | `mgmt`, `cnv`, `target`, `fusion` |
+| Classification | `sturgeon`, `nanodx`, `pannanodx` |
+| Slow | `random_forest` |
 
 ### `workflow`
-Run an async workflow on BAM files in a directory:
 
 ```bash
 robin workflow /path/to/directory --workflow "workflow_plan" [OPTIONS]
 ```
 
-**Required Options:**
-- `--workflow, -w`: Workflow plan (e.g., 'mgmt,sturgeon' or 'preprocessing:bed_conversion,analysis:mgmt,classification:sturgeon')
-- `--center`: Center ID running the analysis (e.g., 'Sherwood', 'Auckland', 'New York')
+**Commonly required**
 
-**Optional Options:**
-- `--work-dir, -d`: Base output directory for analysis results
-- `--reference, -r`: Path to reference genome (FASTA format)
-- `--verbose, -v`: Enable verbose output and detailed error traces
-- `--no-process-existing`: Skip processing existing files, only watch for new changes
-- `--log-level`: Global log level (DEBUG|INFO|WARNING|ERROR, default: ERROR)
-- `--job-log-level`: Set log level for specific job (e.g., 'preprocessing:DEBUG', 'mgmt:WARNING')
-- `--deduplicate-jobs`: Job types to deduplicate by sample ID (e.g., 'sturgeon', 'mgmt')
-- `--no-progress`: Disable progress bars for file processing
-- `--use-ray/--no-use-ray`: Enable Ray distributed computing (default: on)
-- `--with-gui/--no-gui`: Launch NiceGUI workflow monitor (default: on)
+- `--workflow`, `-w` — Plan such as `mgmt,sturgeon` or queue-style `preprocessing:bed_conversion,analysis:mgmt,classification:sturgeon`
+- `--center` — Center ID (e.g. `Sherwood`, `Auckland`, `New York`)
 
+**Common options**
 
+- `--work-dir`, `-d` — Output base directory
+- `--reference`, `-r` — Reference genome (FASTA)
+- `--verbose`, `-v` — Verbose output and traces
+- `--no-process-existing` — Only watch for new files
+- `--log-level` — `DEBUG` \| `INFO` \| `WARNING` \| `ERROR` (default: `ERROR`)
+- `--job-log-level` — Per-job level, e.g. `preprocessing:DEBUG`, `mgmt:WARNING`
+- `--deduplicate-jobs` — Deduplicate by sample ID for given types (e.g. `sturgeon`, `mgmt`)
+- `--no-progress` — Disable file progress bars
+- `--use-ray` / `--no-use-ray` — Ray distributed execution (default: on)
+- `--with-gui` / `--no-gui` — NiceGUI monitor (default: on)
 
 ### Panel management
 
-Manage built-in and custom target panels used by analyses like `target`, `cnv`, and `fusion`.
+Built-in panels include `rCNS2`, `AML`, `PanCan`. Custom panels are stored after you add them from a BED file.
 
-- Built-in panels include: `rCNS2`, `AML`, `PanCan`.
-- Custom panels are stored internally after you add them from a BED file.
+**List panels**
 
-#### List available panels
 ```bash
 robin list-panels
 ```
 
-#### Add a custom panel from a BED file
-```bash
-# Add and register a panel (BED must have ≥4 columns: chr, start, end, gene_name[s])
-robin add-panel /path/to/your_panel.bed MyCustomPanel
+**Add a custom panel** (BED: ≥ 4 columns — chr, start, end, gene name(s); 4- or 6-column BED supported; multiple genes comma-separated in one region)
 
-# Optional: validate format only, without adding
+```bash
+robin add-panel /path/to/your_panel.bed MyCustomPanel
 robin add-panel /path/to/your_panel.bed MyCustomPanel --validate-only
 ```
 
-Notes:
-- Panel names cannot be empty and cannot reuse reserved names: `rCNS2`, `AML`, `PanCan`.
-- BED may be 4- or 6-column; if multiple genes are in one region, use comma-separated names.
+Names must be non-empty and not reserved (`rCNS2`, `AML`, `PanCan`).
 
-#### Remove a custom panel
+**Remove a custom panel**
+
 ```bash
-# Will prompt for confirmation
 robin remove-panel MyCustomPanel
-
-# Skip confirmation
 robin remove-panel MyCustomPanel --force
 ```
 
 Built-in panels cannot be removed.
 
-#### Use a panel in a workflow
+**Use in a workflow**
+
 ```bash
 robin workflow /path/to/bam_files \
   --work-dir ~/results \
@@ -274,68 +309,66 @@ robin workflow /path/to/bam_files \
   --center Sherwood
 ```
 
-## Performance Features
+---
 
-### Enhanced Processing Capabilities
-- **Batched Processing**: All analysis workflows now support batched processing for improved efficiency
-- **Memory Optimization**: Intelligent memory management for large datasets and long-running processes
-- **Multi-threading**: Configurable multi-threaded BAM processing via `LJ_BAM_THREADS` environment variable
-- **Async Updates**: Non-blocking GUI updates during analysis execution
-- **Smart Progress Tracking**: Streamlined progress indicators with real-time status updates
+## Known issues and limitations
+
+**Release and scope**
+
+1. This release is intended for testing; feedback is welcome.
+2. **Real-time variant calling** is currently unavailable; it is planned to return - post run variant calling **IS** available.
+3. All analyses must be interpreted by a qualified expert.
+
+**Operation and data**
+
+1. CNV calls use heuristics — verify by visual inspection.
+2. **Ctrl+C** attempts graceful shutdown but may not always complete cleanly.
+3. CSV export is in development and not yet reliable.
+4. To **reanalyse** a dataset, remove the existing results under the ROBIN output folder first.
+5. Other issues may exist — please [open an issue](https://github.com/LooseLab/littlejohn/issues) where possible.
+
+---
+
+## Performance
+
+- **Batched processing** across analysis workflows
+- **Memory-aware** behaviour for large or long runs
+- **Multi-threaded BAM handling** — tune with `LJ_BAM_THREADS`
+- **Non-blocking GUI** updates during analysis
+- **Progress tracking** with live status
+
+---
 
 ## Dependencies
 
-### Core Dependencies
-- `click>=8.0.0`: CLI framework
-- `watchdog>=3.0.0`: File system monitoring
-- `pysam>=0.21.0`: BAM file processing
-- `pandas>=1.3.0`: Data manipulation
-- `numpy>=1.21.0`: Numerical computations
-- `scipy>=1.7.0`: Scientific computing
-- `ruptures>=1.1.0`: Change point detection
-- `tqdm>=4.64.0`: Progress bars
-- `ray[default]>=2.0.0`: Distributed computing
-- `nicegui>=3.0.4`: Advanced GUI framework with enhanced performance
+Python package versions are declared in **`pyproject.toml`**. The **`robin.yml`** conda environment supplies the scientific stack, bioinformatics tools (e.g. samtools, bedtools), and R/Bioconductor packages used by the workflows.
 
-### External Dependencies
-- `bedtools`: For region extraction and BED file operations
-- `samtools`: For BAM file manipulation
-- `R` and `Rscript`: For statistical analysis and classification
+**Notable Python libraries** include Click, Watchdog, pysam, pandas, NumPy, SciPy, ruptures, tqdm, Ray, and NiceGUI.
 
-### Git Submodules
-- `nanoDX`: NanoDX analysis tools
-- `hv_rapidCNS2`: Rapid CNS analysis tools
+**External tools** include bedtools, samtools, and R (`Rscript`) for parts of the classification stack.
 
+**Git submodules** (e.g. nanoDX, hv_rapidCNS2) must be initialised as in [Installation](#installation).
+
+---
 
 ## License
 
 ***This software is provided "as is", and is for research use only.***
 
+ROBIN is distributed under a **CC BY-NC 4.0** license. See the `LICENSE` file. That license does not override licenses of third-party tools bundled or invoked by ROBIN.
 
-robin is distributed under a CC BY-NC 4.0 license. See LICENSE for more information. This license does not override any licenses that may be present in the third party tools used by robin.
+---
 
 ## Acknowledgments
 
-This tool uses a range of third party tools and applications including:
+Third-party tools and references:
 
-[Sturgeon] https://github.com/marcpaga/sturgeon
-[Radid-CNS2] https://link.springer.com/article/10.1007/s00401-022-02415-6
-[Readfish] https://github.com/LooseLab/readfish
-[cnv_from_bam] https://github.com/adoni5/cnv_from_bam
-[methylartist] https://github.com/adamewing/methylartist
+- [Sturgeon](https://github.com/marcpaga/sturgeon)
+- [Rapid-CNS2](https://link.springer.com/article/10.1007/s00401-022-02415-6)
+- [Readfish](https://github.com/LooseLab/readfish)
+- [cnv_from_bam](https://github.com/adoni5/cnv_from_bam)
+- [methylartist](https://github.com/adamewing/methylartist)
 
-We are grateful to the authors of these tools for their work.
+Libraries include [Click](https://click.palletsprojects.com/), [Watchdog](https://python-watchdog.readthedocs.io/), [pysam](https://pysam.readthedocs.io/), [Ray](https://ray.io/), and [NiceGUI](https://nicegui.io/).
 
-We also thank a lot of people who have contributed to these tools including: Graeme Fox, Simon Deacon, Rory Munro, Satrio Wibowo, Thomas Murray, Inswasti Cahyani, Nadine Holmes, Simon Paine, Stuart Smith and many others from outside Nottingham.
-
-We are particularly grateful to Areeba Patel, Felix Sahm and colleagues for their work on Rapid-CNS2.
-
-This list is non-exhaustive and the software is under active development.
-
-In addition we use:
-
-- [Click](https://click.palletsprojects.com/) - Python package for creating command line interfaces
-- [Watchdog](https://python-watchdog.readthedocs.io/) - Python library for monitoring file system events
-- [pysam](https://pysam.readthedocs.io/) - Python interface for SAM/BAM files
-- [Ray](https://ray.io/) - Distributed computing framework
-- [NiceGUI](https://nicegui.io/) - Web-based GUI framework 
+Thanks to everyone who contributed to these ecosystems, including colleagues in Nottingham and beyond. We are particularly grateful to Areeba Patel, Felix Sahm and colleagues for Rapid-CNS2. The list is non-exhaustive; the software is under active development.
