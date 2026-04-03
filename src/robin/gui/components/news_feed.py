@@ -28,6 +28,9 @@ class NewsRecord:
     @classmethod
     def from_dict(cls, item: Dict[str, Any]) -> "NewsRecord":
         """Create a NewsRecord instance from a dictionary."""
+        raw_image = item.get("image_url")
+        if isinstance(raw_image, str):
+            raw_image = raw_image.strip() or None
         return cls(
             id=item["id"],
             headline=item["headline"],
@@ -35,7 +38,8 @@ class NewsRecord:
             end_date=item["end_date"],
             content=item["content"],
             link=item.get("link"),
-            image_url=item.get("image_url"),
+            image_url=raw_image,
+            message_type=item.get("message_type") or "news",
         )
 
 
@@ -245,27 +249,18 @@ class NewsFeed:
                                             "w-full overflow-hidden rounded-lg my-1"
                                         ):
                                             with ui.row().classes(
-                                                "justify-center items-center"
+                                                "justify-center items-center w-full"
                                             ):
-                                                # Create image with responsive dimensions and proper scaling
-                                                img = ui.image(item.image_url).classes(
-                                                    "w-full max-w-md h-auto rounded-lg"
+                                                # Quasar QImg (ui.image) often collapses to ~0 height here until a
+                                                # ratio is set; native <img> gets a real src on first paint and
+                                                # sizes from the loaded bitmap like a normal browser image.
+                                                ui.element("img").classes(
+                                                    "block w-full max-w-md h-auto rounded-lg object-contain"
+                                                ).props(
+                                                    f"src={json.dumps(item.image_url)} "
+                                                    f"alt={json.dumps(item.headline[:200])} "
+                                                    "loading=lazy referrerpolicy=no-referrer"
                                                 )
-
-                                            # Add error handling for image load failure
-                                            def on_error(e):
-                                                img.set_visibility(False)
-                                                with ui.row().classes(
-                                                    "items-center justify-center gap-2 p-2"
-                                                ):
-                                                    ui.icon(
-                                                        "broken_image", color="gray"
-                                                    )
-                                                    ui.label(
-                                                        "Image unavailable"
-                                                    ).classes("text-gray-500 text-sm")
-
-                                            img.on("error", on_error)
                                     except Exception as e:
                                         logging.warning(
                                             f"Error displaying image: {str(e)}"
