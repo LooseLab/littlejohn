@@ -54,7 +54,7 @@ With **LITTLE JOHN**, ROBIN can run two PromethION flow cells simultaneously on 
 
 Use **conda** so native and Python dependencies stay consistent. Create the environment from **`robin.yml`** (Python 3.12); older Python 3.9-era env files are removed.
 
-For a step-by-step walkthrough, see [`docs/installation_guide.md`](docs/installation_guide.md).
+For a step-by-step walkthrough, see [`docs/getting-started/installation.md`](docs/getting-started/installation.md).
 
 ### Prerequisites
 
@@ -130,7 +130,7 @@ For a step-by-step walkthrough, see [`docs/installation_guide.md`](docs/installa
 
 After any of these, run **`pip install -e .`** again from the repository root with the env you intend to use.
 
-More detail: [`docs/installation_guide.md` → If the `robin` environment already exists](docs/installation_guide.md#if-the-robin-environment-already-exists).
+More detail: [`docs/getting-started/installation.md` → If the `robin` environment already exists](docs/getting-started/installation.md#if-the-robin-environment-already-exists).
 
 ---
 
