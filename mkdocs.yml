@@ -1,0 +1,87 @@
+site_name: ROBIN
+site_description: Rapid nanopore brain intraoperative classification
+site_author: Matt Loose
+repo_url: https://github.com/looselab/robin
+repo_name: looselab/robin
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - search.highlight
+    - search.share
+    - content.code.copy
+  palette:
+    # Editorial Bioinformatics (design.md): emerald shell, slate content in dark mode
+    - scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  logo: images/ROBIN_logo_small.png
+  favicon: images/ROBIN_logo_small.png
+  font:
+    text: Inter
+    code: JetBrains Mono
+
+extra_css:
+  - stylesheets/extra.css
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - admonition
+  - footnotes
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - attr_list
+  - md_in_html
+
+plugins:
+  - search
+  - minify:
+      minify_html: true
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: getting-started/installation.md
+    - ROBIN Quickstart: getting-started/quickstart.md
+    - At startup (disclaimer, GUI, password): getting-started/startup.md
+    - Library Preparation: getting-started/library-preparation.md
+    - MinKNOW Configuration: getting-started/minknow-configuration.md
+  - Command-line reference:
+    - Overview: cli/index.md
+    - workflow command: cli/workflow.md
+    - Job types: cli/jobs.md
+    - Panel commands: cli/panels.md
+    - Utilities (utils): cli/utils.md
+    - GUI password: cli/password.md
+  - Using ROBIN:
+    - Overview: using-robin/index.md
+    - First steps and navigation: using-robin/authentication-and-layout.md
+    - Tour of the screens: using-robin/pages-and-routes.md
+    - Reading your results: using-robin/sample-results.md
+    - Troubleshooting: using-robin/troubleshooting.md
